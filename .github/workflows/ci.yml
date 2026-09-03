@@ -35,6 +35,7 @@ jobs:
             'install.ps1',
             'scripts/chat-swarm-classic-controller.ps1',
             'scripts/chat-swarm-classic-runtime-clone.ps1',
+            'scripts/chat-swarm-classic-runtime-identity.ps1',
             'scripts/chat-swarm-classic-update-manager.ps1'
           )
           foreach ($file in $files) {

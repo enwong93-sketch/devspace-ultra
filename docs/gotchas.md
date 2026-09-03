@@ -223,12 +223,16 @@ If a skill appears in `open_workspace`, the model must read that skill's
 
 ## Review Card Does Not Appear
 
-Per-tool widget cards are enabled by default with:
+Per-tool widget cards are disabled by default (`DEVSPACE_WIDGETS=off`) so normal
+coding work does not fill the conversation with `Ran command`, read, and edit
+iframes.
 
-```bash
-DEVSPACE_WIDGETS=full
-```
+To opt into aggregate review UI, set `DEVSPACE_WIDGETS=changes`. To opt into all
+per-tool cards, set `DEVSPACE_WIDGETS=full`. Plain MCP clients may ignore
+ChatGPT Apps widget metadata and only show text results.
 
-The aggregate `show_changes` tool is only exposed with
-`DEVSPACE_WIDGETS=changes`. Plain MCP clients may ignore ChatGPT Apps widget
-metadata and only show text results.
+If an already-connected ChatGPT app still shows old per-tool cards after changing
+this setting or upgrading DevSpace, refresh that app's action/tool snapshot in
+ChatGPT. ChatGPT deliberately keeps an approved/frozen tool-metadata snapshot;
+server restarts and MCP `tools/list_changed` notifications do not replace that
+approved snapshot automatically.

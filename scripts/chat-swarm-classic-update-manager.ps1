@@ -21,7 +21,6 @@ $controllerScript = Join-Path $PSScriptRoot "chat-swarm-classic-controller.ps1"
 $bootstrapScript = Join-Path $PSScriptRoot "chat-swarm-classic-cdp-bootstrap.mjs"
 $stateRoot = Join-Path $env:LOCALAPPDATA "DevSpace\ChatSwarmClassic"
 $controllerStatePath = Join-Path $stateRoot "controller-state.json"
-$authSeedProfile = Join-Path $stateRoot "auth-seed\profile"
 $backupRootBase = Join-Path $stateRoot "update-backups"
 
 $authStateItems = @(
@@ -134,23 +133,43 @@ function Read-ControllerState {
     catch { $null }
 }
 
+function Get-ProtectedWorkerNumbers {
+    $state = Read-ControllerState
+    if (-not $state -or $state.PSObject.Properties.Name -notcontains "protectedWorkers") { return @() }
+    @($state.protectedWorkers | ForEach-Object { [int]$_ } | Where-Object { $_ -ge 1 -and $_ -le 32 } | Sort-Object -Unique)
+}
+
+function Assert-NotProtected {
+    param(
+        [Parameter(Mandatory)][int]$Number,
+        [Parameter(Mandatory)][string]$Operation
+    )
+    if (@(Get-ProtectedWorkerNumbers) -contains $Number) {
+        throw "worker-{0:D2} is a protected interactive runtime; refusing {1}. Move/unprotect the interactive conversation before this operation." -f $Number, $Operation
+    }
+}
+
 function Parse-WorkerNumbers {
+    $protected = @(Get-ProtectedWorkerNumbers)
     if (-not [string]::IsNullOrWhiteSpace($WorkerNumbers)) {
-        return @($WorkerNumbers -split ',' | ForEach-Object {
+        $explicit = @($WorkerNumbers -split ',' | ForEach-Object {
             $n = 0
             if (-not [int]::TryParse($_.Trim(), [ref]$n) -or $n -lt 1 -or $n -gt 32) {
                 throw "WorkerNumbers must contain integers from 1 to 32."
             }
             $n
         } | Sort-Object -Unique)
+        foreach ($number in $explicit) { Assert-NotProtected -Number $number -Operation "update rollout" }
+        return $explicit
     }
 
     $state = Read-ControllerState
-    if (-not $state) { return @(1,2,3,4) }
+    if (-not $state) { return @(1,2,3,4 | Where-Object { $protected -notcontains $_ }) }
     $desired = if ($state.PSObject.Properties.Name -contains "productionDesired") { [int]$state.productionDesired } else { 4 }
     $reserved = @()
     if ($state.PSObject.Properties.Name -contains "reservedWorkers") { $reserved = @($state.reservedWorkers | ForEach-Object { [int]$_ }) }
-    $available = @(1..32 | Where-Object { $reserved -notcontains $_ })
+    $excluded = @($reserved + $protected | Sort-Object -Unique)
+    $available = @(1..32 | Where-Object { $excluded -notcontains $_ })
     @($available | Select-Object -First $desired)
 }
 
@@ -218,6 +237,7 @@ function Rollback-Worker {
         [Parameter(Mandatory)][string]$OldManifest,
         [Parameter(Mandatory)][string]$BackupPath
     )
+    Assert-NotProtected -Number $Number -Operation "rollback"
     $current = Get-WorkerRuntime -Number $Number
     Stop-WorkerRuntime -Runtime $current
     $package = Get-AppxPackage -Name $current.PackageName -ErrorAction SilentlyContinue |
@@ -263,14 +283,14 @@ switch ($Action) {
     }
 
     "prepare-canary" {
-        if (-not (Test-Path -LiteralPath (Join-Path $authSeedProfile "IndexedDB"))) {
-            throw "Authentication seed is missing. Scale the production runtime pool once before preparing a canary."
-        }
+        Assert-NotProtected -Number $CanaryWorker -Operation "update canary preparation"
         $state = Read-ControllerState
         if ($state) {
             $desired = if ($state.PSObject.Properties.Name -contains "productionDesired") { [int]$state.productionDesired } else { 4 }
             $reserved = if ($state.PSObject.Properties.Name -contains "reservedWorkers") { @($state.reservedWorkers | ForEach-Object { [int]$_ }) } else { @() }
-            $production = @(1..32 | Where-Object { $reserved -notcontains $_ } | Select-Object -First $desired)
+            $protected = @(Get-ProtectedWorkerNumbers)
+            $excluded = @($reserved + $protected | Sort-Object -Unique)
+            $production = @(1..32 | Where-Object { $excluded -notcontains $_ } | Select-Object -First $desired)
             if ($production -contains $CanaryWorker) {
                 throw "worker-{0:D2} is currently part of the production pool; choose a free canary worker number." -f $CanaryWorker
             }
@@ -279,9 +299,17 @@ switch ($Action) {
         $existing = Get-WorkerRuntime -Number $CanaryWorker
         if ($existing.Registered) { Stop-WorkerRuntime -Runtime $existing }
         & $runtimeCloneScript -Count 1 -FirstWorker $CanaryWorker -ForceRefresh | Out-Null
+        # The normal controller lifecycle is authoritative for authentication too:
+        # start the canary with CDP, then seed/verify its session from any currently
+        # signed-in runtime using the in-memory CDP Session Seed path. No filesystem
+        # auth seed or global chatgpt:// worker registration is required.
+        & $controllerScript -Action start -WorkerNumbers ([string]$CanaryWorker) -EnableAutomation -NoMinimize | Out-Null
+        & $controllerScript -Action ensure -WorkerNumbers ([string]$CanaryWorker) -NoMinimize | Out-Null
         $canary = Get-WorkerRuntime -Number $CanaryWorker
-        Copy-AuthState -SourceRoot $authSeedProfile -TargetRoot $canary.ProfilePath
-        $root = Start-Canary -Runtime $canary
+        $root = Get-CimInstance Win32_Process |
+            Where-Object { $_.Name -eq "ChatGPT Classic.exe" -and $_.ExecutablePath -eq $canary.ExecutablePath -and $_.CommandLine -notlike "*--type=*" } |
+            Select-Object -First 1
+        if (-not $root) { throw "Canary runtime did not remain running after controller ensure." }
         $probe = Invoke-CanaryProbe -Runtime $canary
         $healthy = $probe.probe.composer -and -not $probe.probe.loginVisible
         [pscustomobject]@{
@@ -312,6 +340,7 @@ switch ($Action) {
         $results = @()
 
         foreach ($number in $targets) {
+            Assert-NotProtected -Number $number -Operation "update rollout"
             $old = Get-WorkerRuntime -Number $number
             if (-not $old.Registered) {
                 $results += [pscustomobject]@{ Worker = "worker-{0:D2}" -f $number; State = "missing-skip"; Version = $null }
@@ -324,10 +353,13 @@ switch ($Action) {
 
             $oldManifest = Join-Path $old.InstallLocation "AppxManifest.xml"
             if (-not (Test-Path -LiteralPath $oldManifest)) { throw "Rollback manifest missing for $($old.WorkerId)." }
+            # Stop the target before copying its Chromium profile. Network/Cookies
+            # is SQLite-locked while Electron is alive; backing up first was both
+            # unreliable and could leave an incomplete rollback image.
+            Stop-WorkerRuntime -Runtime $old
+            Start-Sleep -Milliseconds 700
             $backupPath = Backup-WorkerProfile -Runtime $old -BackupRoot $backupRoot
             try {
-                Stop-WorkerRuntime -Runtime $old
-                Start-Sleep -Milliseconds 700
                 & $runtimeCloneScript -Count 1 -FirstWorker $number -ForceRefresh | Out-Null
                 $updated = Get-WorkerRuntime -Number $number
                 Restore-WorkerProfile -Runtime $updated -BackupPath $backupPath

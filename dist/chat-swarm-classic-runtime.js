@@ -9,6 +9,7 @@ const moduleDir = dirname(fileURLToPath(import.meta.url));
 const packageRoot = resolve(moduleDir, "..");
 const controllerScript = resolve(packageRoot, "scripts", "chat-swarm-classic-controller.ps1");
 const updateManagerScript = resolve(packageRoot, "scripts", "chat-swarm-classic-update-manager.ps1");
+const identityScript = resolve(packageRoot, "scripts", "chat-swarm-classic-runtime-identity.ps1");
 const MAX_OUTPUT = 4 * 1024 * 1024;
 
 const READ_ONLY = {
@@ -96,6 +97,30 @@ async function runController(action, input = {}, timeoutMs = 150_000) {
   };
 }
 
+async function runIdentityManager(action, timeoutMs = 240_000) {
+  if (process.platform !== "win32") {
+    throw new Error("ChatGPT Classic runtime identity management is currently supported only on Windows.");
+  }
+  const { stdout, stderr } = await execFileAsync("powershell.exe", [
+    "-NoProfile",
+    "-ExecutionPolicy", "Bypass",
+    "-File", identityScript,
+    "-Action", action,
+  ], {
+    cwd: packageRoot,
+    windowsHide: true,
+    timeout: timeoutMs,
+    maxBuffer: MAX_OUTPUT,
+    encoding: "utf8",
+  });
+  const output = String(stdout || "").trim();
+  const errorText = String(stderr || "").trim();
+  let parsed;
+  try { parsed = output ? JSON.parse(output) : {}; }
+  catch { throw new Error(`Runtime identity manager returned invalid JSON: ${output.slice(0, 2_000)}`); }
+  return { ...parsed, stderr: errorText || undefined };
+}
+
 async function runUpdateManager(action, input = {}, timeoutMs = 300_000) {
   if (process.platform !== "win32") {
     throw new Error("ChatGPT Classic update management is currently supported only on Windows.");
@@ -130,8 +155,37 @@ const poolSchema = {
   workers: z.array(z.number().int().min(1).max(32)).max(32).optional(),
 };
 
+function parseControllerJson(result, action) {
+  const output = String(result?.output || "").trim();
+  try {
+    return output ? JSON.parse(output) : {};
+  } catch {
+    throw new Error(`ChatGPT Classic controller ${action} returned invalid JSON: ${output.slice(0, 2_000)}`);
+  }
+}
+
+export async function planClassicRuntimePool(input) {
+  const raw = await runController("plan", input, 45_000);
+  const plan = parseControllerJson(raw, "plan");
+  const runtimeNumbers = Array.isArray(plan.ProductionWorkerNumbers)
+    ? plan.ProductionWorkerNumbers.map((value) => Number(value))
+    : [];
+  if (runtimeNumbers.some((value) => !Number.isInteger(value) || value < 1 || value > 32)) {
+    throw new Error(`Controller returned invalid production runtime plan: ${JSON.stringify(plan)}`);
+  }
+  return {
+    ok: plan.Ok !== false,
+    desiredWorkers: Number(plan.DesiredWorkers ?? input.desiredWorkers ?? runtimeNumbers.length),
+    runtimeNumbers,
+    reservedWorkers: Array.isArray(plan.ReservedWorkers) ? plan.ReservedWorkers.map(Number) : [],
+    protectedWorkers: Array.isArray(plan.ProtectedWorkers) ? plan.ProtectedWorkers.map(Number) : [],
+  };
+}
+
 export async function scaleClassicRuntimePool(input) {
-  return await runController("scale", input, 360_000);
+  const plan = await planClassicRuntimePool(input);
+  const result = await runController("scale", input, 360_000);
+  return { ...result, plan, runtimeNumbers: plan.runtimeNumbers, protectedWorkers: plan.protectedWorkers, reservedWorkers: plan.reservedWorkers };
 }
 
 export async function autojoinClassicRuntimeWorkers(input) {
@@ -273,7 +327,8 @@ export function registerChatSwarmClassicRuntimeTools(server, coordinator) {
       annotations: MUTATING,
     }, async (input) => {
       try {
-        const runtimeNumbers = productionRuntimeNumbers(input.desiredWorkers, input.reservedWorkers);
+        const runtimePlan = await planClassicRuntimePool({ desiredWorkers: input.desiredWorkers, reservedWorkers: input.reservedWorkers });
+        const runtimeNumbers = runtimePlan.runtimeNumbers;
         const desiredLabels = runtimeNumbers.map((number) => `Runtime-${String(number).padStart(2, "0")}`);
         const before = await coordinator.status(input.orchestratorToken);
         let resize;
@@ -319,6 +374,8 @@ export function registerChatSwarmClassicRuntimeTools(server, coordinator) {
           desiredWorkers: input.desiredWorkers,
           runtimeNumbers,
           desiredLabels,
+          protectedWorkers: runtimePlan.protectedWorkers,
+          effectiveReservedWorkers: runtimePlan.reservedWorkers,
           resize,
           runtime: runtimeResult,
           bootstrap: bootstrapResult,
@@ -332,14 +389,43 @@ export function registerChatSwarmClassicRuntimeTools(server, coordinator) {
             structuredContent: result,
           };
         }
-        const reservationText = input.reservedWorkers.length
-          ? ` Reserved runtime numbers: ${input.reservedWorkers.join(", ")}.`
-          : " No runtime numbers are reserved by default.";
+        const excluded = [...new Set([...runtimePlan.reservedWorkers, ...runtimePlan.protectedWorkers])].sort((a, b) => a - b);
+        const reservationText = excluded.length
+          ? ` Excluded reserved/protected runtime numbers: ${excluded.join(", ")}.`
+          : " No runtime numbers are excluded by controller policy.";
         return textResult(result, `Elastic scale complete: ${current.activeWorkers}/${input.desiredWorkers} workers active.${reservationText}`);
       }
       catch (error) { return errorResult(error); }
     });
   }
+
+  server.registerTool("chat_swarm_runtime_identity_status", {
+    title: "ChatGPT Runtime Identity Status",
+    description: "Audit Primary ChatGPT versus isolated Worker runtime identity without changing processes. Reports the current chatgpt:// protocol owner, Primary visibility, worker manifest/registration isolation, and any protected interactive runtimes or pending migrations.",
+    inputSchema: {},
+    annotations: READ_ONLY,
+  }, async () => {
+    try {
+      const result = await runIdentityManager("audit", 90_000);
+      const protocol = result.Protocol?.ApplicationName || "unassigned";
+      const pending = Array.isArray(result.PendingRunningMigration) ? result.PendingRunningMigration : [];
+      return textResult(result, `Runtime identity audit: primary visible=${Boolean(result.Primary?.Visible)}; chatgpt:// owner=${protocol}; pending protected/running migrations=${pending.join(",") || "none"}.`);
+    }
+    catch (error) { return errorResult(error); }
+  });
+
+  server.registerTool("chat_swarm_runtime_identity_repair", {
+    title: "Repair ChatGPT Runtime Identity",
+    description: "Repair stale Worker package identity registrations without terminating running workers. Inactive workers are sanitized/re-registered so they cannot own chatgpt://, startup, Copilot-key, or normal app-list launch surfaces; running dirty workers are left pending/protected. Also activates the explicit Primary ChatGPT window when needed.",
+    inputSchema: {},
+    annotations: MUTATING,
+  }, async () => {
+    try {
+      const result = await runIdentityManager("guard", 300_000);
+      return textResult(result, `Runtime identity guard complete. Primary=${result.PrimaryGuard?.State || "unknown"}; protocol misroute=${result.ProtocolMisroute?.State || "none"}; pending migrations=${(result.Snapshot?.PendingRunningMigration || []).join(",") || "none"}.`);
+    }
+    catch (error) { return errorResult(error); }
+  });
 
   server.registerTool("chat_swarm_update_status", {
     title: "ChatGPT Classic Worker Update Status",
@@ -356,7 +442,7 @@ export function registerChatSwarmClassicRuntimeTools(server, coordinator) {
 
   server.registerTool("chat_swarm_update_rollout", {
     title: "Roll Out Validated ChatGPT Classic Update",
-    description: "Roll a previously canary-validated ChatGPT Classic version across production worker runtimes. Each worker is backed up, updated one at a time, returned to its saved conversation, verified, and automatically rolled back if that worker fails. By default rollout targets the saved production pool and respects its configured runtime reservations unless workers is explicitly supplied.",
+    description: "Roll a previously canary-validated ChatGPT Classic version across production worker runtimes. Each worker is backed up, updated one at a time, returned to its saved conversation, verified, and automatically rolled back if that worker fails. Saved protected interactive runtimes are never valid rollout targets; default selection also excludes reserved runtimes.",
     inputSchema: {
       validatedVersion: z.string().min(1),
       workers: z.array(z.number().int().min(1).max(32)).max(31).optional(),
@@ -372,7 +458,7 @@ export function registerChatSwarmClassicRuntimeTools(server, coordinator) {
 
   server.registerTool("chat_swarm_runtime_scale", {
     title: "Scale Chat Swarm Runtime Pool",
-    description: "Elastic local runtime scaling for production ChatGPT Classic workers. Expands on demand by provisioning missing isolated runtimes and login state, skips any standalone runtime numbers explicitly reserved by the operator, ensures desired runtimes are healthy/minimized, and stops excess production runtimes. No runtime number is reserved by default. This changes local runtime capacity only; use chat_swarm_resize or chat_swarm_elastic_scale to change live swarm membership.",
+    description: "Elastic local runtime scaling for production ChatGPT Classic workers. The Windows controller is the source of truth for runtime numbering and excludes both operator-reserved and protected interactive runtimes. It provisions/starts the remaining workers and stops only unprotected excess workers. This changes local runtime capacity only; use chat_swarm_resize or chat_swarm_elastic_scale to change live swarm membership.",
     inputSchema: {
       desiredWorkers: z.number().int().min(0).max(32),
       reservedWorkers: z.array(z.number().int().min(1).max(32)).max(32).default([]),
@@ -381,7 +467,7 @@ export function registerChatSwarmClassicRuntimeTools(server, coordinator) {
   }, async (input) => {
     try {
       const result = await scaleClassicRuntimePool(input);
-      return textResult({ ...result, desiredWorkers: input.desiredWorkers, runtimeNumbers: productionRuntimeNumbers(input.desiredWorkers, input.reservedWorkers) }, result.output || `Runtime pool scaled to ${input.desiredWorkers}.`);
+      return textResult({ ...result, desiredWorkers: input.desiredWorkers, runtimeNumbers: result.runtimeNumbers }, result.output || `Runtime pool scaled to ${input.desiredWorkers}.`);
     }
     catch (error) { return errorResult(error); }
   });
@@ -401,7 +487,7 @@ export function registerChatSwarmClassicRuntimeTools(server, coordinator) {
 
   server.registerTool("chat_swarm_runtime_ensure", {
     title: "Ensure Chat Swarm Runtimes",
-    description: "Make the saved ChatGPT Classic worker pool healthy. Starts missing runtimes with local automation, returns each worker to its saved conversation, resumes an interrupted worker loop when needed, dismisses blocking UI notices, and minimizes the worker windows. Defaults to workers 01-04 and never joins a new swarm by itself.",
+    description: "Make the saved ChatGPT Classic worker pool healthy. Starts/reopens ordinary workers, restores saved conversations, resumes interrupted loops, and minimizes worker windows. Protected interactive runtimes are reported as protected-skip and are never navigated, restarted, resumed, or minimized unless protection is explicitly removed outside this tool.",
     inputSchema: poolSchema,
     annotations: MUTATING,
   }, async (input) => {
@@ -463,7 +549,7 @@ export function registerChatSwarmClassicRuntimeTools(server, coordinator) {
 
   server.registerTool("chat_swarm_runtime_stop", {
     title: "Stop Chat Swarm Runtimes",
-    description: "Stop only the selected isolated ChatGPT Classic worker runtimes. The primary ChatGPT app is never targeted. The convenience default selects workers 01-04; pass workers explicitly when using a different pool layout.",
+    description: "Stop only selected isolated ChatGPT Classic worker runtimes. The primary app is never targeted, and protected interactive runtimes are hard-refused at the lowest stop layer so indirect stop paths cannot terminate them.",
     inputSchema: poolSchema,
     annotations: MUTATING,
   }, async (input) => {

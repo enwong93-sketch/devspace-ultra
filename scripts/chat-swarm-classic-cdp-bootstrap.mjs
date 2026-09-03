@@ -145,6 +145,7 @@ function expressionForProbe() {
       throttled,
       connectionInterrupted,
       generating: !!document.querySelector('button[data-testid="stop-button"], button[aria-label*="Stop"], button[aria-label*="停止"]'),
+      messageCount: document.querySelectorAll('[data-message-author-role]').length,
       textLength: bodyText.length,
       bodyPreview: bodyText.slice(-900),
       recentChats,
@@ -291,6 +292,71 @@ async function waitForComposer(client, timeoutMs = 45_000) {
   throw new Error(`Composer did not become ready: ${JSON.stringify(last)}`);
 }
 
+async function waitForFreshComposer(client, previousHref, timeoutMs = 45_000) {
+  const deadline = Date.now() + timeoutMs;
+  const started = Date.now();
+  let last;
+  let stable = 0;
+  let stableHref = "";
+  while (Date.now() < deadline) {
+    last = await evaluate(client, expressionForProbe());
+    const href = String(last?.href || "");
+    const leftConversation = !/^https:\/\/chatgpt\.com\/(?:c\/|g\/g-p-[^/]+\/c\/)/.test(href);
+    const routeChanged = href && href !== previousHref;
+    const emptyConversation = Number(last?.messageCount ?? 0) === 0;
+    const ready = Date.now() - started >= 900 && last?.composer && !last?.composerDisabled && !last?.loginVisible && (routeChanged || leftConversation || emptyConversation);
+    if (ready) {
+      if (href === stableHref) stable += 1;
+      else { stableHref = href; stable = 1; }
+      if (stable >= 2) return last;
+    } else {
+      stable = 0;
+      stableHref = "";
+    }
+    await sleep(450);
+  }
+  throw new Error(`Fresh-chat composer did not become ready after leaving ${previousHref}: ${JSON.stringify(last)}`);
+}
+
+function canonicalConversationUrl(raw) {
+  try {
+    const url = new URL(String(raw || ""));
+    if (url.protocol !== "https:" || url.hostname !== "chatgpt.com") return "";
+    const match = url.pathname.match(/^\/(?:c|g\/g-p-[^/]+\/c)\/([A-Za-z0-9_-]{16,})\/?$/);
+    if (!match || /^(?:WEB|TEMP|LOCAL)[_:.-]/i.test(match[1]) || match[1].includes(":")) return "";
+    return `${url.protocol}//${url.hostname}${url.pathname.replace(/\/$/, "")}`;
+  } catch { return ""; }
+}
+
+async function waitForStableConversationUrl(client, timeoutMs = 90_000, expectedProjectUrl = "") {
+  const deadline = Date.now() + timeoutMs;
+  let last;
+  let stableUrl = "";
+  let stable = 0;
+  const expectedProjectPrefix = expectedProjectUrl
+    ? new URL(expectedProjectUrl).pathname.replace(/\/project\/?$/, "/c/")
+    : "";
+  while (Date.now() < deadline) {
+    last = await evaluate(client, expressionForProbe());
+    const url = canonicalConversationUrl(last?.href);
+    let projectOk = true;
+    if (url && expectedProjectPrefix) {
+      try { projectOk = new URL(url).pathname.startsWith(expectedProjectPrefix); }
+      catch { projectOk = false; }
+    }
+    if (url && projectOk) {
+      if (url === stableUrl) stable += 1;
+      else { stableUrl = url; stable = 1; }
+      if (stable >= 2) return { probe: last, conversationUrl: url };
+    } else {
+      stable = 0;
+      stableUrl = "";
+    }
+    await sleep(500);
+  }
+  throw new Error(`Stable server conversation URL did not appear after bootstrap: ${JSON.stringify(last)}`);
+}
+
 async function run() {
 const page = await findPage();
 const client = new CdpClient(page.webSocketDebuggerUrl);
@@ -305,8 +371,14 @@ try {
     if (target.protocol !== "https:" || target.hostname !== "chatgpt.com" || !safeConversation) {
       throw new Error(`Unsafe --conversation-url: ${conversationUrl}`);
     }
-    await client.call("Page.navigate", { url: target.toString() });
-    await sleep(1400);
+    // A resume/compact wake can be initiated from a currently active ChatGPT
+    // tool turn. Reloading the exact same conversation would cancel that turn.
+    // Navigate only when the runtime is genuinely on a different conversation.
+    const current = await evaluate(client, expressionForProbe());
+    if (canonicalConversationUrl(current?.href) !== canonicalConversationUrl(target.toString())) {
+      await client.call("Page.navigate", { url: target.toString() });
+      await sleep(1400);
+    }
   } else if (projectUrl) {
     const target = new URL(projectUrl);
     if (target.protocol !== "https:" || target.hostname !== "chatgpt.com" || !/^\/g\/g-p-[^/]+\/project\/?$/.test(target.pathname)) {
@@ -350,16 +422,19 @@ try {
   }
 
   if (newChat) {
-    await evaluate(client, expressionForNewChat());
-    await sleep(1200);
+    const beforeNewChat = await evaluate(client, expressionForProbe());
+    const created = await evaluate(client, expressionForNewChat());
+    if (!created?.ok) throw new Error(`Could not create new chat: ${JSON.stringify(created)}`);
+    await waitForFreshComposer(client, String(beforeNewChat?.href || ""));
+  } else {
+    await waitForComposer(client);
   }
-  await waitForComposer(client);
 
   const prompt = resumeWorker
-    ? `@DevSpace Tailscale 繼續現有 Chat Swarm worker loop。使用呢個對話已保存嘅 workerToken，立即呼叫 chat_swarm_next 一次。收到 lease checkpoint 時不要向用家回覆，立即再呼叫 chat_swarm_next 一次；收到真實 task 就先呼叫 chat_swarm_status 一次，再完成並用 chat_swarm_submit 提交。`
+    ? `@DevSpace Tailscale 繼續現有 Chat Swarm worker loop。如果呢個係 Auto Compact 後嘅 session-bound continuation，立即呼叫 chat_swarm_next 而唔傳 workerToken；如果舊 tool schema 強制要求 workerToken，就傳固定非秘密值 SESSION_BOUND_CONTINUATION。否則普通未 compact worker 繼續使用呢個對話已保存嘅 workerToken。收到 lease checkpoint 時不要向用家回覆，立即再呼叫 chat_swarm_next 一次；收到真實 task 就先呼叫 chat_swarm_status 一次，再完成並用 chat_swarm_submit 提交，所有 session-bound call 都沿用同一 no-token／SESSION_BOUND_CONTINUATION 規則。`
     : minimalPrompt
-      ? `@DevSpace Tailscale 加入 Chat Swarm，invite code：${invite}。label 用 ${label}。請呼叫 chat_swarm_join 加入，成功後立即使用返回嘅 workerToken 呼叫 chat_swarm_next 等候工作。`
-      : `@DevSpace Tailscale 加入 Chat Swarm，invite code：${invite}。label 用 ${label}。你係 worker。先呼叫 chat_swarm_join 一次，成功後立即用返回嘅 workerToken 呼叫 chat_swarm_next 一次並持續等待；收到真實 task 後先用同一 workerToken 呼叫 chat_swarm_status 一次，再完成任務並只用 chat_swarm_submit 提交。不要向我回報 idle、progress 或 completion。`;
+      ? `@DevSpace Tailscale 加入 Chat Swarm，invite code：${invite}。label 用 ${label}。請呼叫 chat_swarm_join 加入。ChatGPT worker 會由 backend 綁定到目前 MCP session，正常情況唔會返回 workerToken；成功後立即呼叫 chat_swarm_next 而唔傳 workerToken。如果舊 tool schema 強制要求 workerToken，傳固定非秘密值 SESSION_BOUND_CONTINUATION。`
+      : `@DevSpace Tailscale 加入 Chat Swarm，invite code：${invite}。label 用 ${label}。你係 worker。先呼叫 chat_swarm_join 一次；ChatGPT worker 會 session-bound，唔需要保存 workerToken。成功後立即呼叫 chat_swarm_next 一次並持續等待；如果舊 schema 強制要求 workerToken，一律用固定非秘密值 SESSION_BOUND_CONTINUATION。收到真實 task 後先呼叫 chat_swarm_status 一次，再完成任務並只用 chat_swarm_submit 提交，全部 session-bound call 沿用 no-token／SESSION_BOUND_CONTINUATION 規則。不要向我回報 idle、progress 或 completion。`;
   const inserted = await evaluate(client, expressionForInsert(prompt));
   if (!inserted?.ok) throw new Error(`Could not insert bootstrap prompt: ${JSON.stringify(inserted)}`);
 
@@ -371,9 +446,10 @@ try {
     await client.call("Input.dispatchKeyEvent", { type: "keyUp", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13 });
   }
 
-  let after;
+  const stableConversation = await waitForStableConversationUrl(client, 90_000, projectUrl);
+  let after = stableConversation.probe;
   for (let attempt = 0; attempt < 8; attempt++) {
-    await sleep(attempt === 0 ? 900 : 500);
+    await sleep(attempt === 0 ? 600 : 500);
     after = await evaluate(client, expressionForProbe());
     if (after?.throttled || !after?.generating) break;
   }
@@ -389,6 +465,7 @@ try {
     label,
     invite,
     inserted: true,
+    conversationUrl: stableConversation.conversationUrl,
     uiDismissed: {
       beforeSend: compactDismiss(preSendDismissed) || null,
       afterSend: compactDismiss(postSendDismissed) || null

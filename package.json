@@ -1,7 +1,7 @@
 {
   "name": "devspace-ultra",
-  "version": "0.3.0",
-  "description": "DevSpace Ultra: elastic multi-agent orchestration, Chrome Browser Control, and a universal agent capability/plugin runtime.",
+  "version": "0.3.1",
+  "description": "DevSpace Ultra: elastic multi-agent orchestration, Browser Control, universal agent capabilities, and automatic long-context continuity.",
   "type": "module",
   "main": "dist/server.js",
   "engines": {
@@ -15,11 +15,13 @@
     "dist",
     "!dist/chat-swarm.js.bak-before-plain-tools",
     "docs",
-    "!docs/DEVSPACE-ULTRA-HANDOFF-2026-08-18.md",
+    "!docs/DEVSPACE-ULTRA-HANDOFF-*.md",
     "examples",
     "chat-swarm-browser-bridge",
     "browser-control-bridge",
     "scripts",
+    "!scripts/chat-swarm-classic-auth-seed.mjs",
+    "!scripts/chat-swarm-classic-callback-relay.ps1",
     "skills",
     "README.md",
     "NOTICE",
@@ -43,9 +45,11 @@
     "verify:capabilities:git-live": "node scripts/capability-git-live-gate.mjs",
     "verify:capabilities:codex-live": "node scripts/codex-plugin-compat-live-gate.mjs",
     "verify:capabilities:blender-live": "node scripts/blender-mcp-dual-live-gate.mjs",
-    "verify:ultra": "node --check dist/chat-swarm.js && node --check dist/chat-swarm-classic-runtime.js && node --check dist/browser-control.js && node --check dist/capability-runtime.js && node --check dist/server.js && node --check dist/cli.js && node --check dist/config.js && node --check dist/skills.js && node --check dist/user-config.js && node --check scripts/chat-swarm-classic-cdp-bootstrap.mjs && node --check scripts/browser-control-live-gate.mjs && node --check scripts/capability-git-live-gate.mjs && node --check scripts/codex-plugin-compat-live-gate.mjs && node --check scripts/blender-mcp-dual-live-gate.mjs && node --check browser-control-bridge/background.js && node --check browser-control-bridge/popup.js && node dist/chat-swarm.test.js && node dist/browser-control.test.js && node dist/capability-runtime.test.js",
+    "verify:auto-compact": "node --check dist/conversation-continuity.js && node --check dist/conversation-continuity.test.js && node --check scripts/chat-swarm-classic-continuity.mjs && node --check scripts/conversation-auto-compact-stress.mjs && node dist/conversation-continuity.test.js && node scripts/conversation-auto-compact-stress.mjs",
+    "verify:runtime-identity": "node --check scripts/chat-swarm-classic-session-seed.mjs && node --check scripts/runtime-identity-static-gate.mjs && node scripts/runtime-identity-static-gate.mjs",
+    "verify:ultra": "node --check dist/chat-swarm.js && node --check dist/chat-swarm-classic-runtime.js && node --check dist/browser-control.js && node --check dist/capability-runtime.js && node --check dist/conversation-continuity.js && node --check dist/server.js && node --check dist/cli.js && node --check dist/config.js && node --check dist/config.test.js && node --check dist/skills.js && node --check dist/user-config.js && node --check scripts/chat-swarm-classic-cdp-bootstrap.mjs && node --check scripts/chat-swarm-classic-continuity.mjs && node --check scripts/chat-swarm-classic-session-seed.mjs && node --check scripts/devspace-server-handover.mjs && node --check scripts/conversation-auto-compact-stress.mjs && node --check scripts/runtime-identity-static-gate.mjs && node --check scripts/browser-control-live-gate.mjs && node --check scripts/capability-git-live-gate.mjs && node --check scripts/codex-plugin-compat-live-gate.mjs && node --check scripts/blender-mcp-dual-live-gate.mjs && node --check browser-control-bridge/background.js && node --check browser-control-bridge/popup.js && node dist/config.test.js && node dist/chat-swarm.test.js && node dist/browser-control.test.js && node dist/capability-runtime.test.js && node dist/conversation-continuity.test.js && node scripts/runtime-identity-static-gate.mjs",
     "test": "npm run verify:ultra",
-    "typecheck": "node --check dist/server.js && node --check dist/capability-runtime.js && node --check dist/browser-control.js && node --check dist/chat-swarm.js"
+    "typecheck": "node --check dist/server.js && node --check dist/capability-runtime.js && node --check dist/conversation-continuity.js && node --check dist/browser-control.js && node --check dist/chat-swarm.js"
   },
   "keywords": [
     "mcp",
@@ -60,7 +64,9 @@
     "chrome",
     "plugins",
     "agent-skills",
-    "capabilities"
+    "capabilities",
+    "auto-compact",
+    "context-continuity"
   ],
   "author": "enwong93-sketch and DevSpace Ultra contributors",
   "license": "MIT",

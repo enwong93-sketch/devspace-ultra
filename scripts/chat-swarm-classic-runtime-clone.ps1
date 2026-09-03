@@ -8,6 +8,8 @@ param(
 
     [switch]$ForceRefresh,
 
+    [switch]$RepairExisting,
+
     [switch]$Launch
 )
 
@@ -38,6 +40,76 @@ function Remove-XmlNodes {
     foreach ($node in $nodes) {
         [void]$node.ParentNode.RemoveChild($node)
     }
+}
+
+function Update-WorkerManifest {
+    param(
+        [Parameter(Mandatory)] [string]$ManifestPath,
+        [Parameter(Mandatory)] [string]$PackageName,
+        [Parameter(Mandatory)] [string]$DisplayName,
+        [Parameter(Mandatory)] [string]$AliasName
+    )
+
+    [xml]$manifest = Get-Content -LiteralPath $ManifestPath -Raw
+    $ns = [System.Xml.XmlNamespaceManager]::new($manifest.NameTable)
+    $ns.AddNamespace("f", "http://schemas.microsoft.com/appx/manifest/foundation/windows10")
+    $ns.AddNamespace("uap", "http://schemas.microsoft.com/appx/manifest/uap/windows10")
+    $ns.AddNamespace("uap3", "http://schemas.microsoft.com/appx/manifest/uap/windows10/3")
+    $ns.AddNamespace("uap5", "http://schemas.microsoft.com/appx/manifest/uap/windows10/5")
+    $ns.AddNamespace("uap10", "http://schemas.microsoft.com/appx/manifest/uap/windows10/10")
+    $ns.AddNamespace("desktop", "http://schemas.microsoft.com/appx/manifest/desktop/windows10")
+
+    $identity = $manifest.SelectSingleNode("/f:Package/f:Identity", $ns)
+    if (-not $identity) { throw "Clone manifest is missing Package/Identity." }
+    $identity.SetAttribute("Name", $PackageName)
+
+    # Give workers a different Application Id from Primary. Package identity alone
+    # is not enough because Windows taskbar/default-app artifacts can persist an
+    # AUMID (PackageFamily!ApplicationId). Keeping !ChatGPT on worker packages let
+    # stale pins/protocol choices continue targeting a worker after the global
+    # protocol extension itself had been removed. Only Primary may own !ChatGPT.
+    $application = $manifest.SelectSingleNode("/f:Package/f:Applications/f:Application", $ns)
+    if (-not $application) { throw "Clone manifest is missing Package/Applications/Application." }
+    $application.SetAttribute("Id", "DevSpaceWorker")
+
+    $propertyDisplayName = $manifest.SelectSingleNode("/f:Package/f:Properties/f:DisplayName", $ns)
+    if ($propertyDisplayName) { $propertyDisplayName.InnerText = $DisplayName }
+    $propertyDescription = $manifest.SelectSingleNode("/f:Package/f:Properties/f:Description", $ns)
+    if ($propertyDescription) { $propertyDescription.InnerText = "$DisplayName runtime clone" }
+
+    $visual = $manifest.SelectSingleNode("/f:Package/f:Applications/f:Application/uap:VisualElements", $ns)
+    if ($visual) {
+        $visual.SetAttribute("DisplayName", $DisplayName)
+        $visual.SetAttribute("Description", "$DisplayName runtime clone")
+        # Worker runtimes are backend-controlled infrastructure, not user-facing
+        # launcher targets. Hiding them from the app list prevents accidental
+        # manual/default launches from competing with the primary ChatGPT app.
+        $visual.SetAttribute("AppListEntry", "none")
+    }
+
+    $defaultTile = $manifest.SelectSingleNode("/f:Package/f:Applications/f:Application/uap:VisualElements/uap:DefaultTile", $ns)
+    if ($defaultTile) { $defaultTile.SetAttribute("ShortName", $DisplayName) }
+
+    $executionAlias = $manifest.SelectSingleNode("//uap3:Extension[@Category='windows.appExecutionAlias']//desktop:ExecutionAlias", $ns)
+    if (-not $executionAlias) { throw "Clone manifest is missing the ChatGPT app execution alias." }
+    $executionAlias.SetAttribute("Alias", $AliasName)
+
+    # Worker clones must never register any global launch surface owned by the
+    # primary ChatGPT installation. In particular, retaining chatgpt:// can make
+    # Windows select a worker package as the user's default ChatGPT handler after
+    # reboot/deep-link activation. Startup and Copilot-key ownership are primary-only.
+    # The separate DevSpaceWorker Application Id also invalidates legacy !ChatGPT
+    # worker AUMIDs retained by old taskbar pins or default-app artifacts.
+    Remove-XmlNodes -Document $manifest -NamespaceManager $ns -XPath "//uap:Extension[@Category='windows.protocol']"
+    Remove-XmlNodes -Document $manifest -NamespaceManager $ns -XPath "//uap5:Extension[@Category='windows.startupTask']"
+    Remove-XmlNodes -Document $manifest -NamespaceManager $ns -XPath "//uap3:Extension[@Category='windows.appExtension']"
+    Remove-XmlNodes -Document $manifest -NamespaceManager $ns -XPath "/f:Package/f:Properties/uap10:PackageIntegrity"
+
+    Save-Utf8Xml -Document $manifest -Path $ManifestPath
+}
+
+if ($RepairExisting -and $ForceRefresh) {
+    throw "-RepairExisting is an in-place migration mode and cannot be combined with -ForceRefresh."
 }
 
 $sourcePackage = Get-AppxPackage -Name "OpenAI.ChatGPT-Desktop" |
@@ -89,56 +161,47 @@ for ($offset = 0; $offset -lt $Count; $offset++) {
             Remove-Item -LiteralPath $metadataPath -Recurse -Force
         }
 
-        [xml]$manifest = Get-Content -LiteralPath $manifestPath -Raw
-        $ns = [System.Xml.XmlNamespaceManager]::new($manifest.NameTable)
-        $ns.AddNamespace("f", "http://schemas.microsoft.com/appx/manifest/foundation/windows10")
-        $ns.AddNamespace("uap", "http://schemas.microsoft.com/appx/manifest/uap/windows10")
-        $ns.AddNamespace("uap3", "http://schemas.microsoft.com/appx/manifest/uap/windows10/3")
-        $ns.AddNamespace("uap5", "http://schemas.microsoft.com/appx/manifest/uap/windows10/5")
-        $ns.AddNamespace("uap10", "http://schemas.microsoft.com/appx/manifest/uap/windows10/10")
-        $ns.AddNamespace("desktop", "http://schemas.microsoft.com/appx/manifest/desktop/windows10")
-
-        $identity = $manifest.SelectSingleNode("/f:Package/f:Identity", $ns)
-        if (-not $identity) { throw "Clone manifest is missing Package/Identity." }
-        $identity.SetAttribute("Name", $packageName)
-
-        $propertyDisplayName = $manifest.SelectSingleNode("/f:Package/f:Properties/f:DisplayName", $ns)
-        if ($propertyDisplayName) { $propertyDisplayName.InnerText = $displayName }
-        $propertyDescription = $manifest.SelectSingleNode("/f:Package/f:Properties/f:Description", $ns)
-        if ($propertyDescription) { $propertyDescription.InnerText = "$displayName runtime clone" }
-
-        $visual = $manifest.SelectSingleNode("/f:Package/f:Applications/f:Application/uap:VisualElements", $ns)
-        if ($visual) {
-            $visual.SetAttribute("DisplayName", $displayName)
-            $visual.SetAttribute("Description", "$displayName runtime clone")
-        }
-
-        $defaultTile = $manifest.SelectSingleNode("/f:Package/f:Applications/f:Application/uap:VisualElements/uap:DefaultTile", $ns)
-        if ($defaultTile) { $defaultTile.SetAttribute("ShortName", $displayName) }
-
-        $executionAlias = $manifest.SelectSingleNode("//uap3:Extension[@Category='windows.appExecutionAlias']//desktop:ExecutionAlias", $ns)
-        if (-not $executionAlias) { throw "Clone manifest is missing the ChatGPT app execution alias." }
-        $executionAlias.SetAttribute("Alias", $aliasName)
-
-        # Worker clones must not compete with the primary ChatGPT installation
-        # for chatgpt:// links, Windows startup, or Copilot-key app extension.
-        Remove-XmlNodes -Document $manifest -NamespaceManager $ns -XPath "//uap:Extension[@Category='windows.protocol']"
-        Remove-XmlNodes -Document $manifest -NamespaceManager $ns -XPath "//uap5:Extension[@Category='windows.startupTask']"
-        Remove-XmlNodes -Document $manifest -NamespaceManager $ns -XPath "//uap3:Extension[@Category='windows.appExtension']"
-        Remove-XmlNodes -Document $manifest -NamespaceManager $ns -XPath "/f:Package/f:Properties/uap10:PackageIntegrity"
-
-        Save-Utf8Xml -Document $manifest -Path $manifestPath
+        Update-WorkerManifest -ManifestPath $manifestPath -PackageName $packageName -DisplayName $displayName -AliasName $aliasName
+    }
+    elseif ($RepairExisting) {
+        # Migrate old already-installed clones without deleting the package,
+        # process, or profile. This is safe to attempt on a running worker and
+        # is the preferred path for protocol/startup identity cleanup.
+        Update-WorkerManifest -ManifestPath $manifestPath -PackageName $packageName -DisplayName $displayName -AliasName $aliasName
     }
 
+    $registrationState = "registered"
+    $runningClone = $false
     if ($existingClone) {
-        Remove-AppxPackage -Package $existingClone.PackageFullName -ErrorAction Stop
-        Start-Sleep -Milliseconds 500
+        $runningClone = [bool](Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+            Where-Object {
+                $_.ExecutablePath -and
+                $_.ExecutablePath.StartsWith($existingClone.InstallLocation, [System.StringComparison]::OrdinalIgnoreCase)
+            } |
+            Select-Object -First 1)
     }
 
-    Add-AppxPackage -Register $manifestPath -ErrorAction Stop
-    $registered = Get-AppxPackage -Name $packageName -ErrorAction Stop |
-        Sort-Object Version -Descending |
-        Select-Object -First 1
+    if ($RepairExisting -and $existingClone -and $runningClone) {
+        # Never unregister or re-register a worker while it may own a live ChatGPT
+        # conversation. The sanitized manifest remains staged on disk and a later
+        # identity-repair pass will activate it once the runtime is inactive.
+        $registrationState = "pending-running"
+        $registered = $existingClone
+    }
+    else {
+        if ($existingClone) {
+            # These workers are loose-file registered development packages. Preserve
+            # their package data explicitly across identity re-registration so a
+            # manifest/AUMID repair cannot erase the isolated ChatGPT profile/session.
+            Remove-AppxPackage -Package $existingClone.PackageFullName -PreserveApplicationData -ErrorAction Stop
+            Start-Sleep -Milliseconds 500
+        }
+        Add-AppxPackage -Register $manifestPath -ErrorAction Stop
+        $registered = Get-AppxPackage -Name $packageName -ErrorAction Stop |
+            Sort-Object Version -Descending |
+            Select-Object -First 1
+        $registrationState = if ($RepairExisting) { "repaired" } else { "registered" }
+    }
 
     $launchResult = "not-requested"
     if ($Launch) {
@@ -156,8 +219,11 @@ for ($offset = 0; $offset -lt $Count; $offset++) {
         PackageFullName = $registered.PackageFullName
         InstallLocation = $registered.InstallLocation
         Alias = $aliasName
+        Mode = if ($RepairExisting) { "repair-existing" } elseif ($ForceRefresh) { "force-refresh" } else { "register" }
+        Registration = $registrationState
+        Running = $runningClone
         Launch = $launchResult
     }
 }
 
-$results | Format-Table WorkerId, PackageName, Alias, Launch -AutoSize
+$results | Format-Table WorkerId, PackageName, Alias, Mode, Registration, Running, Launch -AutoSize

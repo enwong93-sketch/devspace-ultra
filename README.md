@@ -11,12 +11,15 @@ It keeps the original DevSpace local MCP workspace capabilities — local files,
 - **Elastic worker pool** — the main agent can scale workers up or down according to the current workload instead of using a fixed worker count.
 - **Live Swarm resize** — backend capacity can grow or shrink without replacing the orchestrator or losing completed work. Shrink is safety-first and refuses to evict busy/tail workers.
 - **Independent ChatGPT Classic runtimes** — on Windows, worker packages use isolated package identities, profiles, sessions, and conversations.
-- **Same-worker context continuity** — a worker can be reopened at its exact saved ChatGPT conversation and continue with the worker token held by that conversation.
+- **Same-worker context continuity** — a worker can be reopened at its exact saved ChatGPT conversation; ChatGPT workers are session-bound by the backend so fresh joins/continuations do not need to expose raw worker credentials in the transcript.
 - **Zero-copy bootstrap** — workers can be launched, minimized, sent into a configured `sub-agents` ChatGPT Project, joined to a Swarm, and parked without manual invite-code copy/paste.
 - **Backend-first routing** — normal work is always dispatched through the DevSpace Chat Swarm backend. UI/CDP automation is lifecycle/bootstrap/recovery only.
 - **Recovery** — detects missing runtimes, interrupted connections, stale worker loops, and blocking UI notices; can reopen the exact worker conversation and resume it.
 - **Update compatibility manager** — detects ChatGPT Classic version drift, supports a canary runtime, profile backup, rolling worker update, exact-conversation restore, verification, and rollback.
 - **Configurable runtime reservation** — operators can reserve any runtime numbers for standalone/private use; no runtime number is reserved by default in the public package.
+- **Automatic long-context continuity** — managed workers compact before the configured hard context limit (90% by default), rotate into a fresh ChatGPT conversation, preserve the same worker identity, and continue without requiring the old conversation to know a newly added MCP tool name.
+- **Runtime identity safety** — worker packages never own Primary-only global launch surfaces; persistent logon/deferred-heal guards protect a misrouted interactive worker instead of terminating it and repair legacy registrations once they are safely stopped.
+- **Memory-only Session Seed** — signed-out/expired workers can replace only stale ChatGPT/OpenAI cookies from a verified signed-in runtime through CDP, without copying raw cookie databases, logging cookie values, or stopping the source runtime.
 
 ### Browser Control
 
@@ -43,6 +46,16 @@ DevSpace Ultra 0.3 adds a shared **universal agent capability/plugin layer** on 
 The runtime exposes a compact progressive-disclosure `capability_*` surface for discovering, installing, inspecting, enabling, updating, isolating, and calling reusable capabilities. It understands Agent Skills, instruction packs, MCP tools/prompts/resources, DevSpace manifests, Claude-style and Codex-style plugin metadata, nested MCP profiles, official MCP Registry metadata, and explicitly declared local command tools. Managed packages live under `~/.devspace/plugins/packages`; enabled + trusted plugin `SKILL.md` files join normal workspace skill discovery automatically.
 
 Shared MCP services reuse one backend connection. Stateful application MCPs can instead claim isolated named instances with private tokens and ephemeral per-instance environment, allowing the same MCP type to serve independent projects without sharing process state. Git/local installation is separated from execution trust: downloading a repository does not execute it, executable surfaces stay disabled until explicitly trusted, and plugin secrets remain environment-driven instead of being copied into the registry. See [Unified Agent Capability Runtime](docs/capability-runtime.md).
+
+### Automatic Conversation Continuity — v0.3.1
+
+DevSpace Ultra 0.4 adds a coding-harness-style **Auto Compact** path for managed ChatGPT Classic workers. The default policy estimates a `1,050,000`-token model budget, triggers at 90% (`945,000` estimated tokens), and counts a configurable hidden/system/tool reserve as already-consumed context. ChatGPT does not expose a native exact context counter through this MCP connection, so the watchdog reports its value as a conservative estimate rather than pretending it is host-native telemetry.
+
+At a safe idle boundary the backend builds a bounded capsule from authoritative Chat Swarm history plus bounded recent conversation context, opens a fresh project-scoped ChatGPT conversation, and uses a short-lived one-time continuation ticket to preserve the same worker identity. ChatGPT workers are session-bound to the backend-observed MCP conversation identity, so no raw replacement worker token needs to cross the ChatGPT tool-result surface; cached schemas can use a fixed non-secret compatibility sentinel. A monotonic Backend Context Ledger is combined with the DOM estimate using the larger value, preventing virtualized old messages from hiding accumulated context. Protected interactive runtimes are never auto-rotated. See [Automatic Conversation Continuity](docs/conversation-continuity.md).
+
+### Runtime identity + session safety — v0.3.1
+
+Windows worker clones no longer register the global `chatgpt://` protocol, ChatGPT startup task or Copilot-key provider, and are hidden from the normal app list. Workers also use the dedicated AppX `Application Id` **`DevSpaceWorker`** instead of Primary's `ChatGPT`, so only Primary owns an AUMID ending in `!ChatGPT`; legacy taskbar/default-app worker activation identities therefore become invalid after migration. Legacy clones are audited against both their manifest and Windows' registered AppX state. A running dirty worker is marked `pending-running` and protected instead of being killed; a repeating deferred-heal task completes the migration only after it closes naturally, preserving loose-package application data. The audit also flags stale/unknown Windows `chatgpt://` `UserChoice` ProgIDs rather than reporting a false healthy state; DevSpace never forges Windows' protected default-app hash. New/signed-out workers use verified CDP **Session Seed** from an already signed-in runtime, first removing only stale allowlisted target cookies and then transferring the verified ChatGPT/OpenAI session in memory without logging values. The logon guard separately ensures Primary ChatGPT has a visible window even if Windows restores a legacy worker first. See [Runtime Identity Safety](docs/runtime-identity.md).
 
 ### Demo videos
 
@@ -112,6 +125,8 @@ macOS/Linux users still receive the DevSpace coding/MCP core and Chat Swarm back
 | Automatic isolated ChatGPT Classic desktop runtime cloning | ✅ | — | — |
 | Automatic desktop worker recovery by package/profile identity | ✅ | — | — |
 | ChatGPT Classic canary/rolling package update manager | ✅ | — | — |
+| Managed ChatGPT Classic Auto Compact / cross-conversation continuation | ✅ | — | — |
+| Runtime identity guard + deferred AppX self-heal + CDP Session Seed | ✅ | — | — |
 
 DevSpace Ultra installs and runs the base DevSpace/Chat Swarm layer on supported Node platforms. The Windows-only rows depend on Windows AppX package identity and the current ChatGPT Classic desktop distribution model. Ultra feature-detects those capabilities rather than pretending they exist on platforms where the same desktop package mechanism is unavailable.
 
@@ -141,6 +156,8 @@ The Ultra server registers runtime tools such as:
 - `chat_swarm_runtime_autojoin`
 - `chat_swarm_runtime_setup`
 - `chat_swarm_runtime_stop`
+- `chat_swarm_runtime_identity_status`
+- `chat_swarm_runtime_identity_repair`
 - `chat_swarm_elastic_scale`
 - `chat_swarm_update_status`
 - `chat_swarm_update_rollout`
@@ -162,6 +179,7 @@ Ultra deliberately separates **runtime capacity** from **task routing**.
 
 - The main agent may choose a small worker count for simple work and expand for parallelizable work.
 - `reservedWorkers` can exclude any operator-chosen runtime numbers from elastic production scaling; the public default is an empty reservation list.
+- `protectedWorkers` are a stronger safety boundary used for interactive/misrouted runtimes: controller stop/repair/recover/scale/update and managed Auto Compact all fail closed for them until protection is safely removed.
 - Scaling down only removes safe idle tail capacity; it does not interrupt a busy worker merely to reach a number immediately.
 - Existing worker conversations and saved context are preferred over creating throwaway conversations.
 - Normal tasks are never typed into worker UI by the controller. They travel through the shared Chat Swarm backend.
@@ -175,13 +193,14 @@ When configured with a ChatGPT Project URL, new worker conversations are created
 `chat-swarm-classic-update-manager.ps1` is designed around a canary-first rollout:
 
 1. detect primary ChatGPT Classic version and worker drift;
-2. prepare a free canary runtime from the new primary package;
-3. restore a known authenticated seed profile;
-4. verify the canary renderer/login/composer and run a real worker task at the orchestration layer;
-5. update production workers one at a time;
-6. back up profile/session state before each worker update;
-7. reopen the exact saved conversation and verify the worker after update;
-8. rollback the affected worker if verification fails.
+2. refuse any protected runtime as a canary or rollout target;
+3. prepare a free canary runtime from the new primary package;
+4. start the canary with CDP and verify its actual login/composer state;
+5. if needed, Session Seed it from a currently verified signed-in runtime without stopping the source;
+6. run a real worker task at the orchestration layer;
+7. update production workers one at a time, stopping each target before taking its rollback profile snapshot so Chromium databases are consistent;
+8. reopen the exact saved conversation and verify the worker after update;
+9. rollback the affected worker if verification fails.
 
 If there is no version drift, no rollout is needed.
 
@@ -203,11 +222,11 @@ Distribution-level verification:
 npm run verify:ultra
 ```
 
-The Chat Swarm regression covers multi-worker fan-out, targeted routing, submit/repark, sparse wake-up, retry idempotency, persistence, close wake-up, recycle safety, and resize invariants. Browser Control regression covers multi-session tab claims, semantic actions, restart continuity, and credential boundaries. Capability Runtime regression covers install/trust separation, shared connection deduplication, stateful instance isolation, MCP tools/prompts/resources, command adapters, plugin path confinement, and secret non-persistence.
+The Chat Swarm regression covers multi-worker fan-out, targeted routing, submit/repark, sparse wake-up, retry idempotency, persistence, close wake-up, recycle safety, resize invariants, session-bound ChatGPT joins, and legacy token compatibility. Browser Control regression covers multi-session tab claims, semantic actions, restart continuity, and credential boundaries. Capability Runtime regression covers install/trust separation, shared connection deduplication, stateful instance isolation, MCP tools/prompts/resources, command adapters, plugin path confinement, and secret non-persistence. Auto Compact regression covers the 90% gate, DOM + Backend Context Ledger pressure, capsule redaction, cached-tool-schema continuation through `chat_swarm_join`, protected-runtime exclusion, one-time tickets, session-bound continuation, replay rejection, and a 500-window rotation stress test. Runtime Identity regression verifies worker global-launch isolation, protected stop/update boundaries, authoritative pool planning, deferred self-heal, stale-cookie-safe CDP Session Seed, canonical conversation persistence, and safe backend handover.
 
 Release-specific live gates additionally exercise real Chrome Browser Control, a real GitHub-installed capability package, dual stateful MCP instances, and Codex-plugin compatibility. The v0.3 release environment scanned 71 Codex plugin manifests with 71/71 structural compatibility; platform-managed App connector IDs and Codex host lifecycle hooks are preserved as explicit host dependencies rather than silently emulated.
 
-Windows lifecycle testing additionally covers isolated runtime startup, minimized CDP control, worker recovery, long lease soak, same-conversation continuity, and elastic provisioning.
+Windows lifecycle testing additionally covers isolated runtime startup, minimized CDP control, worker recovery, long lease soak, same-conversation continuity, elastic provisioning, a real ChatGPT A→B Auto Compact handoff using a temporary reduced test window through the same production watchdog path, post-handoff semantic recall, fresh/expired-worker Session Seed recovery, canonical project-scoped conversation mapping, repeated DevSpace backend hot handovers, and reboot-style runtime identity recovery while a protected interactive worker remains on the same PID/window.
 
 ## Documentation
 
@@ -215,6 +234,8 @@ Windows lifecycle testing additionally covers isolated runtime startup, minimize
 - [Productization and verification record](docs/chat-swarm-classic-productization.md)
 - [Browser Control architecture and local verification](docs/browser-control-architecture.md)
 - [Unified Agent Capability Runtime](docs/capability-runtime.md)
+- [Automatic Conversation Continuity](docs/conversation-continuity.md)
+- [Runtime Identity Safety](docs/runtime-identity.md)
 - [Configuration](docs/configuration.md)
 - [Contributing](CONTRIBUTING.md)
 

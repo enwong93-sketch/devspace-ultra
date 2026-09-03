@@ -1503,7 +1503,7 @@ export class CapabilityRuntime {
       throw new Error(definition.unsupportedReason || `MCP server ${definition.id} cannot be launched.`);
     }
     assertRequiredEnv(definition);
-    const client = new Client({ name: `devspace-ultra-capability-${slugify(pluginId)}`, version: "0.3.0-dev" });
+    const client = new Client({ name: `devspace-ultra-capability-${slugify(pluginId)}`, version: "0.3.1" });
     let transport;
     if (definition.type === "stdio") {
       const componentRoot = definition.baseDir && isPathInside(definition.baseDir, plugin.root)

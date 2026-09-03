@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet("setup", "start", "scale", "ensure", "status", "minimize", "restore", "stop", "repair", "capture", "recover", "autojoin", "help")]
+    [ValidateSet("setup", "start", "scale", "plan", "ensure", "status", "minimize", "restore", "stop", "repair", "capture", "recover", "autojoin", "protect", "unprotect", "help")]
     [string]$Action = "status",
 
     [ValidateRange(1, 32)]
@@ -18,6 +18,10 @@ param(
     [int]$DesiredWorkers = 4,
 
     [string]$ReservedWorkerNumbers = "",
+
+    [string]$ProtectionReason = "interactive-main-conversation",
+
+    [switch]$OverrideProtected,
 
     [string]$InviteCode,
 
@@ -41,26 +45,11 @@ param(
 $ErrorActionPreference = "Stop"
 
 $runtimeCloneScript = Join-Path $PSScriptRoot "chat-swarm-classic-runtime-clone.ps1"
+$identityScript = Join-Path $PSScriptRoot "chat-swarm-classic-runtime-identity.ps1"
+$sessionSeedScript = Join-Path $PSScriptRoot "chat-swarm-classic-session-seed.mjs"
 $bootstrapScript = Join-Path $PSScriptRoot "chat-swarm-classic-cdp-bootstrap.mjs"
 $stateRoot = Join-Path $env:LOCALAPPDATA "DevSpace\ChatSwarmClassic"
 $statePath = Join-Path $stateRoot "controller-state.json"
-$authSeedRoot = Join-Path $stateRoot "auth-seed"
-$authSeedProfile = Join-Path $authSeedRoot "profile"
-$authStateItems = @(
-    "Local State",
-    "Preferences",
-    "config.json",
-    "Network",
-    "Local Storage",
-    "IndexedDB",
-    "Session Storage",
-    "WebStorage",
-    "shared_proto_db",
-    "SharedStorage",
-    "SharedStorage-wal",
-    "Service Worker"
-)
-
 Add-Type -TypeDefinition @"
 using System;
 using System.Runtime.InteropServices;
@@ -72,11 +61,60 @@ public static class ChatSwarmWindowApi {
 }
 "@ -ErrorAction SilentlyContinue
 
+function Ensure-RuntimeIdentityTasks {
+    if (-not (Test-Path -LiteralPath $identityScript)) { return }
+    $guardTask = Get-ScheduledTask -TaskName "DevSpace-ChatGPT-Primary-Identity-Guard" -ErrorAction SilentlyContinue
+    $healTask = Get-ScheduledTask -TaskName "DevSpace-ChatGPT-Worker-Identity-Heal" -ErrorAction SilentlyContinue
+    if ($guardTask -and $healTask) { return }
+    $previousPreference = $ErrorActionPreference
+    try {
+        # Native stderr redirected by Windows PowerShell 5 can become ErrorRecord
+        # objects. Do not let one line bypass the explicit child exit-code check.
+        $ErrorActionPreference = "Continue"
+        $output = @(& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $identityScript -Action install-guard 2>&1)
+        $exitCode = if ($null -eq $LASTEXITCODE) { 1 } else { [int]$LASTEXITCODE }
+    }
+    finally {
+        $ErrorActionPreference = $previousPreference
+    }
+    if ($exitCode -ne 0) {
+        throw "Unable to install ChatGPT runtime identity guard tasks: $($output -join "`n")"
+    }
+}
+
 function Get-ReservedWorkerNumbers {
-    @($ReservedWorkerNumbers -split ',' | ForEach-Object {
-        $value = 0
-        if ([int]::TryParse($_.Trim(), [ref]$value) -and $value -ge 1 -and $value -le 32) { $value }
-    } | Sort-Object -Unique)
+    if (-not [string]::IsNullOrWhiteSpace($ReservedWorkerNumbers)) {
+        return @($ReservedWorkerNumbers -split ',' | ForEach-Object {
+            $value = 0
+            if ([int]::TryParse($_.Trim(), [ref]$value) -and $value -ge 1 -and $value -le 32) { $value }
+        } | Sort-Object -Unique)
+    }
+    $state = Read-ControllerState
+    if ($state -and $state.PSObject.Properties.Name -contains "reservedWorkers") {
+        return @($state.reservedWorkers | ForEach-Object { [int]$_ } | Where-Object { $_ -ge 1 -and $_ -le 32 } | Sort-Object -Unique)
+    }
+    @()
+}
+
+function Get-ProtectedWorkerNumbers {
+    $state = Read-ControllerState
+    if (-not $state -or $state.PSObject.Properties.Name -notcontains "protectedWorkers") { return @() }
+    @($state.protectedWorkers | ForEach-Object { [int]$_ } | Where-Object { $_ -ge 1 -and $_ -le 32 } | Sort-Object -Unique)
+}
+
+function Test-WorkerProtected {
+    param([Parameter(Mandatory)][int]$Number)
+    @(Get-ProtectedWorkerNumbers) -contains $Number
+}
+
+function Assert-WorkerMutable {
+    param(
+        [Parameter(Mandatory)]$Runtime,
+        [Parameter(Mandatory)][string]$Operation
+    )
+    if ((Test-WorkerProtected -Number $Runtime.Number) -and -not $OverrideProtected) {
+        throw "$($Runtime.WorkerId) is a protected interactive runtime; refusing $Operation. Use -OverrideProtected only after the protected conversation has moved elsewhere."
+    }
 }
 
 function Get-WorkerNumberRange {
@@ -98,12 +136,13 @@ function Get-ProductionWorkerNumbers {
     param([Parameter(Mandatory)][int]$Desired)
     $reserved = [System.Collections.Generic.HashSet[int]]::new()
     foreach ($number in @(Get-ReservedWorkerNumbers)) { [void]$reserved.Add([int]$number) }
+    foreach ($number in @(Get-ProtectedWorkerNumbers)) { [void]$reserved.Add([int]$number) }
     $available = @()
     for ($number = 1; $number -le 32; $number++) {
         if (-not $reserved.Contains($number)) { $available += $number }
     }
     if ($Desired -gt $available.Count) {
-        throw "Requested $Desired production workers but only $($available.Count) runtime numbers are available after reserved workers: $((Get-ReservedWorkerNumbers) -join ',')."
+        throw "Requested $Desired production workers but only $($available.Count) runtime numbers are available after reserved/protected workers: $(@((Get-ReservedWorkerNumbers) + (Get-ProtectedWorkerNumbers)) -join ',')."
     }
     @($available | Select-Object -First $Desired)
 }
@@ -203,7 +242,7 @@ function Save-ControllerState {
                 packageFamilyName = [string]$item.packageFamilyName
                 profilePath = [string]$item.profilePath
                 debugPort = [int]$item.debugPort
-                conversationUrl = if ($item.PSObject.Properties.Name -contains "conversationUrl") { [string]$item.conversationUrl } else { $null }
+                conversationUrl = if ($item.PSObject.Properties.Name -contains "conversationUrl") { Convert-ToCanonicalConversationUrl -Url ([string]$item.conversationUrl) } else { $null }
             }
         }
     }
@@ -230,16 +269,20 @@ function Save-ControllerState {
     }
 
     $existingDesired = if ($existing -and $existing.PSObject.Properties.Name -contains "productionDesired") { [int]$existing.productionDesired } else { 4 }
+    $existingProtected = if ($existing -and $existing.PSObject.Properties.Name -contains "protectedWorkers") { @($existing.protectedWorkers | ForEach-Object { [int]$_ }) } else { @() }
+    $existingProtection = if ($existing -and $existing.PSObject.Properties.Name -contains "protection") { $existing.protection } else { [pscustomobject]@{} }
     $payload = [ordered]@{
-        version = 4
+        version = 5
         updatedAt = (Get-Date).ToString("o")
         debugBasePort = $DebugBasePort
         projectUrl = $effectiveProjectUrl
         reservedWorkers = @(Get-ReservedWorkerNumbers)
+        protectedWorkers = @($existingProtected | Sort-Object -Unique)
+        protection = $existingProtection
         productionDesired = $existingDesired
         workers = @($byNumber.Keys | Sort-Object | ForEach-Object { $byNumber[$_] })
     }
-    $payload | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $statePath -Encoding UTF8
+    $payload | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $statePath -Encoding UTF8
 }
 
 function Set-WorkerConversationUrl {
@@ -247,18 +290,19 @@ function Set-WorkerConversationUrl {
         [Parameter(Mandatory)]$Runtime,
         [Parameter(Mandatory)][string]$Url
     )
-    if ($Url -notmatch '^https://chatgpt\.com/(?:c/|g/g-p-[^/]+/c/)') {
-        throw "Refusing to store non-conversation URL for $($Runtime.WorkerId): $Url"
+    $canonical = Convert-ToCanonicalConversationUrl -Url $Url
+    if (-not $canonical) {
+        throw "Refusing to store non-conversation or transient ChatGPT URL for $($Runtime.WorkerId): $Url"
     }
     $state = Read-ControllerState
     if (-not $state) { throw "Controller state is missing; run start/status setup first." }
     $entry = @($state.workers | Where-Object { [int]$_.number -eq [int]$Runtime.Number } | Select-Object -First 1)
     if ($entry.Count -eq 0) { throw "No controller state entry for $($Runtime.WorkerId)." }
     $worker = $entry[0]
-    $worker | Add-Member -NotePropertyName conversationUrl -NotePropertyValue $Url -Force
+    $worker | Add-Member -NotePropertyName conversationUrl -NotePropertyValue $canonical -Force
     $state.updatedAt = (Get-Date).ToString("o")
-    $state.version = 4
-    $state | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $statePath -Encoding UTF8
+    $state.version = 5
+    $state | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $statePath -Encoding UTF8
 }
 
 function Set-ProductionDesired {
@@ -267,9 +311,56 @@ function Set-ProductionDesired {
     if (-not $state) { throw "Controller state is missing." }
     $state | Add-Member -NotePropertyName productionDesired -NotePropertyValue $Desired -Force
     $state | Add-Member -NotePropertyName reservedWorkers -NotePropertyValue @(Get-ReservedWorkerNumbers) -Force
+    if ($state.PSObject.Properties.Name -notcontains "protectedWorkers") { $state | Add-Member -NotePropertyName protectedWorkers -NotePropertyValue @() -Force }
+    if ($state.PSObject.Properties.Name -notcontains "protection") { $state | Add-Member -NotePropertyName protection -NotePropertyValue ([pscustomobject]@{}) -Force }
     $state.updatedAt = (Get-Date).ToString("o")
-    $state.version = 4
-    $state | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $statePath -Encoding UTF8
+    $state.version = 5
+    $state | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $statePath -Encoding UTF8
+}
+
+function Set-WorkerProtection {
+    param(
+        [Parameter(Mandatory)]$Runtime,
+        [Parameter(Mandatory)][bool]$Enabled,
+        [string]$Reason = "interactive-main-conversation"
+    )
+    $state = Read-ControllerState
+    if (-not $state) {
+        Save-ControllerState -Runtimes @($Runtime)
+        $state = Read-ControllerState
+    }
+    $protected = [System.Collections.Generic.HashSet[int]]::new()
+    if ($state.PSObject.Properties.Name -contains "protectedWorkers") {
+        foreach ($number in @($state.protectedWorkers)) { [void]$protected.Add([int]$number) }
+    }
+    $protection = if ($state.PSObject.Properties.Name -contains "protection" -and $state.protection) { $state.protection } else { [pscustomobject]@{} }
+    $key = [string]$Runtime.Number
+    if ($Enabled) {
+        [void]$protected.Add([int]$Runtime.Number)
+        $url = Get-WorkerConversationUrl -Runtime $Runtime
+        $record = [pscustomobject]@{
+            reason = $Reason
+            protectedAt = (Get-Date).ToString("o")
+            conversationUrl = $url
+            packageName = $Runtime.PackageName
+        }
+        $protection | Add-Member -NotePropertyName $key -NotePropertyValue $record -Force
+    }
+    else {
+        [void]$protected.Remove([int]$Runtime.Number)
+        $protection.PSObject.Properties.Remove($key)
+    }
+    $state | Add-Member -NotePropertyName protectedWorkers -NotePropertyValue @($protected | Sort-Object) -Force
+    $state | Add-Member -NotePropertyName protection -NotePropertyValue $protection -Force
+    $state.version = 5
+    $state.updatedAt = (Get-Date).ToString("o")
+    $state | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $statePath -Encoding UTF8
+    [pscustomobject]@{
+        Worker = $Runtime.WorkerId
+        Protected = $Enabled
+        Reason = if ($Enabled) { $Reason } else { $null }
+        ConversationUrl = Get-WorkerConversationUrl -Runtime $Runtime
+    }
 }
 
 function Get-ConfiguredProjectUrl {
@@ -296,7 +387,7 @@ function Get-WorkerConversationUrl {
     if ($entry.Count -eq 0) { return $null }
     $url = [string]$entry[0].conversationUrl
     if ([string]::IsNullOrWhiteSpace($url)) { return $null }
-    return $url
+    return (Convert-ToCanonicalConversationUrl -Url $url)
 }
 
 function Start-WorkerRuntime {
@@ -369,6 +460,7 @@ function Start-WorkerRuntime {
 function Stop-WorkerRuntime {
     param([Parameter(Mandatory)]$Runtime)
     if (-not $Runtime.Registered) { return }
+    Assert-WorkerMutable -Runtime $Runtime -Operation "stop"
 
     $processes = @(
         Get-CimInstance Win32_Process |
@@ -393,6 +485,7 @@ function Set-WorkerWindowState {
     if (-not $process -or $process.MainWindowHandle -eq 0) { return $false }
 
     if ($Mode -eq "minimize") {
+        if ((Test-WorkerProtected -Number $Runtime.Number) -and -not $OverrideProtected) { return $false }
         return [ChatSwarmWindowApi]::ShowWindow([IntPtr]$process.MainWindowHandle, 6)
     }
 
@@ -413,84 +506,88 @@ function Get-WorkerStatusRow {
         Running = [bool]$root
         Pid = if ($root) { $root.ProcessId } else { $null }
         Responding = if ($process) { [bool]$process.Responding } else { $false }
-        LoggedInState = if ($profile) { Test-Path -LiteralPath (Join-Path $profile "IndexedDB") } else { $false }
+        LoggedInState = if (Test-TcpPort -Port $Runtime.DebugPort) { Test-WorkerSignedIn -Runtime $Runtime } else { $null }
         Automation = Test-TcpPort -Port $Runtime.DebugPort
         DebugPort = $Runtime.DebugPort
         WindowTitle = if ($process) { $process.MainWindowTitle } else { "" }
+        Protected = Test-WorkerProtected -Number $Runtime.Number
     }
 }
 
-function Copy-AuthStateItem {
-    param(
-        [Parameter(Mandatory)][string]$SourceRoot,
-        [Parameter(Mandatory)][string]$TargetRoot,
-        [Parameter(Mandatory)][string]$RelativePath
-    )
-    $source = Join-Path $SourceRoot $RelativePath
-    if (-not (Test-Path -LiteralPath $source)) { return }
-    $target = Join-Path $TargetRoot $RelativePath
-    if (Test-Path -LiteralPath $target) { Remove-Item -LiteralPath $target -Recurse -Force }
-    $parent = Split-Path -Parent $target
-    New-Item -ItemType Directory -Path $parent -Force | Out-Null
-    Copy-Item -LiteralPath $source -Destination $target -Recurse -Force
-}
-
-function Test-AuthProfile {
-    param([string]$ProfilePath)
-    if ([string]::IsNullOrWhiteSpace($ProfilePath)) { return $false }
-    Test-Path -LiteralPath (Join-Path $ProfilePath "IndexedDB")
-}
-
-function Ensure-AuthSeed {
-    if (Test-AuthProfile -ProfilePath $authSeedProfile) { return "existing" }
-
-    $reserved = @(Get-ReservedWorkerNumbers)
-    $sourceRuntime = $null
-    for ($number = 1; $number -le 32; $number++) {
-        if ($reserved -contains $number) { continue }
-        $candidate = Get-WorkerRuntime -Number $number
-        if ($candidate.Registered -and (Test-AuthProfile -ProfilePath $candidate.ProfilePath)) {
-            $sourceRuntime = $candidate
-            break
-        }
-    }
-    if (-not $sourceRuntime) {
-        throw "No authenticated production worker is available to seed new runtimes. Provision/login one worker first."
-    }
-
-    $wasRunning = [bool](Get-WorkerRootProcess -Runtime $sourceRuntime)
-    if ($wasRunning) {
-        Stop-WorkerRuntime -Runtime $sourceRuntime
-        Start-Sleep -Milliseconds 900
-    }
-    if (Test-Path -LiteralPath $authSeedProfile) { Remove-Item -LiteralPath $authSeedProfile -Recurse -Force }
-    New-Item -ItemType Directory -Path $authSeedProfile -Force | Out-Null
-    foreach ($item in $authStateItems) {
-        Copy-AuthStateItem -SourceRoot $sourceRuntime.ProfilePath -TargetRoot $authSeedProfile -RelativePath $item
-    }
-    if (-not (Test-AuthProfile -ProfilePath $authSeedProfile)) {
-        throw "Authentication seed capture failed: IndexedDB is missing from the seed."
-    }
-    return "captured-from-$($sourceRuntime.WorkerId)"
-}
-
-function Apply-AuthSeed {
+function Get-WorkerLoginProbe {
     param([Parameter(Mandatory)]$Runtime)
-    if (Test-AuthProfile -ProfilePath $Runtime.ProfilePath) { return $false }
-    if (-not (Test-AuthProfile -ProfilePath $authSeedProfile)) { [void](Ensure-AuthSeed) }
-    Stop-WorkerRuntime -Runtime $Runtime
-    New-Item -ItemType Directory -Path $Runtime.ProfilePath -Force | Out-Null
-    foreach ($item in $authStateItems) {
-        Copy-AuthStateItem -SourceRoot $authSeedProfile -TargetRoot $Runtime.ProfilePath -RelativePath $item
+    if (-not (Test-TcpPort -Port $Runtime.DebugPort)) { return $null }
+    try { return (Invoke-CdpHelper -Runtime $Runtime -Arguments @("--probe", "--compact")).probe }
+    catch { return $null }
+}
+
+function Test-WorkerSignedIn {
+    param([Parameter(Mandatory)]$Runtime)
+    $probe = Get-WorkerLoginProbe -Runtime $Runtime
+    [bool]($probe -and $probe.composer -and -not $probe.loginVisible)
+}
+
+function Find-SessionSeedSource {
+    param([Parameter(Mandatory)]$TargetRuntime)
+    # A protected interactive runtime is valid as a read-only cookie source. It is
+    # never stopped, navigated or modified by session seeding; CDP only reads the
+    # allowlisted ChatGPT/OpenAI cookie jar in memory.
+    foreach ($number in 1..32) {
+        if ($number -eq $TargetRuntime.Number) { continue }
+        $candidate = Get-WorkerRuntime -Number $number
+        if (-not $candidate.Registered -or -not (Get-WorkerRootProcess -Runtime $candidate)) { continue }
+        if (-not (Test-TcpPort -Port $candidate.DebugPort)) { continue }
+        if (Test-WorkerSignedIn -Runtime $candidate) { return $candidate }
     }
-    if (-not (Test-AuthProfile -ProfilePath $Runtime.ProfilePath)) {
-        throw "Failed to provision login state for $($Runtime.WorkerId)."
+    return $null
+}
+
+function Seed-WorkerSession {
+    param(
+        [Parameter(Mandatory)]$SourceRuntime,
+        [Parameter(Mandatory)]$TargetRuntime
+    )
+    if (-not (Test-Path -LiteralPath $sessionSeedScript)) { throw "Session seed helper is missing: $sessionSeedScript" }
+    if (-not (Test-TcpPort -Port $SourceRuntime.DebugPort)) { throw "$($SourceRuntime.WorkerId) seed source CDP is offline." }
+    if (-not (Test-TcpPort -Port $TargetRuntime.DebugPort)) { throw "$($TargetRuntime.WorkerId) target CDP is offline." }
+    $node = (Get-Command node -ErrorAction Stop).Source
+    $output = @(& $node $sessionSeedScript --source-port $SourceRuntime.DebugPort --target-port $TargetRuntime.DebugPort --verify-seconds 15)
+    if ($LASTEXITCODE -ne 0) { throw "Session seed failed for $($TargetRuntime.WorkerId)." }
+    $text = ($output -join "`n").Trim()
+    try { $result = $text | ConvertFrom-Json }
+    catch { throw "Session seed returned invalid JSON for $($TargetRuntime.WorkerId)." }
+    if (-not $result.ok -or -not $result.targetVerified) { throw "Session seed did not verify a signed-in target for $($TargetRuntime.WorkerId)." }
+    return $result
+}
+
+function Ensure-WorkerAuthenticated {
+    param([Parameter(Mandatory)]$Runtime)
+    if (Test-WorkerSignedIn -Runtime $Runtime) {
+        return [pscustomobject]@{ State = "already-signed-in"; SourceWorker = $null; CookieCount = 0 }
     }
-    return $true
+    $source = Find-SessionSeedSource -TargetRuntime $Runtime
+    if (-not $source) {
+        throw "$($Runtime.WorkerId) is signed out and no verified signed-in CDP runtime is available as a session seed source. Sign in one runtime once, then retry."
+    }
+    $seed = Seed-WorkerSession -SourceRuntime $source -TargetRuntime $Runtime
+    return [pscustomobject]@{ State = "session-seeded"; SourceWorker = $source.WorkerId; CookieCount = [int]$seed.transferredCookies }
 }
 
 function Ensure-OneRuntime {
     param([Parameter(Mandatory)]$Runtime)
+    if ((Test-WorkerProtected -Number $Runtime.Number) -and -not $OverrideProtected) {
+        $status = Get-WorkerStatusRow -Runtime $Runtime
+        return [pscustomobject]@{
+            Worker = $Runtime.WorkerId
+            Label = $Runtime.Label
+            State = "protected-skip"
+            Running = $status.Running
+            Responding = $status.Responding
+            LoggedIn = $status.LoggedInState
+            Automation = $status.Automation
+            ConversationUrl = Get-WorkerConversationUrl -Runtime $Runtime
+        }
+    }
     $url = Get-WorkerConversationUrl -Runtime $Runtime
     $root = Get-WorkerRootProcess -Runtime $Runtime
     $automation = Test-TcpPort -Port $Runtime.DebugPort
@@ -501,6 +598,11 @@ function Ensure-OneRuntime {
         if ($root) { Stop-WorkerRuntime -Runtime $Runtime; Start-Sleep -Milliseconds 500 }
         $null = Start-WorkerRuntime -Runtime $Runtime -Automation -ForceRestart
         $state = "started"
+    }
+
+    $auth = Ensure-WorkerAuthenticated -Runtime $Runtime
+    if ($auth.State -eq "session-seeded") {
+        $state = if ($state -eq "started") { "started-session-seeded" } else { "session-seeded" }
     }
 
     if ($url) {
@@ -526,11 +628,11 @@ function Ensure-OneRuntime {
             $state = if ($state -eq "healthy") { "resume-sent" } else { "$state-resume-sent" }
         }
     }
-    elseif (-not $root -or -not $automation) {
-        $state = "started-no-conversation-map"
+    elseif ($state -eq "healthy") {
+        $state = "running-no-conversation-map"
     }
     else {
-        $state = "running-no-conversation-map"
+        $state = "$state-no-conversation-map"
     }
 
     Start-Sleep -Milliseconds 250
@@ -572,17 +674,25 @@ function Invoke-CdpHelper {
 
 function Convert-ToCanonicalConversationUrl {
     param([string]$Url)
-    if ([string]::IsNullOrWhiteSpace($Url) -or $Url -notmatch '^https://chatgpt\.com/(?:c/|g/g-p-[^/]+/c/)') { return $null }
-    $uri = [Uri]$Url
-    return "$($uri.Scheme)://$($uri.Host)$($uri.AbsolutePath)"
+    if ([string]::IsNullOrWhiteSpace($Url)) { return $null }
+    try { $uri = [Uri]$Url }
+    catch { return $null }
+    if ($uri.Scheme -ne "https" -or $uri.Host -ne "chatgpt.com") { return $null }
+    $match = [regex]::Match($uri.AbsolutePath, '^/(?:c|g/g-p-[^/]+/c)/([A-Za-z0-9_-]{16,})/?$')
+    if (-not $match.Success) { return $null }
+    $conversationId = $match.Groups[1].Value
+    if ($conversationId -match '^(?:WEB|TEMP|LOCAL)[_:.-]' -or $conversationId.Contains(':')) { return $null }
+    return "$($uri.Scheme)://$($uri.Host)$($uri.AbsolutePath.TrimEnd('/'))"
 }
 
 function Invoke-AutoJoin {
     param([Parameter(Mandatory)]$Runtime)
+    Assert-WorkerMutable -Runtime $Runtime -Operation "autojoin"
 
     if ([string]::IsNullOrWhiteSpace($InviteCode)) {
         throw "autojoin requires -InviteCode."
     }
+    if (-not (Test-WorkerSignedIn -Runtime $Runtime)) { [void](Ensure-WorkerAuthenticated -Runtime $Runtime) }
     $arguments = @("--invite", $InviteCode, "--label", $Runtime.Label, "--minimal")
     $existingConversationUrl = Get-WorkerConversationUrl -Runtime $Runtime
     if ($existingConversationUrl) {
@@ -593,8 +703,10 @@ function Invoke-AutoJoin {
         if ($targetProjectUrl) { $arguments += @("--project-url", $targetProjectUrl) }
     }
     $result = Invoke-CdpHelper -Runtime $Runtime -Arguments $arguments
-    $url = Convert-ToCanonicalConversationUrl -Url ([string]$result.after.href)
-    if ($url) { Set-WorkerConversationUrl -Runtime $Runtime -Url $url }
+    $url = Convert-ToCanonicalConversationUrl -Url ([string]$result.conversationUrl)
+    if (-not $url) { $url = Convert-ToCanonicalConversationUrl -Url ([string]$result.after.href) }
+    if (-not $url) { throw "$($Runtime.WorkerId) bootstrap sent but no stable server conversation URL was returned; refusing to persist a transient route." }
+    Set-WorkerConversationUrl -Runtime $Runtime -Url $url
     return $result
 }
 
@@ -602,17 +714,21 @@ $runtimes = @(Get-WorkerNumberRange | ForEach-Object { Get-WorkerRuntime -Number
 
 switch ($Action) {
     "setup" {
+        Ensure-RuntimeIdentityTasks
         if (-not (Test-Path -LiteralPath $runtimeCloneScript)) {
             throw "Runtime clone helper is missing: $runtimeCloneScript"
         }
+        foreach ($runtime in $runtimes) { Assert-WorkerMutable -Runtime $runtime -Operation "setup/re-register" }
         & $runtimeCloneScript -Count $Count -FirstWorker $FirstWorker -ForceRefresh:$ForceRefresh
         $runtimes = @(Get-WorkerNumberRange | ForEach-Object { Get-WorkerRuntime -Number $_ })
         Save-ControllerState -Runtimes $runtimes
         $runtimes | ForEach-Object { Get-WorkerStatusRow -Runtime $_ } | Format-Table -AutoSize
     }
     "start" {
+        Ensure-RuntimeIdentityTasks
         Save-ControllerState -Runtimes $runtimes
         $started = foreach ($runtime in $runtimes) {
+            Assert-WorkerMutable -Runtime $runtime -Operation "start"
             Start-WorkerRuntime -Runtime $runtime -Automation:$EnableAutomation -ForceRestart:$RestartForAutomation
         }
         if (-not $NoMinimize) {
@@ -621,23 +737,28 @@ switch ($Action) {
         }
         $started | Format-Table -AutoSize
     }
+    "plan" {
+        $targetNumbers = @(Get-ProductionWorkerNumbers -Desired $DesiredWorkers)
+        [pscustomobject]@{
+            Ok = $true
+            DesiredWorkers = $DesiredWorkers
+            ProductionWorkerNumbers = $targetNumbers
+            ReservedWorkers = @(Get-ReservedWorkerNumbers)
+            ProtectedWorkers = @(Get-ProtectedWorkerNumbers)
+        } | ConvertTo-Json -Depth 5
+    }
     "scale" {
+        Ensure-RuntimeIdentityTasks
         $targetNumbers = @(Get-ProductionWorkerNumbers -Desired $DesiredWorkers)
         $targetSet = [System.Collections.Generic.HashSet[int]]::new()
         foreach ($number in $targetNumbers) { [void]$targetSet.Add([int]$number) }
 
         $existingTargets = @($targetNumbers | ForEach-Object { Get-WorkerRuntime -Number $_ })
         $missing = @($existingTargets | Where-Object { -not $_.Registered })
-        $needsAuth = @($existingTargets | Where-Object { $_.Registered -and -not (Test-AuthProfile -ProfilePath $_.ProfilePath) })
-        if ($missing.Count -gt 0 -or $needsAuth.Count -gt 0) { [void](Ensure-AuthSeed) }
-
         foreach ($runtime in $missing) {
             & $runtimeCloneScript -Count 1 -FirstWorker $runtime.Number
         }
         $targetRuntimes = @($targetNumbers | ForEach-Object { Get-WorkerRuntime -Number $_ })
-        foreach ($runtime in $targetRuntimes) {
-            if (-not (Test-AuthProfile -ProfilePath $runtime.ProfilePath)) { [void](Apply-AuthSeed -Runtime $runtime) }
-        }
 
         Save-ControllerState -Runtimes $targetRuntimes
         Set-ProductionDesired -Desired $DesiredWorkers
@@ -645,7 +766,7 @@ switch ($Action) {
         $rows = @()
         foreach ($runtime in $targetRuntimes) { $rows += Ensure-OneRuntime -Runtime $runtime }
 
-        $reserved = @(Get-ReservedWorkerNumbers)
+        $reserved = @((Get-ReservedWorkerNumbers) + (Get-ProtectedWorkerNumbers) | Sort-Object -Unique)
         for ($number = 1; $number -le 32; $number++) {
             if ($reserved -contains $number -or $targetSet.Contains($number)) { continue }
             $runtime = Get-WorkerRuntime -Number $number
@@ -658,7 +779,7 @@ switch ($Action) {
                     State = "scaled-down-stopped"
                     Running = $false
                     Responding = $false
-                    LoggedIn = (Test-AuthProfile -ProfilePath $runtime.ProfilePath)
+                    LoggedIn = $null
                     Automation = $false
                     ConversationUrl = (Get-WorkerConversationUrl -Runtime $runtime)
                 }
@@ -763,6 +884,15 @@ switch ($Action) {
             }
         }
         $rows | Format-Table -AutoSize
+    }
+    "protect" {
+        $runtime = Get-WorkerRuntime -Number $Worker
+        Save-ControllerState -Runtimes @($runtime)
+        Set-WorkerProtection -Runtime $runtime -Enabled $true -Reason $ProtectionReason | Format-List
+    }
+    "unprotect" {
+        $runtime = Get-WorkerRuntime -Number $Worker
+        Set-WorkerProtection -Runtime $runtime -Enabled $false | Format-List
     }
     "help" {
         @"

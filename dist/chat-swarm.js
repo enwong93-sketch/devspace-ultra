@@ -13,6 +13,15 @@ const WORKER_CHECKPOINT_MIN_MS = 20 * 60_000;
 const WORKER_CHECKPOINT_JITTER_MS = 5 * 60_000;
 const WORKER_OFFER_LEASE_MS = 60_000;
 const BROWSER_BIND_TTL_MS = 10 * 60_000;
+// Runtime labels can be reused after an abandoned swarm. A genuinely parked
+// worker refreshes lastSeen/checkpoint/dock/browser activity well inside this
+// window; older duplicates must not permanently block continuity routing.
+const CONTINUITY_ACTIVE_WINDOW_MS = 2 * 60 * 60_000;
+const CONTINUATION_TICKET_TTL_MS = 10 * 60_000;
+const CONTEXT_LEDGER_BASE_TOKENS = 900;
+const CONTEXT_LEDGER_TASK_ENVELOPE_TOKENS = 220;
+const CONTEXT_LEDGER_RESULT_ENVELOPE_TOKENS = 180;
+const SESSION_BOUND_COMPAT_TOKEN = "SESSION_BOUND_CONTINUATION";
 export const CHAT_SWARM_WORKER_UI_URI = "ui://devspace/chat-swarm-worker.html";
 const MAX_WORKERS = 32;
 const MAX_BATCH_TASKS = 64;
@@ -48,6 +57,34 @@ function normalizeInvite(value) {
 }
 function nowIso() {
     return new Date().toISOString();
+}
+function estimateContextLedgerTextTokens(value) {
+    const text = String(value ?? "");
+    let cjk = 0;
+    let ascii = 0;
+    let other = 0;
+    let whitespace = 0;
+    for (const ch of text) {
+        const cp = ch.codePointAt(0);
+        if (/\s/u.test(ch)) whitespace += 1;
+        else if (cp <= 0x7f) ascii += 1;
+        else if ((cp >= 0x3400 && cp <= 0x9fff) || (cp >= 0xf900 && cp <= 0xfaff) || (cp >= 0x3040 && cp <= 0x30ff) || (cp >= 0xac00 && cp <= 0xd7af)) cjk += 1;
+        else other += 1;
+    }
+    return Math.ceil(cjk * 1.08 + ascii / 3.2 + other / 1.8 + whitespace / 7);
+}
+function ensureWorkerContextLedger(worker) {
+    if (!worker.contextEpochId) {
+        worker.contextEpochId = randomId("ctx");
+        worker.contextEpochStartedAt = worker.joinedAt || nowIso();
+        worker.contextLedgerTokens = Math.max(CONTEXT_LEDGER_BASE_TOKENS, Number(worker.contextLedgerTokens ?? 0));
+    }
+    return { epochId: worker.contextEpochId, tokens: Number(worker.contextLedgerTokens ?? CONTEXT_LEDGER_BASE_TOKENS) };
+}
+function addWorkerContextLedger(worker, tokens) {
+    ensureWorkerContextLedger(worker);
+    worker.contextLedgerTokens = Math.max(0, Number(worker.contextLedgerTokens ?? 0)) + Math.max(0, Math.ceil(Number(tokens) || 0));
+    return worker.contextLedgerTokens;
 }
 function workerCheckpointWaitMs() {
     const override = Number(process.env.DEVSPACE_CHAT_SWARM_CHECKPOINT_MS ?? "");
@@ -304,6 +341,36 @@ export class ChatSwarmCoordinator {
         throw new Error("Invalid or inactive worker token.");
     }
 
+    findSessionBoundWorker(peer) {
+        const source = String(peer?.identitySource ?? "");
+        const fingerprint = String(peer?.identityFingerprint ?? "");
+        if (!fingerprint || source === "none")
+            throw new Error("This continuation is not bound to a verifiable MCP session.");
+        const matches = [];
+        for (const swarm of Object.values(this.state.swarms)) {
+            if (swarm.state !== "active")
+                continue;
+            for (const worker of Object.values(swarm.workers ?? {})) {
+                if (!worker.active || !worker.sessionBound)
+                    continue;
+                if (worker.peer?.identitySource === source && worker.peer?.identityFingerprint === fingerprint)
+                    matches.push({ swarm, worker });
+            }
+        }
+        if (matches.length === 1)
+            return matches[0];
+        if (matches.length === 0)
+            throw new Error("No active session-bound Chat Swarm continuation matches this MCP conversation.");
+        throw new Error("Multiple session-bound workers match this MCP conversation; refusing ambiguous authentication.");
+    }
+
+    findWorkerAuth(token, peer) {
+        const normalized = typeof token === "string" ? token.trim() : "";
+        if (normalized && normalized !== SESSION_BOUND_COMPAT_TOKEN)
+            return this.findWorker(normalized);
+        return this.findSessionBoundWorker(peer);
+    }
+
     findBrowserWorker(token) {
         const hash = sha256(token);
         for (const swarm of Object.values(this.state.swarms)) {
@@ -313,6 +380,203 @@ export class ChatSwarmCoordinator {
             }
         }
         throw new Error("Invalid or inactive browser wake token.");
+    }
+
+    activeWorkerByLabel(label) {
+        const normalized = String(label ?? "").trim();
+        const activityAt = (worker) => {
+            const candidates = [
+                worker.lastSeenAt,
+                worker.lastCheckpointAt,
+                worker.progressHeartbeatLastSeenAt,
+                worker.dockLastSeenAt,
+                worker.browserLastSeenAt,
+            ].map((value) => Date.parse(value ?? "")).filter(Number.isFinite);
+            return candidates.length ? Math.max(...candidates) : 0;
+        };
+        const matches = [];
+        for (const swarm of Object.values(this.state.swarms)) {
+            if (swarm.state !== "active")
+                continue;
+            for (const worker of Object.values(swarm.workers ?? {})) {
+                if (worker.active && worker.label === normalized)
+                    matches.push({ swarm, worker, activityAt: activityAt(worker) });
+            }
+        }
+        if (matches.length === 0)
+            throw new Error(`No active Chat Swarm worker uses label ${normalized}.`);
+        if (matches.length === 1)
+            return { swarm: matches[0].swarm, worker: matches[0].worker };
+        const freshCutoff = Date.now() - CONTINUITY_ACTIVE_WINDOW_MS;
+        const fresh = matches.filter((item) => item.activityAt >= freshCutoff).sort((a, b) => b.activityAt - a.activityAt);
+        if (fresh.length === 1)
+            return { swarm: fresh[0].swarm, worker: fresh[0].worker };
+        if (fresh.length === 0)
+            throw new Error(`Multiple stale Chat Swarm workers use label ${normalized}; continuity handoff needs a fresh worker heartbeat before routing.`);
+        throw new Error(`Multiple recently active Chat Swarm workers use label ${normalized}; continuity handoff is ambiguous.`);
+    }
+
+    async markCompactRequiredByLabel(label, pressure) {
+        await this.ready;
+        const { swarm, worker } = this.activeWorkerByLabel(label);
+        worker.compactRequired = true;
+        worker.compactPressure = pressure;
+        worker.compactRequestedAt = nowIso();
+        this.touch(swarm);
+        this.wakeWorker(swarm.id, worker.id, "compact_required");
+        await this.save();
+        return { ok: true, swarmId: swarm.id, workerId: worker.id, label: worker.label, compactRequired: true };
+    }
+
+    async clearCompactRequiredByLabel(label) {
+        await this.ready;
+        const { swarm, worker } = this.activeWorkerByLabel(label);
+        worker.compactRequired = false;
+        worker.compactPressure = undefined;
+        worker.compactRequestedAt = undefined;
+        this.touch(swarm);
+        await this.save();
+        return { ok: true, swarmId: swarm.id, workerId: worker.id, label: worker.label, compactRequired: false };
+    }
+
+    async prepareContinuationForWorker(swarm, worker, ttlMs = CONTINUATION_TICKET_TTL_MS) {
+        if (worker.inFlightTaskId)
+            throw new Error(`Worker ${worker.id} still has in-flight task ${worker.inFlightTaskId}; refuse conversation rotation until the task reaches a safe boundary.`);
+        const ticket = randomToken(18);
+        const continuationId = randomId("continuation");
+        worker.pendingContinuation = {
+            id: continuationId,
+            ticketHash: sha256(ticket),
+            preparedAt: nowIso(),
+            expiresAt: new Date(Date.now() + Math.max(30_000, Math.min(Number(ttlMs) || CONTINUATION_TICKET_TTL_MS, 30 * 60_000))).toISOString(),
+        };
+        this.touch(swarm);
+        await this.save();
+        return {
+            ok: true,
+            swarmId: swarm.id,
+            workerId: worker.id,
+            label: worker.label,
+            continuationId,
+            continuationTicket: ticket,
+            expiresAt: worker.pendingContinuation.expiresAt,
+        };
+    }
+
+    async prepareContinuationByLabel(label, ttlMs = CONTINUATION_TICKET_TTL_MS) {
+        await this.ready;
+        const { swarm, worker } = this.activeWorkerByLabel(label);
+        return await this.prepareContinuationForWorker(swarm, worker, ttlMs);
+    }
+
+    async prepareContinuationByWorkerToken(workerToken, ttlMs = CONTINUATION_TICKET_TTL_MS) {
+        await this.ready;
+        const { swarm, worker } = this.findWorker(workerToken);
+        return await this.prepareContinuationForWorker(swarm, worker, ttlMs);
+    }
+
+    async cancelContinuation(continuationId) {
+        await this.ready;
+        for (const swarm of Object.values(this.state.swarms)) {
+            for (const worker of Object.values(swarm.workers ?? {})) {
+                if (worker.pendingContinuation?.id !== continuationId)
+                    continue;
+                worker.pendingContinuation = undefined;
+                this.touch(swarm);
+                await this.save();
+                return { ok: true, swarmId: swarm.id, workerId: worker.id, continuationId, state: "cancelled" };
+            }
+        }
+        return { ok: false, continuationId, state: "unknown" };
+    }
+
+    async resumeContinuation({ continuationTicket, peer }) {
+        await this.ready;
+        const hash = sha256(String(continuationTicket ?? "").trim());
+        const now = Date.now();
+        for (const swarm of Object.values(this.state.swarms)) {
+            if (swarm.state !== "active")
+                continue;
+            for (const worker of Object.values(swarm.workers ?? {})) {
+                const pending = worker.pendingContinuation;
+                if (!worker.active || !pending || pending.ticketHash !== hash)
+                    continue;
+                const expiresAt = Date.parse(pending.expiresAt ?? "");
+                if (!Number.isFinite(expiresAt) || expiresAt < now) {
+                    worker.pendingContinuation = undefined;
+                    this.touch(swarm);
+                    await this.save();
+                    throw new Error("Conversation continuation ticket expired.");
+                }
+                if (worker.inFlightTaskId)
+                    throw new Error(`Worker ${worker.id} became busy before continuation resumed; refuse token rotation.`);
+                if (!peer?.identityFingerprint || peer.identitySource === "none")
+                    throw new Error("Fresh continuation lacks a verifiable MCP session identity; refusing session binding.");
+                // Rotate away from the old conversation token, but deliberately
+                // discard the new raw secret. Fresh Auto Compact conversations
+                // authenticate by their backend-observed MCP session fingerprint,
+                // so no new workerToken needs to cross the ChatGPT tool-result UI.
+                worker.tokenHash = sha256(randomToken());
+                worker.peer = peer;
+                worker.sessionBound = true;
+                worker.sessionBoundAt = nowIso();
+                worker.lastSeenAt = worker.sessionBoundAt;
+                worker.continuationCount = Number(worker.continuationCount ?? 0) + 1;
+                worker.lastContinuationId = pending.id;
+                worker.lastContinuationAt = worker.lastSeenAt;
+                worker.contextEpochId = randomId("ctx");
+                worker.contextEpochStartedAt = worker.lastSeenAt;
+                worker.contextLedgerTokens = Math.max(CONTEXT_LEDGER_BASE_TOKENS, Number(pending.contextCarryTokens ?? CONTEXT_LEDGER_BASE_TOKENS));
+                worker.pendingContinuation = undefined;
+                worker.compactRequired = false;
+                worker.compactPressure = undefined;
+                worker.compactRequestedAt = undefined;
+                this.touch(swarm);
+                this.wakeWorker(swarm.id, worker.id, "continued");
+                await this.save();
+                return {
+                    ok: true,
+                    swarmId: swarm.id,
+                    workerId: worker.id,
+                    label: worker.label,
+                    sessionBound: true,
+                    continuationId: worker.lastContinuationId,
+                    continuationCount: worker.continuationCount,
+                    instruction: "Continuation identity restored and bound to this MCP conversation. No workerToken is returned or required. Do not reply to the user; immediately call chat_swarm_next exactly once without workerToken and continue the same worker loop.",
+                };
+            }
+        }
+        throw new Error("Invalid or expired conversation continuation ticket.");
+    }
+
+    async setContinuationContextEstimate(continuationId, tokens) {
+        await this.ready;
+        for (const swarm of Object.values(this.state.swarms)) {
+            for (const worker of Object.values(swarm.workers ?? {})) {
+                if (worker.pendingContinuation?.id !== continuationId)
+                    continue;
+                worker.pendingContinuation.contextCarryTokens = Math.max(CONTEXT_LEDGER_BASE_TOKENS, Math.ceil(Number(tokens) || 0));
+                this.touch(swarm);
+                await this.save();
+                return { ok: true, swarmId: swarm.id, workerId: worker.id, continuationId, contextCarryTokens: worker.pendingContinuation.contextCarryTokens };
+            }
+        }
+        throw new Error(`Unknown pending continuation ${continuationId}.`);
+    }
+
+    async continuationStatus(continuationId) {
+        await this.ready;
+        for (const swarm of Object.values(this.state.swarms)) {
+            for (const worker of Object.values(swarm.workers ?? {})) {
+                if (worker.pendingContinuation?.id === continuationId) {
+                    return { ok: true, swarmId: swarm.id, workerId: worker.id, label: worker.label, state: "pending", expiresAt: worker.pendingContinuation.expiresAt };
+                }
+                if (worker.lastContinuationId === continuationId) {
+                    return { ok: true, swarmId: swarm.id, workerId: worker.id, label: worker.label, state: "resumed", resumedAt: worker.lastContinuationAt, continuationCount: Number(worker.continuationCount ?? 0) };
+                }
+            }
+        }
+        return { ok: false, state: "unknown", continuationId };
     }
 
     async enableBrowserWake(workerToken) {
@@ -545,6 +809,14 @@ export class ChatSwarmCoordinator {
                 progressHeartbeatLastSeenAt: item.progressHeartbeatLastSeenAt,
                 checkpointCount: Number(item.checkpointCount ?? 0),
                 lastCheckpointAt: item.lastCheckpointAt,
+                compactRequired: Boolean(item.compactRequired),
+                compactPressure: item.compactPressure,
+                compactRequestedAt: item.compactRequestedAt,
+                continuationCount: Number(item.continuationCount ?? 0),
+                lastContinuationAt: item.lastContinuationAt,
+                contextEpochId: item.contextEpochId,
+                contextEpochStartedAt: item.contextEpochStartedAt,
+                contextLedgerTokens: Number(item.contextLedgerTokens ?? 0),
                 peer: item.peer,
             })),
             taskCounts: counts,
@@ -583,12 +855,35 @@ export class ChatSwarmCoordinator {
             orchestratorToken,
             workerSlots,
             peer,
-            instruction: `Open ${workerSlots} other ChatGPT Classic conversations connected to this same DevSpace backend. In each worker conversation, call chat_swarm_join once with inviteCode ${code}, then immediately call chat_swarm_next exactly once with the returned workerToken. Stay parked while the swarm is active; do not poll or self-renew. The backend may return a low-frequency lease checkpoint roughly every 20-25 minutes; on a checkpoint, do not reply to the user and immediately call chat_swarm_next exactly once to continue the same worker loop. When a real task arrives, call chat_swarm_status exactly once with the saved workerToken before substantive work, then solve it fully and submit only through chat_swarm_submit. chat_swarm_submit stores the result and re-parks the same worker. Never emit idle/heartbeat/checkpoint/progress/completion messages to the user and never end the worker loop while the swarm is active.`,
+            instruction: `Open ${workerSlots} other ChatGPT Classic conversations connected to this same DevSpace backend. In each worker conversation, call chat_swarm_join once with inviteCode ${code}. ChatGPT workers are session-bound by default, so no workerToken is normally returned; immediately call chat_swarm_next exactly once without workerToken. If an older cached schema requires that field, use the fixed non-secret value ${SESSION_BOUND_COMPAT_TOKEN}. Stay parked while the swarm is active; do not poll or self-renew. On a lease checkpoint, repeat chat_swarm_next with the same session-bound rule. When real work arrives, call chat_swarm_status once before substantive work, then solve it fully and submit only through chat_swarm_submit. Never emit idle/heartbeat/checkpoint/progress/completion messages to the user and never end the worker loop while the swarm is active.`,
         };
     }
 
-    async join({ inviteCode: code, label, peer }) {
+    async join({ inviteCode: code, label, peer, sessionBound = false }) {
         await this.ready;
+        // Backward-compatible continuation redemption: old/long-lived ChatGPT
+        // conversations already know chat_swarm_join even when their MCP tool
+        // schema predates the dedicated resume tool. A one-time continuation
+        // ticket can therefore travel through the existing inviteCode field.
+        const continuationHash = sha256(String(code ?? "").trim());
+        for (const candidateSwarm of Object.values(this.state.swarms)) {
+            if (candidateSwarm.state !== "active")
+                continue;
+            for (const candidateWorker of Object.values(candidateSwarm.workers ?? {})) {
+                const pending = candidateWorker.pendingContinuation;
+                if (!candidateWorker.active || !pending || pending.ticketHash !== continuationHash)
+                    continue;
+                const requestedLabel = label?.trim();
+                if (requestedLabel && requestedLabel !== candidateWorker.label)
+                    throw new Error(`Continuation ticket belongs to ${candidateWorker.label}, not ${requestedLabel}.`);
+                const resumed = await this.resumeContinuation({ continuationTicket: code, peer });
+                return {
+                    ...resumed,
+                    continuationResumed: true,
+                    instruction: "This fresh conversation is now session-bound to the existing worker. No workerToken is returned or required. Do not reply to the user; immediately call chat_swarm_next exactly once without workerToken and continue the same worker loop.",
+                };
+            }
+        }
         const swarm = this.findSwarmByInvite(code);
         if (!swarm || swarm.state !== "active")
             throw new Error("Invite code is invalid or the swarm is closed.");
@@ -604,6 +899,7 @@ export class ChatSwarmCoordinator {
             slot += 1;
         const workerId = `worker-${String(slot).padStart(2, "0")}`;
         const workerToken = randomToken();
+        const bindSession = Boolean(sessionBound && peer?.identityFingerprint && peer?.identitySource && peer.identitySource !== "none");
         const desktopWakeMarker = `[[CHAT_SWARM_DESKTOP:${randomToken(12)}]]`;
         const timestamp = nowIso();
         swarm.workers[workerId] = {
@@ -615,8 +911,13 @@ export class ChatSwarmCoordinator {
             joinInviteCode: normalizeInvite(code),
             active: true,
             peer,
+            sessionBound: bindSession,
+            sessionBoundAt: bindSession ? timestamp : undefined,
             joinedAt: timestamp,
             lastSeenAt: timestamp,
+            contextEpochId: randomId("ctx"),
+            contextEpochStartedAt: timestamp,
+            contextLedgerTokens: CONTEXT_LEDGER_BASE_TOKENS,
         };
         this.touch(swarm);
         await this.save();
@@ -625,16 +926,19 @@ export class ChatSwarmCoordinator {
             swarmId: swarm.id,
             workerId,
             label: swarm.workers[workerId].label,
-            workerToken,
+            ...(bindSession ? {} : { workerToken }),
+            sessionBound: bindSession,
             desktopWakeMarker,
             peer,
-            instruction: "Keep this workerToken private inside this conversation. Immediately call chat_swarm_next exactly once and remain in the worker loop while the swarm is active. Do not poll or self-renew. If the backend returns a low-frequency lease checkpoint, do not reply to the user; immediately call chat_swarm_next exactly once to continue the same worker. When a real task arrives, first call the existing chat_swarm_status once with this workerToken to mark execution started, then solve it fully and send the complete result only through chat_swarm_submit. chat_swarm_submit stores the result and re-parks the same worker. Never send idle/heartbeat/checkpoint/progress/completion messages to the user and never end the worker loop while the swarm is active."
+            instruction: bindSession
+                ? "This ChatGPT conversation is session-bound to the worker. No workerToken is exposed or required. Immediately call chat_swarm_next exactly once without workerToken and remain in the worker loop while the swarm is active."
+                : "Keep this workerToken private inside this conversation. Immediately call chat_swarm_next exactly once and remain in the worker loop while the swarm is active. Do not poll or self-renew. If the backend returns a low-frequency lease checkpoint, do not reply to the user and immediately call chat_swarm_next exactly once to continue the same worker. When a real task arrives, first call the existing chat_swarm_status once with this workerToken to mark execution started, then solve it fully and send the complete result only through chat_swarm_submit. chat_swarm_submit stores the result and re-parks the same worker. Never send idle/heartbeat/checkpoint/progress/completion messages to the user and never end the worker loop while the swarm is active."
         };
     }
 
-    async noteWorkerWaitCapabilities(workerToken, progressHeartbeat) {
+    async noteWorkerWaitCapabilities(workerToken, progressHeartbeat, peer) {
         await this.ready;
-        const { swarm, worker } = this.findWorker(workerToken);
+        const { swarm, worker } = this.findWorkerAuth(workerToken, peer);
         worker.progressHeartbeat = Boolean(progressHeartbeat);
         worker.progressHeartbeatLastSeenAt = nowIso();
         worker.lastSeenAt = nowIso();
@@ -643,32 +947,35 @@ export class ChatSwarmCoordinator {
         return { ok: true, swarmId: swarm.id, workerId: worker.id, progressHeartbeat: worker.progressHeartbeat };
     }
 
-    async status(token) {
+    async status(token, peer) {
         await this.ready;
-        try {
-            const swarm = this.findOrchestrator(token);
-            return this.summary(swarm, "orchestrator");
-        }
-        catch {
-            const { swarm, worker } = this.findWorker(token);
-            worker.lastSeenAt = nowIso();
-            if (worker.inFlightTaskId) {
-                const task = swarm.tasks[worker.inFlightTaskId];
-                if (task?.status === "claimed" && task.workerId === worker.id && !task.executionStartedAt) {
-                    task.executionStartedAt = worker.lastSeenAt;
-                    this.touch(swarm);
-                    await this.save();
-                }
+        if (typeof token === "string" && token.trim()) {
+            try {
+                const swarm = this.findOrchestrator(token);
+                return this.summary(swarm, "orchestrator");
             }
-            return this.summary(swarm, "worker", worker);
+            catch {}
         }
+        const { swarm, worker } = this.findWorkerAuth(token, peer);
+        worker.lastSeenAt = nowIso();
+        if (worker.inFlightTaskId) {
+            const task = swarm.tasks[worker.inFlightTaskId];
+            if (task?.status === "claimed" && task.workerId === worker.id && !task.executionStartedAt) {
+                task.executionStartedAt = worker.lastSeenAt;
+                this.touch(swarm);
+                await this.save();
+            }
+        }
+        return this.summary(swarm, "worker", worker);
     }
 
-    async reserveWorkerWake(workerToken) {
+    async reserveWorkerWake(workerToken, peer) {
         await this.ready;
-        const { swarm, worker } = this.findWorker(workerToken);
+        const { swarm, worker } = this.findWorkerAuth(workerToken, peer);
         if (swarm.state !== "active")
             return { state: "closed", swarmId: swarm.id, workerId: worker.id };
+        if (worker.compactRequired && !worker.inFlightTaskId)
+            return { state: "compact_required", swarmId: swarm.id, workerId: worker.id, label: worker.label, pressure: worker.compactPressure };
         if (worker.inFlightTaskId) {
             const inFlight = swarm.tasks[worker.inFlightTaskId];
             if (inFlight?.status === "claimed")
@@ -805,14 +1112,23 @@ export class ChatSwarmCoordinator {
         task.offeredAt = undefined;
         worker.inFlightTaskId = task.id;
         worker.lastSeenAt = nowIso();
+        const ledger = ensureWorkerContextLedger(worker);
+        if (task.contextPromptEpochId !== ledger.epochId) {
+            addWorkerContextLedger(worker, estimateContextLedgerTextTokens(task.prompt) + CONTEXT_LEDGER_TASK_ENVELOPE_TOKENS);
+            task.contextPromptEpochId = ledger.epochId;
+        }
         this.touch(swarm);
         return { state: "task", swarmId: swarm.id, workerId: worker.id, task: this.publicTask(task), replay: false };
     }
 
-    async next({ workerToken, waitMs, signal }) {
+    async next({ workerToken, peer, waitMs, signal }) {
         await this.ready;
-        const { swarm, worker } = this.findWorker(workerToken);
+        const { swarm, worker } = this.findWorkerAuth(workerToken, peer);
         worker.lastSeenAt = nowIso();
+        if (worker.compactRequired && !worker.inFlightTaskId) {
+            await this.save();
+            return { state: "compact_required", swarmId: swarm.id, workerId: worker.id, label: worker.label, pressure: worker.compactPressure };
+        }
         const immediate = this.claimAvailableTask(swarm, worker);
         if (immediate) {
             await this.save();
@@ -823,6 +1139,12 @@ export class ChatSwarmCoordinator {
         const wakeSignal = await this.waitForWorker(swarm, worker, waitMs, signal);
         if (wakeSignal === "closed" || swarm.state !== "active")
             return { state: "closed", swarmId: swarm.id, workerId: worker.id };
+        if (wakeSignal === "continued")
+            return { state: "continued", swarmId: swarm.id, workerId: worker.id };
+        if (wakeSignal === "compact_required" || (worker.compactRequired && !worker.inFlightTaskId)) {
+            await this.save();
+            return { state: "compact_required", swarmId: swarm.id, workerId: worker.id, label: worker.label, pressure: worker.compactPressure };
+        }
         const claimed = this.claimAvailableTask(swarm, worker);
         if (claimed) {
             await this.save();
@@ -838,9 +1160,9 @@ export class ChatSwarmCoordinator {
         return { state: "idle", swarmId: swarm.id, workerId: worker.id, waitedMs: waitMs, checkpoint: wakeSignal === "timeout" };
     }
 
-    async acknowledgeTask({ workerToken, taskId }) {
+    async acknowledgeTask({ workerToken, peer, taskId }) {
         await this.ready;
-        const { swarm, worker } = this.findWorker(workerToken);
+        const { swarm, worker } = this.findWorkerAuth(workerToken, peer);
         const task = swarm.tasks[taskId];
         if (!task)
             throw new Error(`Unknown task ${taskId}.`);
@@ -954,9 +1276,9 @@ export class ChatSwarmCoordinator {
             this.wakeWorker(swarm.id, workerId);
     }
 
-    async submit({ workerToken, taskId, status, result, error, waitForNextMs, signal }) {
+    async submit({ workerToken, peer, taskId, status, result, error, waitForNextMs, signal }) {
         await this.ready;
-        const { swarm, worker } = this.findWorker(workerToken);
+        const { swarm, worker } = this.findWorkerAuth(workerToken, peer);
         const task = swarm.tasks[taskId];
         if (!task)
             throw new Error(`Unknown task ${taskId}.`);
@@ -967,7 +1289,7 @@ export class ChatSwarmCoordinator {
                 throw new Error(`Task ${taskId} was already completed by another worker.`);
             const duplicateResponse = { ok: true, duplicate: true, submitted: this.publicTask(task) };
             if (waitForNextMs !== 0)
-                duplicateResponse.next = await this.next({ workerToken, waitMs: waitForNextMs, signal });
+                duplicateResponse.next = await this.next({ workerToken, peer, waitMs: waitForNextMs, signal });
             return duplicateResponse;
         }
         if (task.status !== "claimed" || task.workerId !== worker.id)
@@ -978,11 +1300,19 @@ export class ChatSwarmCoordinator {
         task.completedAt = nowIso();
         worker.inFlightTaskId = undefined;
         worker.lastSeenAt = nowIso();
+        const ledger = ensureWorkerContextLedger(worker);
+        if (task.contextResultEpochId !== ledger.epochId) {
+            addWorkerContextLedger(worker,
+                estimateContextLedgerTextTokens(result) +
+                estimateContextLedgerTextTokens(error) +
+                CONTEXT_LEDGER_RESULT_ENVELOPE_TOKENS);
+            task.contextResultEpochId = ledger.epochId;
+        }
         this.touch(swarm);
         await this.save();
         const response = { ok: true, duplicate: false, submitted: this.publicTask(task) };
         if (waitForNextMs !== 0)
-            response.next = await this.next({ workerToken, waitMs: waitForNextMs, signal });
+            response.next = await this.next({ workerToken, peer, waitMs: waitForNextMs, signal });
         return response;
     }
 
@@ -1219,9 +1549,9 @@ export class ChatSwarmCoordinator {
         };
     }
 
-    async leave({ workerToken }) {
+    async leave({ workerToken, peer }) {
         await this.ready;
-        const { swarm, worker } = this.findWorker(workerToken);
+        const { swarm, worker } = this.findWorkerAuth(workerToken, peer);
         if (worker.inFlightTaskId) {
             const task = swarm.tasks[worker.inFlightTaskId];
             if (task?.status === "claimed") {
@@ -1304,15 +1634,34 @@ export function registerChatSwarmTools(server, coordinator, options = {}) {
 
     server.registerTool("chat_swarm_join", {
         title: "Join Chat Swarm",
-        description: "Use this once in a worker ChatGPT Classic conversation to join the swarm and obtain a private workerToken. After this succeeds, immediately call chat_swarm_next exactly once. Do not poll or self-renew; only re-enter chat_swarm_next when the backend explicitly returns a low-frequency lease checkpoint.",
+        description: "Use this once in a ChatGPT Classic worker conversation. ChatGPT/MCP workers are session-bound by default: the backend authenticates later calls from the observed MCP session fingerprint and does not expose a workerToken. Non-ChatGPT/internal callers may still use token mode. Auto Compact continuation tickets use the same session-bound path while preserving the existing worker identity.",
         inputSchema: {
             inviteCode: z.string().min(6).max(64),
             label: z.string().min(1).max(80).optional(),
         },
         annotations: MUTATING,
     }, withErrors(async ({ inviteCode, label }, extra) => {
-        const joined = await coordinator.join({ inviteCode, label, peer: peerInfo(extra, server) });
-        return textResult(joined, `Joined ${joined.swarmId} as ${joined.workerId}. Do not reply to the user. Immediately call chat_swarm_next exactly once with the returned workerToken. Stay in that worker loop; do not poll or self-renew. If the backend later returns a lease checkpoint, immediately call chat_swarm_next exactly once again without replying to the user.`);
+        const peer = peerInfo(extra, server);
+        const joined = await coordinator.join({ inviteCode, label, peer, sessionBound: Boolean(peer.identityFingerprint && peer.identitySource !== "none") });
+        if (joined.continuationResumed) {
+            return textResult(joined, `Auto Compact continuation restored for ${joined.workerId} and bound to this MCP conversation. No workerToken is returned. Do not reply to the user; immediately call chat_swarm_next exactly once without workerToken. If this ChatGPT client still shows a cached schema that requires workerToken, pass the literal non-secret compatibility value ${SESSION_BOUND_COMPAT_TOKEN}.`);
+        }
+        if (joined.sessionBound) {
+            return textResult(joined, `Joined ${joined.swarmId} as ${joined.workerId} and bound this MCP conversation server-side. No workerToken is returned. Do not reply to the user; immediately call chat_swarm_next exactly once without workerToken. If a cached schema still requires the field, use ${SESSION_BOUND_COMPAT_TOKEN}.`);
+        }
+        return textResult(joined, `Joined ${joined.swarmId} as ${joined.workerId} in legacy/internal token mode. Keep that private credential inside this non-session-bound client and use it for subsequent worker calls.`);
+    }));
+
+    server.registerTool("chat_swarm_resume_continuation", {
+        title: "Resume Compacted Chat Swarm Worker",
+        description: "Use only in a fresh ChatGPT conversation created by DevSpace Auto Compact. Redeems the short-lived one-time continuation ticket, preserves the existing worker identity/task routing, invalidates the old token, and binds this fresh MCP conversation server-side. No new workerToken is exposed. Never use this to join a new swarm.",
+        inputSchema: {
+            continuationTicket: z.string().min(16).max(200),
+        },
+        annotations: MUTATING,
+    }, withErrors(async ({ continuationTicket }, extra) => {
+        const resumed = await coordinator.resumeContinuation({ continuationTicket, peer: peerInfo(extra, server) });
+        return textResult(resumed, `Continuation restored for ${resumed.workerId} and bound to this MCP conversation. No workerToken is returned. Do not reply to the user; immediately call chat_swarm_next exactly once without workerToken. If a cached schema still requires workerToken, pass the literal non-secret compatibility value ${SESSION_BOUND_COMPAT_TOKEN}.`);
     }));
 
     registerAppTool(server, "chat_swarm_dock", {
@@ -1359,11 +1708,11 @@ export function registerChatSwarmTools(server, coordinator, options = {}) {
 
     server.registerTool("chat_swarm_status", {
         title: "Chat Swarm Status",
-        description: "Use this when an orchestrator or worker needs the current roster and task counts. Pass the private token previously returned to this conversation by chat_swarm_create or chat_swarm_join.",
-        inputSchema: { token: z.string().min(16) },
+        description: `Use this when an orchestrator or worker needs the current roster and task counts. Orchestrators pass orchestratorToken; normal workers pass their workerToken. A session-bound Auto Compact continuation may omit token and is authenticated from the backend-observed MCP conversation identity. Cached schemas may pass the non-secret literal ${SESSION_BOUND_COMPAT_TOKEN}.`,
+        inputSchema: { token: z.string().min(16).optional() },
         annotations: READ_ONLY,
-    }, withErrors(async ({ token }) => {
-        const result = await coordinator.status(token);
+    }, withErrors(async ({ token }, extra) => {
+        const result = await coordinator.status(token, peerInfo(extra, server));
         return textResult(result, `${result.swarmId}: ${result.activeWorkers}/${result.workerSlots} workers active; ${JSON.stringify(result.taskCounts)}`);
     }));
 
@@ -1400,18 +1749,23 @@ export function registerChatSwarmTools(server, coordinator, options = {}) {
 
     server.registerTool("chat_swarm_claim", {
         title: "Claim Browser-Woken Chat Swarm Task",
-        description: "Use this only after Worker Dock or the browser wake bridge wakes a worker conversation. Claim exactly one immediately available task using the workerToken already stored in this conversation. This never waits or polls.",
+        description: "Use this only after Worker Dock or the browser wake bridge wakes a worker conversation. Claim exactly one immediately available task. Normal workers pass workerToken; a session-bound Auto Compact continuation may omit it. This never waits or polls.",
         inputSchema: {
-            workerToken: z.string().min(16),
+            workerToken: z.string().min(16).optional(),
         },
         annotations: READ_ONLY,
     }, withErrors(async ({ workerToken }, extra) => {
-        const result = await coordinator.next({ workerToken, waitMs: 0, signal: extra?.signal });
+        const peer = peerInfo(extra, server);
+        const result = await coordinator.next({ workerToken, peer, waitMs: 0, signal: extra?.signal });
         const text = result.state === "task"
             ? `Wake-managed worker control: solve task ${result.task.taskId}: ${result.task.prompt} Submit the complete result only through chat_swarm_submit_once. Do not report the result to the user.`
-            : result.state === "closed"
-                ? "Wake-managed worker control: swarm closed; stop."
-                : "Wake-managed worker control: no task available. End this turn; do not poll. Worker Dock or the browser wake bridge will wake this conversation later.";
+            : result.state === "compact_required"
+                ? "Auto Compact is required before more work. Do not reply to the user or call another swarm tool from this old turn. End the turn now; the backend will build the capsule and rotate this worker into a fresh continuation conversation at the safe idle boundary."
+                : result.state === "continued"
+                    ? "This worker identity has moved to a fresh compacted conversation. End this turn immediately and do not call any more swarm tools from this old conversation."
+                    : result.state === "closed"
+                        ? "Wake-managed worker control: swarm closed; stop."
+                        : "Wake-managed worker control: no task available. End this turn; do not poll. Worker Dock or the browser wake bridge will wake this conversation later.";
         return textResult({ ok: true, ...result }, text);
     }));
 
@@ -1419,69 +1773,79 @@ export function registerChatSwarmTools(server, coordinator, options = {}) {
         title: "Acknowledge Chat Swarm Task Resume",
         description: "Call this exactly once immediately after chat_swarm_next returns a real task, before doing substantive work. It marks that this ChatGPT Classic worker actually resumed from the parked tool result. This lets the local Desktop Wake Bridge distinguish a healthy long-running task from a stale tool result without interrupting complex work.",
         inputSchema: {
-            workerToken: z.string().min(16),
+            workerToken: z.string().min(16).optional(),
             taskId: z.string().min(8),
         },
         annotations: MUTATING,
-    }, withErrors(async ({ workerToken, taskId }) => {
-        const result = await coordinator.acknowledgeTask({ workerToken, taskId });
+    }, withErrors(async ({ workerToken, taskId }, extra) => {
+        const result = await coordinator.acknowledgeTask({ workerToken, peer: peerInfo(extra, server), taskId });
         return textResult(result, `Task ${taskId} execution acknowledged. Continue the task; do not reply to the user until the result has been submitted through chat_swarm_submit.`);
     }));
 
     server.registerTool("chat_swarm_next", {
         title: "Wait for Chat Swarm Work",
-        description: "Use this only inside an active ChatGPT Classic worker loop. It parks for one long backend lease (normally 20-25 minutes) with low-frequency transport heartbeats. Do not poll or self-renew. If the lease checkpoint returns idle, immediately call chat_swarm_next exactly once again without replying to the user. If work arrives, solve it and submit only through chat_swarm_submit.",
+        description: `Use this only inside an active ChatGPT Classic worker loop. It parks for one long backend lease (normally 20-25 minutes) with low-frequency transport heartbeats. Normal workers pass workerToken; a session-bound Auto Compact continuation omits it and authenticates from this MCP conversation. Cached schemas that still require workerToken may pass the non-secret literal ${SESSION_BOUND_COMPAT_TOKEN}. Do not poll or self-renew. If work arrives, solve it and submit only through chat_swarm_submit.`,
         inputSchema: {
-            workerToken: z.string().min(16),
+            workerToken: z.string().min(16).optional(),
         },
         annotations: READ_ONLY,
     }, withErrors(async ({ workerToken }, extra) => {
+        const peer = peerInfo(extra, server);
         const progressHeartbeat = extra?._meta?.progressToken !== undefined;
-        await coordinator.noteWorkerWaitCapabilities(workerToken, progressHeartbeat);
+        await coordinator.noteWorkerWaitCapabilities(workerToken, progressHeartbeat, peer);
         const checkpointMs = workerCheckpointWaitMs();
         const result = await withWorkerHeartbeat(
             extra,
-            () => coordinator.next({ workerToken, waitMs: checkpointMs, signal: extra?.signal }),
+            () => coordinator.next({ workerToken, peer, waitMs: checkpointMs, signal: extra?.signal }),
             "checkpointed-parked-wait",
         );
         const text = result.state === "task"
-            ? `Worker-loop control: do not reply to the user. First call chat_swarm_status exactly once with your saved workerToken to mark execution started. Then solve task ${result.task.taskId}: ${result.task.prompt} Send the complete answer only through chat_swarm_submit.`
-            : result.state === "closed"
-                ? "Worker-loop control: swarm closed; stop waiting."
-                : "Worker-loop control: lease checkpoint reached. Do not reply to the user; immediately call chat_swarm_next exactly once to continue the same worker loop.";
+            ? `Worker-loop control: do not reply to the user. First call chat_swarm_status exactly once to mark execution started; pass workerToken only if this is a normal token-authenticated worker, otherwise omit it for a session-bound continuation. Then solve task ${result.task.taskId}: ${result.task.prompt} Send the complete answer only through chat_swarm_submit, again omitting workerToken for a session-bound continuation.`
+            : result.state === "compact_required"
+                ? "Auto Compact is required before more work. Do not reply to the user or call another swarm tool from this old turn. End the turn now; the backend will build the capsule and rotate this worker into a fresh continuation conversation at the safe idle boundary."
+                : result.state === "continued"
+                    ? "This worker identity has moved to a fresh compacted conversation. End this old conversation turn immediately; do not call chat_swarm_next again here."
+                    : result.state === "closed"
+                        ? "Worker-loop control: swarm closed; stop waiting."
+                        : "Worker-loop control: lease checkpoint reached. Do not reply to the user; immediately call chat_swarm_next exactly once to continue the same worker loop.";
         return textResult({ ok: true, ...result, checkpointedParkedWait: true, checkpointMs, heartbeatMs: WORKER_HEARTBEAT_MS, progressHeartbeat }, text);
     }));
 
     server.registerTool("chat_swarm_recover", {
         title: "Recover Chat Swarm Worker Wait",
-        description: "Use this only after a transport/network error interrupted chat_swarm_next or chat_swarm_submit. It performs one fixed 30-second backoff and then re-enters the same long backend lease. Call it at most once for a given interruption; never loop recovery calls.",
+        description: "Use this only after a transport/network error interrupted chat_swarm_next or chat_swarm_submit. It performs one fixed 30-second backoff and then re-enters the same long backend lease. Normal workers pass workerToken; session-bound continuations may omit it. Call it at most once for a given interruption; never loop recovery calls.",
         inputSchema: {
-            workerToken: z.string().min(16),
+            workerToken: z.string().min(16).optional(),
         },
         annotations: READ_ONLY,
     }, withErrors(async ({ workerToken }, extra) => {
         await waitWithAbort(30_000, extra?.signal);
+        const peer = peerInfo(extra, server);
         const progressHeartbeat = extra?._meta?.progressToken !== undefined;
-        await coordinator.noteWorkerWaitCapabilities(workerToken, progressHeartbeat);
+        await coordinator.noteWorkerWaitCapabilities(workerToken, progressHeartbeat, peer);
         const checkpointMs = workerCheckpointWaitMs();
         const result = await withWorkerHeartbeat(
             extra,
-            () => coordinator.next({ workerToken, waitMs: checkpointMs, signal: extra?.signal }),
+            () => coordinator.next({ workerToken, peer, waitMs: checkpointMs, signal: extra?.signal }),
             "recovery-checkpointed-wait",
         );
         const text = result.state === "task"
-            ? `Worker recovery complete. Do not reply to the user. First call chat_swarm_status exactly once with your saved workerToken to mark execution started. Then continue with task ${result.task.taskId}: ${result.task.prompt} Submit only through chat_swarm_submit.`
-            : result.state === "closed"
-                ? "Worker recovery complete and the swarm is closed; stop waiting."
-                : "Worker recovery lease checkpoint reached. Do not reply to the user; immediately call chat_swarm_next exactly once to continue the same worker loop.";
+            ? `Worker recovery complete. Do not reply to the user. First call chat_swarm_status exactly once to mark execution started; pass workerToken only for a normal token-authenticated worker and omit it for a session-bound continuation. Then continue with task ${result.task.taskId}: ${result.task.prompt} Submit only through chat_swarm_submit, with the same authentication mode.`
+            : result.state === "compact_required"
+                ? "Worker recovery reached an Auto Compact boundary. Do not reply to the user or call another swarm tool from this old turn. End the turn; the backend will create the compact capsule and fresh continuation automatically."
+                : result.state === "continued"
+                    ? "This worker identity has already moved to a fresh compacted conversation. End this old conversation turn immediately."
+                    : result.state === "closed"
+                        ? "Worker recovery complete and the swarm is closed; stop waiting."
+                        : "Worker recovery lease checkpoint reached. Do not reply to the user; immediately call chat_swarm_next exactly once to continue the same worker loop.";
         return textResult({ ok: true, ...result, checkpointedParkedWait: true, checkpointMs, heartbeatMs: WORKER_HEARTBEAT_MS, progressHeartbeat }, text);
     }));
 
     server.registerTool("chat_swarm_submit_once", {
         title: "Submit Browser-Woken Chat Swarm Result",
-        description: "Use this after completing one task claimed through chat_swarm_claim. Store the complete result in the backend, return immediately, do not wait for another task, and do not echo the result to the user. End the ChatGPT turn after this call; Worker Dock or the browser wake bridge remains idle and will wake the conversation again later.",
+        description: "Use this after completing one task claimed through chat_swarm_claim. Store the complete result in the backend, return immediately, do not wait for another task, and do not echo the result to the user. Normal workers pass workerToken; a session-bound Auto Compact continuation may omit it.",
         inputSchema: {
-            workerToken: z.string().min(16),
+            workerToken: z.string().min(16).optional(),
             taskId: z.string().min(8),
             status: z.enum(["completed", "failed"]).default("completed"),
             result: z.string().max(MAX_RESULT_CHARS).default(""),
@@ -1489,7 +1853,7 @@ export function registerChatSwarmTools(server, coordinator, options = {}) {
         },
         annotations: MUTATING,
     }, withErrors(async (input, extra) => {
-        const outcome = await coordinator.submit({ ...input, waitForNextMs: 0, signal: extra?.signal });
+        const outcome = await coordinator.submit({ ...input, peer: peerInfo(extra, server), waitForNextMs: 0, signal: extra?.signal });
         const submitted = {
             taskId: outcome.submitted.taskId,
             taskKey: outcome.submitted.taskKey,
@@ -1502,9 +1866,9 @@ export function registerChatSwarmTools(server, coordinator, options = {}) {
 
     server.registerTool("chat_swarm_submit", {
         title: "Submit Chat Swarm Result",
-        description: "Use this inside the active ChatGPT Classic worker loop after solving a claimed task. Store the complete result in the shared backend and never echo it to the user. After storing the result, this same tool call re-parks for one long backend lease (normally 20-25 minutes). If that lease checkpoint returns idle, immediately call chat_swarm_next exactly once without replying to the user.",
+        description: `Use this inside the active ChatGPT Classic worker loop after solving a claimed task. Store the complete result in the shared backend and never echo it to the user. Normal workers pass workerToken; a session-bound Auto Compact continuation may omit it. Cached schemas may use the non-secret literal ${SESSION_BOUND_COMPAT_TOKEN}. After storing the result, this same tool call re-parks for one long backend lease.`,
         inputSchema: {
-            workerToken: z.string().min(16),
+            workerToken: z.string().min(16).optional(),
             taskId: z.string().min(8),
             status: z.enum(["completed", "failed"]).default("completed"),
             result: z.string().max(MAX_RESULT_CHARS).default(""),
@@ -1512,12 +1876,13 @@ export function registerChatSwarmTools(server, coordinator, options = {}) {
         },
         annotations: MUTATING,
     }, withErrors(async (input, extra) => {
+        const peer = peerInfo(extra, server);
         const progressHeartbeat = extra?._meta?.progressToken !== undefined;
-        await coordinator.noteWorkerWaitCapabilities(input.workerToken, progressHeartbeat);
+        await coordinator.noteWorkerWaitCapabilities(input.workerToken, progressHeartbeat, peer);
         const checkpointMs = workerCheckpointWaitMs();
         const result = await withWorkerHeartbeat(
             extra,
-            () => coordinator.submit({ ...input, waitForNextMs: checkpointMs, signal: extra?.signal }),
+            () => coordinator.submit({ ...input, peer, waitForNextMs: checkpointMs, signal: extra?.signal }),
             "submit-checkpointed-repark",
         );
         const submitted = {
@@ -1529,10 +1894,14 @@ export function registerChatSwarmTools(server, coordinator, options = {}) {
         };
         const next = result.next;
         const directive = next?.state === "task"
-            ? `Worker-loop control: result stored in backend. Do not reply to the user. First call chat_swarm_status exactly once with your saved workerToken to mark execution started. Then solve task ${next.task.taskId}: ${next.task.prompt} Then submit the complete answer with chat_swarm_submit.`
-            : next?.state === "closed"
-                ? "Worker-loop control: result stored in backend and the swarm is closed; stop waiting."
-                : "Worker-loop control: result stored in backend; lease checkpoint reached. Do not reply to the user; immediately call chat_swarm_next exactly once to continue the same worker loop.";
+            ? `Worker-loop control: result stored in backend. Do not reply to the user. First call chat_swarm_status exactly once to mark execution started; pass workerToken only for a normal token-authenticated worker and omit it for a session-bound continuation. Then solve task ${next.task.taskId}: ${next.task.prompt} Then submit the complete answer with chat_swarm_submit using the same authentication mode.`
+            : next?.state === "compact_required"
+                ? "Worker-loop control: result stored in backend and Auto Compact is now required. Do not reply to the user or call another swarm tool from this old turn. End the turn now; the backend will build the capsule and rotate this worker into a fresh continuation conversation automatically."
+                : next?.state === "continued"
+                    ? "Worker-loop control: result stored and this worker identity moved to a fresh compacted conversation. End this old conversation turn immediately."
+                    : next?.state === "closed"
+                        ? "Worker-loop control: result stored in backend and the swarm is closed; stop waiting."
+                        : "Worker-loop control: result stored in backend; lease checkpoint reached. Do not reply to the user; immediately call chat_swarm_next exactly once to continue the same worker loop.";
         return textResult({
             ok: result.ok,
             duplicate: result.duplicate,
@@ -1544,7 +1913,7 @@ export function registerChatSwarmTools(server, coordinator, options = {}) {
             progressHeartbeat,
             workerLoop: {
                 userFacingReplyAllowed: false,
-                nextAction: next?.state === "task" ? "solve_and_submit" : next?.state === "closed" ? "stop" : "restore_wait",
+                nextAction: next?.state === "task" ? "solve_and_submit" : next?.state === "compact_required" ? "stop_old_turn_for_backend_handoff" : next?.state === "continued" ? "stop_old_conversation" : next?.state === "closed" ? "stop" : "restore_wait",
             },
         }, directive);
     }));
@@ -1597,11 +1966,11 @@ export function registerChatSwarmTools(server, coordinator, options = {}) {
 
     server.registerTool("chat_swarm_leave", {
         title: "Leave Chat Swarm",
-        description: "Use this from a worker conversation when it should leave the swarm. Any task currently claimed by that worker is safely requeued while the swarm remains active, freeing the worker slot for another ChatGPT Classic conversation.",
-        inputSchema: { workerToken: z.string().min(16) },
+        description: "Use this from a worker conversation when it should leave the swarm. Any task currently claimed by that worker is safely requeued while the swarm remains active. Normal workers pass workerToken; session-bound continuations may omit it.",
+        inputSchema: { workerToken: z.string().min(16).optional() },
         annotations: MUTATING,
-    }, withErrors(async (input) => {
-        const result = await coordinator.leave(input);
+    }, withErrors(async (input, extra) => {
+        const result = await coordinator.leave({ ...input, peer: peerInfo(extra, server) });
         return textResult(result, `${result.workerId} left ${result.swarmId}; its slot is available again.`);
     }));
 

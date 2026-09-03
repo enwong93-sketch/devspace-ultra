@@ -92,6 +92,24 @@ function parsePositiveInteger(value, fallback, name, max = Number.MAX_SAFE_INTEG
     }
     return parsed;
 }
+function parseNonNegativeInteger(value, fallback, name, max = Number.MAX_SAFE_INTEGER) {
+    if (value === undefined || value === null || value === "")
+        return fallback;
+    const parsed = Number(value);
+    if (!Number.isInteger(parsed) || parsed < 0 || parsed > max) {
+        throw new Error(`Invalid ${name}: ${value}`);
+    }
+    return parsed;
+}
+function parseFraction(value, fallback, name, min = 0, max = 1) {
+    if (value === undefined || value === null || value === "")
+        return fallback;
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed) || parsed < min || parsed > max) {
+        throw new Error(`Invalid ${name}: ${value}`);
+    }
+    return parsed;
+}
 function parseLoggingConfig(env) {
     return {
         level: parseLogLevel(env.DEVSPACE_LOG_LEVEL),
@@ -104,9 +122,9 @@ function parseLoggingConfig(env) {
     };
 }
 function parseWidgetMode(value) {
-    if (!value || value === "full")
-        return "full";
-    if (value === "off" || value === "changes")
+    if (!value || value === "off")
+        return "off";
+    if (value === "full" || value === "changes")
         return value;
     throw new Error(`Invalid DEVSPACE_WIDGETS: ${value}`);
 }
@@ -180,6 +198,14 @@ export function loadConfig(env = process.env) {
         pluginPaths: parsePathList(env.DEVSPACE_PLUGIN_PATHS ?? (Array.isArray(files.config.pluginPaths) ? files.config.pluginPaths.join(",") : files.config.pluginPaths)),
         pluginsDir: resolve(expandHomePath(env.DEVSPACE_PLUGINS_DIR ?? files.config.pluginsDir ?? devspacePluginsDir(env))),
         capabilityRegistryPath: resolve(expandHomePath(env.DEVSPACE_CAPABILITY_REGISTRY ?? files.config.capabilityRegistryPath ?? devspaceCapabilityRegistryPath(env))),
+        autoCompactEnabled: env.DEVSPACE_AUTO_COMPACT === undefined
+            ? files.config.autoCompactEnabled === true
+            : parseBoolean(env.DEVSPACE_AUTO_COMPACT),
+        autoCompactThreshold: parseFraction(env.DEVSPACE_AUTO_COMPACT_THRESHOLD ?? numberConfigValue(files.config.autoCompactThreshold), 0.90, "DEVSPACE_AUTO_COMPACT_THRESHOLD", 0.50, 0.98),
+        autoCompactContextWindowTokens: parsePositiveInteger(env.DEVSPACE_AUTO_COMPACT_CONTEXT_TOKENS ?? numberConfigValue(files.config.autoCompactContextWindowTokens), 1_050_000, "DEVSPACE_AUTO_COMPACT_CONTEXT_TOKENS", 10_000_000),
+        autoCompactReserveTokens: parseNonNegativeInteger(env.DEVSPACE_AUTO_COMPACT_RESERVE_TOKENS ?? numberConfigValue(files.config.autoCompactReserveTokens), 32_000, "DEVSPACE_AUTO_COMPACT_RESERVE_TOKENS", 5_000_000),
+        autoCompactPollSeconds: parsePositiveInteger(env.DEVSPACE_AUTO_COMPACT_POLL_SECONDS ?? numberConfigValue(files.config.autoCompactPollSeconds), 15, "DEVSPACE_AUTO_COMPACT_POLL_SECONDS", 3_600),
+        autoCompactResumeTimeoutSeconds: parsePositiveInteger(env.DEVSPACE_AUTO_COMPACT_RESUME_TIMEOUT_SECONDS ?? numberConfigValue(files.config.autoCompactResumeTimeoutSeconds), 150, "DEVSPACE_AUTO_COMPACT_RESUME_TIMEOUT_SECONDS", 900),
         subagents: env.DEVSPACE_SUBAGENTS === undefined
             ? files.config.subagents === true
             : parseBoolean(env.DEVSPACE_SUBAGENTS),

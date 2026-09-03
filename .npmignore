@@ -1,6 +1,6 @@
 dist/chat-swarm.js.bak-before-plain-tools
 restart-devspace.ps1
-docs/DEVSPACE-ULTRA-HANDOFF-2026-08-18.md
+docs/DEVSPACE-ULTRA-HANDOFF-*.md
 *.log
 *.tgz
 *.bak*
@@ -17,3 +17,6 @@ update-backups/
 auth-seed/
 ChatGPT-Classic-Worker-Session-Backups/
 ChatGPT-Classic-Worker-Runtimes/
+# Failed local-only auth experiments; final runtime uses CDP Session Seed instead.
+scripts/chat-swarm-classic-auth-seed.mjs
+scripts/chat-swarm-classic-callback-relay.ps1

@@ -150,13 +150,14 @@ a PTY, or send Ctrl-C. Set `tty: true` only for commands that need a terminal.
 
 ## Show Changes
 
-By default, `DEVSPACE_WIDGETS=full`.
+By default, `DEVSPACE_WIDGETS=off`.
 
-In that mode, DevSpace attaches widget UI to the exposed workspace, file, edit,
-and shell tools. The aggregate `show_changes` tool is not exposed by default.
+In that mode, DevSpace does not attach Apps iframe UI to workspace/file/edit/shell
+tools, so repetitive cards such as `Ran command` do not appear. Tool execution
+and model-readable results are unchanged.
 
-Use `DEVSPACE_WIDGETS=off` to disable widget UI, or `DEVSPACE_WIDGETS=changes`
-to expose the aggregate show-changes flow.
+Use `DEVSPACE_WIDGETS=changes` to expose only the aggregate show-changes flow,
+or `DEVSPACE_WIDGETS=full` to opt back into per-tool widget cards.
 
 When `show_changes` is exposed, models should call it exactly once after the
 final file modification in any turn that changes files. The tool only requires

@@ -6,6 +6,7 @@ DevSpace Ultra uses an on-demand ChatGPT Classic worker pool. Four workers are t
 
 - Production runtime numbers: selected from Runtime-01..32 according to `desiredWorkers` and any operator-configured `reservedWorkers`.
 - Reserved runtime numbers: optional standalone/private slots excluded from elastic production scaling. The public default is no reservation.
+- Protected runtime numbers: stronger fail-closed safety for a currently interactive/misrouted runtime. Stop/repair/recover/minimize/autojoin/scale/update/managed Auto Compact must not mutate a protected runtime.
 - Main ChatGPT conversation: orchestrator.
 - DevSpace Chat Swarm backend: task routing, worker selection, queue state, submission, collection, continuity routing.
 - CDP/UI automation: lifecycle only (open/restore worker conversation, bootstrap join, resume interrupted loop, dismiss blocking UI overlays, minimize).
@@ -18,7 +19,7 @@ DevSpace Ultra uses an on-demand ChatGPT Classic worker pool. Four workers are t
 3. Dispatch work through `chat_swarm_dispatch`; never route normal work by typing into worker UIs.
 4. Collect through `chat_swarm_collect`.
 5. If a claimed/execution-started task stalls and the mapped worker UI is idle or interrupted, recover only that worker with `chat_swarm_runtime_recover` (or controller `-Action recover -Worker N`), then collect again.
-6. Never operate on runtime numbers the operator has placed in `reservedWorkers`.
+6. Never operate on runtime numbers the operator has placed in `reservedWorkers`; never attempt to override `protectedWorkers` merely to reach a desired pool size.
 
 ## Starting a fresh swarm
 
@@ -32,6 +33,8 @@ DevSpace Ultra uses an on-demand ChatGPT Classic worker pool. Four workers are t
 - `too many requests` overlay: dismiss/acknowledge it only. Do not infer scheduler failure solely from that overlay; backend task/worker state is authoritative.
 - `connection interrupted / waiting for complete response`: treat as unhealthy even if the UI still exposes a stop/generating control; recover the mapped worker conversation.
 - Runtime process missing: on-demand ensure/recover starts the correct isolated package and navigates back to its saved exact conversation URL.
+- Signed-out worker: login health is verified through the actual ChatGPT UI/CDP state, not profile-file existence. The controller may Session Seed the target from another verified signed-in runtime with allowlisted in-memory cookies; the source runtime is not stopped or navigated.
+- Context pressure: managed Auto Compact marks the worker before its configured hard limit, waits for a safe idle boundary, then performs the A→B conversation handoff in the backend. Do not manually duplicate the worker when this happens.
 - DevSpace restart: persisted swarm/task state survives; ensure/recover can resume the existing conversation-held workerToken without writing raw workerToken to controller state.
 - Claimed task whose worker UI has become idle without submit: recover the same worker conversation, then collect again. Do not create a duplicate logical task unless backend state proves retry is required.
 - Retry dispatch should use the same `taskKey` for idempotency.
@@ -40,7 +43,7 @@ DevSpace Ultra uses an on-demand ChatGPT Classic worker pool. Four workers are t
 
 `%LOCALAPPDATA%\DevSpace\ChatSwarmClassic\controller-state.json`
 
-Contains worker/package/profile/debug-port/exact-conversation mappings and the configured `sub-agents` Project URL. It must not contain raw workerToken or orchestratorToken values.
+Contains worker/package/profile/debug-port/exact-conversation mappings, protected-runtime policy, and the configured `sub-agents` Project URL. It must not contain raw workerToken, orchestratorToken, continuation-ticket or cookie values.
 
 ## Packaged runtime MCP tools
 
@@ -50,8 +53,10 @@ Contains worker/package/profile/debug-port/exact-conversation mappings and the c
 - `chat_swarm_runtime_autojoin`
 - `chat_swarm_runtime_setup`
 - `chat_swarm_runtime_stop`
+- `chat_swarm_runtime_identity_status`
+- `chat_swarm_runtime_identity_repair`
 
-The convenience defaults for direct status/ensure/stop operations are scoped to Runtime-01..04. Elastic scale has no reserved runtime number by default; pass `reservedWorkers` explicitly for a custom pool layout. A current ChatGPT MCP session can retain a cached older tool catalog after a DevSpace server restart; the PowerShell controller remains the fallback for that session, while a fresh/reconnected MCP session receives the packaged tools.
+The convenience defaults for direct status/ensure/stop operations are scoped to Runtime-01..04, but protected runtimes are skipped/refused even when selected explicitly. Elastic scale has no reserved runtime number by default and always excludes protected runtimes through the controller's authoritative plan. A current ChatGPT MCP session can retain a cached older tool catalog after a DevSpace server restart; Auto Compact therefore redeems fresh-conversation continuation through the existing `chat_swarm_join` schema rather than requiring the old conversation to see a new tool name.
 
 ## Current validated boundary
 

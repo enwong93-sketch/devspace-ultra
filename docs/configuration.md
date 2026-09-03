@@ -115,9 +115,9 @@ sessions.
 
 | Value | Behavior |
 | --- | --- |
-| `full` | Default. Widget UI is attached to exposed workspace, file, edit, and shell tools. |
-| `changes` | Enables the aggregate `show_changes` tool and attaches widget UI to `open_workspace` and `show_changes`. |
-| `off` | Disables widget UI. |
+| `off` | Default. Disables DevSpace widget UI, preventing per-tool iframe cards such as `Ran command`. |
+| `changes` | Enables the aggregate `show_changes` tool and attaches widget UI only to `open_workspace` and `show_changes`. |
+| `full` | Opt-in. Widget UI is attached to exposed workspace, file, edit, and shell tools. |
 
 ## Skills
 
@@ -188,6 +188,25 @@ Default storage:
 Persisted equivalents in `~/.devspace/config.json` are `pluginsEnabled`, `pluginsDir`, `capabilityRegistryPath`, and `pluginPaths`.
 
 Managed downloads are separate from execution trust: `capability_install` defaults to disabled/untrusted, while `capability_enable(... trust=true)` explicitly permits executable MCP/command surfaces. Enabled + trusted plugin `SKILL.md` files join normal workspace skill discovery automatically. Shared MCP services are backend-pooled; stateful stdio MCPs can use `capability_instance` for separate exclusive instances with ephemeral per-project environment values such as a Blender bridge port. See [Unified Agent Capability Runtime](capability-runtime.md).
+
+## Automatic Conversation Continuity
+
+DevSpace Ultra v0.3.1 can automatically rotate managed Windows ChatGPT Classic workers into fresh conversations before the configured context budget is exhausted.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `DEVSPACE_AUTO_COMPACT` | `0` unless enabled in config | Enable the managed Classic watchdog/continuation runtime. |
+| `DEVSPACE_AUTO_COMPACT_THRESHOLD` | `0.90` | Estimated utilization at which compaction becomes required. |
+| `DEVSPACE_AUTO_COMPACT_CONTEXT_TOKENS` | `1050000` | Configured model context budget used by the local estimator. |
+| `DEVSPACE_AUTO_COMPACT_RESERVE_TOKENS` | `32000` | Hidden/system/tool overhead counted as estimated already-consumed context. |
+| `DEVSPACE_AUTO_COMPACT_POLL_SECONDS` | `15` | Managed-runtime watchdog interval. |
+| `DEVSPACE_AUTO_COMPACT_RESUME_TIMEOUT_SECONDS` | `150` | Maximum wait for the fresh conversation to redeem its one-time continuation ticket. |
+
+Persisted equivalents are `autoCompactEnabled`, `autoCompactThreshold`, `autoCompactContextWindowTokens`, `autoCompactReserveTokens`, `autoCompactPollSeconds`, and `autoCompactResumeTimeoutSeconds` in `~/.devspace/config.json`.
+
+The 90% threshold is applied to the full configured window. With the defaults the absolute trigger is `945000`; the reserve is added to estimated consumption rather than subtracted from the window before the percentage calculation. ChatGPT does not expose an exact native context counter through this MCP connection, so this is deliberately reported as a conservative local estimate. See [Automatic Conversation Continuity](conversation-continuity.md).
+
+Windows runtime protection and Session Seed are controller state/policy rather than general DevSpace environment settings. See [Runtime Identity Safety](runtime-identity.md).
 
 ## Logging
 
