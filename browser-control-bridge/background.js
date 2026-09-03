@@ -78,8 +78,9 @@ async function persistTabSets(sharedTabs, managedTabs) {
 function normalizeEndpoint(value) {
   const candidate = String(value || "http://127.0.0.1:7676").trim().replace(/\/+$/, "");
   const parsed = new URL(candidate);
-  const localHosts = new Set(["127.0.0.1", "localhost", "[::1]", "::1"]);
-  if (!["http:", "https:"].includes(parsed.protocol) || !localHosts.has(parsed.hostname)) {
+  const localHosts = new Set(["127.0.0.1", "[::1]", "::1"]);
+  const allowedPorts = new Set(["7676", ""]);
+  if (!["http:", "https:"].includes(parsed.protocol) || !localHosts.has(parsed.hostname) || !allowedPorts.has(parsed.port)) {
     throw new Error("Bridge endpoint must use localhost/127.0.0.1. DevSpace Browser Control is local-first.");
   }
   return parsed.toString().replace(/\/$/, "");
