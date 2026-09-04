@@ -23,7 +23,13 @@ Release baseline before v0.5 work:
 main / origin/main / v0.4.0 = 25b3bd43fd8cfc5efd1565ed501792cdf46f8b4d
 ```
 
-v0.5 work currently exists as local modifications on top of v0.4.0 and is not yet published as a new release.
+v0.5 Plan / Step Card work has now been checkpoint-committed locally on top of v0.4.0 and is not yet pushed or published as a new release.
+
+Current local checkpoint:
+
+```text
+5998b3a feat: add persistent plan progress card
+```
 
 Production fixed MCP identity remains:
 
@@ -259,7 +265,14 @@ Treat this as a separate manager-wrapper bug; do not confuse it with a Main-02 r
 
 ### Status
 
-**DESIGN APPROVED BY USER. IMPLEMENT NEXT.**
+**DESIGN APPROVED BY USER. FORMAL SPEC + IMPLEMENTATION PLAN WRITTEN. IMPLEMENT NEXT.**
+
+Formal documents:
+
+```text
+docs/superpowers/specs/2026-09-05-goal-mode-design.md
+docs/superpowers/plans/2026-09-05-goal-mode.md
+```
 
 The user explicitly corrected the continuation semantics: Goal Mode must work as normal visible ChatGPT turns, not an invisible endless backend loop.
 
@@ -422,12 +435,11 @@ Plan checklist remains in the Plan Card.
 
 ### Next implementation work
 
-Before production code:
+The formal spec and implementation plan are now written. Next:
 
-1. write `docs/superpowers/specs/2026-09-05-goal-mode-design.md` from this approved design;
-2. write `docs/superpowers/plans/2026-09-05-goal-mode.md`;
-3. implement in an isolated worktree based on the Plan Card checkpoint;
-4. TDD in this order:
+1. checkpoint the Goal Mode design/spec/plan + this handoff update locally;
+2. implement in an isolated worktree based on that checkpoint (which already includes Plan Card commit `5998b3a`);
+3. TDD in this order:
    - GoalRuntime persistence/authority/state transitions;
    - round-report + one-time continuation lease;
    - MCP Goal tools;
@@ -624,7 +636,7 @@ node dist/cli.js edge status
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/devspace-edge-startup.ps1 -Action status
 ```
 
-4. If Plan Card code has not yet been checkpoint-committed, verify `npm test` and checkpoint it before creating a Goal Mode worktree.
+4. Plan Card checkpoint is already committed locally at `5998b3a`; use this commit as the Goal Mode worktree base.
 
 5. Continue **Goal Mode only** from section 3. Do not restart Context Guardian work yet.
 
@@ -642,4 +654,4 @@ As of the creation of this rolling handoff:
 #3 Context Guardian v2: research findings captured, implementation deferred
 ```
 
-The immediate next action is to checkpoint #1, write the Goal Mode spec/implementation plan from the approved design, create an isolated Goal Mode worktree, and start TDD with GoalRuntime persistence/state-transition tests.
+The Plan Card checkpoint is complete at `5998b3a`, and the Goal Mode spec/implementation plan are written. The immediate next action is to checkpoint those design documents + this handoff update, create an isolated Goal Mode worktree from that new checkpoint, and start TDD with GoalRuntime persistence/state-transition tests.
