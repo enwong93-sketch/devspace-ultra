@@ -41,10 +41,12 @@ Workers VPC Service
 named Cloudflare Tunnel (outbound-only cloudflared)
         |
         v
-http://127.0.0.1:7676
+http://127.0.0.1:7677  (isolated fixed backend by default)
         |
         v
-DevSpace Ultra
+DevSpace Ultra fixed plane
+
+separate control/dev backend (for example 7676) remains untouched
 ```
 
 The existing Tailscale Funnel remains installed and may continue serving the machine for other DevSpace/local services, but it is no longer on the ChatGPT fixed-edge data path.
@@ -64,7 +66,7 @@ The existing Tailscale Funnel remains installed and may continue serving the mac
 
 When `PRIVATE_ORIGIN` exists, the Worker must prefer it over public `fetch`.
 
-The VPC Service configuration fixes the actual target to loopback and port 7676. The synthetic fetch URL uses `http://127.0.0.1/<path>` so DevSpace's loopback Host allowlist accepts the private hop. Path, query, method, MCP/OAuth headers, request body, status, response headers, and streaming response body remain preserved. OAuth redirects remain manual/pass-through.
+The VPC Service configuration fixes the actual target to loopback and the dedicated fixed-backend port (`7677` by default). The fixed backend receives the Worker public identity, a dedicated state directory and its Host allowlist through child-process environment overrides; edge setup must never rewrite the existing/default control backend's `publicBaseUrl`, port, or state directory. The synthetic Worker fetch URL uses `http://127.0.0.1/<path>` so DevSpace's loopback Host allowlist accepts the private hop. Path, query, method, MCP/OAuth headers, request body, status, response headers, and streaming response body remain preserved. OAuth redirects remain manual/pass-through.
 
 The old `ORIGIN_BASE_URL` public-fetch path remains only as a generic fallback for operators who intentionally configure a compatible HTTPS origin. It is not the production path on this machine.
 
@@ -83,15 +85,16 @@ Tunnel credentials/OAuth tokens remain outside the repository and must never be 
 
 Normal Windows startup must automatically ensure:
 
-1. DevSpace backend is listening on loopback;
-2. named Cloudflare Tunnel is running and connected;
-3. existing Tailscale startup/routes continue independently;
-4. the fixed Worker remains unchanged in Cloudflare;
-5. ChatGPT keeps the same connector URL.
+1. the isolated fixed DevSpace backend is listening on its dedicated loopback port;
+2. the named Cloudflare Tunnel is running and connected;
+3. any separate control/dev DevSpace backend remains independent and untouched;
+4. existing Tailscale startup/routes continue independently;
+5. the fixed Worker remains unchanged in Cloudflare;
+6. ChatGPT keeps the same connector URL.
 
 No `trycloudflare.com` process is required in steady state.
 
-A hidden startup task/process may run `wrangler tunnel run <tunnel-id>` using the one-time Wrangler OAuth credential stored by Wrangler. If later hardening obtains a dedicated tunnel credential/token, the launcher may move to direct `cloudflared` service mode without changing the public Worker URL.
+Windows installs two explicit logon tasks: one owns `wrangler tunnel run <tunnel-id>` in the foreground for the lifetime of the named tunnel, and one owns the isolated fixed backend in the foreground. The tasks have no short execution timeout. Setup replaces older task definitions safely and removes legacy duplicate wrappers only when their command line names the exact configured tunnel ID; unrelated Quick Tunnels and other Cloudflare processes are not touched. If later hardening obtains a dedicated tunnel credential/token, the launcher may move to direct `cloudflared` service mode without changing the public Worker URL.
 
 ## Health status
 

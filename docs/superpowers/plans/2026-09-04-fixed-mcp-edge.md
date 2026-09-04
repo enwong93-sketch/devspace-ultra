@@ -4,7 +4,7 @@
 
 **Goal:** Ship a permanent ChatGPT-facing MCP URL that survives reboots, uses the existing Tailscale Funnel as origin transport, and requires no temporary Quick Tunnel or repeated connector recreation.
 
-**Architecture:** A Cloudflare Worker on a fixed `workers.dev` URL proxies only the DevSpace MCP/OAuth/public asset surface to the existing fixed Tailscale Funnel origin. DevSpace persists the Worker URL as `publicBaseUrl` while preserving the Tailscale hostname in `allowedHosts`; OAuth stays entirely in DevSpace. Backend OAuth authorization codes become handover-safe, and public Express errors become generic.
+**Architecture:** A Cloudflare Worker on a fixed `workers.dev` URL proxies only the DevSpace MCP/OAuth/public asset surface through a Workers VPC Service bound to a named Cloudflare Tunnel reaching `127.0.0.1:7676`. The original Worker→Tailscale-origin path was rejected by the live `525` gate and is superseded by `docs/superpowers/specs/2026-09-04-fixed-mcp-edge-vpc-amendment.md`. Tailscale remains an independent fallback/other-service transport. DevSpace persists the Worker URL as `publicBaseUrl`; OAuth stays entirely in DevSpace. Backend OAuth authorization codes become handover-safe, and public Express errors become generic.
 
 **Tech Stack:** Node.js ESM, Cloudflare Workers Fetch API, Wrangler, Express 5, MCP SDK OAuth router, better-sqlite3, Windows PowerShell/Tailscale startup.
 
@@ -14,7 +14,7 @@
 
 - Fixed public URL must not change across reboot or normal backend restart.
 - Quick Tunnel is diagnostic-only and must not be required in steady state.
-- Tailscale Funnel remains the fixed origin transport.
+- The production fixed edge uses Workers VPC + a named Cloudflare Tunnel; direct Tailscale remains independent fallback/diagnostic transport.
 - Worker must be fixed-origin, not an open proxy.
 - Worker must never proxy Browser Control bridge endpoints or arbitrary local routes.
 - OAuth redirects must be returned to the client without edge-side redirect following.
@@ -196,30 +196,39 @@ Do protocol-level probes only; never print Owner password or bearer material.
 
 Keep network live gate separate from offline `verify:ultra` while syntax/static checks stay in `verify:ultra`.
 
-### Task 6: Deploy the permanent Worker on this machine
+### Task 6: Deploy the permanent Worker + Workers VPC origin on this machine
 
 **Files/state:**
 - Cloudflare Worker control plane
+- named Cloudflare Tunnel + Workers VPC Service
 - `~/.devspace/config.json`
-- Existing `~/.devspace/Start-DevSpace-Stack.ps1` is preserved unless a startup fix is actually required.
+- existing `~/.devspace/Start-DevSpace-Stack.ps1`, extended to ensure the named tunnel is running automatically.
 
 - [ ] **Step 1: Verify Wrangler authentication**
 
 Run `npx wrangler whoami`. If the existing API token cannot enumerate/deploy, use one-time `wrangler login`; complete browser authorization through the already-paired Browser Control session if possible.
 
-- [ ] **Step 2: Deploy generic Worker with origin set to the fixed Tailscale base URL**
+- [ ] **Step 2: Create/reuse named Tunnel and VPC Service**
 
-Use worker name `devspace-ultra-mcp-edge` unless unavailable; capture actual fixed `workers.dev` URL.
+Bind a fixed HTTP VPC Service to loopback DevSpace (`127.0.0.1:7676`) through the named tunnel. Store only non-secret resource IDs/names in local edge metadata.
 
-- [ ] **Step 3: Verify edge before config commit**
+- [ ] **Step 3: Deploy Worker with `PRIVATE_ORIGIN` VPC binding**
 
-Probe edge `/mcp`, PRM, authorization metadata, and blocked `/browser-control/bridge/*` behavior. Confirm redirect manual behavior with an OAuth authorization request.
+Use worker name `devspace-ultra-mcp-edge` unless unavailable; capture the actual fixed `workers.dev` URL. `PRIVATE_ORIGIN.fetch()` is the production upstream path; public HTTPS origin fetch remains an optional generic fallback only.
 
-- [ ] **Step 4: Persist fixed publicBaseUrl/allowedHosts**
+- [ ] **Step 4: Verify transport before config commit**
+
+Probe edge `/healthz`, `/mcp`, and blocked `/browser-control/bridge/*` behavior through VPC. Before backend identity cutover, metadata may still name the old public base; after cutover it must name the Worker URL.
+
+- [ ] **Step 5: Persist fixed publicBaseUrl/edge VPC metadata**
 
 Preserve all unrelated DevSpace config fields and record origin/public edge metadata.
 
-- [ ] **Step 5: Restart only DevSpace backend via handover**
+- [ ] **Step 6: Install/extend automatic named-tunnel startup**
+
+Normal Windows startup must ensure the named Cloudflare Tunnel is connected without user action. Tailscale startup remains intact and independent.
+
+- [ ] **Step 7: Restart only DevSpace backend via handover**
 
 Do not touch Main-01/Main-02. Confirm metadata now advertises fixed Worker identity while Worker still reaches Tailscale origin.
 

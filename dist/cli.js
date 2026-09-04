@@ -11,6 +11,8 @@ import * as prompts from "@clack/prompts";
 import { getShellConfig } from "@earendil-works/pi-coding-agent";
 import { satisfies } from "semver";
 import { loadConfig } from "./config.js";
+import { classifyEdgeConfig, deployCloudflareWorker, deployCloudflareWorkerVpc, ensureCloudflareTunnel, ensureVpcService, installFixedEdgeStartup, planDisableEdgeConfig, planFixedEdgeCandidateConfig, planFixedEdgeConfig, probeFixedEdge, resolveWranglerAuthEnv, startCloudflareTunnelDetached } from "./edge-cloudflare.js";
+import { createCodexContextBridge } from "./codex-context-bridge.js";
 import { runLocalAgentProvider } from "./local-agent-adapters.js";
 import { isLocalAgentProvider, loadLocalAgentProfiles, } from "./local-agent-profiles.js";
 import { assertLocalAgentProviderAvailable, formatLocalAgentProviderAvailabilitySummary, } from "./local-agent-availability.js";
@@ -39,6 +41,12 @@ async function main(argv) {
         case "config":
             runConfigCommand(args);
             return;
+        case "edge":
+            await runEdgeCommand(args);
+            return;
+        case "context":
+            await runContextCommand(args);
+            return;
         case "agents":
             await runAgentsCommand(args);
             return;
@@ -53,7 +61,7 @@ async function main(argv) {
 function normalizeCommand(command) {
     if (!command || command === "serve" || command === "start")
         return "serve";
-    if (command === "init" || command === "doctor" || command === "config" || command === "agents")
+    if (command === "init" || command === "doctor" || command === "config" || command === "edge" || command === "context" || command === "agents")
         return command;
     if (command === "help" || command === "--help" || command === "-h")
         return "help";
@@ -252,6 +260,218 @@ function runConfigCommand(args) {
     });
     console.log(`Updated ${files.configPath}`);
 }
+async function runEdgeCommand(args) {
+    const [subcommand, providerOrAction, ...rest] = args;
+    const files = loadDevspaceFiles();
+    if (!subcommand || subcommand === "status") {
+        const classification = classifyEdgeConfig(files.config);
+        let probe = null;
+        let probeError = null;
+        if (classification.mode === "fixed" && files.config.edgePublicBaseUrl) {
+            try {
+                probe = await probeFixedEdge(files.config.edgePublicBaseUrl);
+            }
+            catch (error) {
+                probeError = error instanceof Error ? error.message : String(error);
+            }
+        }
+        console.log(JSON.stringify({
+            ok: true,
+            ...classification,
+            originBaseUrl: files.config.edgeOriginBaseUrl ?? null,
+            probe,
+            probeError,
+        }, null, 2));
+        return;
+    }
+    if (subcommand === "disable") {
+        const next = planDisableEdgeConfig(files.config);
+        writeDevspaceConfig(next);
+        console.log(JSON.stringify({
+            ok: true,
+            state: "disabled",
+            publicBaseUrl: next.publicBaseUrl,
+            restartRequired: false,
+        }, null, 2));
+        return;
+    }
+    if (subcommand !== "cloudflare") {
+        throw new Error(`Unknown edge command: ${subcommand}`);
+    }
+    if (providerOrAction === "verify") {
+        const publicBaseUrl = files.config.edgePublicBaseUrl ?? files.config.publicBaseUrl;
+        if (!publicBaseUrl) throw new Error("No fixed edge public URL is configured.");
+        const probe = await probeFixedEdge(publicBaseUrl);
+        console.log(JSON.stringify(probe, null, 2));
+        if (!probe.ok) process.exitCode = 2;
+        return;
+    }
+    if (providerOrAction !== "setup") {
+        throw new Error("Usage: devspace edge cloudflare setup [--name <worker-name>] [--tunnel-name <name>] [--service-name <name>] [--transport workers-vpc|public-origin] [--origin <https-origin>] [--backend-port <port>] [--fixed-state-dir <path>]");
+    }
+    const option = (name) => {
+        const index = rest.indexOf(name);
+        if (index < 0 || index + 1 >= rest.length) return null;
+        return rest[index + 1];
+    };
+    const workerName = option("--name") ?? "devspace-ultra-mcp-edge";
+    const transport = option("--transport") ?? "workers-vpc";
+    const backendPort = Number(option("--backend-port") ?? files.config.edgeBackendPort ?? 7677);
+    const fixedStateDir = option("--fixed-state-dir") ?? files.config.edgeFixedStateDir ?? join(process.env.USERPROFILE || process.env.HOME || ".", ".local", "share", "devspace-fixed");
+    const auth = await resolveWranglerAuthEnv(process.env);
+
+    let deployment;
+    let next;
+    let tunnel = null;
+    let vpcService = null;
+    let tunnelProcess = null;
+
+    if (transport === "workers-vpc") {
+        const tunnelName = option("--tunnel-name") ?? files.config.edgeTunnelName ?? "devspace-ultra-origin";
+        const serviceName = option("--service-name") ?? files.config.edgeVpcServiceName ?? "devspace-ultra-fixed";
+        tunnel = await ensureCloudflareTunnel({ name: tunnelName, env: auth.env });
+        vpcService = await ensureVpcService({
+            name: serviceName,
+            tunnelId: tunnel.id,
+            port: backendPort,
+            env: auth.env,
+        });
+        tunnelProcess = startCloudflareTunnelDetached(tunnel.id, { env: auth.env });
+        await new Promise((resolveDelay) => setTimeout(resolveDelay, 4_000));
+        deployment = await deployCloudflareWorkerVpc({
+            serviceId: vpcService.id,
+            workerName,
+            env: auth.env,
+        });
+        next = planFixedEdgeCandidateConfig(files.config, {
+            publicBaseUrl: deployment.publicBaseUrl,
+            workerName: deployment.workerName,
+            transportMode: "workers-vpc",
+            tunnelId: tunnel.id,
+            tunnelName: tunnel.name,
+            vpcServiceId: vpcService.id,
+            vpcServiceName: vpcService.name,
+            backendPort,
+            fixedStateDir,
+        });
+    }
+    else if (transport === "public-origin") {
+        const originBaseUrl = option("--origin") ?? files.config.edgeOriginBaseUrl ?? files.config.publicBaseUrl;
+        if (!originBaseUrl) throw new Error("public-origin transport requires --origin <https-origin> or an existing publicBaseUrl.");
+        deployment = await deployCloudflareWorker({ originBaseUrl, workerName, env: auth.env });
+        next = planFixedEdgeCandidateConfig(files.config, {
+            originBaseUrl: deployment.originBaseUrl,
+            publicBaseUrl: deployment.publicBaseUrl,
+            workerName: deployment.workerName,
+            transportMode: "public-origin",
+            backendPort,
+            fixedStateDir,
+        });
+    }
+    else {
+        throw new Error(`Unsupported Cloudflare edge transport: ${transport}`);
+    }
+
+    let startup = null;
+    writeDevspaceConfig(next);
+    try {
+        if (transport === "workers-vpc") {
+            startup = await installFixedEdgeStartup();
+        }
+        const transportHealth = await fetch(`${deployment.publicBaseUrl}/healthz`, { redirect: "manual", cache: "no-store" });
+        if (!transportHealth.ok) {
+            throw new Error(`Deployed Worker could not reach the isolated fixed backend health endpoint (HTTP ${transportHealth.status}).`);
+        }
+        const transportMcp = await fetch(`${deployment.publicBaseUrl}/mcp`, { redirect: "manual", cache: "no-store" });
+        if (transportMcp.status !== 401 || !/resource_metadata=/i.test(transportMcp.headers.get("www-authenticate") || "")) {
+            throw new Error(`Deployed Worker did not preserve the DevSpace MCP OAuth challenge (HTTP ${transportMcp.status}).`);
+        }
+    }
+    catch (error) {
+        writeDevspaceConfig(files.config);
+        throw new Error(`Fixed edge setup failed after isolated deployment; previous DevSpace control config was restored. ${error instanceof Error ? error.message : String(error)}`);
+    }
+    console.log(JSON.stringify({
+        ok: true,
+        state: "deployed-configured",
+        transport,
+        authMode: auth.mode,
+        workerName: deployment.workerName,
+        publicBaseUrl: deployment.publicBaseUrl,
+        mcpUrl: `${deployment.publicBaseUrl}/mcp`,
+        tunnelId: tunnel?.id ?? null,
+        tunnelName: tunnel?.name ?? null,
+        vpcServiceId: vpcService?.id ?? null,
+        vpcServiceName: vpcService?.name ?? null,
+        tunnelProcessStarted: Boolean(tunnelProcess?.started),
+        startupInstalled: transport === "workers-vpc" ? Boolean(startup?.Ok ?? startup?.ok) : null,
+        startupTaskName: startup?.TaskName ?? null,
+        backendPort,
+        fixedStateDir,
+        controlIdentityPreserved: true,
+        restartRequired: false,
+        next: "Fixed backend is isolated and persistent; the existing control backend identity was preserved. Run `devspace edge cloudflare verify`."
+    }, null, 2));
+}
+async function runContextCommand(args) {
+    const [source, action = "list", ...rest] = args;
+    if (source !== "codex") {
+        throw new Error("Usage: devspace context codex <list|import|latest> [options]");
+    }
+    const option = (name) => {
+        const index = rest.indexOf(name);
+        if (index < 0 || index + 1 >= rest.length) return null;
+        return rest[index + 1];
+    };
+    const flag = (name) => rest.includes(name);
+    const config = loadConfig();
+    let bridge;
+    try {
+        bridge = createCodexContextBridge({ codexDir: config.agentDir, stateDir: config.stateDir });
+        if (action === "list") {
+            const threads = bridge.listThreads({
+                query: option("--query") ?? undefined,
+                projectPath: option("--project") ?? undefined,
+                includeArchived: flag("--include-archived"),
+                limit: option("--limit") ? Number(option("--limit")) : 50,
+            });
+            console.log(JSON.stringify({ ok: true, count: threads.length, threads }, null, 2));
+            return;
+        }
+        if (action === "import") {
+            const result = await bridge.importThread({
+                threadId: option("--thread") ?? undefined,
+                query: option("--query") ?? undefined,
+                projectPath: option("--project") ?? undefined,
+                latest: flag("--latest"),
+                includeArchived: flag("--include-archived") || Boolean(option("--thread")),
+                maxChars: option("--max-chars") ? Number(option("--max-chars")) : undefined,
+                maxMessages: option("--max-messages") ? Number(option("--max-messages")) : undefined,
+                persist: !flag("--no-persist"),
+            });
+            console.log(JSON.stringify(result, null, 2));
+            if (!result.ok) process.exitCode = 2;
+            return;
+        }
+        if (action === "latest") {
+            const projectPath = option("--project");
+            if (!projectPath) throw new Error("`devspace context codex latest` requires --project <path>.");
+            const result = await bridge.importThread({
+                projectPath,
+                latest: true,
+                includeArchived: flag("--include-archived"),
+                persist: !flag("--no-persist"),
+            });
+            console.log(JSON.stringify(result, null, 2));
+            if (!result.ok) process.exitCode = 2;
+            return;
+        }
+        throw new Error(`Unknown Codex context command: ${action}`);
+    }
+    finally {
+        bridge?.close();
+    }
+}
 function printHelp() {
     console.log([
         "DevSpace",
@@ -263,6 +483,13 @@ function printHelp() {
         "  devspace doctor          Show config, runtime, and native dependency status",
         "  devspace config get      Print persisted config",
         "  devspace config set publicBaseUrl <url|null>",
+        "  devspace edge status     Inspect fixed public MCP edge state",
+        "  devspace edge cloudflare setup [--name <worker-name>]  # fixed Worker + Workers VPC by default",
+        "  devspace edge cloudflare verify",
+        "  devspace edge disable",
+        "  devspace context codex list [--query <text>] [--project <path>]",
+        "  devspace context codex import --thread <id>",
+        "  devspace context codex latest --project <path>",
         "  devspace agents ls       List subagent sessions",
         "  devspace agents run <profile-or-provider-or-id> [--model <model>] <prompt>",
         "  devspace agents show <id>",

@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.4.0 — 2026-09-04
+
+### Added
+
+- **Multi-Main ChatGPT Classic runtimes** for Windows. Canonical Main-01 remains the installed Primary, while Main-02+ use separate `OpenAI.ChatGPT-Desktop.InteractiveNN` package identities, independent ChatGPT profiles/processes, visible user-facing windows, and the dedicated `DevSpaceInteractive` Application Id.
+- A reusable role-aware ChatGPT Classic provisioner shared by `worker` and `interactive` roles. Worker behavior remains backend-managed/hidden under `DevSpaceWorker`; Interactive runtimes are explicitly outside Worker lifecycle ownership.
+- `chat_main_runtime_open`, `chat_main_runtime_manage`, `chat_main_runtime_status`, `chat_main_runtime_setup`, `chat_main_runtime_authenticate`, `chat_main_runtime_start`, and `chat_main_runtime_live_gate` MCP surfaces for secondary interactive runtimes. `chat_main_runtime_open` is the one-command UX and automatically chooses the lowest free Main when no number is supplied.
+- Multi-Main identity audit output with separate `Interactives`, `InteractiveIsolationSafe`, dirty/running Interactive lists, and explicit Interactive protocol-owner classification without merging Main runtimes into Worker state.
+- Zero-login Interactive Session Seed source pool: verified signed-in secondary Main CDP first, verified Worker CDP second, canonical Primary encrypted profile last. CDP seeding is allowlisted to ChatGPT/OpenAI cookies, records no values, and includes a bounded persistence-settle verification before first-use restart gates.
+- Controlled canonical Main-01 snapshot fallback for the Windows case where its Chromium Cookies database is exclusively share-locked and no zero-interruption CDP source exists. DevSpace may close only canonical Primary, seed the new Main from the encrypted profile, relaunch Main-01 and require a signed-in visible restore before success. `chat_main_runtime_authenticate` remains only the bounded cold-start OAuth fallback.
+- A fixed **Cloudflare Worker + Workers VPC + named Cloudflare Tunnel** MCP edge. The ChatGPT-facing `workers.dev` URL remains stable across reboots/backend restarts while an isolated fixed backend (port `7677` by default) carries the fixed OAuth/resource identity. The existing/default control backend keeps its own `publicBaseUrl`, port and state directory unchanged. Separate long-lived logon tasks own the fixed backend and named tunnel in the foreground, and upgrade startup cleans legacy duplicate wrappers only for the exact named tunnel ID.
+- `devspace edge status`, `devspace edge cloudflare setup`, `devspace edge cloudflare verify`, and `devspace edge disable` plus deterministic/live edge gates. A generic public-origin Worker path remains optional, while Workers VPC is the default fixed-edge transport.
+- Handover-safe OAuth authorization codes persisted in SQLite with one-time replay prevention, eliminating the process-local `/authorize`→`/token` restart race.
+- Generic public Express error handling that returns bounded JSON errors instead of exposing body-parser stack traces or local filesystem paths.
+- **Codex ContextBridge** with `context_bridge_codex_list`, `context_bridge_codex_import`, and `context_bridge_codex_capsule`, plus `devspace context codex ...` CLI commands. It resolves local Codex threads from the Codex state index, streams large rollout history, uses Codex compaction boundaries, imports only bounded user/assistant historical context, excludes hidden reasoning/developer/raw tool material, redacts obvious credentials, and persists only sanitized capsules in DevSpace state.
+
+### Safety / compatibility
+
+- Only Main-01 may own the canonical `OpenAI.ChatGPT-Desktop` package, `Application Id="ChatGPT"`, `!ChatGPT` AUMID, `chatgpt://`, startup task, or Copilot-key extension.
+- Main-02+ never enter Worker controller state, Worker autojoin, elastic scaling, update rollout, minimize/recovery, or managed Auto Compact.
+- Existing v0.3.1 Worker identity/protected-runtime/Auto Compact behavior remains covered by the original regression gate after the Worker clone entry point was refactored onto the shared provisioner.
+
+### Verified live gate
+
+- Canonical Main-01 stayed on the exact same PID/window (`3656` / `657622`) while Main-02 was provisioned, authenticated and restarted; Main-01 was never stopped or restarted.
+- Main-02 ran as `OpenAI.ChatGPT-Desktop.Interactive02` / `!DevSpaceInteractive`, remained user-visible and outside Worker controller/Auto Compact ownership, authenticated through the direct-alias OAuth relay, then passed independent restart persistence on a new root PID (`22472 -> 23144`) with `SessionVerified=true`.
+- The live identity audit reported `InteractiveIsolationSafe=true`, `WorkerManaged=false`, no protocol/startup/Copilot ownership, and no Worker-controller listing for Main-02.
+- Main-03 was created without manual sign-in by seeding from signed-in Main-02, then passed independent restart persistence after the bounded Chromium persistence-settle fix; Main-01 stayed on PID/window `3656` / `657622` and Main-03 remained outside Worker/Chat Swarm/Auto Compact ownership.
+- The stale protected Windows `chatgpt://` UserChoice was repaired through the supported Windows Default Apps/OpenWith UI rather than registry hash manipulation. Final audit reported `ProtocolCanonical=true`, `WorkerIsolationSafe=true`, `InteractiveIsolationSafe=true`, and canonical Main-01 as `primary-current`.
+- The fixed `workers.dev` edge reached local DevSpace through Workers VPC and returned real `/healthz` 200 plus `/mcp` 401 OAuth challenge. The prior Worker→Tailscale origin attempt was rejected after a live Cloudflare 525, and the implementation pivoted to the private named-tunnel VPC path instead of weakening OAuth.
+- Control/fixed-plane isolation was exercised live: the control backend remained on the same PID while the isolated fixed backend was force-restarted under its Scheduled Task, the fixed connector reconnected without recreation, the named-tunnel task stayed `Running`, and legacy duplicate named-tunnel wrappers were reduced to one exact wrapper/cloudflared tree. Main-03 then passed a fresh restart-persistence gate with `SessionSourceLabel=Main-02`, `Main01Unchanged=true`, and `ProtocolCanonical=true` remained true in the identity audit.
+- The production fixed ChatGPT connector itself executed DevSpace tools after the backend/task restart, and Codex ContextBridge imported/reopened a real local Codex thread through that fixed connector while reporting hidden reasoning/developer/raw tool output excluded.
+- Codex ContextBridge live-imported a real ~89.7 MB compacted rollout by streaming 9,220 records, preserved the Codex compaction anchor, produced a bounded sanitized capsule, round-tripped the persisted capsule exactly, and reported hidden reasoning/developer/raw tool output all excluded.
+
 ## 0.3.1 — 2026-09-04
 
 ### Added

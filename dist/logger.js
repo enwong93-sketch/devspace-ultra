@@ -40,7 +40,8 @@ export function requestIp(req, trustProxy) {
     return req.ip ?? req.socket.remoteAddress;
 }
 export function requestPath(req) {
-    return req.path || req.url.split("?")[0] || req.url;
+    const original = typeof req.originalUrl === "string" ? req.originalUrl.split("?")[0] : "";
+    return original || req.path || req.url.split("?")[0] || req.url;
 }
 export function sessionIdPrefix(sessionId) {
     return sessionId ? sessionId.slice(0, 8) : undefined;

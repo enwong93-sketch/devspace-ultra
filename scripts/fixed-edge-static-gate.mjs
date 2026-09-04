@@ -1,0 +1,57 @@
+import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import { resolve } from "node:path";
+
+const root = resolve(import.meta.dirname, "..");
+const read = async (path) => await readFile(resolve(root, path), "utf8");
+
+const helper = await read("scripts/devspace-edge-tunnel.mjs");
+const installer = await read("scripts/devspace-edge-startup.ps1");
+const fixedBackend = await read("scripts/devspace-fixed-backend.mjs");
+const worker = await read("edge/cloudflare-worker/src/index.js");
+const edgeRuntime = await read("dist/edge-cloudflare.js");
+const cli = await read("dist/cli.js");
+
+assert.match(helper, /edgeTransportMode[\s\S]*workers-vpc/, "startup helper must activate only for Workers VPC edge mode");
+assert.match(helper, /edgeTunnelId/, "startup helper must read the persisted named tunnel id");
+assert.match(helper, /CommandLine|processMatchesTunnel/, "startup helper must validate that a persisted PID still belongs to the expected named-tunnel command before reusing it");
+assert.match(helper, /delete\s+env\.CLOUDFLARE_API_TOKEN/, "startup helper must avoid a stale API-token override when using stored Wrangler OAuth");
+assert.match(helper, /wrangler@4[\s\S]*tunnel[\s\S]*run/, "startup helper must run the named Cloudflare Tunnel, not a Quick Tunnel");
+assert.match(helper, /--foreground/, "named-tunnel helper must support a foreground mode for Scheduled Task lifetime ownership");
+assert.match(helper, /stopExistingNamedTunnelWrappers[\s\S]*tunnelId[\s\S]*taskkill/i, "foreground startup must clean only legacy wrappers tied to the exact named tunnel id before taking lifetime ownership");
+assert.match(installer, /devspace-edge-tunnel\.mjs[^\n]*--foreground|quotedHelper[^\n]*--foreground/, "the Windows Scheduled Task must keep the named tunnel process in its own foreground lifetime instead of spawning a disposable detached child");
+assert.match(fixedBackend, /--foreground/, "fixed-backend helper must support a foreground mode for Scheduled Task lifetime ownership");
+assert.match(installer, /quotedBackendHelper[^\n]*--foreground/, "the fixed-backend Scheduled Task must own the backend foreground lifetime");
+assert.match(installer, /ExecutionTimeLimit[^\n]*(Seconds 0|TimeSpan::Zero)|New-TimeSpan -Seconds 0/, "long-lived fixed-edge tasks must not have a short execution timeout");
+assert.match(helper, /packageRoot/, "named tunnel helper must resolve a stable package working directory instead of inheriting Task Scheduler/System32 cwd");
+assert.doesNotMatch(helper, /cwd:\s*process\.cwd\(\)/, "named tunnel helper must never use caller cwd for Wrangler state/cache");
+assert.doesNotMatch(helper, /trycloudflare\.com|quick-start/, "steady-state startup must not depend on random Quick Tunnel URLs");
+assert.match(installer, /DevSpace-Fixed-Edge-Tunnel/, "startup installer must use a dedicated tunnel task identity");
+assert.match(installer, /DevSpace-Fixed-Backend/, "startup installer must install a dedicated fixed-backend task identity");
+assert.match(installer, /Stop-ScheduledTask[\s\S]*DevSpace-Fixed|Stop-ScheduledTask[\s\S]*taskName/, "startup installer must stop prior edge-owned scheduled-task instances before replacing their definitions");
+assert.match(installer, /New-ScheduledTaskTrigger -AtLogOn|MSFT_TaskLogonTrigger/, "fixed edge tunnel must start automatically at Windows logon");
+assert.match(installer, /devspace-edge-tunnel\.mjs/, "startup task must delegate to the no-secret tunnel helper");
+assert.match(installer, /-WorkingDirectory\s+\$packageRoot/, "scheduled tunnel/backend tasks must start from the DevSpace package root, not System32");
+assert.doesNotMatch(installer, /ownerToken|CLOUDFLARE_API_TOKEN\s*=|access_token|refresh_token/i, "startup installer must not persist credentials");
+assert.match(fixedBackend, /edgePublicBaseUrl/, "fixed backend launcher must read the persisted fixed public URL instead of hardcoding a contributor hostname");
+assert.match(fixedBackend, /DEVSPACE_PUBLIC_BASE_URL/, "fixed backend launcher must isolate public identity through child-process environment overrides");
+assert.match(fixedBackend, /DEVSPACE_STATE_DIR/, "fixed backend launcher must use a dedicated state directory");
+assert.match(fixedBackend, /DEVSPACE_ALLOWED_HOSTS/, "fixed backend launcher must isolate its accepted Host values from the control backend");
+assert.match(fixedBackend, /7677/, "fixed backend must default to a port separate from the control backend");
+assert.match(fixedBackend, /--status/, "fixed backend helper must expose a read-only status mode that never starts a process");
+assert.match(installer, /backendHelper --status|\$backendHelper --status/, "startup status must query the fixed backend without starting it");
+assert.doesNotMatch(fixedBackend, /Stop-Process|taskkill|process\.kill\(/i, "fixed backend startup must fail closed rather than killing an existing listener");
+assert.match(worker, /PRIVATE_ORIGIN/, "production Worker must support a Workers VPC binding");
+assert.match(worker, /http:\/\/127\.0\.0\.1/, "VPC fetch host must remain a loopback allowlisted host");
+assert.match(edgeRuntime, /ensureCloudflareTunnel/, "edge setup must provision/reuse a named Cloudflare Tunnel");
+assert.match(edgeRuntime, /ensureVpcService/, "edge setup must provision/reuse a fixed-target VPC Service");
+assert.match(edgeRuntime, /deployCloudflareWorkerVpc/, "edge setup must deploy the Worker with a VPC binding");
+assert.match(edgeRuntime, /installFixedEdgeStartup/, "edge runtime must expose automatic Windows startup installation");
+assert.match(cli, /installFixedEdgeStartup/, "cloudflare setup must install the fixed-edge startup task automatically");
+assert.match(cli, /planFixedEdgeCandidateConfig/, "cloudflare setup must use a candidate-safe config plan that preserves the live control identity");
+assert.match(cli, /probeFixedEdge\(files\.config\.edgePublicBaseUrl\)/, "edge status must probe the isolated fixed edge URL, never the control/canary publicBaseUrl");
+assert.doesNotMatch(cli, /--activate/, "edge setup must never expose an activation switch that rewrites the live control backend identity");
+assert.doesNotMatch(cli, /activated\.publicBaseUrl|activated\.port|activated\.stateDir/, "edge setup must not repoint the live control backend during fixed-edge setup");
+assert.match(cli, /writeDevspaceConfig\(files\.config\)/, "if startup-task installation fails after config commit, setup must restore the previous DevSpace config");
+
+console.log(JSON.stringify({ ok: true, gate: "fixed-edge-static", workersVpc: true, quickTunnelRequired: false }));

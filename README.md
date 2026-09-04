@@ -2,7 +2,7 @@
 
 **DevSpace Ultra** is an MIT-licensed distribution of DevSpace with an elastic ChatGPT Classic multi-agent runtime layer.
 
-It keeps the original DevSpace local MCP workspace capabilities — local files, code search, editing, terminal execution, artifacts, skills, and secure self-hosting — and adds a production-oriented Chat Swarm control plane for running multiple independent ChatGPT Classic worker conversations on one computer.
+It keeps the original DevSpace local MCP workspace capabilities — local files, code search, editing, terminal execution, artifacts, skills, and secure self-hosting — and adds both a production-oriented Chat Swarm worker control plane and isolated user-facing **Multi-Main** ChatGPT Classic runtimes on one Windows computer.
 
 > Upstream project: [Waishnav/devspace](https://github.com/Waishnav/devspace). DevSpace Ultra preserves the upstream MIT license and attribution and adds the Ultra runtime/orchestration layer.
 
@@ -11,6 +11,7 @@ It keeps the original DevSpace local MCP workspace capabilities — local files,
 - **Elastic worker pool** — the main agent can scale workers up or down according to the current workload instead of using a fixed worker count.
 - **Live Swarm resize** — backend capacity can grow or shrink without replacing the orchestrator or losing completed work. Shrink is safety-first and refuses to evict busy/tail workers.
 - **Independent ChatGPT Classic runtimes** — on Windows, worker packages use isolated package identities, profiles, sessions, and conversations.
+- **Multi-Main interactive runtimes** — Main-01 remains the canonical installed ChatGPT Primary; Main-02+ are separate visible `InteractiveNN` packages with independent profiles/processes and no Worker lifecycle ownership.
 - **Same-worker context continuity** — a worker can be reopened at its exact saved ChatGPT conversation; ChatGPT workers are session-bound by the backend so fresh joins/continuations do not need to expose raw worker credentials in the transcript.
 - **Zero-copy bootstrap** — workers can be launched, minimized, sent into a configured `sub-agents` ChatGPT Project, joined to a Swarm, and parked without manual invite-code copy/paste.
 - **Backend-first routing** — normal work is always dispatched through the DevSpace Chat Swarm backend. UI/CDP automation is lifecycle/bootstrap/recovery only.
@@ -49,13 +50,37 @@ Shared MCP services reuse one backend connection. Stateful application MCPs can 
 
 ### Automatic Conversation Continuity — v0.3.1
 
-DevSpace Ultra 0.4 adds a coding-harness-style **Auto Compact** path for managed ChatGPT Classic workers. The default policy estimates a `1,050,000`-token model budget, triggers at 90% (`945,000` estimated tokens), and counts a configurable hidden/system/tool reserve as already-consumed context. ChatGPT does not expose a native exact context counter through this MCP connection, so the watchdog reports its value as a conservative estimate rather than pretending it is host-native telemetry.
+DevSpace Ultra 0.3.1 adds a coding-harness-style **Auto Compact** path for managed ChatGPT Classic workers. The default policy estimates a `1,050,000`-token model budget, triggers at 90% (`945,000` estimated tokens), and counts a configurable hidden/system/tool reserve as already-consumed context. ChatGPT does not expose a native exact context counter through this MCP connection, so the watchdog reports its value as a conservative estimate rather than pretending it is host-native telemetry.
 
 At a safe idle boundary the backend builds a bounded capsule from authoritative Chat Swarm history plus bounded recent conversation context, opens a fresh project-scoped ChatGPT conversation, and uses a short-lived one-time continuation ticket to preserve the same worker identity. ChatGPT workers are session-bound to the backend-observed MCP conversation identity, so no raw replacement worker token needs to cross the ChatGPT tool-result surface; cached schemas can use a fixed non-secret compatibility sentinel. A monotonic Backend Context Ledger is combined with the DOM estimate using the larger value, preventing virtualized old messages from hiding accumulated context. Protected interactive runtimes are never auto-rotated. See [Automatic Conversation Continuity](docs/conversation-continuity.md).
 
 ### Runtime identity + session safety — v0.3.1
 
 Windows worker clones no longer register the global `chatgpt://` protocol, ChatGPT startup task or Copilot-key provider, and are hidden from the normal app list. Workers also use the dedicated AppX `Application Id` **`DevSpaceWorker`** instead of Primary's `ChatGPT`, so only Primary owns an AUMID ending in `!ChatGPT`; legacy taskbar/default-app worker activation identities therefore become invalid after migration. Legacy clones are audited against both their manifest and Windows' registered AppX state. A running dirty worker is marked `pending-running` and protected instead of being killed; a repeating deferred-heal task completes the migration only after it closes naturally, preserving loose-package application data. The audit also flags stale/unknown Windows `chatgpt://` `UserChoice` ProgIDs rather than reporting a false healthy state; DevSpace never forges Windows' protected default-app hash. New/signed-out workers use verified CDP **Session Seed** from an already signed-in runtime, first removing only stale allowlisted target cookies and then transferring the verified ChatGPT/OpenAI session in memory without logging values. The logon guard separately ensures Primary ChatGPT has a visible window even if Windows restores a legacy worker first. See [Runtime Identity Safety](docs/runtime-identity.md).
+
+### Multi-Main interactive runtimes — v0.4.0
+
+Windows can now provision additional user-facing ChatGPT Classic Main windows without reusing Worker runtimes. Main-01 remains the installed `OpenAI.ChatGPT-Desktop` package with `Application Id="ChatGPT"` and is the only runtime allowed to own `!ChatGPT`, `chatgpt://`, startup, or Copilot-key integration. Main-02+ use `OpenAI.ChatGPT-Desktop.InteractiveNN`, `Application Id="DevSpaceInteractive"`, their own package/profile/process identity, and explicit aliases such as `chatgpt-classic-main02.exe`.
+
+The same role-aware AppX provisioner supports both `worker` and `interactive` roles, but their lifecycle remains separate. Interactive runtimes are visible, are not stored in Worker controller state, do not auto-join Chat Swarm, are not elastic capacity, are not minimized/recovered by the Worker controller, and are not managed by Worker Auto Compact. Runtime identity audit reports them under a separate `Interactives` collection and `InteractiveIsolationSafe` gate.
+
+Zero-login setup now uses a source pool rather than asking the user to sign in to every Main. DevSpace first prefers an already signed-in secondary Main over CDP, then a signed-in Worker CDP source, then canonical Main-01's encrypted profile. If Main-01 keeps its Chromium Cookies database under the Windows sharing lock, DevSpace may perform one bounded **controlled Primary close → encrypted snapshot → relaunch → signed-in verification** and refuses success unless Main-01 is restored. Only when no local signed-in source can complete the transfer does `chat_main_runtime_authenticate` remain as the cold-start OAuth fallback. `chat_main_runtime_open` is the one-command agent entry point: omit `mainNumber` and DevSpace chooses the lowest free Main automatically. See [Runtime Identity Safety](docs/runtime-identity.md).
+
+The Main-03 live gate proved the zero-login path from Main-02 using allowlisted in-memory CDP Session Seed, then verified independent restart persistence on a new PID. The Session Seed helper includes a bounded persistence-settle interval before a first-use restart gate so Chromium has time to flush the inherited session to the target profile. Main-03 remained outside Worker controller, Chat Swarm, elastic scaling and managed Auto Compact ownership.
+
+### Fixed ChatGPT MCP edge — v0.4.0
+
+DevSpace Ultra can expose one permanent ChatGPT-facing MCP URL through a Cloudflare Worker plus **Workers VPC** and a named outbound Cloudflare Tunnel to an **isolated fixed backend** (port `7677` by default). The public `workers.dev` URL remains fixed across Windows reboots and backend restarts; it does not depend on an account-less `trycloudflare.com` Quick Tunnel and it does not require an inbound port. `devspace edge cloudflare setup` provisions/reuses the named Tunnel and fixed-target VPC Service, deploys the Worker, verifies `/healthz` and the MCP OAuth challenge, and records only non-secret edge metadata. It never repoints or restarts the existing/default control backend: its `publicBaseUrl`, port and state directory remain untouched, while the fixed backend receives its own public identity, state directory and Host allowlist only through child-process environment overrides.
+
+Windows logon tasks own both long-lived fixed-edge processes in the foreground: one task keeps the named Cloudflare Tunnel alive, and a second keeps the isolated fixed backend alive. Setup replaces older task definitions safely, removes legacy duplicate wrappers for the exact named tunnel ID, and leaves unrelated Quick Tunnels/other `cloudflared` processes untouched. This means fixed-edge development/restart gates can take down or replace port `7677` without breaking an agent that is still controlling the machine through another DevSpace backend. Direct Tailscale can remain enabled independently for other local services/fallback use.
+
+The fixed edge Worker is not an open proxy: only DevSpace's MCP/OAuth/health/app public surfaces are forwarded, Browser Control/private/arbitrary paths are blocked, forwarding headers are sanitized, and OAuth redirects are passed through without being followed at the edge. OAuth itself remains inside DevSpace; v0.4.0 also persists one-time authorization-code state in SQLite so an in-flight code survives a DevSpace backend handover while replay remains blocked.
+
+### Codex ContextBridge — v0.4.0
+
+`context_bridge_codex_list`, `context_bridge_codex_import`, and `context_bridge_codex_capsule` let a ChatGPT conversation recover a selected local Codex project/thread without manual transcript copy/paste. ContextBridge reads Codex thread metadata from the local Codex state index, streams giant rollout JSONL files instead of loading them into one string, prefers the latest Codex `compacted` continuity boundary, then appends bounded recent user/assistant conversation. Developer/system text, hidden reasoning, raw tool arguments/output and media payloads are excluded; obvious credentials are redacted before a sanitized capsule is returned or persisted under DevSpace state.
+
+Because the import text is returned directly by the MCP tool, the current ChatGPT agent can continue immediately from the imported historical context. The capsule also carries the Codex workspace root so the receiving agent can open the real repository and treat files/git state—not the imported conversation—as authoritative. CLI equivalents are available under `devspace context codex ...`.
 
 ### Demo videos
 
@@ -104,7 +129,7 @@ devspace-ultra serve
 - Network access for the initial install and for the ChatGPT/MCP connection path you configure
 - Tailscale is optional; DevSpace Ultra does not require it
 
-### ChatGPT Classic elastic desktop workers
+### ChatGPT Classic elastic desktop workers / Multi-Main
 
 - Windows 10/11 x64 only for automatic isolated desktop runtime cloning/recovery
 - ChatGPT Classic Windows Desktop app installed and signed in
@@ -123,6 +148,7 @@ macOS/Linux users still receive the DevSpace coding/MCP core and Chat Swarm back
 | Manual/browser worker conversations | ✅ | ✅ | ✅ |
 | Elastic backend worker-slot resize | ✅ | ✅ | ✅ |
 | Automatic isolated ChatGPT Classic desktop runtime cloning | ✅ | — | — |
+| User-facing Multi-Main ChatGPT Classic runtimes (Main-02+) | ✅ | — | — |
 | Automatic desktop worker recovery by package/profile identity | ✅ | — | — |
 | ChatGPT Classic canary/rolling package update manager | ✅ | — | — |
 | Managed ChatGPT Classic Auto Compact / cross-conversation continuation | ✅ | — | — |

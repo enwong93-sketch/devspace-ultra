@@ -24,11 +24,11 @@ auth-seed/
 ChatGPT-Classic-Worker-Session-Backups/
 ChatGPT-Classic-Worker-Runtimes/
 
-# Developer-only handoff/restart helpers (must never be published)
+# Developer-only handoff/restart helpers and temporary live-gate scratch
 restart-devspace.ps1
 docs/DEVSPACE-ULTRA-HANDOFF-*.md
-# Failed local-only auth experiments; final runtime uses CDP Session Seed instead.
-scripts/chat-swarm-classic-auth-seed.mjs
+.devspace-tmp/
+# Legacy callback-relay prototype; v0.4 uses the role-aware Interactive relay.
 scripts/chat-swarm-classic-callback-relay.ps1
 
 # Editor / OS

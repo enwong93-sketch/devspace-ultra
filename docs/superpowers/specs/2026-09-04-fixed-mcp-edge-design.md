@@ -17,9 +17,9 @@ The desired steady-state UX is:
 
 ## Evidence from the 2026-09-04 live incident
 
-The existing direct Tailscale Funnel endpoint was:
+The existing direct Tailscale Funnel endpoint used the machine's fixed `*.ts.net` hostname, represented here generically as:
 
-`https://desktop-hc8eshn.tail18e977.ts.net/mcp`
+`https://desktop-devspace.example-tailnet.ts.net/mcp`
 
 Local and public probes proved:
 
@@ -52,7 +52,7 @@ https://<worker>.<account>.workers.dev
         |
         | Cloudflare Worker transparent HTTP proxy
         v
-https://desktop-hc8eshn.tail18e977.ts.net
+https://desktop-devspace.example-tailnet.ts.net
         |
         | existing Tailscale Funnel / Serve
         v

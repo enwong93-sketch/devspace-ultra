@@ -3,6 +3,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import * as z from "zod/v4";
+import { classicRuntimeIdentity } from "./chat-classic-runtime-role.js";
 
 const execFileAsync = promisify(execFile);
 const moduleDir = dirname(fileURLToPath(import.meta.url));
@@ -10,6 +11,9 @@ const packageRoot = resolve(moduleDir, "..");
 const controllerScript = resolve(packageRoot, "scripts", "chat-swarm-classic-controller.ps1");
 const updateManagerScript = resolve(packageRoot, "scripts", "chat-swarm-classic-update-manager.ps1");
 const identityScript = resolve(packageRoot, "scripts", "chat-swarm-classic-runtime-identity.ps1");
+const interactiveRuntimeScript = resolve(packageRoot, "scripts", "chat-classic-interactive-runtime.ps1");
+const interactiveOrchestratorScript = resolve(packageRoot, "scripts", "chat-classic-main-orchestrator.ps1");
+const interactiveAuthScript = resolve(packageRoot, "scripts", "chat-classic-interactive-auth-live-gate.ps1");
 const MAX_OUTPUT = 4 * 1024 * 1024;
 
 const READ_ONLY = {
@@ -118,6 +122,94 @@ async function runIdentityManager(action, timeoutMs = 240_000) {
   let parsed;
   try { parsed = output ? JSON.parse(output) : {}; }
   catch { throw new Error(`Runtime identity manager returned invalid JSON: ${output.slice(0, 2_000)}`); }
+  return { ...parsed, stderr: errorText || undefined };
+}
+
+async function runInteractiveRuntime(action, input = {}, timeoutMs = 300_000) {
+  if (process.platform !== "win32") {
+    throw new Error("Secondary ChatGPT Main runtime management is currently supported only on Windows.");
+  }
+  const mainNumber = input.mainNumber ?? 2;
+  classicRuntimeIdentity({ role: "interactive", number: mainNumber });
+  const args = [
+    "-NoProfile",
+    "-ExecutionPolicy", "Bypass",
+    "-File", interactiveRuntimeScript,
+    "-Action", action,
+    "-MainNumber", String(mainNumber),
+  ];
+  if (input.forceRefresh) args.push("-ForceRefresh");
+  if (input.reseedSession) args.push("-ReseedSession");
+  if (input.verifyTimeoutSeconds !== undefined) args.push("-VerifyTimeoutSeconds", String(input.verifyTimeoutSeconds));
+  const { stdout, stderr } = await execFileAsync("powershell.exe", args, {
+    cwd: packageRoot,
+    windowsHide: true,
+    timeout: timeoutMs,
+    maxBuffer: MAX_OUTPUT,
+    encoding: "utf8",
+  });
+  const output = String(stdout || "").trim();
+  const errorText = String(stderr || "").trim();
+  let parsed;
+  try { parsed = output ? JSON.parse(output) : {}; }
+  catch { throw new Error(`Interactive runtime manager returned invalid JSON: ${output.slice(0, 2_000)}`); }
+  return { ...parsed, stderr: errorText || undefined };
+}
+
+async function runInteractiveOrchestrator(action, input = {}, timeoutMs = 420_000) {
+  if (process.platform !== "win32") {
+    throw new Error("Secondary ChatGPT Main orchestration is currently supported only on Windows.");
+  }
+  if (input.mainNumber !== undefined) classicRuntimeIdentity({ role: "interactive", number: input.mainNumber });
+  const args = [
+    "-NoProfile",
+    "-ExecutionPolicy", "Bypass",
+    "-File", interactiveOrchestratorScript,
+    "-Action", action,
+  ];
+  if (input.mainNumber !== undefined) args.push("-MainNumber", String(input.mainNumber));
+  if (input.verifyTimeoutSeconds !== undefined) args.push("-VerifyTimeoutSeconds", String(input.verifyTimeoutSeconds));
+  const { stdout, stderr } = await execFileAsync("powershell.exe", args, {
+    cwd: packageRoot,
+    windowsHide: true,
+    timeout: timeoutMs,
+    maxBuffer: MAX_OUTPUT,
+    encoding: "utf8",
+  });
+  const output = String(stdout || "").trim();
+  const errorText = String(stderr || "").trim();
+  let parsed;
+  try { parsed = output ? JSON.parse(output) : {}; }
+  catch { throw new Error(`Interactive Main orchestrator returned invalid JSON: ${output.slice(0, 2_000)}`); }
+  return { ...parsed, stderr: errorText || undefined };
+}
+
+async function runInteractiveAuth(input = {}, timeoutMs = 360_000) {
+  if (process.platform !== "win32") {
+    throw new Error("Secondary ChatGPT Main authentication is currently supported only on Windows.");
+  }
+  const mainNumber = input.mainNumber ?? 2;
+  classicRuntimeIdentity({ role: "interactive", number: mainNumber });
+  const args = [
+    "-NoProfile",
+    "-ExecutionPolicy", "Bypass",
+    "-File", interactiveAuthScript,
+    "-MainNumber", String(mainNumber),
+    "-Stage", String(input.stage ?? "start"),
+    "-WaitSeconds", String(input.waitSeconds ?? 180),
+  ];
+  const { stdout, stderr } = await execFileAsync("powershell.exe", args, {
+    cwd: packageRoot,
+    windowsHide: true,
+    timeout: timeoutMs,
+    maxBuffer: MAX_OUTPUT,
+    encoding: "utf8",
+  });
+  const output = String(stdout || "").trim();
+  const errorText = String(stderr || "").trim();
+  let parsed;
+  try { parsed = output ? JSON.parse(output) : {}; }
+  catch { throw new Error(`Interactive auth manager returned invalid JSON: ${output.slice(0, 2_000)}`); }
   return { ...parsed, stderr: errorText || undefined };
 }
 
@@ -399,6 +491,134 @@ export function registerChatSwarmClassicRuntimeTools(server, coordinator) {
     });
   }
 
+  server.registerTool("chat_main_runtime_open", {
+    title: "Open Another ChatGPT Main",
+    description: "One-command user-facing Multi-Main entry point. If mainNumber is omitted, DevSpace selects the lowest free Main-02..Main-32, provisions its isolated Interactive package/profile, inherits a verified local signed-in session when available, launches the window, and verifies the real ChatGPT composer. Secondary Mains never enter Worker, Chat Swarm, elastic-scaling, or managed Auto Compact ownership. A controlled Main-01 restart is permitted only as the zero-login fallback after signed-in CDP sources are unavailable; OAuth remains the final cold-start fallback.",
+    inputSchema: {
+      mainNumber: z.number().int().min(2).max(32).optional(),
+      verifyTimeoutSeconds: z.number().int().min(5).max(60).default(30),
+    },
+    annotations: MUTATING,
+  }, async (input) => {
+    try {
+      const result = await runInteractiveOrchestrator("open", input, 480_000);
+      const detail = result.Result ?? {};
+      if (detail.AuthRequired) {
+        return textResult(result, `${detail.Label || `Main-${String(result.SelectedMainNumber).padStart(2, "0")}`} was created but no verified local signed-in source was available; cold-start authentication is required.`);
+      }
+      return textResult(result, `${detail.Label || `Main-${String(result.SelectedMainNumber).padStart(2, "0")}`} ready on PID ${detail.Pid ?? "unknown"}; source=${detail.SessionSourceLabel ?? detail.ProvisioningMode ?? "existing-session"}; Primary restarted=${Boolean(detail.PrimaryRestarted)}.`);
+    }
+    catch (error) { return errorResult(error); }
+  });
+
+  server.registerTool("chat_main_runtime_manage", {
+    title: "Manage ChatGPT Main Window",
+    description: "Show, restore, minimize, stop, or inspect one user-facing secondary Main by its isolated package/process identity. These actions never target Worker runtimes or canonical Main-01.",
+    inputSchema: {
+      mainNumber: z.number().int().min(2).max(32),
+      action: z.enum(["show", "restore", "minimize", "stop", "status"]),
+      verifyTimeoutSeconds: z.number().int().min(5).max(60).default(30),
+    },
+    annotations: MUTATING,
+  }, async (input) => {
+    try {
+      const result = await runInteractiveOrchestrator(input.action, input, 180_000);
+      return textResult(result, `Main-${String(input.mainNumber).padStart(2, "0")} ${input.action} complete.`);
+    }
+    catch (error) { return errorResult(error); }
+  });
+
+  server.registerTool("chat_main_runtime_status", {
+    title: "ChatGPT Main Runtime Status",
+    description: "Inspect a user-facing secondary ChatGPT Classic Main runtime (Main-02+). Secondary Mains use a distinct Interactive package/profile/process identity and are never Worker capacity, Worker autojoin members, or Auto Compact managed runtimes. Main-01 remains the canonical Primary.",
+    inputSchema: {
+      mainNumber: z.number().int().min(2).max(32).default(2),
+    },
+    annotations: READ_ONLY,
+  }, async (input) => {
+    try {
+      const result = await runInteractiveRuntime("status", input, 60_000);
+      return textResult(result, `${result.Label}: registered=${Boolean(result.Registered)}, running=${Boolean(result.Running)}, session=${result.SessionVerified ?? "not-probed"}, Main-01 PID=${result.PrimaryPidAfter ?? "unknown"}.`);
+    }
+    catch (error) { return errorResult(error); }
+  });
+
+  server.registerTool("chat_main_runtime_setup", {
+    title: "Setup ChatGPT Main Runtime",
+    description: "Provision and launch a user-facing secondary ChatGPT Classic Main runtime using the shared role-aware provisioner. Zero-login setup first inherits from a verified signed-in secondary Main via CDP, then a verified Worker CDP source, then canonical Main-01's encrypted profile. If Main-01 holds its Cookies database with an exclusive Windows share lock, DevSpace may perform one controlled canonical Primary close/snapshot/relaunch and verifies Main-01 is restored before reporting success. OAuth is only the final cold-start fallback. Only non-secret provisioning metadata is persisted.",
+    inputSchema: {
+      mainNumber: z.number().int().min(2).max(32).default(2),
+      forceRefresh: z.boolean().default(false),
+      reseedSession: z.boolean().default(false),
+      verifyTimeoutSeconds: z.number().int().min(5).max(60).default(30),
+    },
+    annotations: MUTATING,
+  }, async (input) => {
+    try {
+      const result = await runInteractiveRuntime("setup", input, 420_000);
+      if (result.AuthRequired) {
+        return textResult(result, `${result.Label} provisioned on PID ${result.Pid}; no verified local signed-in source completed zero-login seeding. Use chat_main_runtime_authenticate only as the cold-start fallback.`);
+      }
+      return textResult(result, `${result.Label} ready on PID ${result.Pid}; signed-in=${Boolean(result.SessionVerified)}; source=${result.SessionSourceLabel ?? result.ProvisioningMode ?? "existing"}; Main-01 restarted=${Boolean(result.PrimaryRestarted)}, restored=${Boolean(result.PrimaryRestored)}.`);
+    }
+    catch (error) { return errorResult(error); }
+  });
+
+  server.registerTool("chat_main_runtime_authenticate", {
+    title: "Authenticate ChatGPT Main Runtime",
+    description: "Complete bounded authentication for a secondary ChatGPT Main when safe Session Seed is blocked by canonical Main-01's Windows cookie-database share lock. stage=start moves only the selected Main into Google sign-in and returns immediately so the user can choose/confirm their account. stage=finish waits for the completed browser desktop-auth page, relays its one-time callback directly to the selected Main alias without changing Windows default protocol ownership, verifies the Main is signed in, and records only a non-secret provisioning marker. stage=full combines both for environments where user interaction can happen while the call is waiting.",
+    inputSchema: {
+      mainNumber: z.number().int().min(2).max(32).default(2),
+      stage: z.enum(["start", "finish", "full"]).default("start"),
+      waitSeconds: z.number().int().min(30).max(300).default(180),
+    },
+    annotations: MUTATING,
+  }, async (input) => {
+    try {
+      const result = await runInteractiveAuth(input, Math.max(120_000, (input.waitSeconds + 60) * 1000));
+      if (result.State === "browser-auth-started") {
+        return textResult(result, `${result.Label} browser authentication started. Complete the account step in the browser, then call chat_main_runtime_authenticate again with stage=finish. Main-01 remained unchanged on PID ${result.PrimaryPidAfter}.`);
+      }
+      if (result.State === "already-signed-in") {
+        return textResult(result, `${result.Label} is already signed in; Main-01 remains unchanged on PID ${result.PrimaryPidAfter}.`);
+      }
+      return textResult(result, `${result.Label} authentication complete: signed-in=${Boolean(result.SessionVerified)}, relayed=${Boolean(result.Relayed)}, Main-01 unchanged=${Boolean(result.Main01Unchanged)} (PID ${result.PrimaryPidAfter}).`);
+    }
+    catch (error) { return errorResult(error); }
+  });
+
+  server.registerTool("chat_main_runtime_start", {
+    title: "Start ChatGPT Main Runtime",
+    description: "Start an already-provisioned secondary ChatGPT Main runtime from its own isolated profile. This does not reseed from Main-01 and does not enter Worker controller ownership.",
+    inputSchema: {
+      mainNumber: z.number().int().min(2).max(32).default(2),
+      verifyTimeoutSeconds: z.number().int().min(5).max(60).default(30),
+    },
+    annotations: MUTATING,
+  }, async (input) => {
+    try {
+      const result = await runInteractiveRuntime("start", input, 120_000);
+      return textResult(result, `${result.Label} running on PID ${result.Pid}; signed-in=${Boolean(result.SessionVerified)}; Main-01 unchanged=${Boolean(result.Main01Unchanged)}.`);
+    }
+    catch (error) { return errorResult(error); }
+  });
+
+  server.registerTool("chat_main_runtime_live_gate", {
+    title: "Validate ChatGPT Main Runtime Restart",
+    description: "Run the acceptance gate for one secondary Main: verify it is signed in, stop/relaunch only that secondary Main, verify its independent session persists on a new PID, and prove canonical Main-01 kept the same PID/window. Worker runtimes are not used or modified.",
+    inputSchema: {
+      mainNumber: z.number().int().min(2).max(32).default(2),
+      verifyTimeoutSeconds: z.number().int().min(5).max(60).default(30),
+    },
+    annotations: MUTATING,
+  }, async (input) => {
+    try {
+      const result = await runInteractiveRuntime("live-gate", input, 180_000);
+      return textResult(result, `${result.Label} restart persistence PASS: ${result.PreviousInteractivePid} -> ${result.Pid}; Main-01 stayed on PID ${result.PrimaryPidAfter}.`);
+    }
+    catch (error) { return errorResult(error); }
+  });
+
   server.registerTool("chat_swarm_runtime_identity_status", {
     title: "ChatGPT Runtime Identity Status",
     description: "Audit Primary ChatGPT versus isolated Worker runtime identity without changing processes. Reports the current chatgpt:// protocol owner, Primary visibility, worker manifest/registration isolation, and any protected interactive runtimes or pending migrations.",
@@ -423,6 +643,20 @@ export function registerChatSwarmClassicRuntimeTools(server, coordinator) {
     try {
       const result = await runIdentityManager("guard", 300_000);
       return textResult(result, `Runtime identity guard complete. Primary=${result.PrimaryGuard?.State || "unknown"}; protocol misroute=${result.ProtocolMisroute?.State || "none"}; pending migrations=${(result.Snapshot?.PendingRunningMigration || []).join(",") || "none"}.`);
+    }
+    catch (error) { return errorResult(error); }
+  });
+
+  server.registerTool("chat_swarm_runtime_protocol_repair", {
+    title: "Repair Canonical ChatGPT Protocol Owner",
+    description: "Repair stale Windows chatgpt:// default-app ownership through the supported Windows Default Apps/OpenWith UI and verify that canonical Main-01 becomes the active protocol owner. DevSpace never writes, deletes, or forges the protected Windows UserChoice hash. If ownership is already canonical, this returns immediately without changing the UI.",
+    inputSchema: {},
+    annotations: MUTATING,
+  }, async () => {
+    try {
+      const result = await runIdentityManager("repair-protocol", 180_000);
+      const snapshot = result.Snapshot ?? {};
+      return textResult(result, `chatgpt:// canonical repair ${result.ProtocolRepair?.State || "complete"}; canonical=${Boolean(snapshot.ProtocolCanonical)}; owner=${snapshot.Protocol?.ApplicationName || "unknown"}.`);
     }
     catch (error) { return errorResult(error); }
   });

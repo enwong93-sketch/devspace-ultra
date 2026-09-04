@@ -17,6 +17,6 @@ update-backups/
 auth-seed/
 ChatGPT-Classic-Worker-Session-Backups/
 ChatGPT-Classic-Worker-Runtimes/
-# Failed local-only auth experiments; final runtime uses CDP Session Seed instead.
-scripts/chat-swarm-classic-auth-seed.mjs
+.devspace-tmp/
+# Legacy callback-relay prototype; v0.4 uses the role-aware Interactive relay.
 scripts/chat-swarm-classic-callback-relay.ps1

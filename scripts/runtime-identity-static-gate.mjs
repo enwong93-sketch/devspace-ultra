@@ -2,8 +2,9 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 
 const read = (path) => readFile(new URL(`../${path}`, import.meta.url), "utf8");
-const [clone, controller, updateManager, runtime, identity, continuity, sessionSeed, chatSwarm, handover, bootstrap] = await Promise.all([
+const [clone, provisioner, controller, updateManager, runtime, identity, continuity, sessionSeed, chatSwarm, handover, bootstrap] = await Promise.all([
   read("scripts/chat-swarm-classic-runtime-clone.ps1"),
+  read("scripts/chat-classic-runtime-provision.ps1"),
   read("scripts/chat-swarm-classic-controller.ps1"),
   read("scripts/chat-swarm-classic-update-manager.ps1"),
   read("dist/chat-swarm-classic-runtime.js"),
@@ -15,17 +16,21 @@ const [clone, controller, updateManager, runtime, identity, continuity, sessionS
   read("scripts/chat-swarm-classic-cdp-bootstrap.mjs"),
 ]);
 
-// Worker packages must never own global Primary launch surfaces.
-assert.match(clone, /AppListEntry", "none"/);
-assert.match(clone, /SetAttribute\("Id", "DevSpaceWorker"\)/);
-assert.match(clone, /Only Primary may own !ChatGPT/);
-assert.match(clone, /windows\.protocol/);
-assert.match(clone, /Remove-XmlNodes[^\n]+windows\.protocol/);
-assert.match(clone, /Remove-XmlNodes[^\n]+windows\.startupTask/);
-assert.match(clone, /Remove-XmlNodes[^\n]+windows\.appExtension/);
-assert.match(clone, /pending-running/);
-assert.match(clone, /RepairExisting/);
-assert.match(clone, /PreserveApplicationData/);
+// Worker packages must never own global Primary launch surfaces. The legacy
+// worker entry point now delegates to the shared role-aware provisioner, so the
+// gate follows that source of truth instead of assuming the XML logic is local.
+assert.match(clone, /chat-classic-runtime-provision\.ps1/);
+assert.match(clone, /(?:-Role\s+worker|"-Role"\s*,\s*"worker")/);
+assert.match(provisioner, /AppListEntry", "none"/);
+assert.match(provisioner, /DevSpaceWorker/);
+assert.match(provisioner, /Only canonical Main-01 may own global ChatGPT launch surfaces/);
+assert.match(provisioner, /windows\.protocol/);
+assert.match(provisioner, /Remove-XmlNodes[^\n]+windows\.protocol/);
+assert.match(provisioner, /Remove-XmlNodes[^\n]+windows\.startupTask/);
+assert.match(provisioner, /Remove-XmlNodes[^\n]+windows\.appExtension/);
+assert.match(provisioner, /pending-running/);
+assert.match(provisioner, /RepairExisting/);
+assert.match(provisioner, /PreserveApplicationData/);
 
 // Protection is persistent and enforced at the lowest destructive stop path.
 assert.match(controller, /protectedWorkers/);
@@ -63,6 +68,11 @@ assert.match(identity, /primary-current/);
 assert.match(identity, /worker-stale/);
 assert.match(identity, /stale-unknown/);
 assert.match(identity, /NeedsUserDefaultRepair/);
+assert.match(identity, /repair-protocol/, "identity manager must expose a supported canonical protocol repair action");
+assert.match(runtime, /chat_swarm_runtime_protocol_repair/, "MCP must expose the supported canonical chatgpt protocol repair action");
+assert.match(identity, /ms-settings:defaultapps\?registeredAUMID=/, "protocol repair must use Windows Default Apps UI for the canonical packaged AUMID");
+assert.match(identity, /OpenWith/, "protocol repair must complete the supported Windows Open With/default chooser flow");
+assert.doesNotMatch(identity, /Set-ItemProperty[^\n]*UserChoice|New-ItemProperty[^\n]*UserChoice|Remove-Item[^\n]*UserChoice/i, "identity repair must never forge or directly rewrite the protected UserChoice registry key");
 assert.match(identity, /protocol\.State -eq "primary-current"/);
 assert.match(identity, /WorkerIsolationSafe/);
 assert.match(identity, /ProtocolCanonical/);

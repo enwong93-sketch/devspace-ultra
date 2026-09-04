@@ -14,6 +14,11 @@ const migrations = [
         name: "local-agent-sessions",
         up: migrateLocalAgentSessions,
     },
+    {
+        version: 4,
+        name: "oauth-authorization-codes",
+        up: migrateOAuthAuthorizationCodes,
+    },
 ];
 export function migrateDatabase(sqlite) {
     const migrate = sqlite.transaction(() => {
@@ -118,6 +123,23 @@ function migrateOAuthState(sqlite) {
 
     create index if not exists oauth_refresh_tokens_expires_at_idx
       on oauth_refresh_tokens(expires_at);
+  `);
+}
+function migrateOAuthAuthorizationCodes(sqlite) {
+    sqlite.exec(`
+    create table if not exists oauth_authorization_codes (
+      code_hash text primary key,
+      client_id text not null,
+      params_json text not null,
+      expires_at_ms integer not null,
+      foreign key (client_id) references oauth_clients(client_id) on delete cascade
+    );
+
+    create index if not exists oauth_authorization_codes_client_id_idx
+      on oauth_authorization_codes(client_id);
+
+    create index if not exists oauth_authorization_codes_expires_at_idx
+      on oauth_authorization_codes(expires_at_ms);
   `);
 }
 function migrateLocalAgentSessions(sqlite) {

@@ -1,0 +1,7 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "devspace-ultra-mcp-edge",
+  "main": "src/index.js",
+  "compatibility_date": "2026-09-04",
+  "workers_dev": true
+}

@@ -78,7 +78,6 @@ function requestedScopesAllowed(requested, supported) {
 export class SingleUserOAuthProvider {
     config;
     clientsStore;
-    codes = new Map();
     oauthStore;
     resourceServerUrl;
     constructor(config, resourceServerUrl, stateDir) {
@@ -117,9 +116,9 @@ export class SingleUserOAuthProvider {
             return;
         }
         const code = `code-${randomUUID()}`;
-        this.codes.set(code, {
+        this.oauthStore.saveAuthorizationCode(hashToken(code), {
             clientId: client.client_id,
-            params,
+            params: serializeAuthorizationParams(params),
             expiresAtMs: Date.now() + CODE_TTL_MS,
         });
         const redirectUrl = new URL(params.redirectUri);
@@ -140,8 +139,8 @@ export class SingleUserOAuthProvider {
         if (resource && !checkResourceAllowed({ requestedResource: resource, configuredResource: this.resourceServerUrl })) {
             throw new InvalidGrantError("Invalid resource");
         }
-        this.codes.delete(authorizationCode);
-        return this.issueTokens(client.client_id, record.params.scopes ?? this.config.scopes, record.params.resource);
+        const consumed = this.consumeValidCodeRecord(client, authorizationCode);
+        return this.issueTokens(client.client_id, consumed.params.scopes ?? this.config.scopes, consumed.params.resource);
     }
     async exchangeRefreshToken(client, refreshToken, scopes, resource) {
         const refreshTokenHash = hashToken(refreshToken);
@@ -180,7 +179,14 @@ export class SingleUserOAuthProvider {
         this.oauthStore.close();
     }
     validCodeRecord(client, authorizationCode) {
-        const record = this.codes.get(authorizationCode);
+        const record = normalizeAuthorizationCodeRecord(this.oauthStore.getAuthorizationCode(hashToken(authorizationCode)));
+        if (!record || record.clientId !== client.client_id || record.expiresAtMs < Date.now()) {
+            throw new InvalidGrantError("Invalid authorization code");
+        }
+        return record;
+    }
+    consumeValidCodeRecord(client, authorizationCode) {
+        const record = normalizeAuthorizationCodeRecord(this.oauthStore.consumeAuthorizationCode(hashToken(authorizationCode)));
         if (!record || record.clientId !== client.client_id || record.expiresAtMs < Date.now()) {
             throw new InvalidGrantError("Invalid authorization code");
         }
@@ -219,6 +225,26 @@ export class SingleUserOAuthProvider {
             scope: scopes.join(" "),
         };
     }
+}
+function serializeAuthorizationParams(params) {
+    return {
+        redirectUri: params.redirectUri,
+        codeChallenge: params.codeChallenge,
+        scopes: params.scopes,
+        state: params.state,
+        resource: params.resource?.href,
+    };
+}
+function normalizeAuthorizationCodeRecord(record) {
+    if (!record)
+        return undefined;
+    return {
+        ...record,
+        params: {
+            ...record.params,
+            resource: record.params?.resource ? new URL(record.params.resource) : undefined,
+        },
+    };
 }
 function authorizationFormFields(client, params) {
     return {

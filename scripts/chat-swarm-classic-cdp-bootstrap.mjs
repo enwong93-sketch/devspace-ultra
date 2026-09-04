@@ -8,6 +8,9 @@ const port = Number(arg("port", "0"));
 const invite = String(arg("invite", "")).trim();
 const label = String(arg("label", "Runtime")).trim();
 const probeOnly = process.argv.includes("--probe");
+const loginOnly = process.argv.includes("--login-only");
+const authBackOnly = process.argv.includes("--auth-back-only");
+const googleLoginOnly = process.argv.includes("--google-login-only");
 const dismissOnly = process.argv.includes("--dismiss-only");
 const interruptOnly = process.argv.includes("--interrupt-only");
 const compactOutput = process.argv.includes("--compact");
@@ -21,8 +24,8 @@ if (!Number.isInteger(port) || port <= 0) {
   console.error("A valid --port is required.");
   process.exit(2);
 }
-if (!probeOnly && !dismissOnly && !interruptOnly && !resumeWorker && !invite) {
-  console.error("--invite is required unless --probe, --dismiss-only, --interrupt-only, or --resume is used.");
+if (!probeOnly && !loginOnly && !authBackOnly && !googleLoginOnly && !dismissOnly && !interruptOnly && !resumeWorker && !invite) {
+  console.error("--invite is required unless --probe, --login-only, --auth-back-only, --google-login-only, --dismiss-only, --interrupt-only, or --resume is used.");
   process.exit(2);
 }
 
@@ -117,7 +120,31 @@ function expressionForProbe() {
       document.querySelector('textarea[placeholder]') ||
       [...document.querySelectorAll('[contenteditable="true"]')].find((el) => el.offsetParent !== null);
     const bodyText = String(document.body?.innerText || '');
-    const login = [...document.querySelectorAll('button,a')].some((el) => /^(log in|登入)$/i.test((el.innerText || el.textContent || '').trim()));
+    const loginElements = [...document.querySelectorAll('button,a')].filter((el) => /^(log in|登入)$/i.test((el.innerText || el.textContent || '').trim()));
+    const login = loginElements.some((el) => el.offsetParent !== null || el.getClientRects().length > 0);
+    const loginControls = loginElements.slice(0, 6).map((el) => ({
+      tag: el.tagName,
+      text: String(el.innerText || el.textContent || '').trim(),
+      href: el.getAttribute('href') || '',
+      target: el.getAttribute('target') || '',
+      testId: el.getAttribute('data-testid') || '',
+      ariaLabel: el.getAttribute('aria-label') || '',
+      role: el.getAttribute('role') || '',
+      visible: el.offsetParent !== null || el.getClientRects().length > 0,
+    }));
+    const visible = (el) => !!el && (el.offsetParent !== null || el.getClientRects().length > 0);
+    const authControls = [...document.querySelectorAll('button,input,a')]
+      .filter(visible)
+      .map((el) => ({
+        tag: el.tagName,
+        text: String(el.innerText || el.textContent || '').trim().slice(0, 120),
+        type: el.getAttribute('type') || '',
+        placeholder: el.getAttribute('placeholder') || '',
+        testId: el.getAttribute('data-testid') || '',
+        ariaLabel: el.getAttribute('aria-label') || '',
+      }))
+      .filter((item) => /log in|登入|註冊|google|apple|手機|phone|continue|繼續|email|電郵|電子郵件/i.test(item.text + ' ' + item.placeholder + ' ' + item.ariaLabel))
+      .slice(0, 24);
     const throttled = /too many requests|try again later|太多要求|過於頻繁|請稍等幾分鐘後再試/i.test(bodyText);
     const connectionInterrupted = /connection interrupted|waiting for (?:the )?complete response|連線中斷|等待完整回覆/i.test(bodyText);
     const composerText = composer ? ('value' in composer ? String(composer.value || '') : String(composer.innerText || composer.textContent || '')) : '';
@@ -142,6 +169,8 @@ function expressionForProbe() {
       sendButton: !!sendButton,
       sendButtonDisabled: sendButton ? !!sendButton.disabled : null,
       loginVisible: login,
+      loginControls,
+      authControls,
       throttled,
       connectionInterrupted,
       generating: !!document.querySelector('button[data-testid="stop-button"], button[aria-label*="Stop"], button[aria-label*="停止"]'),
@@ -172,6 +201,57 @@ function compactProbe(probe) {
 function compactDismiss(value) {
   if (!value || !compactOutput) return value;
   return { detected: !!value.detected, clicked: !!value.clicked };
+}
+
+function expressionForLoginTarget() {
+  return String.raw`(() => {
+    const visible = (el) => !!el && (el.offsetParent !== null || el.getClientRects().length > 0);
+    const login = [...document.querySelectorAll('button,a')].find((el) => {
+      const label = String(el.innerText || el.textContent || '').trim();
+      return visible(el) && /^(log in|登入)$/i.test(label);
+    });
+    if (!login) return { detected: false };
+    if (login.disabled || login.getAttribute('aria-disabled') === 'true') {
+      return { detected: true, disabled: true };
+    }
+    const rect = login.getBoundingClientRect();
+    return {
+      detected: true,
+      disabled: false,
+      x: rect.left + rect.width / 2,
+      y: rect.top + rect.height / 2,
+      width: rect.width,
+      height: rect.height,
+    };
+  })()`;
+}
+
+function expressionForAuthBackTarget() {
+  return String.raw`(() => {
+    const visible = (el) => !!el && (el.offsetParent !== null || el.getClientRects().length > 0);
+    const target = [...document.querySelectorAll('button,a')].find((el) => {
+      const label = String(el.innerText || el.textContent || '').trim();
+      return visible(el) && /^(go back|返回)$/i.test(label);
+    });
+    if (!target) return { detected: false };
+    if (target.disabled || target.getAttribute('aria-disabled') === 'true') return { detected: true, disabled: true };
+    const rect = target.getBoundingClientRect();
+    return { detected: true, disabled: false, x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+  })()`;
+}
+
+function expressionForGoogleLoginTarget() {
+  return String.raw`(() => {
+    const visible = (el) => !!el && (el.offsetParent !== null || el.getClientRects().length > 0);
+    const target = [...document.querySelectorAll('button,a')].find((el) => {
+      const label = String(el.innerText || el.textContent || '').trim();
+      return visible(el) && /google/i.test(label) && /continue|繼續|帳號|account/i.test(label);
+    });
+    if (!target) return { detected: false };
+    if (target.disabled || target.getAttribute('aria-disabled') === 'true') return { detected: true, disabled: true };
+    const rect = target.getBoundingClientRect();
+    return { detected: true, disabled: false, x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+  })()`;
 }
 
 function expressionForDismissThrottle() {
@@ -391,6 +471,45 @@ try {
   const probe = await evaluate(client, expressionForProbe());
   if (probeOnly) {
     console.log(JSON.stringify({ ok: true, port, page: compactOutput ? { url: page.url } : { url: page.url, title: page.title }, probe: compactProbe(probe) }));
+    return;
+  }
+  if (loginOnly) {
+    const target = await evaluate(client, expressionForLoginTarget());
+    if (!target?.detected || target?.disabled || !Number.isFinite(target?.x) || !Number.isFinite(target?.y)) {
+      console.log(JSON.stringify({ ok: false, port, login: { detected: Boolean(target?.detected), clicked: false, disabled: Boolean(target?.disabled) } }));
+      process.exitCode = 4;
+      return;
+    }
+    await client.call("Input.dispatchMouseEvent", { type: "mouseMoved", x: target.x, y: target.y, button: "none" });
+    await client.call("Input.dispatchMouseEvent", { type: "mousePressed", x: target.x, y: target.y, button: "left", buttons: 1, clickCount: 1 });
+    await client.call("Input.dispatchMouseEvent", { type: "mouseReleased", x: target.x, y: target.y, button: "left", buttons: 0, clickCount: 1 });
+    console.log(JSON.stringify({ ok: true, port, login: { detected: true, clicked: true, disabled: false } }));
+    return;
+  }
+  if (authBackOnly) {
+    const target = await evaluate(client, expressionForAuthBackTarget());
+    if (!target?.detected || target?.disabled || !Number.isFinite(target?.x) || !Number.isFinite(target?.y)) {
+      console.log(JSON.stringify({ ok: false, port, authBack: { detected: Boolean(target?.detected), clicked: false, disabled: Boolean(target?.disabled) } }));
+      process.exitCode = 4;
+      return;
+    }
+    await client.call("Input.dispatchMouseEvent", { type: "mouseMoved", x: target.x, y: target.y, button: "none" });
+    await client.call("Input.dispatchMouseEvent", { type: "mousePressed", x: target.x, y: target.y, button: "left", buttons: 1, clickCount: 1 });
+    await client.call("Input.dispatchMouseEvent", { type: "mouseReleased", x: target.x, y: target.y, button: "left", buttons: 0, clickCount: 1 });
+    console.log(JSON.stringify({ ok: true, port, authBack: { detected: true, clicked: true, disabled: false } }));
+    return;
+  }
+  if (googleLoginOnly) {
+    const target = await evaluate(client, expressionForGoogleLoginTarget());
+    if (!target?.detected || target?.disabled || !Number.isFinite(target?.x) || !Number.isFinite(target?.y)) {
+      console.log(JSON.stringify({ ok: false, port, googleLogin: { detected: Boolean(target?.detected), clicked: false, disabled: Boolean(target?.disabled) } }));
+      process.exitCode = 4;
+      return;
+    }
+    await client.call("Input.dispatchMouseEvent", { type: "mouseMoved", x: target.x, y: target.y, button: "none" });
+    await client.call("Input.dispatchMouseEvent", { type: "mousePressed", x: target.x, y: target.y, button: "left", buttons: 1, clickCount: 1 });
+    await client.call("Input.dispatchMouseEvent", { type: "mouseReleased", x: target.x, y: target.y, button: "left", buttons: 0, clickCount: 1 });
+    console.log(JSON.stringify({ ok: true, port, googleLogin: { detected: true, clicked: true, disabled: false } }));
     return;
   }
   if (dismissOnly) {

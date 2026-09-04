@@ -7,6 +7,7 @@ function arg(name, fallback = "") {
 const sourcePort = Number(arg("source-port", "0"));
 const targetPort = Number(arg("target-port", "0"));
 const verifySeconds = Math.max(3, Math.min(30, Number(arg("verify-seconds", "12")) || 12));
+const settleSeconds = Math.max(2, Math.min(15, Number(arg("settle-seconds", "6")) || 6));
 
 if (!Number.isInteger(sourcePort) || sourcePort < 1024 || !Number.isInteger(targetPort) || targetPort < 1024 || sourcePort === targetPort) {
   console.error("Distinct valid --source-port and --target-port values are required.");
@@ -142,16 +143,29 @@ try {
   } while (Date.now() < deadline);
 
   const verified = Boolean(targetState?.composer && !targetState.loginVisible && !targetState.accountExpired);
+  let persistenceSettled = false;
+  if (verified) {
+    // Chromium can acknowledge Network.setCookies before the profile store has
+    // durably flushed the new session. Keep the target alive for a bounded
+    // settle interval, then re-verify before any caller is allowed to run an
+    // immediate restart-persistence gate.
+    await sleep(settleSeconds * 1000);
+    targetState = await loginProbe(target);
+    persistenceSettled = Boolean(targetState?.composer && !targetState.loginVisible && !targetState.accountExpired);
+  }
+  const complete = verified && persistenceSettled;
   console.log(JSON.stringify({
-    ok: verified,
+    ok: complete,
     sourceVerified: true,
-    targetVerified: verified,
+    targetVerified: complete,
+    persistenceSettled,
+    settleSeconds,
     transferredCookies: cookies.length,
     clearedTargetCookies,
     allowlistedDomainsOnly: true,
     secretValuesLogged: false,
   }));
-  if (!verified) process.exitCode = 4;
+  if (!complete) process.exitCode = 4;
 } finally {
   source.close();
   target.close();

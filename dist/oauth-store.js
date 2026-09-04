@@ -18,6 +18,7 @@ export class SqliteOAuthStore {
     constructor(stateDir) {
         this.database = openDatabase(stateDir);
         this.deleteExpiredTokens(Math.floor(Date.now() / 1000));
+        this.deleteExpiredAuthorizationCodes(Date.now());
     }
     getClient(clientId) {
         const row = this.database.sqlite
@@ -98,12 +99,47 @@ export class SqliteOAuthStore {
     deleteRefreshToken(tokenHash) {
         this.database.sqlite.prepare("delete from oauth_refresh_tokens where token_hash = ?").run(tokenHash);
     }
+    saveAuthorizationCode(codeHash, record) {
+        this.database.sqlite
+            .prepare(`insert into oauth_authorization_codes (code_hash, client_id, params_json, expires_at_ms)
+         values (?, ?, ?, ?)
+         on conflict(code_hash) do update set
+           client_id = excluded.client_id,
+           params_json = excluded.params_json,
+           expires_at_ms = excluded.expires_at_ms`)
+            .run(codeHash, record.clientId, JSON.stringify(record.params), record.expiresAtMs);
+    }
+    getAuthorizationCode(codeHash) {
+        const row = this.database.sqlite
+            .prepare("select client_id, params_json, expires_at_ms from oauth_authorization_codes where code_hash = ?")
+            .get(codeHash);
+        return row ? rowToAuthorizationCodeRecord(row) : undefined;
+    }
+    consumeAuthorizationCode(codeHash) {
+        const consume = this.database.sqlite.transaction(() => {
+            const row = this.database.sqlite
+                .prepare("select client_id, params_json, expires_at_ms from oauth_authorization_codes where code_hash = ?")
+                .get(codeHash);
+            if (!row)
+                return undefined;
+            const deleted = this.database.sqlite
+                .prepare("delete from oauth_authorization_codes where code_hash = ?")
+                .run(codeHash);
+            if (deleted.changes !== 1)
+                return undefined;
+            return rowToAuthorizationCodeRecord(row);
+        });
+        return consume.immediate();
+    }
     close() {
         this.database.close();
     }
     deleteExpiredTokens(nowSeconds) {
         this.database.sqlite.prepare("delete from oauth_access_tokens where expires_at < ?").run(nowSeconds);
         this.database.sqlite.prepare("delete from oauth_refresh_tokens where expires_at < ?").run(nowSeconds);
+    }
+    deleteExpiredAuthorizationCodes(nowMs) {
+        this.database.sqlite.prepare("delete from oauth_authorization_codes where expires_at_ms < ?").run(nowMs);
     }
 }
 export class SqliteOAuthClientsStore {
@@ -134,5 +170,12 @@ function rowToRefreshTokenRecord(row) {
         scopes: JSON.parse(row.scopes_json),
         expiresAt: row.expires_at,
         resource: row.resource ?? undefined,
+    };
+}
+function rowToAuthorizationCodeRecord(row) {
+    return {
+        clientId: row.client_id,
+        params: JSON.parse(row.params_json),
+        expiresAtMs: row.expires_at_ms,
     };
 }
