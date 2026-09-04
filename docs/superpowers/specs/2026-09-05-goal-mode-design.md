@@ -216,7 +216,7 @@ window.openai.sendFollowUpMessage({
 })
 ```
 
-On success it calls `ack`; on definite send failure it calls `release` so the continuation becomes claimable again.
+On success it calls `ack`. On an explicit host rejection such as `{ ok: false }`, it calls `release` so the continuation becomes claimable again. An ambiguous transport exception after claim must not immediately release because the host may already have started the next assistant turn; leave that lease to the bounded expiry / round-redemption recovery path instead of risking a duplicate continuation.
 
 `ack` changes `dispatching -> dispatched`.
 
@@ -236,7 +236,7 @@ as the first Goal-control action of the next turn.
 
 - validates the Goal is active;
 - validates the continuation belongs to the current reported round;
-- accepts either `dispatching` or `dispatched` state to tolerate ack races;
+- accepts a matching continuation in `dispatching` or `dispatched` state to tolerate ack races, and also accepts the same matching ID if an expired lease was conservatively normalized back to `pending` before the already-started assistant turn redeemed it; atomic redemption immediately clears that continuation so a later claim cannot advance the round twice;
 - increments `round` exactly once;
 - records `lastConsumedContinuationId` for idempotent replay handling;
 - clears continuation state back to `idle`;

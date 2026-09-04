@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased — v0.5 plan runtime
+## Unreleased — v0.5 agent runtime
 
 ### Added
 
@@ -8,10 +8,15 @@
 - A dedicated live MCP Apps plan card that mounts once, refreshes plan state without remounting on every update, expands to the full checklist, and opportunistically uses picture-in-picture with safe inline fallback.
 - `devspace_plan_start`, `devspace_update_plan`, `devspace_plan_status`, and `devspace_plan_mount`, separating mutation/data tools from render tools so ordinary `DEVSPACE_WIDGETS=off` behavior remains unchanged.
 - Codex-style model instructions that keep one current step in progress, update the plan before scope pivots, avoid duplicating the whole checklist in prose, and exclude Chat Swarm workers from user-facing plan cards.
+- **Goal Mode** as a separate persistent multi-turn harness: immutable objective/success criteria, ordinary visible ChatGPT rounds, strict criterion-evidence completion, repeated-blocker guard, pause/resume/stop control, restart recovery, and a compact Goal Dock.
+- Host-supported hidden Goal continuation through the MCP App `sendFollowUpMessage` path. Each physical Goal turn must visibly report to the user before `devspace_goal_turn_report` makes the next round eligible; the next turn redeems a one-time continuation with `devspace_goal_round_begin` instead of inserting a synthetic user message or typing through CDP.
+- Atomic Goal continuation leases with release/expiry recovery, acknowledgement-race tolerance, idempotent round redemption, and an app-only continuation tool so duplicate widget polls cannot normally create duplicate assistant rounds.
 
 ### Verification
 
 - Plan runtime persistence/transition unit gate, MCP registration gate, widget/resource/instruction static gates, and an in-memory real MCP protocol gate covering tool discovery, app resource reading, step advancement, backend restart recovery, remount, and terminal completion.
+- Goal runtime deterministic gates cover one-report-per-round, strict completion evidence, 3-round repeated blocker protection, exclusive continuation leases, release/timeout recovery, late-ack races, and idempotent round begin.
+- A real in-memory MCP protocol/restart gate discovers all nine Goal tools, reads the Goal Dock MCP App resource, runs three Goal rounds with pause/resume and terminal completion, rejects continuation after completion, and restores the exact final Goal from the same state directory after backend restart.
 
 ## 0.4.0 — 2026-09-04
 

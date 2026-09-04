@@ -190,6 +190,41 @@ This plan runtime is independent from Goal Mode and Context Guardian. Goal
 continuation and context compaction are separate harness features rather than
 implicit behaviors of the progress card.
 
+## Goal Mode
+
+Goal Mode is a separate persistent harness for outcomes that need to continue
+across ordinary ChatGPT Classic assistant turns. `devspace_goal_start` stores an
+immutable final objective plus explicit success criteria and mounts one compact
+Goal Dock. A Plan can be used underneath the Goal as the current execution
+route, but completing a Plan does not complete the Goal.
+
+Each physical Goal turn remains a normal user-visible ChatGPT turn. The agent
+does meaningful work, verifies progress, and gives the user a complete visible
+round report first. Only after that report does it call
+`devspace_goal_turn_report` as the final action of the turn. If the Goal remains
+active, the Goal Dock atomically claims a continuation lease and uses the
+ChatGPT MCP App `sendFollowUpMessage` host bridge to start the next assistant
+turn. The next turn begins by redeeming that continuation with
+`devspace_goal_round_begin`. This avoids CDP composer automation and does not
+insert a synthetic user message into the visible transcript.
+
+Goal completion requires evidence for every stored success criterion. A Goal
+cannot be marked blocked until the runtime has observed three consecutive
+reported rounds with the same normalized blocker and no meaningful progress.
+The Goal Dock provides Pause, Resume, and Stop controls; pause/stop should not be
+used by the model unless the user explicitly requests them. Continuation leases
+are persisted and tolerate renderer reloads, send/ack races, bounded lease
+expiry, duplicate redemption attempts, and backend restart.
+
+The Goal Dock uses `devspace_goal_status` to refresh authoritative backend
+state. `devspace_goal_continuation` is app-only; it is not exposed to the model.
+Only Goal start/mount render the Dock, so later round transitions do not add a
+new Goal card on every turn. Chat Swarm worker loops remain backend-only and do
+not start or mount user-facing Goal Mode.
+
+Goal Mode still does not solve ChatGPT Classic context-window exhaustion. Main
+Context Guardian / Auto Compact v2 is a separate later subsystem.
+
 ## Shell Use
 
 The shell tool is for commands that belong in a terminal:

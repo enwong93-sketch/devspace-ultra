@@ -1,0 +1,428 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>DevSpace Goal</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      font-family: var(--font-sans, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
+      --goal-bg: var(--color-background-primary, rgba(18, 18, 20, 0.96));
+      --goal-bg-subtle: var(--color-background-secondary, rgba(255, 255, 255, 0.035));
+      --goal-text: var(--color-text-primary, #f4f4f5);
+      --goal-muted: var(--color-text-secondary, #a1a1aa);
+      --goal-faint: var(--color-text-tertiary, #71717a);
+      --goal-border: var(--color-border-secondary, rgba(255, 255, 255, 0.1));
+      --goal-ring: var(--color-ring-primary, #6d72d8);
+      --goal-success: var(--color-text-success, #22a060);
+      --goal-warning: var(--color-text-warning, #b7791f);
+      --goal-danger: var(--color-text-danger, #d04f4f);
+      --goal-info: var(--color-text-info, #4f79b8);
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; background: transparent; color: var(--goal-text); }
+    body { padding: 2px; }
+    button { font: inherit; color: inherit; }
+    .dock {
+      width: 100%;
+      border: 1px solid var(--goal-border);
+      border-radius: var(--border-radius-lg, 12px);
+      background: var(--goal-bg);
+      box-shadow: var(--shadow-sm, 0 1px 5px rgba(0, 0, 0, 0.08));
+      overflow: clip;
+    }
+    .main {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 12px;
+      align-items: center;
+      padding: 10px 12px;
+    }
+    .identity { min-width: 0; }
+    .heading {
+      display: flex;
+      align-items: baseline;
+      gap: 8px;
+      min-width: 0;
+    }
+    .label {
+      flex: 0 0 auto;
+      font-size: 11px;
+      line-height: 1.5;
+      letter-spacing: 0.02em;
+      color: var(--goal-faint);
+    }
+    .status {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-size: var(--font-text-xs-size, 12px);
+      line-height: 1.5;
+      font-weight: var(--font-weight-medium, 560);
+      color: var(--goal-info);
+    }
+    .dock[data-status="paused"] .status { color: var(--goal-warning); }
+    .dock[data-status="blocked"] .status { color: var(--goal-danger); }
+    .dock[data-status="completed"] .status { color: var(--goal-success); }
+    .dock[data-status="stopped"] .status { color: var(--goal-faint); }
+    .objective {
+      margin-top: 3px;
+      max-width: 65ch;
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+      font-size: var(--font-text-sm-size, 13px);
+      line-height: 1.5;
+      font-weight: var(--font-weight-medium, 560);
+      color: var(--goal-text);
+    }
+    .meta {
+      margin-top: 4px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
+      color: var(--goal-faint);
+      font-size: 11px;
+      line-height: 1.5;
+    }
+    .continuation {
+      max-width: 18rem;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .actions {
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 5px;
+      min-height: 28px;
+    }
+    .action {
+      min-height: 28px;
+      padding: 4px 9px;
+      border: 1px solid var(--goal-border);
+      border-radius: var(--border-radius-sm, 6px);
+      background: transparent;
+      color: var(--goal-muted);
+      font-size: 11px;
+      line-height: 1.4;
+      letter-spacing: 0.02em;
+      cursor: pointer;
+      transition: background-color 120ms ease, color 120ms ease, transform 80ms ease;
+    }
+    .action:hover:not(:disabled) { background: var(--goal-bg-subtle); color: var(--goal-text); }
+    .action:active:not(:disabled) { transform: translateY(1px); }
+    .action:focus-visible { outline: 2px solid var(--goal-ring); outline-offset: 1px; }
+    .action:disabled { cursor: default; opacity: 0.45; }
+    .action.stop:hover:not(:disabled) { color: var(--goal-danger); }
+    .error {
+      display: none;
+      padding: 7px 12px 8px;
+      border-top: 1px solid var(--goal-border);
+      color: var(--goal-danger);
+      font-size: 11px;
+      line-height: 1.5;
+    }
+    .dock.has-error .error { display: block; }
+    @media (max-width: 520px) {
+      .main { grid-template-columns: 1fr; gap: 8px; }
+      .actions { justify-content: flex-start; }
+      .objective { -webkit-line-clamp: 3; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .action { transition: none; }
+    }
+  </style>
+</head>
+<body>
+  <section id="dock" class="dock" aria-live="polite" data-status="active">
+    <div class="main">
+      <div class="identity">
+        <div class="heading">
+          <span class="label">Goal Mode</span>
+          <span id="status" class="status">Waiting</span>
+        </div>
+        <div id="objective" class="objective">Waiting for Goal state...</div>
+        <div class="meta">
+          <span id="round">Round -</span>
+          <span id="elapsed">-</span>
+          <span id="continuation" class="continuation">Loading state</span>
+        </div>
+      </div>
+      <div id="actions" class="actions" aria-label="Goal controls"></div>
+    </div>
+    <div id="error" class="error" role="status"></div>
+  </section>
+
+  <script>
+    (() => {
+      const ACTIVE_POLL_MS = 1500;
+      const HIDDEN_POLL_MS = 6000;
+      const dock = document.getElementById("dock");
+      const statusEl = document.getElementById("status");
+      const objectiveEl = document.getElementById("objective");
+      const roundEl = document.getElementById("round");
+      const elapsedEl = document.getElementById("elapsed");
+      const continuationEl = document.getElementById("continuation");
+      const actionsEl = document.getElementById("actions");
+      const errorEl = document.getElementById("error");
+
+      let goal = null;
+      let timer = null;
+      let dispatchInFlight = false;
+      let controlInFlight = false;
+
+      const safeGoal = (value) => {
+        if (!value || typeof value !== "object") return null;
+        const candidate = value.goal && typeof value.goal === "object" ? value.goal : value;
+        if (!candidate.id || !Array.isArray(candidate.successCriteria)) return null;
+        return candidate;
+      };
+
+      const resultGoal = (value) => safeGoal(
+        value?.structuredContent?.goal ??
+        value?.structured_content?.goal ??
+        value?.toolResult?.structuredContent?.goal ??
+        value?.goal ??
+        value
+      );
+
+      const structured = (value) => (
+        value?.structuredContent ??
+        value?.structured_content ??
+        value?.toolResult?.structuredContent ??
+        value ??
+        {}
+      );
+
+      const elapsed = (createdAt, endedAt) => {
+        const start = Date.parse(String(createdAt || ""));
+        const end = endedAt ? Date.parse(String(endedAt)) : Date.now();
+        if (!Number.isFinite(start) || !Number.isFinite(end)) return "";
+        const total = Math.max(0, Math.floor((end - start) / 1000));
+        const hours = Math.floor(total / 3600);
+        const minutes = Math.floor((total % 3600) / 60);
+        const seconds = total % 60;
+        if (hours > 0) return `${hours}h ${String(minutes).padStart(2, "0")}m`;
+        if (minutes > 0) return `${minutes}m ${String(seconds).padStart(2, "0")}s`;
+        return `${seconds}s`;
+      };
+
+      const terminal = () => goal?.status === "completed" || goal?.status === "stopped";
+
+      const statusLabel = () => {
+        if (!goal) return "Waiting";
+        if (goal.status === "paused") return "Paused";
+        if (goal.status === "blocked") return "Blocked";
+        if (goal.status === "completed") return "Completed";
+        if (goal.status === "stopped") return "Stopped";
+        return goal.roundState === "reported" ? "Round reported" : "Active";
+      };
+
+      const continuationLabel = () => {
+        if (!goal) return "Loading state";
+        if (goal.status === "paused") return "Automatic continuation paused";
+        if (goal.status === "blocked") return `Blocked after ${goal.blocker?.consecutiveRounds || 0} matching rounds`;
+        if (goal.status === "completed") return "Goal criteria verified";
+        if (goal.status === "stopped") return "Automatic continuation stopped";
+        if (dispatchInFlight) return "Starting next round";
+        if (goal.roundState === "working") return "Working in this round";
+        if (goal.continuation?.state === "pending") return "Ready to continue";
+        if (goal.continuation?.state === "dispatching") return "Continuation claimed";
+        if (goal.continuation?.state === "dispatched") return "Waiting for next round";
+        return "Round report recorded";
+      };
+
+      const setError = (message = "") => {
+        dock.classList.toggle("has-error", Boolean(message));
+        errorEl.textContent = message;
+      };
+
+      const makeButton = (label, action, className = "") => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = `action ${className}`.trim();
+        button.textContent = label;
+        button.setAttribute("aria-label", `${label} Goal`);
+        button.disabled = dispatchInFlight || controlInFlight;
+        button.addEventListener("click", () => { void controlGoal(action); });
+        return button;
+      };
+
+      const renderActions = () => {
+        actionsEl.replaceChildren();
+        if (!goal || terminal()) return;
+        if (goal.status === "active") {
+          actionsEl.append(makeButton("Pause", "pause"));
+          actionsEl.append(makeButton("Stop", "stop", "stop"));
+          return;
+        }
+        if (goal.status === "paused" || goal.status === "blocked") {
+          actionsEl.append(makeButton("Resume", "resume"));
+          actionsEl.append(makeButton("Stop", "stop", "stop"));
+        }
+      };
+
+      const render = () => {
+        if (!goal) return;
+        dock.dataset.status = goal.status;
+        statusEl.textContent = statusLabel();
+        objectiveEl.textContent = goal.objective || "DevSpace Goal";
+        roundEl.textContent = `Round ${goal.round}`;
+        elapsedEl.textContent = elapsed(goal.createdAt, goal.completedAt || goal.stoppedAt);
+        continuationEl.textContent = continuationLabel();
+        renderActions();
+      };
+
+      const stopPolling = () => {
+        if (timer !== null) {
+          clearTimeout(timer);
+          timer = null;
+        }
+      };
+
+      const schedulePoll = (delay) => {
+        stopPolling();
+        if (!goal || terminal()) return;
+        const wait = delay ?? (document.visibilityState === "hidden" ? HIDDEN_POLL_MS : ACTIVE_POLL_MS);
+        timer = window.setTimeout(poll, wait);
+      };
+
+      const adoptGoal = (value, { dispatch = true } = {}) => {
+        const next = resultGoal(value);
+        if (!next) return false;
+        if (goal && next.id !== goal.id) return false;
+        if (goal && Number(next.revision || 0) < Number(goal.revision || 0)) return false;
+        goal = next;
+        setError("");
+        render();
+        if (terminal()) stopPolling();
+        else schedulePoll();
+        if (dispatch) void maybeDispatchContinuation();
+        return true;
+      };
+
+      const callTool = async (name, args) => {
+        if (typeof window.openai?.callTool !== "function") {
+          throw new Error("Goal controls are unavailable in this host.");
+        }
+        return await window.openai.callTool(name, args);
+      };
+
+      const controlGoal = async (action) => {
+        if (!goal || controlInFlight || dispatchInFlight) return;
+        controlInFlight = true;
+        setError("");
+        render();
+        try {
+          const result = await callTool("devspace_goal_control", { goalId: goal.id, action });
+          if (!adoptGoal(result)) throw new Error("Goal control returned no Goal state.");
+        } catch (error) {
+          setError(error?.message || "Unable to control Goal Mode.");
+        } finally {
+          controlInFlight = false;
+          render();
+          schedulePoll();
+        }
+      };
+
+      const eligibleForContinuation = () => (
+        goal?.status === "active" &&
+        goal?.roundState === "reported" &&
+        goal?.continuation?.state === "pending"
+      );
+
+      const maybeDispatchContinuation = async () => {
+        if (!eligibleForContinuation() || dispatchInFlight) return;
+        if (typeof window.openai?.sendFollowUpMessage !== "function") {
+          setError("Automatic Goal continuation is unavailable in this host.");
+          return;
+        }
+
+        dispatchInFlight = true;
+        setError("");
+        render();
+        let leaseId = null;
+        let explicitSendFailure = false;
+        let followUpAccepted = false;
+
+        try {
+          const claimResult = await callTool("devspace_goal_continuation", {
+            goalId: goal.id,
+            action: "claim",
+          });
+          const claimData = structured(claimResult);
+          if (claimData.goal) adoptGoal(claimResult, { dispatch: false });
+          const claim = claimData.claim;
+          if (!claim?.leaseId || !claim?.prompt) throw new Error("Continuation claim returned incomplete data.");
+          leaseId = claim.leaseId;
+
+          const sendResult = await window.openai.sendFollowUpMessage({
+            prompt: claim.prompt,
+            scrollToBottom: false,
+          });
+          if (sendResult?.ok === false) {
+            explicitSendFailure = true;
+            throw new Error("ChatGPT rejected the Goal continuation request.");
+          }
+          followUpAccepted = true;
+
+          const ackResult = await callTool("devspace_goal_continuation", {
+            goalId: goal.id,
+            action: "ack",
+            leaseId,
+          });
+          adoptGoal(ackResult, { dispatch: false });
+        } catch (error) {
+          if (leaseId && explicitSendFailure && !followUpAccepted) {
+            try {
+              const released = await callTool("devspace_goal_continuation", {
+                goalId: goal.id,
+                action: "release",
+                leaseId,
+              });
+              adoptGoal(released, { dispatch: false });
+            } catch {
+              // The backend lease expiry path remains the final recovery guard.
+            }
+          }
+          setError(error?.message || "Unable to continue Goal Mode automatically.");
+        } finally {
+          dispatchInFlight = false;
+          render();
+          schedulePoll(500);
+        }
+      };
+
+      const poll = async () => {
+        if (!goal || terminal()) return;
+        try {
+          const result = await callTool("devspace_goal_status", { goalId: goal.id });
+          if (!adoptGoal(result)) schedulePoll();
+        } catch (error) {
+          setError(error?.message || "Unable to refresh Goal state.");
+          schedulePoll(document.visibilityState === "hidden" ? HIDDEN_POLL_MS : ACTIVE_POLL_MS * 2);
+        }
+      };
+
+      document.addEventListener("visibilitychange", () => {
+        if (document.visibilityState === "visible") schedulePoll(100);
+        else schedulePoll(HIDDEN_POLL_MS);
+      });
+
+      window.addEventListener("openai:set_globals", () => {
+        adoptGoal(window.openai?.toolOutput);
+      });
+
+      if (!adoptGoal(window.openai?.toolOutput)) {
+        setError("Waiting for Goal state from ChatGPT.");
+      }
+    })();
+  </script>
+</body>
+</html>

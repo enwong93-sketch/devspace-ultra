@@ -265,7 +265,148 @@ Treat this as a separate manager-wrapper bug; do not confuse it with a Main-02 r
 
 ### Status
 
-**DESIGN APPROVED BY USER. FORMAL SPEC + IMPLEMENTATION PLAN WRITTEN. IMPLEMENT NEXT.**
+**IMPLEMENTATION IN PROGRESS IN ISOLATED WORKTREE. TASK 1 GOAL CORE PASS.**
+
+Current Goal Mode worktree:
+
+```text
+C:\Users\enwong\.devspace\worktrees\devspace-fd66e55d
+base = 7b38a8f
+Task 1 checkpoint = 3272219 feat: add goal runtime core
+```
+
+Task 1 verified behavior:
+
+```text
+GoalRuntime({ stateDir, now?, dispatchLeaseMs?, dispatchRecoveryMs? })
+start({ objective, successCriteria })
+status(goalId)
+control({ goalId, action: pause | resume | stop })
+close()
+```
+
+Fresh gate output:
+
+```text
+{"ok":true,"gate":"goal-runtime-core","persisted":true,"restartRecovered":true,"controls":["pause","resume","stop"],"terminalStopped":true}
+```
+
+Core state now includes round 1=`working`, immutable objective/criterion IDs, idle continuation placeholder, blocker placeholder, serialized persistence, clone-on-return and corrupt-state fail-open recovery.
+
+Task 2 checkpoint:
+
+```text
+9e90c7b feat: add goal round reporting and audit
+```
+
+Task 2 verified APIs:
+
+```text
+turnReport({ goalId, summary, meaningfulProgress, blockerFingerprint? })
+complete({ goalId, evidence })
+markBlocked({ goalId })
+```
+
+Fresh combined gate output:
+
+```text
+{"ok":true,"gate":"goal-runtime-core","persisted":true,"restartRecovered":true,"controls":["pause","resume","stop"],"terminalStopped":true,"reportOnce":true,"completionCoverage":true,"blockerFoundation":true}
+```
+
+Verified Task 2 invariants: one report per round; active report creates pending continuation; completed final report creates none; completion evidence covers every criterion and rejects missing/unknown/empty evidence; blocker fingerprints normalize consistently; blocker below 3 rounds is rejected; meaningful progress resets blocker state; reported Pause clears continuation and Resume recreates it.
+
+Task 3 checkpoint:
+
+```text
+7bafade feat: add goal continuation lease runtime
+```
+
+Task 3 verified APIs:
+
+```text
+continuation({ goalId, action: claim | ack | release, leaseId? })
+roundBegin({ goalId, continuationId })
+```
+
+Fresh combined GoalRuntime gate includes:
+
+```text
+exclusiveLease=true
+releaseRecovery=true
+ackRace=true
+roundBeginIdempotent=true
+dispatchRecovery=true
+blockedThreeRounds=true
+```
+
+Verified continuation rules: one live lease per pending continuation; release/45s lease expiry preserves the same continuation ID and returns it to pending; acknowledged dispatch uses a 120s recovery deadline; matching `roundBegin` increments exactly once and clears continuation; duplicate round-begin is idempotent; late ack after consume is harmless; a matching pending continuation may still be consumed after conservative expiry normalization; full public 3-round blocker flow reaches count 3 before `markBlocked` is allowed.
+
+Task 4 checkpoint:
+
+```text
+529a051 feat: expose goal mode tools
+```
+
+Task 4 registered nine Goal tools. `devspace_goal_continuation` is app-only; start/mount are the only render tools; status/control are model+app; round-begin/report/complete/blocked are model-only mutations. Fresh gates: `goal-tools` PASS with `tools=9`, `continuationAppOnly=true`, `renderTools=2`; `goal-server-static` PASS. Server now owns one shared GoalRuntime, registers `ui://devspace/goal-dock.html` independently of `DEVSPACE_WIDGETS`, and closes GoalRuntime on shutdown.
+
+Task 5 checkpoint:
+
+```text
+dcd64a8 feat: add goal continuation dock
+```
+
+Goal Dock files:
+
+```text
+dist/ui/goal-dock.html
+scripts/goal-dock-static-gate.mjs
+```
+
+Task 5 design gates applied: OpenDesign canonical router, `frontend-design`, `linear-app`, craft `typography` / `color` / `anti-ai-slop`, `design-taste-frontend`, and the existing Plan Card as project-owned UI convention.
+
+The Dock is self-contained and host-themed. It polls `devspace_goal_status`, exposes Pause/Resume/Stop by Goal state, uses a local `dispatchInFlight` guard, claims app-only continuation leases, dispatches through `window.openai.sendFollowUpMessage`, acknowledges explicit success, releases only explicit `{ok:false}` rejection, and leaves ambiguous send transport failures to lease-expiry/round-redemption recovery instead of risking duplicate assistant turns. It stops normal polling on completed/stopped Goals and keeps polling paused/blocked so user controls remain live.
+
+Fresh Task 5 gates: Goal runtime PASS, Goal tools PASS, Goal server static PASS, Goal Dock static PASS, visible-copy forbidden dash gate clean, `git diff --check` PASS.
+
+Task 6 checkpoint:
+
+```text
+c05a24f feat: teach agents goal mode rounds
+```
+
+Task 6 adds a separate Goal instruction block to both DevSpace tool modes. It enforces the visible-report-before-`devspace_goal_turn_report` invariant, makes that report tool the final action of each Goal turn, requires `devspace_goal_round_begin` first on hidden continuation turns, forbids CDP/composer/fake-user continuation, requires authoritative evidence for all success criteria, respects the 3-round blocker guard, limits pause/stop to explicit user control, and excludes Chat Swarm workers from user-facing Goal Mode. Fresh `goal-instructions-static` gate PASS.
+
+Task 7 checkpoint:
+
+```text
+e82ae0d test: verify goal mode end to end
+```
+
+Task 7 added `verify:goal`, integrated it into `verify:ultra`, and added the real in-memory MCP protocol/restart gate `scripts/goal-mode-live-gate.mjs`.
+
+Fresh Goal protocol result:
+
+```text
+{"ok":true,"gate":"goal-mode-live","tools":9,"resourceMimeType":"text/html;profile=mcp-app","finalRound":3,"finalStatus":"completed","restartRecoveredRevision":12,"duplicateRoundBeginBlocked":true,"pauseResumeContinuation":true}
+```
+
+The real MCP gate covers Goal tool discovery, Goal Dock resource read, round-1 report, continuation claim/ack, round-2 redemption, duplicate redemption idempotency, round-2 report, pause clearing continuation, paused claim rejection, resume with a fresh continuation, round 3, criterion-complete evidence, final report without continuation, mount recovery, and exact terminal-state recovery after backend restart.
+
+Task 7 also found and fixed a protocol-level error-schema bug: an expected Goal tool error must return `isError + content` without success-shaped `structuredContent`; otherwise the MCP Client validates the error payload against the success output schema and upgrades it into protocol `-32602`.
+
+### Task 8 integration status
+
+Goal Mode executable/source files have now been synchronized from the detached worktree into the real main checkout with EOL-insensitive exact comparisons. The matched set includes Goal runtime/tests, Goal tools/tests, Goal Dock, four Goal gates, `dist/server.js`, `package.json`, Goal spec and Goal implementation plan.
+
+Native main-checkout verification is GREEN:
+
+```text
+npm run verify:goal -> PASS
+npm test -> PASS
+git diff --check -> PASS
+```
+
+The full native regression still passes edge/OAuth, ContextBridge, Plan Card, Goal Mode, runtime identity, Chat Swarm, Browser Control, capability runtime and existing conversation-continuity/Auto Compact gates. Task 8 has not yet reloaded production 7677 or started the Main-02 live Goal acceptance.
 
 Formal documents:
 
@@ -636,9 +777,9 @@ node dist/cli.js edge status
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/devspace-edge-startup.ps1 -Action status
 ```
 
-4. Plan Card checkpoint is already committed locally at `5998b3a`; use this commit as the Goal Mode worktree base.
+4. Goal Mode Tasks 1-7 are complete in the detached worktree through `e82ae0d`, and their code is now synchronized into main with native `npm test` PASS.
 
-5. Continue **Goal Mode only** from section 3. Do not restart Context Guardian work yet.
+5. Continue **Goal Mode Task 8 only** from section 3: local main checkpoint, fixed-backend 7677 reload, plugin Refresh, and real Main-02 multi-round acceptance. Do not restart Context Guardian work yet.
 
 6. Keep updating this same handoff file after each Goal Mode gate.
 
@@ -650,8 +791,8 @@ As of the creation of this rolling handoff:
 
 ```text
 #1 Plan / Step Card: IMPLEMENTED + real Main-02 production acceptance PASS
-#2 Goal Mode: APPROVED DESIGN, implementation next
+#2 Goal Mode: IMPLEMENTATION IN PROGRESS, Tasks 1-7 green
 #3 Context Guardian v2: research findings captured, implementation deferred
 ```
 
-The Plan Card checkpoint is complete at `5998b3a`, and the Goal Mode spec/implementation plan are written. The immediate next action is to checkpoint those design documents + this handoff update, create an isolated Goal Mode worktree from that new checkpoint, and start TDD with GoalRuntime persistence/state-transition tests.
+Goal Mode Tasks 1-7 are complete through detached-worktree checkpoint `e82ae0d`, and the code is now synchronized into main with native `npm test` and `git diff --check` PASS. The immediate next action is to make a local main Goal Mode checkpoint commit (excluding the unrelated untracked `AGENTS.md`), reload only fixed backend 7677 while keeping the named tunnel untouched, refresh DevSpace Ultra metadata in Main-02, and perform real multi-round Goal acceptance proving visible-report-before-continuation, no synthetic user message, pause/resume, completion stop, and one logical Goal Dock.
