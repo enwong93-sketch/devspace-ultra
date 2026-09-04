@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased — v0.5 plan runtime
+
+### Added
+
+- Backend-authoritative Codex-style execution plans for long ChatGPT Classic tasks, with persistent ordered steps, strict `pending` / `in_progress` / `completed` transitions, restart recovery, and an immutable terminal state.
+- A dedicated live MCP Apps plan card that mounts once, refreshes plan state without remounting on every update, expands to the full checklist, and opportunistically uses picture-in-picture with safe inline fallback.
+- `devspace_plan_start`, `devspace_update_plan`, `devspace_plan_status`, and `devspace_plan_mount`, separating mutation/data tools from render tools so ordinary `DEVSPACE_WIDGETS=off` behavior remains unchanged.
+- Codex-style model instructions that keep one current step in progress, update the plan before scope pivots, avoid duplicating the whole checklist in prose, and exclude Chat Swarm workers from user-facing plan cards.
+
+### Verification
+
+- Plan runtime persistence/transition unit gate, MCP registration gate, widget/resource/instruction static gates, and an in-memory real MCP protocol gate covering tool discovery, app resource reading, step advancement, backend restart recovery, remount, and terminal completion.
+
 ## 0.4.0 — 2026-09-04
 
 ### Added

@@ -164,6 +164,32 @@ final file modification in any turn that changes files. The tool only requires
 the `workspaceId`; DevSpace automatically compares against the last shown
 checkpoint and advances that checkpoint after rendering the aggregate diff.
 
+## Plan Progress Card
+
+For genuinely multi-step or long-running interactive work, DevSpace exposes a
+Codex-style persistent execution plan. `devspace_plan_start` creates the plan and
+mounts one compact live progress card. Later `devspace_update_plan` calls mutate
+backend state only, so advancing a step does not add a new card to the
+conversation.
+
+The card refreshes the backend-authoritative state through
+`devspace_plan_status`, shows the current step and `Step X / N`, and can expand
+to show the full checklist. Active cards request picture-in-picture when the
+ChatGPT host supports it so progress can remain visible near the active
+conversation; unsupported hosts stay inline. `devspace_plan_mount` re-mounts an
+existing plan after an interrupt, later turn, or renderer reload without
+creating a replacement plan.
+
+Active plans keep exactly one `in_progress` step. Existing pending work must
+become `in_progress` before it can become `completed`, completed steps cannot
+regress, and a completed plan is immutable. Plan state is persisted under the
+DevSpace state directory and survives backend restarts. Chat Swarm worker loops
+do not mount user-facing plan cards.
+
+This plan runtime is independent from Goal Mode and Context Guardian. Goal
+continuation and context compaction are separate harness features rather than
+implicit behaviors of the progress card.
+
 ## Shell Use
 
 The shell tool is for commands that belong in a terminal:

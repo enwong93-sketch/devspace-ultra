@@ -1,0 +1,285 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>DevSpace Plan</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      font-family: var(--font-sans, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
+      --plan-bg: var(--color-background-primary, rgba(18, 18, 20, 0.96));
+      --plan-bg-subtle: var(--color-background-secondary, rgba(255, 255, 255, 0.035));
+      --plan-text: var(--color-text-primary, #f4f4f5);
+      --plan-muted: var(--color-text-secondary, #a1a1aa);
+      --plan-faint: var(--color-text-tertiary, #71717a);
+      --plan-border: var(--color-border-secondary, rgba(255, 255, 255, 0.1));
+      --plan-success: var(--color-text-success, #22c55e);
+      --plan-ring: var(--color-ring-primary, #7c83ff);
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; background: transparent; color: var(--plan-text); }
+    body { padding: 2px; }
+    button { font: inherit; color: inherit; }
+    .card {
+      width: 100%;
+      border: 1px solid var(--plan-border);
+      border-radius: var(--border-radius-lg, 12px);
+      background: var(--plan-bg);
+      box-shadow: var(--shadow-sm, 0 1px 5px rgba(0,0,0,.08));
+      overflow: clip;
+    }
+    .top {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 12px;
+      padding: 11px 12px 9px;
+    }
+    .identity { min-width: 0; }
+    .title-row { display: flex; align-items: center; gap: 7px; min-width: 0; }
+    .status-dot {
+      width: 8px; height: 8px; flex: 0 0 auto; border-radius: 999px;
+      background: var(--plan-ring);
+      box-shadow: 0 0 0 3px color-mix(in srgb, var(--plan-ring) 14%, transparent);
+    }
+    .card.completed .status-dot { background: var(--plan-success); box-shadow: none; }
+    .title {
+      min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      font-size: var(--font-text-sm-size, 13px); font-weight: var(--font-weight-medium, 560);
+      letter-spacing: -0.01em;
+    }
+    .current {
+      margin: 4px 0 0 15px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      font-size: var(--font-text-xs-size, 12px); color: var(--plan-muted);
+    }
+    .meta { display: flex; align-items: center; gap: 8px; color: var(--plan-faint); font-size: 11px; white-space: nowrap; }
+    .toggle {
+      width: 26px; height: 26px; display: grid; place-items: center; padding: 0;
+      border: 0; border-radius: var(--border-radius-sm, 6px); background: transparent; cursor: pointer;
+    }
+    .toggle:hover { background: var(--plan-bg-subtle); }
+    .toggle:focus-visible { outline: 2px solid var(--plan-ring); outline-offset: 1px; }
+    .chevron { width: 8px; height: 8px; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; transform: rotate(45deg) translateY(-2px); transition: transform 150ms cubic-bezier(.23,1,.32,1); }
+    .expanded .chevron { transform: rotate(225deg) translate(-1px,-1px); }
+    .details { display: none; border-top: 1px solid var(--plan-border); padding: 7px 12px 10px; }
+    .expanded .details { display: block; }
+    .step {
+      display: grid; grid-template-columns: 16px minmax(0,1fr); gap: 7px; align-items: start;
+      min-height: 25px; padding: 3px 0; font-size: 12px; line-height: 1.45;
+    }
+    .step-icon { width: 14px; height: 14px; margin-top: 1px; display: grid; place-items: center; color: var(--plan-faint); }
+    .step.completed .step-icon { color: var(--plan-success); }
+    .step.in_progress .step-icon { color: var(--plan-ring); }
+    .step-text { color: var(--plan-muted); }
+    .step.in_progress .step-text { color: var(--plan-text); font-weight: var(--font-weight-medium, 560); }
+    .step.completed .step-text { color: var(--plan-faint); }
+    .check { width: 11px; height: 6px; border-left: 1.7px solid currentColor; border-bottom: 1.7px solid currentColor; transform: rotate(-45deg) translate(1px,-1px); }
+    .pending-dot { width: 5px; height: 5px; border: 1px solid currentColor; border-radius: 999px; }
+    .spinner { width: 8px; height: 8px; border: 1.5px solid color-mix(in srgb, currentColor 30%, transparent); border-top-color: currentColor; border-radius: 999px; animation: spin .8s linear infinite; }
+    .explanation { margin: 7px 0 0 23px; color: var(--plan-faint); font-size: 11px; line-height: 1.45; }
+    .error { padding: 9px 12px; border-top: 1px solid var(--plan-border); color: var(--color-text-danger, #ef4444); font-size: 11px; display: none; }
+    .has-error .error { display: block; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    @media (prefers-reduced-motion: reduce) { .spinner { animation: none; } .chevron { transition: none; } }
+  </style>
+</head>
+<body>
+  <section id="card" class="card" aria-live="polite">
+    <div class="top">
+      <div class="identity">
+        <div class="title-row"><span class="status-dot" aria-hidden="true"></span><div id="title" class="title">DevSpace Plan</div></div>
+        <div id="current" class="current">Waiting for plan state…</div>
+      </div>
+      <div class="meta">
+        <span id="progress">—</span>
+        <span id="elapsed">—</span>
+        <button id="toggle" class="toggle" type="button" aria-expanded="false" aria-label="Show plan steps"><span class="chevron" aria-hidden="true"></span></button>
+      </div>
+    </div>
+    <div id="details" class="details"></div>
+    <div id="error" class="error"></div>
+  </section>
+
+  <script>
+    (() => {
+      const ACTIVE_POLL_MS = 1500;
+      const HIDDEN_POLL_MS = 6000;
+      const card = document.getElementById("card");
+      const titleEl = document.getElementById("title");
+      const currentEl = document.getElementById("current");
+      const progressEl = document.getElementById("progress");
+      const elapsedEl = document.getElementById("elapsed");
+      const toggleEl = document.getElementById("toggle");
+      const detailsEl = document.getElementById("details");
+      const errorEl = document.getElementById("error");
+
+      let plan = null;
+      let timer = null;
+      let pipRequested = false;
+      let restoredInline = false;
+      let expanded = Boolean(window.openai?.widgetState?.expanded);
+
+      const safePlan = (value) => {
+        if (!value || typeof value !== "object") return null;
+        const candidate = value.plan && typeof value.plan === "object" ? value.plan : value;
+        if (!candidate.id || !Array.isArray(candidate.steps)) return null;
+        return candidate;
+      };
+
+      const resultPlan = (value) => safePlan(
+        value?.structuredContent?.plan ??
+        value?.structured_content?.plan ??
+        value?.toolResult?.structuredContent?.plan ??
+        value?.plan ??
+        value
+      );
+
+      const elapsed = (createdAt, endedAt) => {
+        const start = Date.parse(String(createdAt || ""));
+        const end = endedAt ? Date.parse(String(endedAt)) : Date.now();
+        if (!Number.isFinite(start) || !Number.isFinite(end)) return "";
+        const total = Math.max(0, Math.floor((end - start) / 1000));
+        const hours = Math.floor(total / 3600);
+        const minutes = Math.floor((total % 3600) / 60);
+        const seconds = total % 60;
+        if (hours > 0) return `${hours}h ${String(minutes).padStart(2, "0")}m`;
+        if (minutes > 0) return `${minutes}m ${String(seconds).padStart(2, "0")}s`;
+        return `${seconds}s`;
+      };
+
+      const stepIcon = (status) => {
+        const icon = document.createElement("span");
+        icon.className = "step-icon";
+        const mark = document.createElement("span");
+        mark.className = status === "completed" ? "check" : status === "in_progress" ? "spinner" : "pending-dot";
+        icon.append(mark);
+        return icon;
+      };
+
+      const setExpanded = (next, persist = true) => {
+        expanded = Boolean(next);
+        card.classList.toggle("expanded", expanded);
+        toggleEl.setAttribute("aria-expanded", String(expanded));
+        toggleEl.setAttribute("aria-label", expanded ? "Hide plan steps" : "Show plan steps");
+        if (persist && window.openai?.setWidgetState) {
+          Promise.resolve(window.openai.setWidgetState({ expanded })).catch(() => {});
+        }
+      };
+
+      const setError = (message = "") => {
+        card.classList.toggle("has-error", Boolean(message));
+        errorEl.textContent = message;
+      };
+
+      const render = () => {
+        if (!plan) return;
+        const completed = plan.status === "completed";
+        card.classList.toggle("completed", completed);
+        titleEl.textContent = plan.title || "DevSpace Plan";
+
+        const currentIndex = plan.steps.findIndex((step) => step.status === "in_progress");
+        const completedCount = plan.steps.filter((step) => step.status === "completed").length;
+        const currentStep = currentIndex >= 0 ? plan.steps[currentIndex] : null;
+        currentEl.textContent = completed ? "Completed" : currentStep?.text || "Plan active";
+        progressEl.textContent = completed ? `${plan.steps.length} / ${plan.steps.length}` : `Step ${Math.max(1, currentIndex + 1)} / ${plan.steps.length}`;
+        elapsedEl.textContent = elapsed(plan.createdAt, plan.completedAt);
+
+        detailsEl.replaceChildren();
+        for (const step of plan.steps) {
+          const row = document.createElement("div");
+          row.className = `step ${step.status}`;
+          row.append(stepIcon(step.status));
+          const text = document.createElement("div");
+          text.className = "step-text";
+          text.textContent = step.text;
+          row.append(text);
+          detailsEl.append(row);
+        }
+        if (plan.lastExplanation) {
+          const explanation = document.createElement("div");
+          explanation.className = "explanation";
+          explanation.textContent = plan.lastExplanation;
+          detailsEl.append(explanation);
+        }
+
+        if (completed) {
+          stopPolling();
+          if (!restoredInline && window.openai?.requestDisplayMode && window.openai?.displayMode === "pip") {
+            restoredInline = true;
+            Promise.resolve(window.openai.requestDisplayMode({ mode: "inline" })).catch(() => {});
+          }
+        } else {
+          requestPiP();
+        }
+      };
+
+      const adoptPlan = (value) => {
+        const next = resultPlan(value);
+        if (!next) return false;
+        if (plan && next.id !== plan.id) return false;
+        if (plan && Number(next.revision || 0) < Number(plan.revision || 0)) return false;
+        plan = next;
+        setError("");
+        render();
+        schedulePoll();
+        return true;
+      };
+
+      const requestPiP = () => {
+        if (pipRequested || !plan || plan.status === "completed" || !window.openai?.requestDisplayMode) return;
+        pipRequested = true;
+        Promise.resolve(window.openai.requestDisplayMode({ mode: "pip" })).catch(() => {
+          // Inline presentation remains fully functional when PiP is unavailable.
+        });
+      };
+
+      const stopPolling = () => {
+        if (timer !== null) {
+          clearTimeout(timer);
+          timer = null;
+        }
+      };
+
+      const schedulePoll = (delay) => {
+        stopPolling();
+        if (!plan || plan.status === "completed") return;
+        const wait = delay ?? (document.visibilityState === "hidden" ? HIDDEN_POLL_MS : ACTIVE_POLL_MS);
+        timer = window.setTimeout(poll, wait);
+      };
+
+      const poll = async () => {
+        if (!plan || plan.status === "completed") return;
+        if (!window.openai?.callTool) {
+          setError("Live plan refresh is unavailable in this host.");
+          schedulePoll(HIDDEN_POLL_MS);
+          return;
+        }
+        try {
+          const result = await window.openai.callTool("devspace_plan_status", { planId: plan.id });
+          if (!adoptPlan(result)) schedulePoll();
+        } catch (error) {
+          setError(error?.message || "Unable to refresh plan state.");
+          schedulePoll(document.visibilityState === "hidden" ? HIDDEN_POLL_MS : ACTIVE_POLL_MS * 2);
+        }
+      };
+
+      toggleEl.addEventListener("click", () => setExpanded(!expanded));
+      document.addEventListener("visibilitychange", () => {
+        if (document.visibilityState === "visible") schedulePoll(100);
+        else schedulePoll(HIDDEN_POLL_MS);
+      });
+      window.addEventListener("openai:set_globals", () => {
+        const hostState = window.openai?.widgetState;
+        if (hostState && typeof hostState.expanded === "boolean") setExpanded(hostState.expanded, false);
+        adoptPlan(window.openai?.toolOutput);
+      });
+
+      setExpanded(expanded, false);
+      if (!adoptPlan(window.openai?.toolOutput)) {
+        currentEl.textContent = "Waiting for plan state…";
+      }
+    })();
+  </script>
+</body>
+</html>
