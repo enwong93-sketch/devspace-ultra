@@ -25,6 +25,7 @@ import {
 import * as YAML from "yaml";
 import * as z from "zod/v4";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { ContentBlockSchema } from "@modelcontextprotocol/sdk/types.js";
 import {
   StdioClientTransport,
   getDefaultEnvironment,
@@ -99,22 +100,22 @@ function textResult(structuredContent, text = JSON.stringify(structuredContent, 
   return { content: [{ type: "text", text }], structuredContent };
 }
 function capabilityCallResult(callResult) {
-  if (callResult?.kind !== "mcp" || !Array.isArray(callResult?.result?.content)) {
+  if (callResult?.kind !== "mcp") {
     return textResult(callResult);
   }
   const innerResult = callResult.result;
-  const content = innerResult.content.map((item) => ({ ...item }));
+  // Validate against the installed SDK without replacing native blocks with JSON text.
+  const validContent = z.array(ContentBlockSchema).safeParse(innerResult?.content).success;
+  const { content: _content, ...innerMetadata } = innerResult ?? {};
   const structuredContent = {
     ...callResult,
-    result: {
-      ...innerResult,
-      content: undefined,
-    },
+    result: innerMetadata,
   };
-  delete structuredContent.result.content;
   return {
-    ...(innerResult.isError === true ? { isError: true } : {}),
-    content,
+    ...(innerResult?.isError === true ? { isError: true } : {}),
+    content: validContent
+      ? innerResult.content.map((item) => ({ ...item }))
+      : textResult(structuredContent).content,
     structuredContent,
   };
 }
