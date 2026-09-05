@@ -98,6 +98,26 @@ function sha256(value) {
 function textResult(structuredContent, text = JSON.stringify(structuredContent, null, 2)) {
   return { content: [{ type: "text", text }], structuredContent };
 }
+function capabilityCallResult(callResult) {
+  if (callResult?.kind !== "mcp" || !Array.isArray(callResult?.result?.content)) {
+    return textResult(callResult);
+  }
+  const innerResult = callResult.result;
+  const content = innerResult.content.map((item) => ({ ...item }));
+  const structuredContent = {
+    ...callResult,
+    result: {
+      ...innerResult,
+      content: undefined,
+    },
+  };
+  delete structuredContent.result.content;
+  return {
+    ...(innerResult.isError === true ? { isError: true } : {}),
+    content,
+    structuredContent,
+  };
+}
 function errorResult(error) {
   const message = error instanceof Error ? error.message : String(error);
   return {
@@ -2024,7 +2044,7 @@ export function registerCapabilityTools(server, runtime) {
     },
     annotations: CALLING,
   }, async (input) => {
-    try { return textResult(await runtime.call(input)); }
+    try { return capabilityCallResult(await runtime.call(input)); }
     catch (error) { return errorResult(error); }
   });
 }

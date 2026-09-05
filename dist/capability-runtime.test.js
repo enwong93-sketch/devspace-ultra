@@ -117,7 +117,7 @@ async function makeFixtureSource(root) {
   const mcpServerModule = import.meta.resolve("@modelcontextprotocol/sdk/server/mcp.js");
   const stdioServerModule = import.meta.resolve("@modelcontextprotocol/sdk/server/stdio.js");
   const zodModule = import.meta.resolve("zod/v4");
-  await writeFile(join(source, "fixture-mcp-server.mjs"), `import { McpServer } from ${JSON.stringify(mcpServerModule)};\nimport { StdioServerTransport } from ${JSON.stringify(stdioServerModule)};\nimport * as z from ${JSON.stringify(zodModule)};\nconst server = new McpServer({name:'fixture-memory', version:'1.0.0'});\nserver.registerTool('remember', {description:'Store a test memory', inputSchema:{text:z.string()}}, async ({text}) => ({content:[{type:'text', text:'stored:'+text}], structuredContent:{stored:text, secretPresent:Boolean(process.env.CAP_FIXTURE_SECRET), instanceMarker:process.env.CAP_INSTANCE_MARKER||null}}));\nserver.registerResource('fixture-memory-resource', 'memory://fixture/status', {description:'Fixture memory status', mimeType:'text/plain'}, async (uri) => ({contents:[{uri:String(uri), mimeType:'text/plain', text:'fixture-resource-ok'}]}));\nserver.registerPrompt('memory-review', {description:'Review a memory topic', argsSchema:{topic:z.string()}}, async ({topic}) => ({messages:[{role:'user', content:{type:'text', text:'review-memory:'+topic}}]}));\nawait server.connect(new StdioServerTransport());\n`);
+  await writeFile(join(source, "fixture-mcp-server.mjs"), `import { McpServer } from ${JSON.stringify(mcpServerModule)};\nimport { StdioServerTransport } from ${JSON.stringify(stdioServerModule)};\nimport * as z from ${JSON.stringify(zodModule)};\nconst server = new McpServer({name:'fixture-memory', version:'1.0.0'});\nserver.registerTool('remember', {description:'Store a test memory', inputSchema:{text:z.string()}}, async ({text}) => ({content:[{type:'text', text:'stored:'+text}], structuredContent:{stored:text, secretPresent:Boolean(process.env.CAP_FIXTURE_SECRET), instanceMarker:process.env.CAP_INSTANCE_MARKER||null}}));\nserver.registerTool('observe', {description:'Return text and a native PNG image', inputSchema:{}}, async () => ({content:[{type:'text', text:'fixture-observation'},{type:'image', mimeType:'image/png', data:'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9ZrVIAAAAASUVORK5CYII='}], structuredContent:{observationId:'fixture-observation-1', source:'fixture'}}));\nserver.registerResource('fixture-memory-resource', 'memory://fixture/status', {description:'Fixture memory status', mimeType:'text/plain'}, async (uri) => ({contents:[{uri:String(uri), mimeType:'text/plain', text:'fixture-resource-ok'}]}));\nserver.registerPrompt('memory-review', {description:'Review a memory topic', argsSchema:{topic:z.string()}}, async ({topic}) => ({messages:[{role:'user', content:{type:'text', text:'review-memory:'+topic}}]}));\nawait server.connect(new StdioServerTransport());\n`);
   return source;
 }
 
@@ -277,7 +277,7 @@ async function run() {
 
     const probe = await runtime.probePluginMcp("fixture-memory");
     assert.equal(probe.memory.status, "online");
-    assert.deepEqual(probe.memory.tools.map((tool) => tool.name), ["remember"]);
+    assert.deepEqual(probe.memory.tools.map((tool) => tool.name).sort(), ["observe", "remember"]);
     assert.deepEqual(probe.memory.prompts.map((prompt) => prompt.name), ["memory-review"]);
     assert.deepEqual(probe.memory.resources.map((resource) => resource.uri), ["memory://fixture/status"]);
     assert.equal(probe["claude-memory"].status, "online");
@@ -405,6 +405,22 @@ async function run() {
         },
       });
       assert.equal(protocolInstanceCall.structuredContent.result.structuredContent.instanceMarker, "PROTOCOL");
+      const protocolObservation = await protocolMain.client.callTool({
+        name: "capability_call",
+        arguments: {
+          pluginId: "fixture-memory",
+          kind: "mcp",
+          serverId: "memory",
+          instanceToken: protocolInstanceToken,
+          toolName: "observe",
+          arguments: {},
+        },
+      });
+      assert.deepEqual(protocolObservation.content.map((item) => item.type), ["text", "image"]);
+      assert.equal(protocolObservation.content[0].text, "fixture-observation");
+      assert.equal(protocolObservation.content[1].mimeType, "image/png");
+      assert.equal(protocolObservation.structuredContent.result.structuredContent.observationId, "fixture-observation-1");
+      assert.equal(JSON.stringify(protocolObservation.structuredContent).includes("iVBORw0KGgo"), false);
       const protocolRelease = await protocolMain.client.callTool({
         name: "capability_instance",
         arguments: { action: "release", instanceToken: protocolInstanceToken },
