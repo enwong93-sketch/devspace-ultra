@@ -1485,7 +1485,7 @@ export function createServer(config = loadConfig(), options = {}) {
         host: config.host,
         ...(allowedHosts ? { allowedHosts } : {}),
     });
-    const transports = new McpSessionRegistry();
+    const transports = new McpSessionRegistry({ maxSessions: options.maxMcpSessions });
     const mcpUrl = new URL("/mcp", config.publicBaseUrl);
     const resourceServerUrl = resourceUrlFromServerUrl(mcpUrl);
     const oauthProvider = new SingleUserOAuthProvider(config.oauth, mcpUrl, config.stateDir);
@@ -2038,6 +2038,18 @@ export function createServer(config = loadConfig(), options = {}) {
             sessionIdPrefix: sessionIdPrefix(sessionId),
             isInitialize: initializeRequest,
         });
+        let reservation;
+        const trackRequest = (id) => {
+            if (res.destroyed || res.writableEnded) return;
+            const release = transports.beginRequest(id);
+            const done = () => {
+                res.off("finish", done);
+                res.off("close", done);
+                release();
+            };
+            res.once("finish", done);
+            res.once("close", done);
+        };
         try {
             let transport;
             if (sessionId) {
@@ -2046,13 +2058,29 @@ export function createServer(config = loadConfig(), options = {}) {
                     sendJsonRpcError(res, 404, -32000, "Unknown MCP session");
                     return;
                 }
+                trackRequest(sessionId);
             }
             else if (initializeRequest) {
+                reservation = await transports.reserve();
+                if (!reservation) {
+                    res.setHeader("Retry-After", "1");
+                    sendJsonRpcError(res, 503, -32000, "MCP session capacity reached; retry after an active session finishes");
+                    return;
+                }
+                if (reservation.evictedSessionId) {
+                    logEvent(config.logging, "info", "mcp_session_closed", {
+                        reason: "capacity_idle_eviction",
+                        sessionIdPrefix: sessionIdPrefix(reservation.evictedSessionId),
+                    });
+                }
                 transport = new StreamableHTTPServerTransport({
                     sessionIdGenerator: () => randomUUID(),
                     onsessioninitialized: (newSessionId) => {
-                        if (transport)
+                        if (transport) {
                             transports.register(newSessionId, transport);
+                            reservation?.release();
+                            trackRequest(newSessionId);
+                        }
                         logEvent(config.logging, "info", "mcp_session_created", {
                             requestId,
                             sessionIdPrefix: sessionIdPrefix(newSessionId),
@@ -2086,6 +2114,9 @@ export function createServer(config = loadConfig(), options = {}) {
             if (!res.headersSent) {
                 sendJsonRpcError(res, 500, -32603, "Internal server error");
             }
+        }
+        finally {
+            reservation?.release();
         }
     });
     app.use((error, req, res, next) => {
