@@ -134,8 +134,7 @@ such as `rg`, `find`, and `ls` for search and directory inspection.
 
 Use `DEVSPACE_TOOL_MODE=full` to restore dedicated search and directory tools.
 
-The experimental Codex-style surface is enabled with
-`DEVSPACE_TOOL_MODE=codex`. It exposes:
+The strict Codex-style surface is enabled with `DEVSPACE_TOOL_MODE=codex`. It exposes:
 
 - `open_workspace`
 - `read`
@@ -147,6 +146,13 @@ In this mode, `write`, `edit`, `bash`, `grep`, `glob`, and `ls` are not
 registered. `exec_command` returns a process session ID when a command is still
 running after its yield window. Use `write_stdin` to poll it, send input, resize
 a PTY, or send Ctrl-C. Set `tty: true` only for commands that need a terminal.
+
+For DevSpace Ultra production use, `DEVSPACE_TOOL_MODE=ultra` is the compatibility
+superset. It exposes the Codex-style tools above together with `write`, `edit`,
+`bash`, `grep`, `glob`, and `ls`. Prefer `apply_patch` and `exec_command` for new
+agent workflows; retain the legacy aliases for ChatGPT clients with cached tool
+schemas and for non-Codex agents. Never repeat one operation through both tool
+families.
 
 ## Show Changes
 
@@ -199,14 +205,21 @@ Goal Dock. A Plan can be used underneath the Goal as the current execution
 route, but completing a Plan does not complete the Goal.
 
 Each physical Goal turn remains a normal user-visible ChatGPT turn. The agent
-does meaningful work, verifies progress, and gives the user a complete visible
-round report first. Only after that report does it call
-`devspace_goal_turn_report` as the final action of the turn. If the Goal remains
-active, the Goal Dock atomically claims a continuation lease and uses the
-ChatGPT MCP App `sendFollowUpMessage` host bridge to start the next assistant
-turn. The next turn begins by redeeming that continuation with
-`devspace_goal_round_begin`. This avoids CDP composer automation and does not
-insert a synthetic user message into the visible transcript.
+does meaningful work and verifies progress, then calls
+`devspace_goal_turn_report` as the final **tool call** immediately before its
+visible final round report. After that tool returns it emits exactly one complete
+visible final response and calls no more tools in that physical turn.
+
+If the Goal remains active, the fresh zero-visual Relay for that report calls
+app-only `devspace_goal_continuation(action="dispatch")`. The backend owns the
+continuation lease and `ClassicGoalHostBridge` locates the matching Chat-mode
+Goal widget by `goalId`, then invokes ChatGPT Classic's raw native hidden Tool
+follow-up transport. The next turn begins by redeeming that continuation with
+`devspace_goal_round_begin`. Public background widget
+`window.openai.sendFollowUpMessage` is deliberately not used because third-party
+Chat-mode widgets require synchronous user activation. The backend bridge keeps
+the native hidden-follow-up semantics without typing into the composer or
+inserting a synthetic user message into the visible transcript.
 
 Goal completion requires evidence for every stored success criterion. A Goal
 cannot be marked blocked until the runtime has observed three consecutive
@@ -217,10 +230,20 @@ are persisted and tolerate renderer reloads, send/ack races, bounded lease
 expiry, duplicate redemption attempts, and backend restart.
 
 The Goal Dock uses `devspace_goal_status` to refresh authoritative backend
-state. `devspace_goal_continuation` is app-only; it is not exposed to the model.
-Only Goal start/mount render the Dock, so later round transitions do not add a
-new Goal card on every turn. Chat Swarm worker loops remain backend-only and do
-not start or mount user-facing Goal Mode.
+state and owns Pause/Resume/Stop only. Resume arms one backend `dispatch`;
+ordinary round-to-round dispatch comes from the fresh per-round Relay.
+`devspace_goal_continuation` is app-only and is not exposed to the model. The
+single persistent Goal Dock is not duplicated across rounds; the tiny Relay is
+expected once per reported round.
+
+Secondary Main runtimes already expose deterministic CDP ports. Canonical
+Main-01 uses port 9721 when debug-enabled. `ClassicPrimaryDebugGuard` protects an
+already-running long-lived Main-01 when the backend first starts, then repairs
+only a fresh startup or later changed PID lacking 9721. The repair targets only
+the canonical package, uses an expected-PID race guard, keeps debug access bound
+to loopback, does not modify Windows `chatgpt://` ownership, and has a normal
+canonical-app restore fallback. Chat Swarm worker loops remain backend-only and
+do not start or mount user-facing Goal Mode.
 
 Goal Mode still does not solve ChatGPT Classic context-window exhaustion. Main
 Context Guardian / Auto Compact v2 is a separate later subsystem.

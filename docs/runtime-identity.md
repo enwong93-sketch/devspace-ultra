@@ -1,6 +1,6 @@
 # ChatGPT Classic Runtime Identity Safety
 
-Status: **DevSpace Ultra v0.4.0 (unreleased)**. Windows-only ChatGPT Classic package-identity layer.
+Status: **Introduced in DevSpace Ultra v0.4.0; maintained in current v0.5.0**. Windows-only ChatGPT Classic package-identity layer.
 
 DevSpace Ultra creates isolated ChatGPT Classic AppX **Worker** packages and separate user-facing **Interactive/Main** packages. Neither role may become a global substitute for the user's canonical Primary/Main-01 installation.
 
@@ -83,6 +83,8 @@ A protected runtime may be used as a **read-only** seed source. Session seeding 
 ### First-use Interactive authentication
 
 Interactive setup uses an ordered local session-source pool. A verified signed-in secondary Main is preferred first because it exposes a dedicated Interactive CDP port and can seed a new Main entirely in memory. A verified signed-in Worker CDP runtime is the next zero-interruption source. Only after those sources are unavailable does DevSpace fall back to canonical Main-01's encrypted profile.
+
+Session-source eligibility is based on authentication health, not turn idleness. ChatGPT temporarily marks the composer disabled while a signed-in Main or Worker is generating; that state must **not** disqualify the runtime as a read-only CDP Session Seed source. v0.5 live acceptance caught the old false-negative because Main-02/Main-03 were both busy, which incorrectly exhausted the zero-interruption source pool and reached the Primary fallback. The gate now ignores `composerDisabled` for source discovery while still requiring a composer to exist, no login UI, and no expired-account signal. A subsequent Main-04 reseed live gate selected `Main-02` through `cdp-session-seed` with `PrimaryRestarted=false` and identical Main-01 PID before/after.
 
 `chat-swarm-classic-auth-seed.mjs` can take a consistent encrypted SQLite snapshot without decrypting or printing authentication values. The Main-02 live gate discovered an important Windows behavior: the canonical Store-packaged Main-01 process can keep its Cookies database under an exclusive file-sharing lock (`0x80070020`) while it is running. The approved v0.4.0 zero-login policy therefore permits one **controlled canonical Primary close → encrypted snapshot → relaunch → signed-in composer verification** when the online Primary snapshot is blocked and no CDP source exists. The operation is fail-closed: `PrimaryRestarted=true` can be reported as successful only when `PrimaryRestored=true` and canonical Main-01 is visible/signed in again. Secondary Mains and Workers are never stopped by that helper.
 

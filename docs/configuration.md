@@ -97,12 +97,15 @@ MCP clients discover metadata from:
 | --- | --- |
 | `minimal` | Default. Exposes `open_workspace`, `read`, `write`, `edit`, and `bash`. Clients use `bash` with tools such as `rg`, `find`, and `ls` for inspection. |
 | `full` | Exposes the minimal tools plus dedicated `grep`, `glob`, and `ls` tools. |
-| `codex` | Experimental. Exposes `open_workspace`, `read`, `apply_patch`, `exec_command`, and `write_stdin`. Existing mutation and shell tools are hidden. |
+| `codex` | Exposes `open_workspace`, `read`, `apply_patch`, `exec_command`, and `write_stdin`. Existing mutation and shell aliases are hidden. |
+| `ultra` | Recommended DevSpace Ultra production surface. Exposes the full legacy workspace/search set **and** the Codex aliases `apply_patch`, `exec_command`, and `write_stdin`, so cached ChatGPT schemas and Codex-style agents remain compatible during migration. |
 
 `DEVSPACE_MINIMAL_TOOLS` remains a backward-compatible alias when
 `DEVSPACE_TOOL_MODE` is unset: `1` selects `minimal` and `0` selects `full`.
-The `codex` mode must be selected through `DEVSPACE_TOOL_MODE` and always uses
-its fixed short tool names regardless of `DEVSPACE_TOOL_NAMING`.
+`codex` and `ultra` must be selected through `DEVSPACE_TOOL_MODE` or the persisted
+`toolMode` config key. Both use fixed Codex alias names regardless of
+`DEVSPACE_TOOL_NAMING`; `ultra` keeps the legacy names available but agents must
+not execute the same operation through two aliases.
 
 Codex-mode commands run without a PTY by default. Set `tty: true` on
 `exec_command` for interactive terminal programs. PTY support uses the optional
@@ -188,6 +191,20 @@ Default storage:
 Persisted equivalents in `~/.devspace/config.json` are `pluginsEnabled`, `pluginsDir`, `capabilityRegistryPath`, and `pluginPaths`.
 
 Managed downloads are separate from execution trust: `capability_install` defaults to disabled/untrusted, while `capability_enable(... trust=true)` explicitly permits executable MCP/command surfaces. Enabled + trusted plugin `SKILL.md` files join normal workspace skill discovery automatically. Shared MCP services are backend-pooled; stateful stdio MCPs can use `capability_instance` for separate exclusive instances with ephemeral per-project environment values such as a Blender bridge port. See [Unified Agent Capability Runtime](capability-runtime.md).
+
+## ChatGPT Classic Main safety — v0.5
+
+User-facing ChatGPT Classic Main runtimes have three separate Chat-mode safety/continuity layers enabled by default:
+
+| Variable | Default | Persisted config key | Purpose |
+| --- | --- | --- | --- |
+| `DEVSPACE_CLASSIC_STREAM_RECOVERY` | `1` | `classicStreamRecoveryEnabled` | Repair a stale foreground renderer only after a matching active-conversation `stream_status` transport failure and authoritative server `COMPLETE`. |
+| `DEVSPACE_CONTEXT_GUARDIAN` | `1` | `contextGuardianEnabled` | Enable native-model-aware Main context accounting, prospective safety guard, structured checkpointing, and authorized hidden Goal-continuation rollover when required. Background polling is checkpoint-only and never creates/sends a fresh Chat. |
+| `DEVSPACE_CLASSIC_HOST_OVERLAY` | `1` | `classicHostOverlayEnabled` | Project the backend-authoritative Goal directly above the owning Classic Chat composer and the current Plan as a compact top-right HUD. The projection reuses Context Guardian CDP sessions and is bound to the exact owner conversation. |
+
+All three features support **Chat mode only**. Stream Recovery never reloads merely because a model is slow: normal renderer progress cancels recovery, the same conversation must remain active, server status must be `COMPLETE`, and recovery is one-shot/cooldown protected. Context Guardian uses the active Classic-native model window plus the strongest available host/snapshot/ledger usage signal rather than a fixed global ceiling or fixed 90% trigger; background pressure checks only checkpoint, while an already-authorized Goal Host Bridge continuation may perform the verified hidden rollover. Host Overlay is a projection only: GoalRuntime and PlanRuntime remain the sole state authorities. It persists only a bounded `goalId + runtimeKey + conversationId` owner pointer, hides on other chats/Main runtimes, and transfers that pointer only after a verified rollover. The original transcript MCP Apps remain compatible fallback/control surfaces.
+
+For the complete trigger rules, privacy boundaries, Main-vs-Worker split, rollover behavior, and verification commands, see [ChatGPT Classic Chat Safety](classic-chat-safety.md).
 
 ## Automatic Conversation Continuity
 
