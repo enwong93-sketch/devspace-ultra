@@ -56,6 +56,7 @@ import { ClassicNativeUsageEvidenceStore } from "./classic-native-usage-evidence
 import { ClassicTurnDeliveryEvidenceStore } from "./classic-turn-delivery-evidence.js";
 import { GoalRunProgressSupervisor } from "./goal-run-progress-supervisor.js";
 import { installGoalToolProgress } from "./goal-tool-progress.js";
+import { createMemoryDiagnostics } from "./memory-diagnostics.js";
 // ChatGPT/OpenAI MCP clients may reconnect without closing the previous transport.
 // Keep only a short reconnect window and a small inactive-session tail. Long-lived
 // in-flight calls are protected separately by McpSessionRegistry acquire/release.
@@ -63,6 +64,7 @@ const MCP_SESSION_IDLE_TIMEOUT_MS = 30 * 1_000;
 const MCP_SESSION_CLEANUP_INTERVAL_MS = 5 * 1_000;
 const MCP_MAX_INACTIVE_SESSIONS = 32;
 const MCP_MAX_EVENT_STREAMS = 40;
+const MCP_MAX_SESSIONS = 40;
 const WORKSPACE_APP_URI = "ui://devspace/workspace-app.html";
 const WORKSPACE_APP_MANIFEST_ENTRY = "workspace-app.html";
 const PLAN_CARD_URI = "ui://devspace/plan-card.html";
@@ -1618,6 +1620,7 @@ export function createServer(config = loadConfig(), options = {}) {
     const transports = new McpSessionRegistry({
         maxInactiveSessions: MCP_MAX_INACTIVE_SESSIONS,
         maxEventStreams: MCP_MAX_EVENT_STREAMS,
+        maxSessions: MCP_MAX_SESSIONS,
     });
     const mcpUrl = new URL("/mcp", config.publicBaseUrl);
     const resourceServerUrl = resourceUrlFromServerUrl(mcpUrl);
@@ -1648,6 +1651,9 @@ export function createServer(config = loadConfig(), options = {}) {
             error: error instanceof Error ? error.message : String(error),
         });
     });
+    const classicCdpOptions = Array.isArray(config.classicMainDebugPorts)
+        ? { ports: config.classicMainDebugPorts }
+        : {};
     const primaryDebugGuard = new ClassicPrimaryDebugGuard();
     const hostOverlayOwnerStore = createClassicHostOverlayOwnerStore({ stateDir: config.stateDir });
     const turnDeliveryEvidence = new ClassicTurnDeliveryEvidenceStore({
@@ -1655,6 +1661,7 @@ export function createServer(config = loadConfig(), options = {}) {
     });
     const turnDeliveryEvidenceReady = turnDeliveryEvidence.load().catch(() => turnDeliveryEvidence.snapshot());
     const goalHostBridge = new ClassicGoalHostBridge({
+        ...classicCdpOptions,
         beforeDispatch: config.passiveCore ? undefined : () => primaryDebugGuard.pollOnce(),
     });
     const goalRoundCompletionGuard = new ClassicGoalRoundCompletionGuard({
@@ -1699,7 +1706,7 @@ export function createServer(config = loadConfig(), options = {}) {
             runtimePort: Number.isInteger(snapshot?.runtimePort) ? snapshot.runtimePort : null,
         }),
     });
-    const streamRecoveryAdapter = new ClassicStreamRecoveryCdpAdapter();
+    const streamRecoveryAdapter = new ClassicStreamRecoveryCdpAdapter(classicCdpOptions);
     const streamRecoveryGuard = new ClassicStreamRecoveryGuard({
         inspect: (runtimeKey) => streamRecoveryAdapter.inspect(runtimeKey),
         checkStreamStatus: (runtimeKey, conversationId) => streamRecoveryAdapter.checkStreamStatus(runtimeKey, conversationId),
@@ -1735,7 +1742,7 @@ export function createServer(config = loadConfig(), options = {}) {
         statePath: join(config.stateDir, "classic-native-usage-evidence.json"),
     });
     const nativeUsageEvidenceReady = nativeUsageEvidence.load().catch(() => nativeUsageEvidence.snapshot());
-    const turnTransportObserver = new ClassicTurnTransportObserver();
+    const turnTransportObserver = new ClassicTurnTransportObserver(classicCdpOptions);
     turnTransportObserver.setHandlers({
         onConversationIdentity: async (event) => {
             await conversationAuthorityReady;
@@ -1756,7 +1763,7 @@ export function createServer(config = loadConfig(), options = {}) {
             error: error instanceof Error ? error.message : String(error),
         });
     });
-    const contextMetadataAdapter = new ClassicContextMetadataCdpAdapter();
+    const contextMetadataAdapter = new ClassicContextMetadataCdpAdapter(classicCdpOptions);
     let contextRollover = null;
     const hostOverlayAdapter = new ClassicHostOverlayContextAdapter({ contextAdapter: contextMetadataAdapter });
     const hostOverlayProjection = new ClassicHostOverlayProjection({
@@ -2001,47 +2008,17 @@ export function createServer(config = loadConfig(), options = {}) {
             res.status(403).json({ ok: false, error: "Memory diagnostics are loopback-only." });
             return;
         }
-        const memory = process.memoryUsage();
-        const mcpDiagnostics = transports.diagnostics();
-        const contextStatus = contextMetadataAdapter.status();
-        const streamStatus = streamRecoveryAdapter.status();
-        const contextRuntimes = Array.isArray(contextStatus?.runtimes) ? contextStatus.runtimes : [];
-        const streamRuntimes = Array.isArray(streamStatus?.runtimes) ? streamStatus.runtimes : [];
         res.setHeader("Cache-Control", "no-store");
-        res.json({
-            ok: true,
-            pid: process.pid,
-            uptimeSeconds: Math.floor(process.uptime()),
-            memory: {
-                rss: Number(memory.rss || 0),
-                heapTotal: Number(memory.heapTotal || 0),
-                heapUsed: Number(memory.heapUsed || 0),
-                external: Number(memory.external || 0),
-                arrayBuffers: Number(memory.arrayBuffers || 0),
-            },
-            registries: {
-                mcpSessions: mcpDiagnostics.sessions,
-                mcpActiveRequests: mcpDiagnostics.activeRequests,
-                mcpEventStreams: mcpDiagnostics.eventStreams,
-                mcpEventStreamsClosing: mcpDiagnostics.eventStreamsClosing,
-                mcpMaxEventStreams: mcpDiagnostics.maxEventStreams,
-                mcpOldestActivityAgeMs: mcpDiagnostics.oldestActivityAgeMs,
-                mcpNewestActivityAgeMs: mcpDiagnostics.newestActivityAgeMs,
-                processSessions: Number(processSessions?.sessions?.size || 0),
-                workspaceContexts: Number(workspaces?.inMemorySize || 0),
-            },
-            contextCdp: {
-                connected: Number(contextStatus?.connected || 0),
-                pendingCalls: contextRuntimes.reduce((sum, runtime) => sum + Number(runtime?.pendingCdpCalls || 0), 0),
-                pendingUsageRequests: contextRuntimes.reduce((sum, runtime) => sum + Number(runtime?.pendingUsageRequests || 0), 0),
-                pendingIdentityCorrelations: contextRuntimes.reduce((sum, runtime) => sum + Number(runtime?.pendingIdentityCorrelations || 0), 0),
-            },
-            streamRecoveryCdp: {
-                connected: Number(streamStatus?.connected || 0),
-                pendingCalls: streamRuntimes.reduce((sum, runtime) => sum + Number(runtime?.pendingCdpCalls || 0), 0),
-                trackedRequestUrls: streamRuntimes.reduce((sum, runtime) => sum + Number(runtime?.trackedRequestUrls || 0), 0),
-            },
-        });
+        res.json(createMemoryDiagnostics({
+            transports,
+            processSessions,
+            workspaces,
+            capabilityRuntime,
+            turnTransportObserver,
+            contextMetadataAdapter,
+            streamRecoveryAdapter,
+            config,
+        }));
     });
     app.get("/__devspace/stream-recovery/status", (req, res) => {
         const remoteAddress = String(req.socket?.remoteAddress ?? "");
@@ -2505,7 +2482,10 @@ export function createServer(config = loadConfig(), options = {}) {
                     sessionIdGenerator: () => randomUUID(),
                     onsessioninitialized: (newSessionId) => {
                         if (transport) {
-                            transports.register(newSessionId, transport);
+                            const registered = transports.register(newSessionId, transport);
+                            if (!registered) {
+                                throw new Error("MCP session capacity exceeded; initialize was rejected without evicting active tool work.");
+                            }
                             transports.acquire(newSessionId);
                             trackedSessionId = newSessionId;
                         }

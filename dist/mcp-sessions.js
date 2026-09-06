@@ -3,6 +3,7 @@ export class McpSessionRegistry {
     now;
     maxInactiveSessions;
     maxEventStreams;
+    maxSessions;
     constructor(options = {}) {
         this.now = options.now ?? Date.now;
         this.maxInactiveSessions = options.maxInactiveSessions == null
@@ -11,6 +12,9 @@ export class McpSessionRegistry {
         this.maxEventStreams = options.maxEventStreams == null
             ? Number.POSITIVE_INFINITY
             : Math.max(1, Number(options.maxEventStreams) || 1);
+        this.maxSessions = options.maxSessions == null
+            ? Number.POSITIVE_INFINITY
+            : Math.max(1, Number(options.maxSessions) || 1);
     }
     get size() {
         return this.sessions.size;
@@ -27,9 +31,14 @@ export class McpSessionRegistry {
             eventStreams: entries.reduce((sum, entry) => sum + Number(entry.eventStreamRequests || 0), 0),
             eventStreamsClosing: entries.reduce((sum, entry) => sum + (entry.eventStreamClosing ? 1 : 0), 0),
             maxEventStreams: Number.isFinite(this.maxEventStreams) ? this.maxEventStreams : null,
+            maxSessions: Number.isFinite(this.maxSessions) ? this.maxSessions : null,
         };
     }
     register(sessionId, transport) {
+        if (this.sessions.has(sessionId)) {
+            void closeSessions([{ sessionId, transport }]);
+            return false;
+        }
         this.sessions.set(sessionId, {
             transport,
             lastActivityAt: this.now(),
@@ -38,7 +47,8 @@ export class McpSessionRegistry {
             eventStreamStartedAt: null,
             eventStreamClosing: false,
         });
-        this.#enforceInactiveCap();
+        this.#enforceInactiveCap(sessionId);
+        return this.#enforceSessionCap(sessionId);
     }
     get(sessionId) {
         const entry = this.sessions.get(sessionId);
@@ -144,13 +154,55 @@ export class McpSessionRegistry {
             }
         }
     }
-    #enforceInactiveCap() {
+    #enforceSessionCap(newSessionId) {
+        if (!Number.isFinite(this.maxSessions) || this.sessions.size <= this.maxSessions)
+            return true;
+        const evicted = [];
+        const evictOldest = (candidates) => {
+            for (const { sessionId, entry } of candidates) {
+                if (this.sessions.size <= this.maxSessions)
+                    break;
+                if (!this.sessions.delete(sessionId))
+                    continue;
+                evicted.push({ sessionId, transport: entry.transport });
+            }
+        };
+        const existing = Array.from(this.sessions, ([sessionId, entry]) => ({ sessionId, entry }))
+            .filter(({ sessionId }) => sessionId !== newSessionId);
+        evictOldest(existing
+            .filter(({ entry }) => Number(entry.activeRequests || 0) === 0)
+            .sort((a, b) => Number(a.entry.lastActivityAt || 0) - Number(b.entry.lastActivityAt || 0)));
+        if (this.sessions.size > this.maxSessions) {
+            evictOldest(existing
+                .filter(({ entry }) => {
+                const activeRequests = Number(entry.activeRequests || 0);
+                const eventStreamRequests = Number(entry.eventStreamRequests || 0);
+                return activeRequests > 0 && eventStreamRequests >= activeRequests;
+            })
+                .sort((a, b) => Number(a.entry.eventStreamStartedAt || a.entry.lastActivityAt || 0)
+                - Number(b.entry.eventStreamStartedAt || b.entry.lastActivityAt || 0)));
+        }
+        if (this.sessions.size > this.maxSessions) {
+            const entry = this.sessions.get(newSessionId);
+            if (entry && this.sessions.delete(newSessionId)) {
+                evicted.push({ sessionId: newSessionId, transport: entry.transport });
+            }
+            void closeSessions(evicted);
+            return false;
+        }
+        void closeSessions(evicted);
+        return true;
+    }
+    #enforceInactiveCap(protectedSessionId = null) {
         if (!Number.isFinite(this.maxInactiveSessions))
             return;
-        const inactive = Array.from(this.sessions, ([sessionId, entry]) => ({ sessionId, entry }))
+        const allInactive = Array.from(this.sessions, ([sessionId, entry]) => ({ sessionId, entry }))
             .filter(({ entry }) => Number(entry.activeRequests || 0) === 0)
             .sort((a, b) => Number(a.entry.lastActivityAt || 0) - Number(b.entry.lastActivityAt || 0));
-        const excess = inactive.slice(0, Math.max(0, inactive.length - this.maxInactiveSessions));
+        const excessCount = Math.max(0, allInactive.length - this.maxInactiveSessions);
+        const excess = allInactive
+            .filter(({ sessionId }) => sessionId !== protectedSessionId)
+            .slice(0, excessCount);
         if (!excess.length)
             return;
         const sessions = [];

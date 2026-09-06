@@ -93,4 +93,64 @@ function fakeTransport(name, closed, eventStreamsClosed = []) {
   assert.equal((await registry.closeIdle(30_000)).length, 1);
 }
 
-console.log(JSON.stringify({ ok: true, gate: "mcp-session-registry", inFlightProtected: true, inactiveBounded: true, eventStreamsBounded: true }));
+{
+  let now = 0;
+  const closed = [];
+  const registry = new McpSessionRegistry({
+    now: () => now,
+    maxInactiveSessions: 32,
+    maxEventStreams: 40,
+    maxSessions: 40,
+  });
+  for (let index = 0; index < 32; index += 1) {
+    assert.equal(registry.register(`old-${index}`, fakeTransport(`old-${index}`, closed)), true);
+    now += 1;
+  }
+  for (let index = 0; index < 32; index += 1) {
+    const id = `active-stream-${index}`;
+    assert.equal(registry.register(id, fakeTransport(id, closed)), true);
+    assert.ok(registry.acquire(id));
+    registry.markEventStreamOpen(id);
+    now += 1;
+  }
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(registry.size, 40, "inactive and active-stream limits must not add together into an unbounded total transport count");
+  assert.equal(registry.diagnostics().maxSessions, 40);
+  assert.deepEqual(closed, Array.from({ length: 24 }, (_, index) => `old-${index}`), "global cap must evict the oldest inactive transports first");
+  for (let index = 0; index < 32; index += 1) assert.ok(registry.get(`active-stream-${index}`));
+}
+
+{
+  const closed = [];
+  const registry = new McpSessionRegistry({ maxSessions: 2 });
+  assert.equal(registry.register("tool-a", fakeTransport("tool-a", closed)), true);
+  assert.ok(registry.acquire("tool-a"));
+  assert.equal(registry.register("tool-b", fakeTransport("tool-b", closed)), true);
+  assert.ok(registry.acquire("tool-b"));
+  assert.equal(registry.register("overflow", fakeTransport("overflow", closed)), false, "new initialize must fail closed when every retained session has a real in-flight tool request");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.ok(registry.get("tool-a"));
+  assert.ok(registry.get("tool-b"));
+  assert.equal(registry.get("overflow"), undefined);
+  assert.deepEqual(closed, ["overflow"], "the rejected new transport must be closed without evicting active tool work");
+}
+
+{
+  let now = 0;
+  const closed = [];
+  const registry = new McpSessionRegistry({ now: () => now, maxSessions: 2, maxEventStreams: 2 });
+  for (const id of ["stream-old", "stream-newer"]) {
+    assert.equal(registry.register(id, fakeTransport(id, closed)), true);
+    assert.ok(registry.acquire(id));
+    registry.markEventStreamOpen(id);
+    now += 1;
+  }
+  assert.equal(registry.register("replacement", fakeTransport("replacement", closed)), true, "a fresh initialize may replace the oldest session whose only active request is a standalone SSE stream");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(registry.get("stream-old"), undefined);
+  assert.ok(registry.get("stream-newer"));
+  assert.ok(registry.get("replacement"));
+  assert.deepEqual(closed, ["stream-old"]);
+}
+
+console.log(JSON.stringify({ ok: true, gate: "mcp-session-registry", inFlightProtected: true, inactiveBounded: true, eventStreamsBounded: true, totalTransportsBounded: true }));

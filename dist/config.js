@@ -73,6 +73,24 @@ function parsePathList(value) {
         .map((entry) => entry.trim())
         .filter(Boolean) ?? []);
 }
+function parsePortList(value, name) {
+    if (value === undefined || value === null || value === "")
+        return undefined;
+    const entries = Array.isArray(value) ? value : String(value).split(",");
+    const ports = [];
+    const seen = new Set();
+    for (const entry of entries) {
+        const port = Number(String(entry).trim());
+        if (!Number.isInteger(port) || port < 1 || port > 65535) {
+            throw new Error(`Invalid ${name}: ${entry}`);
+        }
+        if (!seen.has(port)) {
+            seen.add(port);
+            ports.push(port);
+        }
+    }
+    return ports;
+}
 function parseStringList(value, fallback) {
     const entries = value
         ?.split(",")
@@ -200,6 +218,7 @@ export function loadConfig(env = process.env) {
         passiveCore: env.DEVSPACE_PASSIVE_CORE === undefined
             ? false
             : parseBoolean(env.DEVSPACE_PASSIVE_CORE),
+        classicMainDebugPorts: parsePortList(env.DEVSPACE_CLASSIC_MAIN_DEBUG_PORTS ?? files.config.classicMainDebugPorts, "DEVSPACE_CLASSIC_MAIN_DEBUG_PORTS"),
         classicStreamRecoveryEnabled: env.DEVSPACE_CLASSIC_STREAM_RECOVERY === undefined
             ? files.config.classicStreamRecoveryEnabled !== false
             : parseBoolean(env.DEVSPACE_CLASSIC_STREAM_RECOVERY),

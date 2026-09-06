@@ -38,6 +38,14 @@ try {
   assert.equal(persistedUltra.artifactsEnabled, true);
   assert.equal(loadConfig({ ...baseEnv, DEVSPACE_TOOL_MODE: "codex" }).toolMode, "codex", "explicit environment override remains supported");
 
+  writeFileSync(join(configDir, "config.json"), `${JSON.stringify({ classicMainDebugPorts: [19001, 19002] })}\n`, "utf8");
+  assert.deepEqual(loadConfig(baseEnv).classicMainDebugPorts, [19001, 19002], "memory/canary Cores must be able to isolate Classic observers from production debug ports through persisted config");
+  assert.deepEqual(loadConfig({ ...baseEnv, DEVSPACE_CLASSIC_MAIN_DEBUG_PORTS: "19003,19004,19003" }).classicMainDebugPorts, [19003, 19004], "explicit debug-port override must be parsed and deduplicated");
+  assert.throws(
+    () => loadConfig({ ...baseEnv, DEVSPACE_CLASSIC_MAIN_DEBUG_PORTS: "9721,not-a-port" }),
+    /DEVSPACE_CLASSIC_MAIN_DEBUG_PORTS/,
+  );
+
   writeFileSync(join(configDir, "config.json"), `\uFEFF${JSON.stringify({ classicHostOverlayEnabled: false })}\n`, "utf8");
   assert.equal(loadConfig(baseEnv).classicHostOverlayEnabled, false, "UTF-8 BOM config files should parse normally");
 

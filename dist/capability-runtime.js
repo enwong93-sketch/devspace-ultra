@@ -1829,6 +1829,17 @@ export class CapabilityRuntime {
     throw new Error(`Unsupported capability kind: ${input.kind}`);
   }
 
+  diagnostics() {
+    return {
+      enabled: this.enabled === true,
+      discoveredPlugins: this.discovered.size,
+      mcpClients: this.mcpClients.size,
+      mcpConnecting: this.mcpConnecting.size,
+      mcpStartupTails: this.mcpStartupTails.size,
+      mcpInstances: this.mcpInstances.size,
+    };
+  }
+
   async close() {
     for (const id of [...this.discovered.keys()]) await this.closePluginClients(id);
   }

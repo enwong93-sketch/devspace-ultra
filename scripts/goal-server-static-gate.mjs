@@ -9,7 +9,8 @@ assert.match(source, /import \{ ClassicGoalHostBridge \} from "\.\/goal-host-bri
 assert.match(source, /const GOAL_DOCK_URI = "ui:\/\/devspace\/goal-dock\.html";/);
 assert.match(source, /const GOAL_RELAY_URI = "ui:\/\/devspace\/goal-continuation-relay\.html";/);
 assert.match(source, /new GoalRuntime\(\{\s*stateDir: config\.stateDir,?\s*\}\)/s);
-assert.match(source, /new ClassicGoalHostBridge\(\{\s*beforeDispatch:\s*config\.passiveCore\s*\?\s*undefined\s*:\s*\(\) => primaryDebugGuard\.pollOnce\(\),?\s*\}\)/s);
+assert.match(source, /const\s+classicCdpOptions\s*=\s*Array\.isArray\(config\.classicMainDebugPorts\)[\s\S]{0,180}ports:\s*config\.classicMainDebugPorts/, "Goal Host Bridge must share the configured bounded Classic port set");
+assert.match(source, /new ClassicGoalHostBridge\(\{\s*\.\.\.classicCdpOptions,\s*beforeDispatch:\s*config\.passiveCore\s*\?\s*undefined\s*:\s*\(\) => primaryDebugGuard\.pollOnce\(\),?\s*\}\)/s);
 assert.match(source, /registerAppResource\(server, "DevSpace Goal Dock", GOAL_DOCK_URI,/);
 assert.match(source, /new URL\("\.\/ui\/goal-dock\.html", import\.meta\.url\)/);
 assert.match(source, /registerAppResource\(server, "DevSpace Goal Continuation Relay", GOAL_RELAY_URI,/);
