@@ -1,0 +1,353 @@
+import { createHash } from "node:crypto";
+
+const DEFAULT_TIMEOUT_MS = 5_000;
+const CANDIDATE_PROTOCOL_VERSION = "2025-11-25";
+
+function canonicalize(value) {
+  if (Array.isArray(value)) return value.map(canonicalize);
+  if (!value || typeof value !== "object") return value;
+  const result = {};
+  for (const key of Object.keys(value).sort()) result[key] = canonicalize(value[key]);
+  return result;
+}
+
+function normalizeTools(tools) {
+  if (!Array.isArray(tools)) throw new Error("tools must be an array.");
+  return tools
+    .map((tool) => ({
+      name: String(tool?.name ?? ""),
+      inputSchema: tool?.inputSchema ?? null,
+      annotations: tool?.annotations ?? null,
+    }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+export function schemaFingerprint(tools) {
+  const canonical = canonicalize(normalizeTools(tools));
+  return createHash("sha256").update(JSON.stringify(canonical)).digest("hex");
+}
+
+function normalizeBaseUrl(value, label) {
+  const parsed = new URL(String(value ?? "").trim());
+  parsed.hash = "";
+  parsed.search = "";
+  parsed.pathname = "/";
+  const normalized = parsed.toString().replace(/\/$/, "");
+  if (!normalized) throw new Error(`${label} is required.`);
+  return normalized;
+}
+
+function requireLoopbackBase(value) {
+  const base = normalizeBaseUrl(value, "coreBaseUrl");
+  const host = new URL(base).hostname.toLowerCase();
+  if (!["127.0.0.1", "localhost", "::1", "[::1]"].includes(host)) {
+    throw new Error("Stable Gateway candidate Core must use a loopback address.");
+  }
+  return base;
+}
+
+function authorizationHeader(value) {
+  const token = String(value ?? "").trim();
+  if (!token) throw new Error("bearerToken is required for candidate MCP probes.");
+  return /^bearer\s+/i.test(token) ? token : `Bearer ${token}`;
+}
+
+function safeError(error) {
+  const name = error instanceof Error ? error.name : "Error";
+  return { error: name };
+}
+
+async function fetchJson(url, options, timeoutMs) {
+  const response = await fetch(url, {
+    redirect: "manual",
+    cache: "no-store",
+    ...options,
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  let body = null;
+  try { body = await response.json(); } catch {}
+  return { response, body };
+}
+
+function parseMcpPayload(text) {
+  const raw = String(text ?? "").trim();
+  if (!raw) return null;
+  try { return JSON.parse(raw); } catch {}
+  for (const line of raw.split(/\r?\n/)) {
+    if (!line.startsWith("data:")) continue;
+    const data = line.slice(5).trim();
+    if (!data || data === "[DONE]") continue;
+    try { return JSON.parse(data); } catch {}
+  }
+  return null;
+}
+
+async function mcpPost(coreBase, authorization, body, { backendSessionId, protocolVersion, timeoutMs }) {
+  const response = await fetch(`${coreBase}/mcp`, {
+    method: "POST",
+    redirect: "manual",
+    cache: "no-store",
+    signal: AbortSignal.timeout(timeoutMs),
+    headers: {
+      authorization,
+      accept: "application/json, text/event-stream",
+      "content-type": "application/json",
+      ...(backendSessionId ? { "mcp-session-id": backendSessionId } : {}),
+      ...(protocolVersion ? { "mcp-protocol-version": protocolVersion } : {}),
+    },
+    body: JSON.stringify(body),
+  });
+  const text = await response.text();
+  return {
+    status: response.status,
+    ok: response.ok,
+    headers: response.headers,
+    payload: parseMcpPayload(text),
+  };
+}
+
+export async function readCoreSchemaFingerprint({
+  coreBaseUrl,
+  bearerToken,
+  timeoutMs = DEFAULT_TIMEOUT_MS,
+} = {}) {
+  const coreBase = requireLoopbackBase(coreBaseUrl);
+  const authorization = authorizationHeader(bearerToken);
+  const boundedTimeout = Number(timeoutMs);
+  if (!Number.isFinite(boundedTimeout) || boundedTimeout <= 0) throw new Error("timeoutMs must be positive.");
+
+  const initializeBody = {
+    jsonrpc: "2.0",
+    id: 1,
+    method: "initialize",
+    params: {
+      protocolVersion: CANDIDATE_PROTOCOL_VERSION,
+      capabilities: {},
+      clientInfo: { name: "devspace-stable-gateway-baseline", version: "0.5.0" },
+    },
+  };
+  const initialized = await mcpPost(coreBase, authorization, initializeBody, { timeoutMs: boundedTimeout });
+  const backendSessionId = String(initialized.headers.get("mcp-session-id") ?? "").trim();
+  const protocolVersion = String(initialized.payload?.result?.protocolVersion ?? CANDIDATE_PROTOCOL_VERSION);
+  if (!initialized.ok || !backendSessionId || !initialized.payload?.result) {
+    throw new Error(`Unable to initialize fresh active Core schema probe (status ${initialized.status}).`);
+  }
+
+  const notification = await mcpPost(coreBase, authorization, {
+    jsonrpc: "2.0",
+    method: "notifications/initialized",
+    params: {},
+  }, {
+    backendSessionId,
+    protocolVersion,
+    timeoutMs: boundedTimeout,
+  });
+  if (!notification.ok) {
+    throw new Error(`Unable to initialize fresh active Core schema session (status ${notification.status}).`);
+  }
+
+  const listed = await mcpPost(coreBase, authorization, {
+    jsonrpc: "2.0",
+    id: 2,
+    method: "tools/list",
+    params: {},
+  }, {
+    backendSessionId,
+    protocolVersion,
+    timeoutMs: boundedTimeout,
+  });
+  const tools = listed.payload?.result?.tools;
+  if (!listed.ok || !Array.isArray(tools)) {
+    throw new Error(`Unable to read fresh active Core tool schema (status ${listed.status}).`);
+  }
+  return {
+    schemaFingerprint: schemaFingerprint(tools),
+    toolCount: tools.length,
+    protocolVersion,
+  };
+}
+
+export async function readSessionSchemaFingerprint({
+  coreBaseUrl,
+  bearerToken,
+  backendSessionId,
+  protocolVersion = CANDIDATE_PROTOCOL_VERSION,
+  timeoutMs = DEFAULT_TIMEOUT_MS,
+} = {}) {
+  const coreBase = requireLoopbackBase(coreBaseUrl);
+  const authorization = authorizationHeader(bearerToken);
+  const sessionId = String(backendSessionId ?? "").trim();
+  if (!sessionId) throw new Error("backendSessionId is required.");
+  const boundedTimeout = Number(timeoutMs);
+  if (!Number.isFinite(boundedTimeout) || boundedTimeout <= 0) throw new Error("timeoutMs must be positive.");
+  const listed = await mcpPost(coreBase, authorization, {
+    jsonrpc: "2.0",
+    id: 1,
+    method: "tools/list",
+    params: {},
+  }, {
+    backendSessionId: sessionId,
+    protocolVersion,
+    timeoutMs: boundedTimeout,
+  });
+  const tools = listed.payload?.result?.tools;
+  if (!listed.ok || !Array.isArray(tools)) {
+    throw new Error(`Unable to read active Core tool schema (status ${listed.status}).`);
+  }
+  return {
+    schemaFingerprint: schemaFingerprint(tools),
+    toolCount: tools.length,
+  };
+}
+
+function authorizationServerMatches(metadata, publicBase) {
+  const expectedIssuer = `${publicBase}/`;
+  const expected = {
+    issuer: expectedIssuer,
+    authorization_endpoint: `${publicBase}/authorize`,
+    token_endpoint: `${publicBase}/token`,
+    registration_endpoint: `${publicBase}/register`,
+    revocation_endpoint: `${publicBase}/revoke`,
+  };
+  return Object.entries(expected).every(([key, value]) => metadata?.[key] === value)
+    && Array.isArray(metadata?.scopes_supported)
+    && metadata.scopes_supported.includes("devspace")
+    && metadata.scopes_supported.includes("offline_access");
+}
+
+export async function probeCandidate({
+  coreBaseUrl,
+  publicBaseUrl,
+  bearerToken,
+  expectedSchemaFingerprint,
+  timeoutMs = DEFAULT_TIMEOUT_MS,
+} = {}) {
+  const coreBase = requireLoopbackBase(coreBaseUrl);
+  const publicBase = normalizeBaseUrl(publicBaseUrl, "publicBaseUrl");
+  const authorization = authorizationHeader(bearerToken);
+  const expectedFingerprint = String(expectedSchemaFingerprint ?? "").trim();
+  if (!/^[a-f0-9]{64}$/i.test(expectedFingerprint)) throw new Error("expectedSchemaFingerprint must be a SHA-256 hex digest.");
+  const boundedTimeout = Number(timeoutMs);
+  if (!Number.isFinite(boundedTimeout) || boundedTimeout <= 0) throw new Error("timeoutMs must be positive.");
+
+  try {
+    const health = await fetchJson(`${coreBase}/healthz`, {}, boundedTimeout);
+    if (!health.response.ok || health.body?.ok !== true) {
+      return { ok: false, stage: "health", status: health.response.status };
+    }
+  } catch (error) {
+    return { ok: false, stage: "health", status: null, ...safeError(error) };
+  }
+
+  const expectedResource = `${publicBase}/mcp`;
+  const expectedIssuer = `${publicBase}/`;
+  let protectedResource;
+  try {
+    const probe = await fetchJson(`${coreBase}/.well-known/oauth-protected-resource/mcp`, {}, boundedTimeout);
+    protectedResource = probe.body;
+    const authorizationServers = Array.isArray(protectedResource?.authorization_servers) ? protectedResource.authorization_servers : [];
+    if (!probe.response.ok || protectedResource?.resource !== expectedResource || !authorizationServers.includes(expectedIssuer)) {
+      return {
+        ok: false,
+        stage: "protected-resource",
+        status: probe.response.status,
+        resource: protectedResource?.resource ?? null,
+      };
+    }
+  } catch (error) {
+    return { ok: false, stage: "protected-resource", status: null, ...safeError(error) };
+  }
+
+  let authorizationServer;
+  try {
+    const probe = await fetchJson(`${coreBase}/.well-known/oauth-authorization-server`, {}, boundedTimeout);
+    authorizationServer = probe.body;
+    if (!probe.response.ok || !authorizationServerMatches(authorizationServer, publicBase)) {
+      return {
+        ok: false,
+        stage: "authorization-server",
+        status: probe.response.status,
+        issuer: authorizationServer?.issuer ?? null,
+        scopes: Array.isArray(authorizationServer?.scopes_supported) ? [...authorizationServer.scopes_supported] : [],
+      };
+    }
+  } catch (error) {
+    return { ok: false, stage: "authorization-server", status: null, ...safeError(error) };
+  }
+
+  const initializeBody = {
+    jsonrpc: "2.0",
+    id: 1,
+    method: "initialize",
+    params: {
+      protocolVersion: CANDIDATE_PROTOCOL_VERSION,
+      capabilities: {},
+      clientInfo: { name: "devspace-stable-gateway-candidate", version: "0.5.0" },
+    },
+  };
+
+  let backendSessionId;
+  let negotiatedProtocol = CANDIDATE_PROTOCOL_VERSION;
+  try {
+    const initialized = await mcpPost(coreBase, authorization, initializeBody, { timeoutMs: boundedTimeout });
+    backendSessionId = String(initialized.headers.get("mcp-session-id") ?? "").trim();
+    negotiatedProtocol = String(initialized.payload?.result?.protocolVersion ?? CANDIDATE_PROTOCOL_VERSION);
+    if (!initialized.ok || !backendSessionId || !initialized.payload?.result) {
+      return { ok: false, stage: "mcp-initialize", status: initialized.status };
+    }
+    const notification = await mcpPost(coreBase, authorization, {
+      jsonrpc: "2.0",
+      method: "notifications/initialized",
+      params: {},
+    }, {
+      backendSessionId,
+      protocolVersion: negotiatedProtocol,
+      timeoutMs: boundedTimeout,
+    });
+    if (!notification.ok) return { ok: false, stage: "mcp-initialized", status: notification.status };
+  } catch (error) {
+    return { ok: false, stage: "mcp-initialize", status: null, ...safeError(error) };
+  }
+
+  let tools;
+  try {
+    const listed = await mcpPost(coreBase, authorization, {
+      jsonrpc: "2.0",
+      id: 2,
+      method: "tools/list",
+      params: {},
+    }, {
+      backendSessionId,
+      protocolVersion: negotiatedProtocol,
+      timeoutMs: boundedTimeout,
+    });
+    tools = listed.payload?.result?.tools;
+    if (!listed.ok || !Array.isArray(tools)) {
+      return { ok: false, stage: "tools-list", status: listed.status };
+    }
+  } catch (error) {
+    return { ok: false, stage: "tools-list", status: null, ...safeError(error) };
+  }
+
+  const fingerprint = schemaFingerprint(tools);
+  if (fingerprint !== expectedFingerprint) {
+    return {
+      ok: false,
+      stage: "schema",
+      schemaFingerprint: fingerprint,
+      expectedSchemaFingerprint: expectedFingerprint,
+      toolCount: tools.length,
+    };
+  }
+
+  return {
+    ok: true,
+    stage: "compatible",
+    resource: expectedResource,
+    issuer: expectedIssuer,
+    scopes: [...authorizationServer.scopes_supported],
+    schemaFingerprint: fingerprint,
+    toolCount: tools.length,
+    protocolVersion: negotiatedProtocol,
+  };
+}

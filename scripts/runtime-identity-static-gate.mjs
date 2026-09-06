@@ -41,8 +41,11 @@ assert.match(controller, /"plan"/);
 assert.match(controller, /ProductionWorkerNumbers/);
 assert.match(controller, /Get-ProtectedWorkerNumbers/);
 assert.match(controller, /function Ensure-WorkerAuthenticated/);
-assert.match(controller, /Find-SessionSeedSource/);
+assert.match(controller, /function Find-SessionSeedSource[\s\S]*Label = "Main-01"[\s\S]*DebugPort = 9721[\s\S]*foreach \(\$number in 2\.\.32\)[\s\S]*Role = "interactive"[\s\S]*DebugPort = 9730 \+ \$number[\s\S]*foreach \(\$number in 1\.\.32\)[\s\S]*Get-WorkerRuntime/,
+  "Worker auth source order must be canonical Main-01 -> signed-in Secondary Main -> signed-in Worker fallback");
 assert.match(controller, /Seed-WorkerSession/);
+assert.match(controller, /Main-01[\s\S]*9721[\s\S]*Test-WorkerSignedIn/, "Worker session seeding must prefer canonical signed-in Main-01 through loopback CDP");
+assert.match(controller, /Find-SessionSeedSource[\s\S]*main-01[\s\S]*interactive[\s\S]*Get-WorkerRuntime/s, "Worker seed priority must be Main-01 -> signed-in secondary Main -> signed-in Worker fallback");
 assert.doesNotMatch(controller, /function Ensure-AuthSeed/);
 assert.doesNotMatch(controller, /function Apply-AuthSeed/);
 

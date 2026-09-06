@@ -48,7 +48,10 @@ function Test-SignedInPort {
         if ($LASTEXITCODE -ne 0) { return $false }
         $payload = ($output -join "`n").Trim() | ConvertFrom-Json
         $probe = $payload.probe
-        return [bool]($probe -and $probe.composer -and -not $probe.composerDisabled -and -not $probe.loginVisible -and -not $probe.accountExpired)
+        # Session-source eligibility is authentication health, not turn idleness.
+        # ChatGPT disables the composer while a Main/Worker is actively generating;
+        # that source is still signed in and remains safe for read-only cookie export.
+        return [bool]($probe -and $probe.composer -and -not $probe.loginVisible -and -not $probe.accountExpired)
     }
     catch { return $false }
 }

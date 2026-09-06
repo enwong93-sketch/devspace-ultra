@@ -529,9 +529,37 @@ function Test-WorkerSignedIn {
 
 function Find-SessionSeedSource {
     param([Parameter(Mandatory)]$TargetRuntime)
-    # A protected interactive runtime is valid as a read-only cookie source. It is
-    # never stopped, navigated or modified by session seeding; CDP only reads the
-    # allowlisted ChatGPT/OpenAI cookie jar in memory.
+
+    # Zero-login source priority is deliberate and user-facing:
+    #   1. canonical Main-01 (the account the operator already signed into),
+    #   2. any verified signed-in secondary Main,
+    #   3. another verified signed-in Worker as a last fallback.
+    # Session seeding is read-only on the source: the CDP helper reads only the
+    # allowlisted ChatGPT/OpenAI cookie jar in memory and never stops/navigates
+    # the source runtime.
+    $primary = [pscustomobject]@{
+        Number = 0
+        WorkerId = "main-01"
+        Label = "Main-01"
+        Role = "primary"
+        DebugPort = 9721
+    }
+    if ((Test-TcpPort -Port $primary.DebugPort) -and (Test-WorkerSignedIn -Runtime $primary)) {
+        return $primary
+    }
+
+    foreach ($number in 2..32) {
+        $candidate = [pscustomobject]@{
+            Number = $number
+            WorkerId = "main-{0:D2}" -f $number
+            Label = "Main-{0:D2}" -f $number
+            Role = "interactive"
+            DebugPort = 9730 + $number
+        }
+        if (-not (Test-TcpPort -Port $candidate.DebugPort)) { continue }
+        if (Test-WorkerSignedIn -Runtime $candidate) { return $candidate }
+    }
+
     foreach ($number in 1..32) {
         if ($number -eq $TargetRuntime.Number) { continue }
         $candidate = Get-WorkerRuntime -Number $number

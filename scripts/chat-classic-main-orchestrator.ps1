@@ -77,7 +77,9 @@ function Invoke-Manager {
     )
     if (-not (Test-Path -LiteralPath $interactiveManager)) { throw "Interactive manager is missing." }
     $output = @(& $interactiveManager -Action $ManagerAction -MainNumber $Number -VerifyTimeoutSeconds $VerifyTimeoutSeconds)
-    if ($LASTEXITCODE -ne 0) { throw "Interactive manager action $ManagerAction failed for Main-$('{0:D2}' -f $Number)." }
+    # The child is another PowerShell script. With ErrorActionPreference=Stop,
+    # terminating errors already propagate. LASTEXITCODE belongs to native
+    # executables and may contain a stale value from commands run inside the child.
     $text = ($output -join "`n").Trim()
     try { return $text | ConvertFrom-Json }
     catch { throw "Interactive manager returned invalid JSON." }

@@ -9,11 +9,15 @@ import { loadDevspaceFiles } from "../dist/user-config.js";
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const statusOnly = process.argv.includes("--status");
 const foreground = process.argv.includes("--foreground");
-const files = loadDevspaceFiles();
+const configDirIndex = process.argv.indexOf("--config-dir");
+const explicitConfigDir = configDirIndex >= 0 ? String(process.argv[configDirIndex + 1] ?? "").trim() : "";
+if (configDirIndex >= 0 && !explicitConfigDir) throw new Error("--config-dir requires a path.");
+const configEnv = explicitConfigDir ? { ...process.env, DEVSPACE_CONFIG_DIR: explicitConfigDir } : process.env;
+const files = loadDevspaceFiles(configEnv);
 const config = files.config ?? {};
-const fixedBase = String(config.edgePublicBaseUrl ?? "").trim().replace(/\/$/, "");
-const fixedPort = Number(config.edgeBackendPort ?? 7677);
-const fixedStateDir = String(config.edgeFixedStateDir ?? join(homedir(), ".local", "share", "devspace-fixed"));
+const fixedBase = String(config.stableGatewayPublicBaseUrl ?? config.edgePublicBaseUrl ?? "").trim().replace(/\/$/, "");
+const fixedPort = Number(config.stableGatewayPort ?? config.edgeBackendPort ?? 7677);
+const fixedStateDir = String(config.stableGatewayStateDir ?? config.edgeFixedStateDir ?? join(homedir(), ".local", "share", "devspace-fixed"));
 const logDir = join(files.dir, "logs");
 const stdoutPath = join(logDir, "fixed-backend.out.log");
 const stderrPath = join(logDir, "fixed-backend.err.log");
@@ -72,15 +76,15 @@ async function main() {
   const childEnv = {
     ...process.env,
     PORT: String(fixedPort),
+    DEVSPACE_CONFIG_DIR: files.dir,
     DEVSPACE_PUBLIC_BASE_URL: fixedBase,
     DEVSPACE_STATE_DIR: fixedStateDir,
     DEVSPACE_ALLOWED_HOSTS: ["localhost", "127.0.0.1", "::1", fixedHost].join(","),
   };
-  delete childEnv.DEVSPACE_CONFIG_DIR;
 
   let child;
   try {
-    child = spawn(process.execPath, ["dist/cli.js", "serve"], {
+    child = spawn(process.execPath, ["scripts/devspace-stable-gateway.mjs"], {
       cwd: packageRoot,
       env: childEnv,
       detached: !foreground,

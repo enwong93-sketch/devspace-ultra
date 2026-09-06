@@ -230,6 +230,32 @@ async function run() {
     const refreshedMcp = await runtime.getMcpClient("fixture-memory", "memory");
     assert.notEqual(refreshedMcp, sharedMcpA);
 
+    await runtime.closeClientKey("fixture-memory::memory");
+    let timeoutOptions = null;
+    let timeoutClientClosed = 0;
+    let timeoutTransportClosed = 0;
+    runtime.mcpClients.set("fixture-memory::memory", {
+      client: { async close() { timeoutClientClosed += 1; } },
+      transport: { async close() { timeoutTransportClosed += 1; } },
+      definition: {},
+    });
+    await assert.rejects(
+      () => runtime.executeMcpRequest("fixture-memory", "memory", undefined, async (_client, options) => {
+        timeoutOptions = options;
+        const error = new Error("Request timed out");
+        error.code = -32001;
+        throw error;
+      }),
+      /timed out/i,
+    );
+    assert.equal(timeoutOptions.timeout, 60_000, "MCP calls must use the SDK-native request timeout");
+    assert.equal(timeoutOptions.maxTotalTimeout, 60_000, "MCP calls must bound total request lifetime as well");
+    assert.equal(timeoutClientClosed, 1, "request timeout must invalidate the pooled MCP client");
+    assert.equal(timeoutTransportClosed, 1, "request timeout must close the pooled MCP transport");
+    assert.equal(runtime.mcpClients.has("fixture-memory::memory"), false, "timed-out pooled client must be removed so the next call reconnects cleanly");
+    const recoveredMcp = await runtime.getMcpClient("fixture-memory", "memory");
+    assert.notEqual(recoveredMcp, refreshedMcp, "a timed-out MCP client must not be reused");
+
     const instanceA = await runtime.claimInstance({
       pluginId: "fixture-memory",
       serverId: "memory",

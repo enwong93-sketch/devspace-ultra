@@ -14,6 +14,7 @@ const mainOrchestrator = await read("scripts/chat-classic-main-orchestrator.ps1"
 const authSeed = await read("scripts/chat-swarm-classic-auth-seed.mjs");
 const cdpSessionSeed = await read("scripts/chat-swarm-classic-session-seed.mjs");
 const runtimeTools = await read("dist/chat-swarm-classic-runtime.js");
+const server = await read("dist/server.js");
 const bootstrap = await read("scripts/chat-swarm-classic-cdp-bootstrap.mjs");
 const identityManager = await read("scripts/chat-swarm-classic-runtime-identity.ps1");
 const interactiveAuthRelay = await read("scripts/chat-classic-interactive-auth-relay.ps1");
@@ -59,6 +60,7 @@ assert.doesNotMatch(interactiveManager, /chat_swarm_join|Invoke-AutoJoin|-Action
 assert.match(sessionSource, /interactive[\s\S]*worker[\s\S]*primary/i, "source discovery must prefer Interactive CDP, then Worker CDP, then Primary");
 assert.match(sessionSource, /9730/, "Interactive source discovery must use the dedicated Main CDP range");
 assert.match(sessionSource, /9330/, "Worker source discovery must use the Worker CDP range");
+assert.doesNotMatch(sessionSource, /probe\.composerDisabled/, "a signed-in Main or Worker remains a valid Session Seed source while its composer is temporarily disabled by active generation");
 assert.doesNotMatch(sessionSource, /Network\.getAllCookies|Network\.setCookies/, "source discovery must not itself read or mutate cookie values");
 assert.match(cdpSessionSeed, /allowlistedDomainsOnly:\s*true/, "CDP Session Seed must continue to restrict copied cookies to ChatGPT/OpenAI domains");
 assert.match(cdpSessionSeed, /secretValuesLogged:\s*false/, "CDP Session Seed must remain no-secret-output");
@@ -73,6 +75,7 @@ assert.doesNotMatch(primarySnapshot, /OpenAI\.ChatGPT-Desktop\.Interactive\d|Wor
 assert.match(mainOrchestrator, /Find-FreeMainNumber/, "high-level Main orchestration must automatically choose a free Main number");
 assert.match(mainOrchestrator, /show|restore|minimize|stop/i, "high-level Main orchestration must own user-facing window lifecycle actions");
 assert.match(mainOrchestrator, /chat-classic-interactive-runtime\.ps1/, "high-level orchestration must delegate setup/start/stop to the Interactive manager");
+assert.doesNotMatch(mainOrchestrator, /\$output\s*=\s*@\(& \$interactiveManager[\s\S]{0,260}\$LASTEXITCODE/, "PowerShell-to-PowerShell delegation must not use stale LASTEXITCODE as the child script success signal");
 
 assert.match(authSeed, /better-sqlite3/, "Session Seed must use a consistent online SQLite snapshot");
 assert.match(authSeed, /readonly:\s*true/, "Session Seed source must be read-only");
@@ -119,7 +122,9 @@ assert.match(interactiveAuthLiveGate, /ValidateSet\("start",\s*"finish",\s*"full
 assert.match(interactiveAuthLiveGate, /browser-auth-started/, "stage=start must return after opening browser authentication instead of blocking on user account selection");
 assert.match(interactiveAuthLiveGate, /provisioningMode\s*=\s*"oauth-relay"/, "successful OAuth relay must persist only a non-secret provisioning marker");
 
-assert.equal(packageJson.version, "0.4.0", "approved Multi-Main feature ships as v0.4.0");
+assert.equal(packageJson.version, "0.5.0", "current DevSpace Ultra release metadata must be v0.5.0");
+const packageVersionPattern = packageJson.version.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+assert.match(server, new RegExp(`name: "devspace",[\\s\\S]{0,160}version: "${packageVersionPattern}"`), "MCP server identity version must match package.json instead of lagging a prior release");
 assert.ok(!packageJson.files.includes("!scripts/chat-swarm-classic-auth-seed.mjs"), "public package must include the no-secret Session Seed helper required by Interactive setup");
 assert.doesNotMatch(gitIgnore, /^scripts\/chat-swarm-classic-auth-seed\.mjs$/m, "clean Git checkouts must include the production Session Seed helper");
 assert.doesNotMatch(npmIgnore, /^scripts\/chat-swarm-classic-auth-seed\.mjs$/m, "npm packages must include the production Session Seed helper");

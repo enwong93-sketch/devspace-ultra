@@ -1,6 +1,7 @@
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { expandHomePath } from "./roots.js";
+import { normalizeToolMode } from "./tool-mode.js";
 import { devspaceAgentsDir, devspaceCapabilityRegistryPath, devspacePluginsDir, devspaceSkillsDir, loadDevspaceFiles } from "./user-config.js";
 const DEFAULT_OAUTH_ACCESS_TOKEN_TTL_SECONDS = 60 * 60;
 const DEFAULT_OAUTH_REFRESH_TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60;
@@ -45,16 +46,12 @@ function normalizeAllowedHosts(rawHosts, derivedHosts) {
 function parseBoolean(value) {
     return ["1", "true", "yes", "on"].includes(value?.toLowerCase() ?? "");
 }
-function parseToolMode(env) {
-    const mode = env.DEVSPACE_TOOL_MODE;
-    if (mode === "minimal" || mode === "full" || mode === "codex")
-        return mode;
-    if (mode)
-        throw new Error(`Invalid DEVSPACE_TOOL_MODE: ${mode}`);
-    if (env.DEVSPACE_MINIMAL_TOOLS !== undefined) {
-        return parseBoolean(env.DEVSPACE_MINIMAL_TOOLS) ? "minimal" : "full";
-    }
-    return "minimal";
+function parseToolMode(env, persistedMode) {
+    const mode = env.DEVSPACE_TOOL_MODE ?? persistedMode;
+    const legacyMinimalTools = env.DEVSPACE_TOOL_MODE === undefined && persistedMode === undefined && env.DEVSPACE_MINIMAL_TOOLS !== undefined
+        ? parseBoolean(env.DEVSPACE_MINIMAL_TOOLS)
+        : undefined;
+    return normalizeToolMode(mode, { legacyMinimalTools });
 }
 function parseLogLevel(value) {
     if (!value || value === "info")
@@ -143,7 +140,7 @@ function parseOAuthConfig(env, ownerToken) {
         ownerToken: parseRequiredSecret(env.DEVSPACE_OAUTH_OWNER_TOKEN ?? ownerToken, "DEVSPACE_OAUTH_OWNER_TOKEN"),
         accessTokenTtlSeconds: parsePositiveInteger(env.DEVSPACE_OAUTH_ACCESS_TOKEN_TTL_SECONDS, DEFAULT_OAUTH_ACCESS_TOKEN_TTL_SECONDS, "DEVSPACE_OAUTH_ACCESS_TOKEN_TTL_SECONDS"),
         refreshTokenTtlSeconds: parsePositiveInteger(env.DEVSPACE_OAUTH_REFRESH_TOKEN_TTL_SECONDS, DEFAULT_OAUTH_REFRESH_TOKEN_TTL_SECONDS, "DEVSPACE_OAUTH_REFRESH_TOKEN_TTL_SECONDS"),
-        scopes: parseStringList(env.DEVSPACE_OAUTH_SCOPES, ["devspace"]),
+        scopes: parseStringList(env.DEVSPACE_OAUTH_SCOPES, ["devspace", "offline_access"]),
         allowedRedirectHosts: parseStringList(env.DEVSPACE_OAUTH_ALLOWED_REDIRECT_HOSTS, [
             "chatgpt.com",
             "localhost",
@@ -180,7 +177,7 @@ export function loadConfig(env = process.env) {
         allowedRoots: parseAllowedRoots(env.DEVSPACE_ALLOWED_ROOTS ?? files.config.allowedRoots),
         allowedHosts: parseAllowedHosts(env.DEVSPACE_ALLOWED_HOSTS, derivedAllowedHosts),
         publicBaseUrl,
-        toolMode: parseToolMode(env),
+        toolMode: parseToolMode(env, files.config.toolMode),
         widgets: parseWidgetMode(env.DEVSPACE_WIDGETS),
         stateDir: resolve(expandHomePath(env.DEVSPACE_STATE_DIR ?? files.config.stateDir ?? defaultStateDir())),
         worktreeRoot: resolve(expandHomePath(env.DEVSPACE_WORKTREE_ROOT ?? files.config.worktreeRoot ?? defaultWorktreeRoot())),
@@ -188,7 +185,9 @@ export function loadConfig(env = process.env) {
             ? files.config.artifactsEnabled === true
             : parseBoolean(env.DEVSPACE_ARTIFACTS),
         artifactMaxFileBytes: parsePositiveInteger(env.DEVSPACE_ARTIFACT_MAX_FILE_BYTES ?? numberConfigValue(files.config.artifactMaxFileBytes), DEFAULT_ARTIFACT_MAX_FILE_BYTES, "DEVSPACE_ARTIFACT_MAX_FILE_BYTES"),
-        skillsEnabled: env.DEVSPACE_SKILLS === undefined ? true : parseBoolean(env.DEVSPACE_SKILLS),
+        skillsEnabled: env.DEVSPACE_SKILLS === undefined
+            ? files.config.skillsEnabled !== false
+            : parseBoolean(env.DEVSPACE_SKILLS),
         skillPaths: parsePathList(env.DEVSPACE_SKILL_PATHS),
         devspaceSkillsDir: devspaceSkillsDir(env),
         devspaceAgentsDir: devspaceAgentsDir(env),
@@ -198,6 +197,18 @@ export function loadConfig(env = process.env) {
         pluginPaths: parsePathList(env.DEVSPACE_PLUGIN_PATHS ?? (Array.isArray(files.config.pluginPaths) ? files.config.pluginPaths.join(",") : files.config.pluginPaths)),
         pluginsDir: resolve(expandHomePath(env.DEVSPACE_PLUGINS_DIR ?? files.config.pluginsDir ?? devspacePluginsDir(env))),
         capabilityRegistryPath: resolve(expandHomePath(env.DEVSPACE_CAPABILITY_REGISTRY ?? files.config.capabilityRegistryPath ?? devspaceCapabilityRegistryPath(env))),
+        passiveCore: env.DEVSPACE_PASSIVE_CORE === undefined
+            ? false
+            : parseBoolean(env.DEVSPACE_PASSIVE_CORE),
+        classicStreamRecoveryEnabled: env.DEVSPACE_CLASSIC_STREAM_RECOVERY === undefined
+            ? files.config.classicStreamRecoveryEnabled !== false
+            : parseBoolean(env.DEVSPACE_CLASSIC_STREAM_RECOVERY),
+        classicHostOverlayEnabled: env.DEVSPACE_CLASSIC_HOST_OVERLAY === undefined
+            ? files.config.classicHostOverlayEnabled !== false
+            : parseBoolean(env.DEVSPACE_CLASSIC_HOST_OVERLAY),
+        contextGuardianEnabled: env.DEVSPACE_CONTEXT_GUARDIAN === undefined
+            ? files.config.contextGuardianEnabled !== false
+            : parseBoolean(env.DEVSPACE_CONTEXT_GUARDIAN),
         autoCompactEnabled: env.DEVSPACE_AUTO_COMPACT === undefined
             ? files.config.autoCompactEnabled === true
             : parseBoolean(env.DEVSPACE_AUTO_COMPACT),

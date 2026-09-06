@@ -6,13 +6,40 @@ import { createManagedWorktree } from "./git-worktrees.js";
 import { assertAllowedPath, isPathInsideRoot, resolveAllowedPath } from "./roots.js";
 import { loadWorkspaceSkills, markSkillActivated, resolveSkillReadPath, } from "./skills.js";
 import { loadLocalAgentProfiles, } from "./local-agent-profiles.js";
+const DEFAULT_MAX_IN_MEMORY_WORKSPACES = 32;
 export class WorkspaceRegistry {
     config;
     store;
     workspaces = new Map();
-    constructor(config, store) {
+    maxInMemoryWorkspaces;
+    constructor(config, store, options = {}) {
         this.config = config;
         this.store = store;
+        this.maxInMemoryWorkspaces = Math.max(1, Math.min(512, Number(options.maxInMemoryWorkspaces) || DEFAULT_MAX_IN_MEMORY_WORKSPACES));
+    }
+    get inMemorySize() {
+        return this.workspaces.size;
+    }
+    rememberWorkspace(workspace) {
+        if (!workspace?.id)
+            throw new Error("Workspace context requires id.");
+        this.workspaces.delete(workspace.id);
+        this.workspaces.set(workspace.id, workspace);
+        while (this.workspaces.size > this.maxInMemoryWorkspaces) {
+            const oldest = this.workspaces.keys().next().value;
+            if (!oldest)
+                break;
+            this.workspaces.delete(oldest);
+        }
+        return workspace;
+    }
+    touchWorkspaceMemory(workspaceId) {
+        const workspace = this.workspaces.get(workspaceId);
+        if (!workspace)
+            return undefined;
+        this.workspaces.delete(workspaceId);
+        this.workspaces.set(workspaceId, workspace);
+        return workspace;
     }
     async openWorkspace(input) {
         const options = typeof input === "string" ? { path: input } : input;
@@ -23,7 +50,7 @@ export class WorkspaceRegistry {
         return this.openCheckoutWorkspace(options.path);
     }
     getWorkspace(workspaceId) {
-        const workspace = this.workspaces.get(workspaceId);
+        const workspace = this.touchWorkspaceMemory(workspaceId);
         if (workspace) {
             this.store?.touchSession(workspaceId);
             return workspace;
@@ -53,7 +80,7 @@ export class WorkspaceRegistry {
             activatedSkillDirs: new Set(),
         };
         this.store?.touchSession(workspaceId);
-        this.workspaces.set(restoredWorkspace.id, restoredWorkspace);
+        this.rememberWorkspace(restoredWorkspace);
         return restoredWorkspace;
     }
     resolvePath(workspace, inputPath) {
@@ -131,7 +158,7 @@ export class WorkspaceRegistry {
             baseSha: workspace.worktree?.baseSha,
             managed: workspace.worktree?.managed,
         });
-        this.workspaces.set(workspace.id, workspace);
+        this.rememberWorkspace(workspace);
         const agentsFiles = await this.loadInitialAgentsFiles(workspace.root);
         const availableAgentsFiles = await this.findAvailableAgentsFiles(workspace.root, agentsFiles);
         return { workspace, agentsFiles, availableAgentsFiles };

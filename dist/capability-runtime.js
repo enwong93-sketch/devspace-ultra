@@ -31,6 +31,7 @@ import {
 } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
+import { ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 
 const REGISTRY_VERSION = 1;
 const MAX_PLUGIN_FILES = 5000;
@@ -123,6 +124,15 @@ async function withTimeout(promise, timeoutMs, label) {
   finally {
     if (timer) clearTimeout(timer);
   }
+}
+function mcpRequestOptions(timeoutMs = MCP_CALL_TIMEOUT_MS) {
+  return { timeout: timeoutMs, maxTotalTimeout: timeoutMs };
+}
+function shouldInvalidateMcpClient(error) {
+  const code = Number(error?.code);
+  if (code === Number(ErrorCode.RequestTimeout)) return true;
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  return /request timed out|maximum total timeout|connection closed|transport|socket|econn(?:reset|refused)|broken pipe|websocket.*closed/i.test(message);
 }
 function isPathInside(child, parent) {
   const rel = relative(resolve(parent), resolve(child));
@@ -1606,6 +1616,22 @@ export class CapabilityRuntime {
     return await pending;
   }
 
+  async executeMcpRequest(pluginId, serverId, instanceToken, operation) {
+    const holder = await this.getMcpClient(pluginId, serverId, instanceToken);
+    const instance = instanceToken ? this.findInstanceByToken(instanceToken) : undefined;
+    const key = this.clientKey(pluginId, serverId, instance?.instanceId);
+    try {
+      return {
+        result: await operation(holder.client, mcpRequestOptions()),
+        instance,
+      };
+    }
+    catch (error) {
+      if (shouldInvalidateMcpClient(error)) await this.closeClientKey(key).catch(() => {});
+      throw error;
+    }
+  }
+
   async probePluginMcp(pluginId) {
     await this.ready;
     const { plugin } = this.requirePlugin(pluginId, { enabled: true, trusted: true });
@@ -1647,7 +1673,12 @@ export class CapabilityRuntime {
           };
           if (capabilities.tools) {
             try {
-              const listed = await withTimeout(holder.client.listTools(), MCP_CALL_TIMEOUT_MS, `MCP listTools ${pluginId}/${definition.id}`);
+              const { result: listed } = await this.executeMcpRequest(
+                pluginId,
+                definition.id,
+                undefined,
+                (client, options) => client.listTools(undefined, options),
+              );
               entry.tools = (listed.tools || []).map((tool) => ({
                 name: tool.name,
                 description: tool.description || "",
@@ -1658,7 +1689,12 @@ export class CapabilityRuntime {
           }
           if (capabilities.prompts) {
             try {
-              const listed = await withTimeout(holder.client.listPrompts(), MCP_CALL_TIMEOUT_MS, `MCP listPrompts ${pluginId}/${definition.id}`);
+              const { result: listed } = await this.executeMcpRequest(
+                pluginId,
+                definition.id,
+                undefined,
+                (client, options) => client.listPrompts(undefined, options),
+              );
               entry.prompts = (listed.prompts || []).map((prompt) => ({
                 name: prompt.name,
                 description: prompt.description || "",
@@ -1669,7 +1705,12 @@ export class CapabilityRuntime {
           }
           if (capabilities.resources) {
             try {
-              const listed = await withTimeout(holder.client.listResources(), MCP_CALL_TIMEOUT_MS, `MCP listResources ${pluginId}/${definition.id}`);
+              const { result: listed } = await this.executeMcpRequest(
+                pluginId,
+                definition.id,
+                undefined,
+                (client, options) => client.listResources(undefined, options),
+              );
               entry.resources = (listed.resources || []).map((resource) => ({
                 uri: resource.uri,
                 name: resource.name || "",
@@ -1701,27 +1742,36 @@ export class CapabilityRuntime {
   async callMcp(pluginId, serverId, toolName, args = {}, instanceToken) {
     await this.ready;
     if (!toolName) throw new Error("toolName is required for MCP tool calls.");
-    const holder = await this.getMcpClient(pluginId, serverId, instanceToken);
-    const result = await withTimeout(holder.client.callTool({ name: toolName, arguments: args || {} }), MCP_CALL_TIMEOUT_MS, `MCP call ${pluginId}/${serverId}/${toolName}`);
-    const instance = instanceToken ? this.findInstanceByToken(instanceToken) : undefined;
+    const { result, instance } = await this.executeMcpRequest(
+      pluginId,
+      serverId,
+      instanceToken,
+      (client, options) => client.callTool({ name: toolName, arguments: args || {} }, undefined, options),
+    );
     return { ok: true, pluginId, kind: "mcp", serverId, instanceId: instance?.instanceId, toolName, result };
   }
 
   async readMcpResource(pluginId, serverId, resourceUri, instanceToken) {
     await this.ready;
     if (!resourceUri) throw new Error("resourceUri is required for MCP resource reads.");
-    const holder = await this.getMcpClient(pluginId, serverId, instanceToken);
-    const result = await withTimeout(holder.client.readResource({ uri: resourceUri }), MCP_CALL_TIMEOUT_MS, `MCP readResource ${pluginId}/${serverId}/${resourceUri}`);
-    const instance = instanceToken ? this.findInstanceByToken(instanceToken) : undefined;
+    const { result, instance } = await this.executeMcpRequest(
+      pluginId,
+      serverId,
+      instanceToken,
+      (client, options) => client.readResource({ uri: resourceUri }, options),
+    );
     return { ok: true, pluginId, kind: "mcp-resource", serverId, instanceId: instance?.instanceId, resourceUri, result };
   }
 
   async getMcpPrompt(pluginId, serverId, promptName, args = {}, instanceToken) {
     await this.ready;
     if (!promptName) throw new Error("promptName is required for MCP prompt retrieval.");
-    const holder = await this.getMcpClient(pluginId, serverId, instanceToken);
-    const result = await withTimeout(holder.client.getPrompt({ name: promptName, arguments: args || {} }), MCP_CALL_TIMEOUT_MS, `MCP getPrompt ${pluginId}/${serverId}/${promptName}`);
-    const instance = instanceToken ? this.findInstanceByToken(instanceToken) : undefined;
+    const { result, instance } = await this.executeMcpRequest(
+      pluginId,
+      serverId,
+      instanceToken,
+      (client, options) => client.getPrompt({ name: promptName, arguments: args || {} }, options),
+    );
     return { ok: true, pluginId, kind: "mcp-prompt", serverId, instanceId: instance?.instanceId, promptName, result };
   }
 

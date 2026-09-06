@@ -71,7 +71,7 @@ export function resolveSubagentsFlag(config, env = process.env) {
 }
 function readJsonFile(filePath) {
     try {
-        return JSON.parse(readFileSync(filePath, "utf8"));
+        return JSON.parse(readFileSync(filePath, "utf8").replace(/^\uFEFF/, ""));
     }
     catch (error) {
         const reason = error instanceof Error ? error.message : String(error);
