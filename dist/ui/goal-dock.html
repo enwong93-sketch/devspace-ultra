@@ -31,7 +31,12 @@
       background: var(--goal-bg);
       box-shadow: var(--shadow-sm, 0 1px 5px rgba(0, 0, 0, 0.08));
       overflow: clip;
+      opacity: 1;
+      transform: translateY(0);
+      transition: opacity 140ms cubic-bezier(.23,1,.32,1), transform 140ms cubic-bezier(.23,1,.32,1);
     }
+    .dock[data-dismissed="true"] { opacity: 0; transform: translateY(-4px); pointer-events: none; }
+    body[data-dismissed="true"] { padding: 0; }
     .main {
       display: grid;
       grid-template-columns: minmax(0, 1fr) auto;
@@ -135,7 +140,7 @@
       .objective { -webkit-line-clamp: 3; }
     }
     @media (prefers-reduced-motion: reduce) {
-      .action { transition: none; }
+      .action, .dock { transition: none; }
     }
   </style>
 </head>
@@ -163,6 +168,8 @@
     (() => {
       const ACTIVE_POLL_MS = 1500;
       const HIDDEN_POLL_MS = 6000;
+      const TERMINAL_DISMISS_MS = 650;
+      const TERMINAL_EXIT_MS = 140;
       const dock = document.getElementById("dock");
       const statusEl = document.getElementById("status");
       const objectiveEl = document.getElementById("objective");
@@ -174,8 +181,10 @@
 
       let goal = null;
       let timer = null;
+      let dismissTimer = null;
       let dispatchInFlight = false;
       let controlInFlight = false;
+      let resumeDispatchArmed = false;
 
       const safeGoal = (value) => {
         if (!value || typeof value !== "object") return null;
@@ -190,14 +199,6 @@
         value?.toolResult?.structuredContent?.goal ??
         value?.goal ??
         value
-      );
-
-      const structured = (value) => (
-        value?.structuredContent ??
-        value?.structured_content ??
-        value?.toolResult?.structuredContent ??
-        value ??
-        {}
       );
 
       const elapsed = (createdAt, endedAt) => {
@@ -241,6 +242,20 @@
       const setError = (message = "") => {
         dock.classList.toggle("has-error", Boolean(message));
         errorEl.textContent = message;
+      };
+
+      const scheduleTerminalDismiss = () => {
+        if (dismissTimer !== null || dock.dataset.dismissed === "true") return;
+        dismissTimer = window.setTimeout(() => {
+          dismissTimer = null;
+          dock.dataset.dismissed = "true";
+          document.body.dataset.dismissed = "true";
+          window.setTimeout(() => {
+            dock.hidden = true;
+            document.documentElement.style.height = "0";
+            document.body.style.height = "0";
+          }, TERMINAL_EXIT_MS);
+        }, TERMINAL_DISMISS_MS);
       };
 
       const makeButton = (label, action, className = "") => {
@@ -293,7 +308,7 @@
         timer = window.setTimeout(poll, wait);
       };
 
-      const adoptGoal = (value, { dispatch = true } = {}) => {
+      const adoptGoal = (value) => {
         const next = resultGoal(value);
         if (!next) return false;
         if (goal && next.id !== goal.id) return false;
@@ -301,9 +316,12 @@
         goal = next;
         setError("");
         render();
-        if (terminal()) stopPolling();
-        else schedulePoll();
-        if (dispatch) void maybeDispatchContinuation();
+        if (terminal()) {
+          stopPolling();
+          scheduleTerminalDismiss();
+        } else {
+          schedulePoll();
+        }
         return true;
       };
 
@@ -322,6 +340,12 @@
         try {
           const result = await callTool("devspace_goal_control", { goalId: goal.id, action });
           if (!adoptGoal(result)) throw new Error("Goal control returned no Goal state.");
+          if (action === "resume") {
+            resumeDispatchArmed = true;
+            void maybeDispatchContinuation();
+          } else {
+            resumeDispatchArmed = false;
+          }
         } catch (error) {
           setError(error?.message || "Unable to control Goal Mode.");
         } finally {
@@ -338,59 +362,21 @@
       );
 
       const maybeDispatchContinuation = async () => {
+        if (!resumeDispatchArmed) return;
         if (!eligibleForContinuation() || dispatchInFlight) return;
-        if (typeof window.openai?.sendFollowUpMessage !== "function") {
-          setError("Automatic Goal continuation is unavailable in this host.");
-          return;
-        }
 
+        resumeDispatchArmed = false;
         dispatchInFlight = true;
         setError("");
         render();
-        let leaseId = null;
-        let explicitSendFailure = false;
-        let followUpAccepted = false;
 
         try {
-          const claimResult = await callTool("devspace_goal_continuation", {
+          const result = await callTool("devspace_goal_continuation", {
             goalId: goal.id,
-            action: "claim",
+            action: "dispatch",
           });
-          const claimData = structured(claimResult);
-          if (claimData.goal) adoptGoal(claimResult, { dispatch: false });
-          const claim = claimData.claim;
-          if (!claim?.leaseId || !claim?.prompt) throw new Error("Continuation claim returned incomplete data.");
-          leaseId = claim.leaseId;
-
-          const sendResult = await window.openai.sendFollowUpMessage({
-            prompt: claim.prompt,
-            scrollToBottom: false,
-          });
-          if (sendResult?.ok === false) {
-            explicitSendFailure = true;
-            throw new Error("ChatGPT rejected the Goal continuation request.");
-          }
-          followUpAccepted = true;
-
-          const ackResult = await callTool("devspace_goal_continuation", {
-            goalId: goal.id,
-            action: "ack",
-            leaseId,
-          });
-          adoptGoal(ackResult, { dispatch: false });
+          adoptGoal(result);
         } catch (error) {
-          if (leaseId && explicitSendFailure && !followUpAccepted) {
-            try {
-              const released = await callTool("devspace_goal_continuation", {
-                goalId: goal.id,
-                action: "release",
-                leaseId,
-              });
-              adoptGoal(released, { dispatch: false });
-            } catch {
-              // The backend lease expiry path remains the final recovery guard.
-            }
-          }
           setError(error?.message || "Unable to continue Goal Mode automatically.");
         } finally {
           dispatchInFlight = false;

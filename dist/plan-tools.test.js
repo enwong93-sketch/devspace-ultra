@@ -44,6 +44,9 @@ try {
   assert.equal(mount.config.annotations.readOnlyHint, true);
   assert.equal(start.config.annotations.readOnlyHint, false);
   assert.equal(update.config.annotations.readOnlyHint, false);
+  assert.match(start.config.description, /fresh.*physical turn|fresh.*Goal round/i, "Plan start must describe a fresh turn-scoped plan rather than one persistent task-wide card");
+  assert.match(start.config.description, /active plan.*resume|resume.*active plan/i, "Plan start must tell interrupted turns to resume the existing active plan instead of creating a duplicate");
+  assert.match(update.config.description, /complete.*before.*final|complete.*before.*turn report/i, "Turn-scoped plan instructions must require completion before the physical turn ends");
 
   const startResult = await start.handler({
     title: "Verify plan tools",
@@ -78,12 +81,64 @@ try {
   assert.match(mountResult.content[0].text, /Mounted plan/i);
 
   await runtime.close();
+
+  {
+    const boundRoot = await mkdtemp(join(tmpdir(), "devspace-plan-tools-conversation-bound-"));
+    try {
+      const boundRuntime = new PlanRuntime({ stateDir: boundRoot });
+      await boundRuntime.ready;
+      const boundRegistered = new Map();
+      const boundServer = {
+        registerTool(name, config, handler) {
+          boundRegistered.set(name, { name, config, handler });
+          return { name, config, handler };
+        },
+      };
+      registerPlanTools(boundServer, boundRuntime, {
+        resourceUri: "ui://devspace/plan-card.html",
+        resolveConversation: async (extra) => extra?.conversationId ? { conversationId: extra.conversationId } : null,
+      });
+      const boundStart = boundRegistered.get("devspace_plan_start");
+      const unresolved = await boundStart.handler({
+        title: "Must not become global",
+        steps: [
+          { text: "Current", status: "in_progress" },
+          { text: "Next", status: "pending" },
+        ],
+      }, {});
+      assert.equal(unresolved.isError, true);
+      assert.match(unresolved.content[0].text, /conversation identity is unresolved|unbound Plan/i);
+
+      const startedA = await boundStart.handler({
+        title: "Conversation A tool plan",
+        steps: [
+          { text: "A current", status: "in_progress" },
+          { text: "A next", status: "pending" },
+        ],
+      }, { conversationId: "conversation-tools-a" });
+      assert.equal(startedA.structuredContent.plan.conversationId, "conversation-tools-a");
+
+      const startedB = await boundStart.handler({
+        title: "Conversation B tool plan",
+        steps: [
+          { text: "B current", status: "in_progress" },
+          { text: "B next", status: "pending" },
+        ],
+      }, { conversationId: "conversation-tools-b" });
+      assert.equal(startedB.structuredContent.plan.conversationId, "conversation-tools-b");
+      await boundRuntime.close();
+    } finally {
+      await rm(boundRoot, { recursive: true, force: true });
+    }
+  }
+
   console.log(JSON.stringify({
     ok: true,
     gate: "plan-tools",
     tools: registered.size,
     renderTools: 2,
     dataTools: 2,
+    conversationBound: true,
   }));
 } finally {
   await rm(root, { recursive: true, force: true });

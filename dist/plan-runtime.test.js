@@ -26,6 +26,19 @@ try {
   assert.equal(started.steps.length, 3);
   assert.equal(started.steps.filter((step) => step.status === "in_progress").length, 1);
   assert.ok(started.steps.every((step) => /^step_[a-f0-9]{16}$/.test(step.id)));
+  assert.deepEqual((await runtime.activePlans()).map((plan) => plan.id), [started.id]);
+
+  await assert.rejects(
+    () => runtime.start({
+      title: "Duplicate turn plan",
+      steps: [
+        { text: "Do duplicate work", status: "in_progress" },
+        { text: "Finish duplicate work", status: "pending" },
+      ],
+    }),
+    /active plan .* must be completed before starting a fresh turn plan/i,
+    "an interrupted physical turn must resume its active plan instead of mounting a duplicate card",
+  );
 
   await assert.rejects(
     () => runtime.update({
@@ -86,6 +99,7 @@ try {
   assert.equal(completed.revision, 4);
   assert.match(completed.completedAt, /^\d{4}-\d{2}-\d{2}T/);
   assert.equal(completed.steps.every((step) => step.status === "completed"), true);
+  assert.deepEqual(await runtime.activePlans(), []);
 
   await assert.rejects(
     () => runtime.update({
@@ -122,12 +136,74 @@ try {
     /exactly one in_progress/i,
   );
 
+  {
+    const boundRoot = await mkdtemp(join(tmpdir(), "devspace-plan-conversation-bound-"));
+    try {
+      const bound = new PlanRuntime({ stateDir: boundRoot });
+      await bound.ready;
+      const legacy = await bound.start({
+        title: "Legacy interrupted plan",
+        steps: [
+          { text: "Legacy current", status: "in_progress" },
+          { text: "Legacy next", status: "pending" },
+        ],
+      });
+      assert.equal(legacy.conversationId, null);
+
+      const planA = await bound.start({
+        conversationId: "conversation-a",
+        title: "Conversation A plan",
+        steps: [
+          { text: "A current", status: "in_progress" },
+          { text: "A next", status: "pending" },
+        ],
+      });
+      assert.equal(planA.conversationId, "conversation-a", "new bound Plan must persist its authoritative conversation identity");
+
+      const planB = await bound.start({
+        conversationId: "conversation-b",
+        title: "Conversation B plan",
+        steps: [
+          { text: "B current", status: "in_progress" },
+          { text: "B next", status: "pending" },
+        ],
+      });
+      assert.equal(planB.conversationId, "conversation-b");
+      assert.deepEqual((await bound.activePlans({ conversationId: "conversation-a" })).map((plan) => plan.id), [planA.id]);
+      assert.deepEqual((await bound.activePlans({ conversationId: "conversation-b" })).map((plan) => plan.id), [planB.id]);
+      assert.equal((await bound.activePlans()).length, 3, "unfiltered legacy diagnostics may still see all active Plans");
+
+      await assert.rejects(
+        () => bound.start({
+          conversationId: "conversation-a",
+          title: "Duplicate A plan",
+          steps: [
+            { text: "Duplicate current", status: "in_progress" },
+            { text: "Duplicate next", status: "pending" },
+          ],
+        }),
+        /active plan .*conversation-a|conversation.*active plan/i,
+        "only an active Plan in the same conversation may block a fresh Plan",
+      );
+
+      const boundReloaded = new PlanRuntime({ stateDir: boundRoot });
+      await boundReloaded.ready;
+      assert.equal((await boundReloaded.status(planA.id)).conversationId, "conversation-a");
+      assert.equal((await boundReloaded.status(planB.id)).conversationId, "conversation-b");
+      await boundReloaded.close();
+      await bound.close();
+    } finally {
+      await rm(boundRoot, { recursive: true, force: true });
+    }
+  }
+
   console.log(JSON.stringify({
     ok: true,
     gate: "plan-runtime",
     revision: completed.revision,
     persisted: true,
     transitionGuards: true,
+    conversationBound: true,
   }));
 } finally {
   await rm(root, { recursive: true, force: true });

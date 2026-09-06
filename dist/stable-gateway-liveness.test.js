@@ -177,7 +177,13 @@ try {
   assert.ok(activeB, "handover must have created the first active B handle");
   await activeB.crash(1);
 
-  await waitUntil(() => bGeneration === 2, 1_000);
+  await waitUntil(() => {
+    const status = controller.status();
+    return bGeneration === 2
+      && status.coreRecoveryInProgress === false
+      && status.activeSlot === "b"
+      && status.ok === true;
+  }, 1_000);
   assert.equal(controller.status().activeSlot, "b", "unexpected Core exit must recover the same active slot");
 
   const preLazySessions = controller.status().sessions.sessions;

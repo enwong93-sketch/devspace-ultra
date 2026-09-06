@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>DevSpace Goal Relay</title>
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: 1px;
+      height: 1px;
+      min-width: 0;
+      min-height: 0;
+      overflow: hidden;
+      background: transparent;
+      color: transparent;
+      pointer-events: none;
+    }
+  </style>
+</head>
+<body aria-hidden="true">
+<script>
+(() => {
+  let dispatchStarted = false;
+
+  const goalFrom = (value) => {
+    if (!value || typeof value !== "object") return null;
+    return value?.structuredContent?.goal ??
+      value?.structured_content?.goal ??
+      value?.toolResult?.structuredContent?.goal ??
+      value?.goal ??
+      null;
+  };
+
+  const eligible = (goal) => (
+    goal?.status === "active" &&
+    goal?.roundState === "reported" &&
+    goal?.continuation?.state === "pending"
+  );
+
+  const callTool = async (name, args) => {
+    if (typeof window.openai?.callTool !== "function") {
+      throw new Error("Goal relay tool bridge unavailable.");
+    }
+    return await window.openai.callTool(name, args);
+  };
+
+  const dispatch = async (value) => {
+    const goal = goalFrom(value);
+    if (!eligible(goal) || dispatchStarted) return;
+
+    dispatchStarted = true;
+    try {
+      await callTool("devspace_goal_continuation", {
+        goalId: goal.id,
+        action: "dispatch",
+      });
+    } catch {
+      // Backend lease/host-bridge recovery remains authoritative.
+    }
+  };
+
+  window.addEventListener("openai:set_globals", () => {
+    void dispatch(window.openai?.toolOutput);
+  }, { passive: true });
+
+  window.addEventListener("message", (event) => {
+    if (event.source !== window.parent) return;
+    const message = event.data;
+    if (!message || message.jsonrpc !== "2.0") return;
+    if (message.method === "ui/notifications/tool-result") {
+      void dispatch(message.params?.structuredContent ?? message.params);
+    }
+  }, { passive: true });
+
+  void dispatch(window.openai?.toolOutput);
+})();
+</script>
+</body>
+</html>

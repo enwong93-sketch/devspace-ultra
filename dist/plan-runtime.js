@@ -10,6 +10,7 @@ const MAX_STEPS = 12;
 const MAX_TITLE_CHARS = 240;
 const MAX_STEP_TEXT_CHARS = 500;
 const MAX_EXPLANATION_CHARS = 2_000;
+const MAX_CONVERSATION_ID_CHARS = 240;
 
 function nowIso() {
   return new Date().toISOString();
@@ -32,6 +33,11 @@ function cleanText(value, maxChars, label) {
   if (!text) throw new Error(`${label} is required.`);
   if (text.length > maxChars) throw new Error(`${label} exceeds ${maxChars} characters.`);
   return text;
+}
+
+function normalizeConversationId(value) {
+  if (value === undefined || value === null || String(value).trim() === "") return null;
+  return cleanText(value, MAX_CONVERSATION_ID_CHARS, "Conversation id");
 }
 
 function normalizeStepStatus(value) {
@@ -104,6 +110,7 @@ function validateLoadedState(value) {
   for (const plan of Object.values(value.plans)) {
     if (!plan || !/^plan_[a-f0-9]{16}$/.test(String(plan.id ?? ""))) throw new Error("invalid persisted plan id");
     if (!PLAN_STATUSES.has(plan.status)) throw new Error("invalid persisted plan status");
+    plan.conversationId = normalizeConversationId(plan.conversationId);
     validateStepSet(plan.steps ?? []);
   }
   return value;
@@ -139,13 +146,25 @@ export class PlanRuntime {
     await this.persistQueue;
   }
 
-  async start({ title, steps }) {
+  async start({ title, steps, conversationId }) {
     await this.ready;
+    const normalizedConversationId = normalizeConversationId(conversationId);
+    const activePlan = Object.values(this.state.plans)
+      .filter((plan) => plan?.status === "active")
+      .filter((plan) => normalizedConversationId === null || plan.conversationId === normalizedConversationId)
+      .sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")))[0];
+    if (activePlan) {
+      if (normalizedConversationId !== null) {
+        throw new Error(`Conversation ${normalizedConversationId} already has active plan ${activePlan.id}; complete it before starting a fresh turn plan.`);
+      }
+      throw new Error(`Active plan ${activePlan.id} must be completed before starting a fresh turn plan.`);
+    }
     const normalizedSteps = normalizeNewSteps(steps);
     const timestamp = nowIso();
     const allCompleted = normalizedSteps.every((step) => step.status === "completed");
     const plan = {
       id: randomId("plan"),
+      conversationId: normalizedConversationId,
       title: cleanText(title, MAX_TITLE_CHARS, "Plan title"),
       status: allCompleted ? "completed" : "active",
       revision: 1,
@@ -188,6 +207,18 @@ export class PlanRuntime {
     const plan = this.state.plans[id];
     if (!plan) throw new Error(`Unknown plan ${id}.`);
     return clone(plan);
+  }
+
+  async activePlans({ limit = 12, conversationId } = {}) {
+    await this.ready;
+    const hasConversationFilter = conversationId !== undefined;
+    const normalizedConversationId = normalizeConversationId(conversationId);
+    return Object.values(this.state.plans)
+      .filter((plan) => plan?.status === "active")
+      .filter((plan) => !hasConversationFilter || plan.conversationId === normalizedConversationId)
+      .sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")))
+      .slice(0, Math.max(1, Math.min(50, Number(limit) || 12)))
+      .map(clone);
   }
 
   async close() {

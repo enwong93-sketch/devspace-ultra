@@ -36,6 +36,7 @@ try {
   assert.equal(started.continuation.state, "idle");
   assert.equal(started.lastRoundReport, null);
   assert.equal(started.blocker.consecutiveRounds, 0);
+  assert.equal((await runtime.activeGoals()).some((goal) => goal.id === started.id), true);
 
   const status1 = await runtime.status(started.id);
   assert.deepEqual(status1, started);
@@ -49,6 +50,8 @@ try {
   assert.equal(paused.roundState, "working");
   assert.equal(paused.revision, 2);
   assert.equal(paused.pausedAt, "2026-09-05T00:00:01.000Z");
+  assert.equal((await runtime.activeGoals()).some((goal) => goal.id === started.id), false);
+  assert.equal((await runtime.projectableGoals()).some((goal) => goal.id === started.id), true);
 
   await assert.rejects(
     () => runtime.control({ goalId: started.id, action: "pause" }),
@@ -272,6 +275,9 @@ try {
   assert.match(claim1.claim.leaseId, /^lease_[a-f0-9]{16}$/);
   assert.match(claim1.claim.prompt, /DEVSPACE_GOAL_CONTINUATION/);
   assert.match(claim1.claim.prompt, /devspace_goal_round_begin/);
+  assert.match(claim1.claim.prompt, /devspace_goal_turn_report/);
+  assert.match(claim1.claim.prompt, /devspace_goal_turn_report.*before.*visible.*final report/i);
+  assert.match(claim1.claim.prompt, /do not call.*(?:more|additional).*tool.*after.*devspace_goal_turn_report/i);
   assert.match(claim1.claim.prompt, new RegExp(leaseGoal.id));
   assert.match(claim1.claim.prompt, new RegExp(leaseContinuationId));
 
@@ -348,6 +354,66 @@ try {
   });
   assert.equal(duplicateRoundBegin.round, 2);
   assert.equal(duplicateRoundBegin.revision, raceRound2.revision);
+
+  assert.equal(typeof raceRound2.roundBeganAt, "string");
+  assert.equal(raceRound2.roundRecovery?.state, "idle");
+  const recoverable = await reloaded.recoverableWorkingRounds();
+  assert.equal(recoverable.some((goal) => goal.id === raceGoal.id), true);
+
+  const recovery1 = await reloaded.claimRoundRecovery({ goalId: raceGoal.id });
+  assert.equal(recovery1.claimed, true);
+  assert.equal(recovery1.goal.round, 2);
+  assert.equal(recovery1.goal.roundState, "working");
+  assert.equal(recovery1.goal.roundRecovery.state, "dispatching");
+  assert.equal(recovery1.claim.round, 2);
+  assert.match(recovery1.claim.recoveryId, /^recovery_[a-f0-9]{16}$/);
+  assert.match(recovery1.claim.prompt, /DEVSPACE_GOAL_ROUND_RECOVERY/);
+  assert.match(recovery1.claim.prompt, /same working round 2/i);
+  assert.match(recovery1.claim.prompt, /do not call devspace_goal_round_begin/i);
+  assert.match(recovery1.claim.prompt, /devspace_goal_turn_report/i);
+
+  const duplicateRecoveryClaim = await reloaded.claimRoundRecovery({ goalId: raceGoal.id });
+  assert.equal(duplicateRecoveryClaim.claimed, false);
+  assert.equal(duplicateRecoveryClaim.reason, "recovery-in-flight");
+
+  const recoveryAck = await reloaded.roundRecovery({
+    goalId: raceGoal.id,
+    action: "ack",
+    recoveryId: recovery1.claim.recoveryId,
+  });
+  assert.equal(recoveryAck.goal.roundRecovery.state, "dispatched");
+  assert.equal(recoveryAck.acknowledged, true);
+
+  const coolingRecovery = await reloaded.claimRoundRecovery({ goalId: raceGoal.id });
+  assert.equal(coolingRecovery.claimed, false);
+  assert.equal(coolingRecovery.reason, "recovery-cooldown");
+
+  advance(30_001);
+  const recovery2 = await reloaded.claimRoundRecovery({ goalId: raceGoal.id });
+  assert.equal(recovery2.claimed, true);
+  assert.equal(recovery2.claim.attempt, 2);
+  const recoveryRelease = await reloaded.roundRecovery({
+    goalId: raceGoal.id,
+    action: "release",
+    recoveryId: recovery2.claim.recoveryId,
+  });
+  assert.equal(recoveryRelease.goal.roundRecovery.state, "idle");
+
+  advance(5_001);
+  const recovery3 = await reloaded.claimRoundRecovery({ goalId: raceGoal.id });
+  assert.equal(recovery3.claimed, true);
+  assert.equal(recovery3.claim.attempt, 3);
+  await reloaded.roundRecovery({ goalId: raceGoal.id, action: "ack", recoveryId: recovery3.claim.recoveryId });
+
+  const raceRound2Reported = await reloaded.turnReport({
+    goalId: raceGoal.id,
+    summary: "Round two recovered and completed after an interrupted assistant turn.",
+    meaningfulProgress: true,
+  });
+  assert.equal(raceRound2Reported.roundState, "reported");
+  assert.equal(raceRound2Reported.roundRecovery.state, "idle");
+  assert.equal((await reloaded.recoverableWorkingRounds()).some((goal) => goal.id === raceGoal.id), false);
+  assert.equal(raceRound2Reported.continuation.state, "pending");
 
   const blockedGoal = await reloaded.start({
     objective: "Verify strict repeated blocker guard",
@@ -433,6 +499,54 @@ try {
 
   await reloaded.close();
 
+  {
+    const boundRoot = await mkdtemp(join(tmpdir(), "devspace-goal-conversation-bound-"));
+    try {
+      const bound = new GoalRuntime({ stateDir: boundRoot, now });
+      await bound.ready;
+      const legacyGoal = await bound.start({
+        objective: "Legacy unbound Goal",
+        successCriteria: ["Legacy remains readable"],
+      });
+      assert.equal(legacyGoal.conversationId, null);
+
+      const goalA = await bound.start({
+        conversationId: "conversation-a",
+        objective: "Conversation A Goal",
+        successCriteria: ["Stay in conversation A"],
+      });
+      const goalB = await bound.start({
+        conversationId: "conversation-b",
+        objective: "Conversation B Goal",
+        successCriteria: ["Stay in conversation B"],
+      });
+      assert.equal(goalA.conversationId, "conversation-a");
+      assert.equal(goalB.conversationId, "conversation-b");
+      assert.deepEqual((await bound.activeGoals({ conversationId: "conversation-a" })).map((goal) => goal.id), [goalA.id]);
+      assert.deepEqual((await bound.projectableGoals({ conversationId: "conversation-b" })).map((goal) => goal.id), [goalB.id]);
+      assert.equal((await bound.activeGoals()).length, 3, "unfiltered legacy diagnostics may still see all active Goals");
+
+      const boundLegacy = await bound.bindConversation({ goalId: legacyGoal.id, conversationId: "conversation-legacy" });
+      assert.equal(boundLegacy.conversationId, "conversation-legacy", "a legacy unbound Goal may be bound exactly once after native authority proves the conversation");
+      await assert.rejects(
+        () => bound.bindConversation({ goalId: legacyGoal.id, conversationId: "conversation-other" }),
+        /already bound|conversation-legacy|different conversation/i,
+        "a Goal may never silently migrate to another conversation after binding",
+      );
+      const idempotent = await bound.bindConversation({ goalId: legacyGoal.id, conversationId: "conversation-legacy" });
+      assert.equal(idempotent.conversationId, "conversation-legacy");
+
+      const boundReloaded = new GoalRuntime({ stateDir: boundRoot, now });
+      await boundReloaded.ready;
+      assert.equal((await boundReloaded.status(goalA.id)).conversationId, "conversation-a");
+      assert.equal((await boundReloaded.status(legacyGoal.id)).conversationId, "conversation-legacy");
+      await boundReloaded.close();
+      await bound.close();
+    } finally {
+      await rm(boundRoot, { recursive: true, force: true });
+    }
+  }
+
   const corruptRoot = await mkdtemp(join(tmpdir(), "devspace-goal-corrupt-"));
   try {
     await writeFile(join(corruptRoot, "goal-state.json"), "{not valid json", "utf8");
@@ -464,6 +578,7 @@ try {
     roundBeginIdempotent: true,
     dispatchRecovery: true,
     blockedThreeRounds: true,
+    conversationBound: true,
   }));
 } finally {
   await rm(root, { recursive: true, force: true });

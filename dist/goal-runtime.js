@@ -13,9 +13,13 @@ const MAX_CRITERION_CHARS = 1_000;
 const MAX_REPORT_SUMMARY_CHARS = 4_000;
 const MAX_BLOCKER_FINGERPRINT_CHARS = 500;
 const MAX_EVIDENCE_CHARS = 4_000;
+const MAX_CONVERSATION_ID_CHARS = 240;
 const REPORT_HISTORY_LIMIT = 32;
 const DEFAULT_DISPATCH_LEASE_MS = 45_000;
 const DEFAULT_DISPATCH_RECOVERY_MS = 120_000;
+const DEFAULT_ROUND_RECOVERY_RETRY_MS = 30_000;
+const DEFAULT_ROUND_RECOVERY_RELEASE_MS = 5_000;
+const MAX_ROUND_RECOVERY_ATTEMPTS = 5;
 
 function randomId(prefix) {
   return `${prefix}_${randomBytes(8).toString("hex")}`;
@@ -56,6 +60,50 @@ function emptyBlocker() {
   };
 }
 
+function idleRoundRecovery(round, attempts = 0, retryAfterAt = null) {
+  return {
+    state: "idle",
+    round,
+    recoveryId: null,
+    attempts,
+    claimedAt: null,
+    dispatchedAt: null,
+    retryAfterAt,
+  };
+}
+
+function buildRoundRecoveryPrompt(goal, recoveryId) {
+  return [
+    "[DEVSPACE_GOAL_ROUND_RECOVERY]",
+    `Resume DevSpace Goal ${goal.id} in the same working round ${goal.round}.`,
+    "The previous assistant turn ended before devspace_goal_turn_report, so this is an automatic runtime recovery, not a new user request and not a new Goal round.",
+    "Do not call devspace_goal_round_begin. Read the current Goal and Plan state, continue meaningful unfinished work for this same round, verify progress, then call devspace_goal_turn_report as the final tool call before one complete visible final report.",
+    "Do not stop after merely acknowledging this recovery prompt. Do not create a synthetic user message. Preserve the full original Goal objective and success criteria.",
+    `Recovery id: ${recoveryId}`,
+  ].join("\n");
+}
+
+function ensureRoundRecoveryShape(goal) {
+  if (!goal.roundBeganAt) {
+    goal.roundBeganAt = goal.round > 1 && goal.roundState === "working" && goal.lastConsumedContinuationId
+      ? goal.updatedAt || goal.createdAt || null
+      : goal.createdAt || null;
+  }
+  if (!goal.roundRecovery || typeof goal.roundRecovery !== "object") {
+    goal.roundRecovery = idleRoundRecovery(goal.round);
+  }
+  if (!Number.isInteger(goal.roundRecovery.attempts) || goal.roundRecovery.attempts < 0) {
+    goal.roundRecovery.attempts = 0;
+  }
+  if (!Number.isInteger(goal.roundRecovery.round) || goal.roundRecovery.round < 1) {
+    goal.roundRecovery.round = goal.round;
+  }
+  if (!["idle", "dispatching", "dispatched"].includes(goal.roundRecovery.state)) {
+    goal.roundRecovery = idleRoundRecovery(goal.round);
+  }
+  return goal;
+}
+
 function pendingContinuation(round, continuationId = randomId("continuation")) {
   return {
     state: "pending",
@@ -74,9 +122,14 @@ function buildContinuationPrompt(goal, continuationId) {
     `Continue active DevSpace Goal ${goal.id} after reported round ${goal.round}.`,
     "This prompt is a runtime continuation, not a new user request.",
     `First call devspace_goal_round_begin with goalId=${goal.id} and continuationId=${continuationId}.`,
-    "Then read current Goal state, preserve the full original objective and success criteria, perform meaningful next work, verify progress, give the user a complete visible report for this round, and finish with devspace_goal_turn_report.",
-    "Do not silently shrink the Goal to an easier sub-goal. If the Goal is already completed, paused, blocked, or stopped, do not continue work.",
+    "Then read current Goal state, preserve the full original objective and success criteria, perform meaningful next work, and verify progress. Call devspace_goal_turn_report before the visible final report for this round. After that tool returns, give the user one complete visible final report as the final response.",
+    "Do not call any more or additional tools after devspace_goal_turn_report in that turn. Do not silently shrink the Goal to an easier sub-goal. If the Goal is already completed, paused, blocked, or stopped, do not continue work.",
   ].join("\n");
+}
+
+function normalizeConversationId(value) {
+  if (value === undefined || value === null || String(value).trim() === "") return null;
+  return cleanText(value, MAX_CONVERSATION_ID_CHARS, "Conversation id");
 }
 
 function normalizeBlockerFingerprint(value) {
@@ -100,6 +153,7 @@ function validateGoalShape(goal) {
   if (!goal || !/^goal_[a-f0-9]{16}$/.test(String(goal.id ?? ""))) {
     throw new Error("invalid persisted goal id");
   }
+  goal.conversationId = normalizeConversationId(goal.conversationId);
   if (!GOAL_STATUSES.has(goal.status)) throw new Error("invalid persisted goal status");
   if (!ROUND_STATES.has(goal.roundState)) throw new Error("invalid persisted goal round state");
   if (!Number.isInteger(goal.round) || goal.round < 1) throw new Error("invalid persisted goal round");
@@ -130,7 +184,10 @@ function validateLoadedState(value) {
   if (!value || value.version !== STATE_VERSION || !value.goals || typeof value.goals !== "object") {
     throw new Error("unsupported goal state version");
   }
-  for (const goal of Object.values(value.goals)) validateGoalShape(goal);
+  for (const goal of Object.values(value.goals)) {
+    ensureRoundRecoveryShape(goal);
+    validateGoalShape(goal);
+  }
   return value;
 }
 
@@ -192,15 +249,18 @@ export class GoalRuntime {
     goal.updatedAt = this.nowIso();
   }
 
-  async start({ objective, successCriteria }) {
+  async start({ objective, successCriteria, conversationId }) {
     await this.ready;
     const timestamp = this.nowIso();
     const goal = {
       id: randomId("goal"),
+      conversationId: normalizeConversationId(conversationId),
       objective: cleanText(objective, MAX_OBJECTIVE_CHARS, "Goal objective"),
       status: "active",
       round: 1,
       roundState: "working",
+      roundBeganAt: timestamp,
+      roundRecovery: idleRoundRecovery(1),
       revision: 1,
       createdAt: timestamp,
       updatedAt: timestamp,
@@ -245,6 +305,47 @@ export class GoalRuntime {
     return clone(goal);
   }
 
+  async activeGoals({ limit = 12, conversationId } = {}) {
+    await this.ready;
+    const hasConversationFilter = conversationId !== undefined;
+    const normalizedConversationId = normalizeConversationId(conversationId);
+    return Object.values(this.state.goals)
+      .filter((goal) => goal?.status === "active")
+      .filter((goal) => !hasConversationFilter || goal.conversationId === normalizedConversationId)
+      .sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")))
+      .slice(0, Math.max(1, Math.min(50, Number(limit) || 12)))
+      .map((goal) => clone(ensureRoundRecoveryShape(goal)));
+  }
+
+  async projectableGoals({ limit = 12, conversationId } = {}) {
+    await this.ready;
+    const visibleStatuses = new Set(["active", "paused", "blocked"]);
+    const hasConversationFilter = conversationId !== undefined;
+    const normalizedConversationId = normalizeConversationId(conversationId);
+    return Object.values(this.state.goals)
+      .filter((goal) => visibleStatuses.has(goal?.status))
+      .filter((goal) => !hasConversationFilter || goal.conversationId === normalizedConversationId)
+      .sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")))
+      .slice(0, Math.max(1, Math.min(50, Number(limit) || 12)))
+      .map((goal) => clone(ensureRoundRecoveryShape(goal)));
+  }
+
+  async bindConversation({ goalId, conversationId }) {
+    await this.ready;
+    const goal = this.getGoal(goalId);
+    const target = normalizeConversationId(conversationId);
+    if (!target) throw new Error("Conversation id is required to bind a Goal.");
+    const current = normalizeConversationId(goal.conversationId);
+    if (current === target) return clone(goal);
+    if (current) {
+      throw new Error(`Goal ${goal.id} is already bound to conversation ${current} and cannot move to a different conversation.`);
+    }
+    goal.conversationId = target;
+    this.touch(goal);
+    await this.save();
+    return clone(goal);
+  }
+
   async control({ goalId, action }) {
     await this.ready;
     const goal = this.getGoal(goalId);
@@ -261,6 +362,7 @@ export class GoalRuntime {
       goal.status = "paused";
       goal.pausedAt = this.nowIso();
       goal.continuation = idleContinuation();
+      goal.roundRecovery = idleRoundRecovery(goal.round);
     } else if (command === "resume") {
       if (goal.status === "active") throw new Error(`Goal ${goal.id} is already active.`);
       if (goal.status !== "paused" && goal.status !== "blocked") {
@@ -274,6 +376,7 @@ export class GoalRuntime {
       goal.status = "stopped";
       goal.stoppedAt = this.nowIso();
       goal.continuation = idleContinuation();
+      goal.roundRecovery = idleRoundRecovery(goal.round);
     } else {
       throw new Error(`Invalid Goal control action: ${command}`);
     }
@@ -303,6 +406,7 @@ export class GoalRuntime {
     goal.lastRoundReport = report;
     goal.recentReports = [...(goal.recentReports ?? []), report].slice(-REPORT_HISTORY_LIMIT);
     goal.roundState = "reported";
+    goal.roundRecovery = idleRoundRecovery(goal.round);
 
     if (meaningfulProgress || !normalizedBlocker) {
       goal.blocker = emptyBlocker();
@@ -355,6 +459,7 @@ export class GoalRuntime {
       evidence: supplied.get(criterion.id),
     }));
     goal.continuation = idleContinuation();
+    goal.roundRecovery = idleRoundRecovery(goal.round);
     this.touch(goal);
     await this.save();
     return clone(goal);
@@ -373,6 +478,7 @@ export class GoalRuntime {
     goal.status = "blocked";
     goal.blockedAt = this.nowIso();
     goal.continuation = idleContinuation();
+    goal.roundRecovery = idleRoundRecovery(goal.round);
     this.touch(goal);
     await this.save();
     return clone(goal);
@@ -483,10 +589,114 @@ export class GoalRuntime {
     goal.lastConsumedLeaseId = goal.continuation.leaseId ?? null;
     goal.round += 1;
     goal.roundState = "working";
+    goal.roundBeganAt = this.nowIso();
+    goal.roundRecovery = idleRoundRecovery(goal.round);
     goal.continuation = idleContinuation();
     this.touch(goal);
     await this.save();
     return clone(goal);
+  }
+
+  async recoverableWorkingRounds() {
+    await this.ready;
+    return Object.values(this.state.goals)
+      .filter((goal) => (
+        goal.status === "active"
+        && goal.roundState === "working"
+        && goal.round >= 2
+        && Boolean(goal.lastConsumedContinuationId)
+        && Boolean(goal.roundBeganAt)
+      ))
+      .map((goal) => clone(ensureRoundRecoveryShape(goal)));
+  }
+
+  async claimRoundRecovery({ goalId } = {}) {
+    await this.ready;
+    const goal = ensureRoundRecoveryShape(this.getGoal(goalId));
+    if (goal.status !== "active" || goal.roundState !== "working" || goal.round < 2 || !goal.lastConsumedContinuationId) {
+      return { goal: clone(goal), claimed: false, reason: "round-not-recoverable" };
+    }
+
+    const recovery = goal.roundRecovery?.round === goal.round
+      ? goal.roundRecovery
+      : idleRoundRecovery(goal.round);
+    const retryAfterMs = Date.parse(String(recovery.retryAfterAt || ""));
+    if (recovery.state === "dispatching") {
+      return { goal: clone(goal), claimed: false, reason: "recovery-in-flight" };
+    }
+    if (recovery.state === "dispatched" && Number.isFinite(retryAfterMs) && this.now() < retryAfterMs) {
+      return { goal: clone(goal), claimed: false, reason: "recovery-cooldown" };
+    }
+    if (recovery.state === "idle" && Number.isFinite(retryAfterMs) && this.now() < retryAfterMs) {
+      return { goal: clone(goal), claimed: false, reason: "recovery-cooldown" };
+    }
+
+    const attempt = Number(recovery.attempts ?? 0) + 1;
+    if (attempt > MAX_ROUND_RECOVERY_ATTEMPTS) {
+      return { goal: clone(goal), claimed: false, reason: "recovery-attempt-limit", exhausted: true };
+    }
+
+    const recoveryId = randomId("recovery");
+    const claimedAt = this.nowIso();
+    goal.roundRecovery = {
+      state: "dispatching",
+      round: goal.round,
+      recoveryId,
+      attempts: attempt,
+      claimedAt,
+      dispatchedAt: null,
+      retryAfterAt: null,
+    };
+    this.touch(goal);
+    await this.save();
+    return {
+      goal: clone(goal),
+      claimed: true,
+      claim: {
+        goalId: goal.id,
+        round: goal.round,
+        recoveryId,
+        attempt,
+        prompt: buildRoundRecoveryPrompt(goal, recoveryId),
+      },
+    };
+  }
+
+  async roundRecovery({ goalId, action, recoveryId } = {}) {
+    await this.ready;
+    const goal = ensureRoundRecoveryShape(this.getGoal(goalId));
+    const command = String(action ?? "");
+    const requestedRecoveryId = String(recoveryId ?? "");
+    if (!requestedRecoveryId) throw new Error(`Goal round recovery ${command} requires recoveryId.`);
+    if (goal.roundRecovery?.state !== "dispatching") {
+      throw new Error(`Goal ${goal.id} round recovery is ${goal.roundRecovery?.state || "idle"}; no dispatch claim is active.`);
+    }
+    if (goal.roundRecovery.recoveryId !== requestedRecoveryId) {
+      throw new Error(`Goal ${goal.id} round recovery id does not match.`);
+    }
+
+    if (command === "ack") {
+      goal.roundRecovery = {
+        ...goal.roundRecovery,
+        state: "dispatched",
+        dispatchedAt: this.nowIso(),
+        retryAfterAt: this.continuationExpiryIso(DEFAULT_ROUND_RECOVERY_RETRY_MS),
+      };
+      this.touch(goal);
+      await this.save();
+      return { goal: clone(goal), acknowledged: true };
+    }
+    if (command === "release") {
+      goal.roundRecovery = idleRoundRecovery(
+        goal.round,
+        Number(goal.roundRecovery.attempts ?? 0),
+        this.continuationExpiryIso(DEFAULT_ROUND_RECOVERY_RELEASE_MS),
+      );
+      this.touch(goal);
+      await this.save();
+      return { goal: clone(goal), released: true };
+    }
+    throw new Error(`Invalid Goal round recovery action: ${command}`);
   }
 
   async close() {

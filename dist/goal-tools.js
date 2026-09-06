@@ -39,16 +39,28 @@ const continuationSchema = z.object({
   expiresAt: z.string().nullable(),
   dispatchedAt: z.string().nullable(),
 });
+const roundRecoverySchema = z.object({
+  state: z.enum(["idle", "dispatching", "dispatched"]),
+  round: z.number().int().positive(),
+  recoveryId: z.string().nullable(),
+  attempts: z.number().int().nonnegative(),
+  claimedAt: z.string().nullable(),
+  dispatchedAt: z.string().nullable(),
+  retryAfterAt: z.string().nullable(),
+});
 const evidenceSchema = z.object({
   criterionId: z.string(),
   evidence: z.string(),
 });
 const goalSchema = z.object({
   id: z.string(),
+  conversationId: z.string().nullable(),
   objective: z.string(),
   status: z.enum(["active", "paused", "blocked", "completed", "stopped"]),
   round: z.number().int().positive(),
   roundState: z.enum(["working", "reported"]),
+  roundBeganAt: z.string().nullable(),
+  roundRecovery: roundRecoverySchema,
   revision: z.number().int().positive(),
   createdAt: z.string(),
   updatedAt: z.string(),
@@ -74,12 +86,20 @@ const continuationClaimSchema = z.object({
   expiresAt: z.string(),
   prompt: z.string(),
 });
+const hostDispatchSchema = z.object({
+  ok: z.boolean(),
+  transport: z.string().optional(),
+  runtimeLabel: z.string().optional(),
+  runtimePort: z.number().int().positive().optional(),
+  targetId: z.string().optional(),
+});
 const continuationOutputSchema = {
   goal: goalSchema,
   claim: continuationClaimSchema.optional(),
   acknowledged: z.boolean().optional(),
   released: z.boolean().optional(),
   consumed: z.boolean().optional(),
+  hostDispatch: hostDispatchSchema.optional(),
 };
 
 function textResult(goal, text, extra = {}) {
@@ -110,8 +130,36 @@ function appOnlyMeta() {
   return { ui: { visibility: ["app"] } };
 }
 
-export function registerGoalTools(server, goalRuntime, { resourceUri }) {
+export function registerGoalTools(server, goalRuntime, { resourceUri, relayResourceUri, hostBridge, onMount, resolveConversation } = {}) {
   if (!resourceUri) throw new Error("registerGoalTools requires resourceUri.");
+  if (!relayResourceUri) throw new Error("registerGoalTools requires relayResourceUri.");
+
+  const resolveConversationId = async (extra) => {
+    if (typeof resolveConversation !== "function") return null;
+    const resolved = await resolveConversation(extra);
+    return String(resolved?.conversationId || "").trim() || null;
+  };
+
+  const bindOrVerifyActiveGoal = async (goalId, extra) => {
+    let goal = await goalRuntime.status(goalId);
+    const conversationId = await resolveConversationId(extra);
+    if (!conversationId) return goal;
+    if (goal.conversationId && goal.conversationId !== conversationId) {
+      throw new Error(`Goal ${goal.id} belongs to conversation ${goal.conversationId}, not ${conversationId}.`);
+    }
+    if (!goal.conversationId && goal.status === "active" && typeof goalRuntime.bindConversation === "function") {
+      goal = await goalRuntime.bindConversation({ goalId: goal.id, conversationId });
+    }
+    return goal;
+  };
+
+  const requireNewConversationId = async (extra) => {
+    const conversationId = await resolveConversationId(extra);
+    if (typeof resolveConversation === "function" && !conversationId) {
+      throw new Error("ChatGPT Classic conversation identity is unresolved; refusing to create an unbound Goal.");
+    }
+    return conversationId;
+  };
 
   registerAppTool(server, "devspace_goal_start", {
     title: "Start DevSpace Goal",
@@ -123,9 +171,10 @@ export function registerGoalTools(server, goalRuntime, { resourceUri }) {
     outputSchema: goalOutputSchema,
     annotations: MUTATING,
     _meta: renderMeta(resourceUri),
-  }, async ({ objective, successCriteria }) => {
+  }, async ({ objective, successCriteria }, extra) => {
     try {
-      const goal = await goalRuntime.start({ objective, successCriteria });
+      const conversationId = await requireNewConversationId(extra);
+      const goal = await goalRuntime.start({ objective, successCriteria, conversationId });
       return textResult(goal, `Started Goal ${goal.id} at round ${goal.round}.`);
     } catch (error) {
       return errorResult(error);
@@ -139,9 +188,9 @@ export function registerGoalTools(server, goalRuntime, { resourceUri }) {
     outputSchema: goalOutputSchema,
     annotations: READ_ONLY,
     _meta: modelAndAppMeta(),
-  }, async ({ goalId }) => {
+  }, async ({ goalId }, extra) => {
     try {
-      const goal = await goalRuntime.status(goalId);
+      const goal = await bindOrVerifyActiveGoal(goalId, extra);
       return textResult(goal, `Goal ${goal.id} is ${goal.status}, round ${goal.round}, ${goal.roundState}.`);
     } catch (error) {
       return errorResult(error);
@@ -158,8 +207,9 @@ export function registerGoalTools(server, goalRuntime, { resourceUri }) {
     outputSchema: goalOutputSchema,
     annotations: MUTATING,
     _meta: modelOnlyMeta(),
-  }, async ({ goalId, continuationId }) => {
+  }, async ({ goalId, continuationId }, extra) => {
     try {
+      await bindOrVerifyActiveGoal(goalId, extra);
       const goal = await goalRuntime.roundBegin({ goalId, continuationId });
       return textResult(goal, `Goal ${goal.id} continued into round ${goal.round}.`);
     } catch (error) {
@@ -169,7 +219,7 @@ export function registerGoalTools(server, goalRuntime, { resourceUri }) {
 
   registerAppTool(server, "devspace_goal_turn_report", {
     title: "Record Goal Round Report",
-    description: "Call this only after you have already given the user the complete visible report for the current Goal round. This records the report gate and, if the Goal remains active, makes one hidden continuation eligible. It must be the final action of the assistant turn.",
+    description: "Call this after the current Goal round has finished its work and verification, immediately before the user-visible final report. This records the report gate and, if the Goal remains active, makes one hidden continuation eligible. This must be the final tool call of the turn; after it returns, emit one complete visible final report and call no more tools.",
     inputSchema: {
       goalId: z.string().min(1),
       summary: z.string().min(1).max(4_000),
@@ -178,13 +228,14 @@ export function registerGoalTools(server, goalRuntime, { resourceUri }) {
     },
     outputSchema: goalOutputSchema,
     annotations: MUTATING,
-    _meta: modelOnlyMeta(),
-  }, async ({ goalId, summary, meaningfulProgress, blockerFingerprint }) => {
+    _meta: renderMeta(relayResourceUri),
+  }, async ({ goalId, summary, meaningfulProgress, blockerFingerprint }, extra) => {
     try {
+      await bindOrVerifyActiveGoal(goalId, extra);
       const goal = await goalRuntime.turnReport({ goalId, summary, meaningfulProgress, blockerFingerprint });
       return textResult(
         goal,
-        `Goal round ${goal.round} report recorded. End this turn now. Emit no additional user-visible text.`,
+        `Goal round ${goal.round} report recorded. Now give the user the complete visible report for this round as your final response. Do not call any more tools in this turn.`,
       );
     } catch (error) {
       return errorResult(error);
@@ -204,8 +255,9 @@ export function registerGoalTools(server, goalRuntime, { resourceUri }) {
     outputSchema: goalOutputSchema,
     annotations: MUTATING,
     _meta: modelOnlyMeta(),
-  }, async ({ goalId, evidence }) => {
+  }, async ({ goalId, evidence }, extra) => {
     try {
+      await bindOrVerifyActiveGoal(goalId, extra);
       const goal = await goalRuntime.complete({ goalId, evidence });
       return textResult(goal, `Goal ${goal.id} is marked completed. Give the user the final visible report, then record that round report.`);
     } catch (error) {
@@ -220,8 +272,9 @@ export function registerGoalTools(server, goalRuntime, { resourceUri }) {
     outputSchema: goalOutputSchema,
     annotations: MUTATING,
     _meta: modelOnlyMeta(),
-  }, async ({ goalId }) => {
+  }, async ({ goalId }, extra) => {
     try {
+      await bindOrVerifyActiveGoal(goalId, extra);
       const goal = await goalRuntime.markBlocked({ goalId });
       return textResult(goal, `Goal ${goal.id} is blocked after ${goal.blocker.consecutiveRounds} consecutive blocker rounds.`);
     } catch (error) {
@@ -239,8 +292,9 @@ export function registerGoalTools(server, goalRuntime, { resourceUri }) {
     outputSchema: goalOutputSchema,
     annotations: MUTATING,
     _meta: modelAndAppMeta(),
-  }, async ({ goalId, action }) => {
+  }, async ({ goalId, action }, extra) => {
     try {
+      await bindOrVerifyActiveGoal(goalId, extra);
       const goal = await goalRuntime.control({ goalId, action });
       return textResult(goal, `Goal ${goal.id} is now ${goal.status}.`);
     } catch (error) {
@@ -250,17 +304,58 @@ export function registerGoalTools(server, goalRuntime, { resourceUri }) {
 
   registerAppTool(server, "devspace_goal_continuation", {
     title: "Goal Continuation Lease",
-    description: "App-only Goal Dock control for atomically claiming, acknowledging, or releasing one hidden continuation dispatch lease.",
+    description: "App-only Goal control for dispatching one hidden continuation through the local ChatGPT Classic host bridge, plus low-level lease claim/ack/release recovery actions.",
     inputSchema: {
       goalId: z.string().min(1),
-      action: z.enum(["claim", "ack", "release"]),
+      action: z.enum(["dispatch", "claim", "ack", "release"]),
       leaseId: z.string().min(1).optional(),
     },
     outputSchema: continuationOutputSchema,
     annotations: MUTATING,
     _meta: appOnlyMeta(),
-  }, async ({ goalId, action, leaseId }) => {
+  }, async ({ goalId, action, leaseId }, extra) => {
     try {
+      await bindOrVerifyActiveGoal(goalId, extra);
+      if (action === "dispatch") {
+        if (!hostBridge || typeof hostBridge.dispatch !== "function") {
+          throw new Error("ChatGPT Classic Goal host bridge is unavailable.");
+        }
+        const claimed = await goalRuntime.continuation({ goalId, action: "claim" });
+        const claim = claimed.claim;
+        if (!claim?.leaseId || !claim?.prompt) {
+          throw new Error("Goal continuation claim is incomplete.");
+        }
+        let hostDispatch;
+        try {
+          hostDispatch = await hostBridge.dispatch({
+            goalId,
+            round: claim.round,
+            continuationId: claim.continuationId,
+            leaseId: claim.leaseId,
+            prompt: claim.prompt,
+            reportedAt: claimed.goal?.lastRoundReport?.reportedAt ?? null,
+            conversationId: claimed.goal?.conversationId ?? null,
+          });
+        } catch (error) {
+          if (error?.definiteFailure === true) {
+            await goalRuntime.continuation({ goalId, action: "release", leaseId: claim.leaseId });
+          }
+          throw error;
+        }
+        if (hostDispatch?.ok !== true) {
+          if (hostDispatch?.definiteFailure === true) {
+            await goalRuntime.continuation({ goalId, action: "release", leaseId: claim.leaseId });
+          }
+          throw new Error(hostDispatch?.error || "ChatGPT Classic Goal host dispatch failed.");
+        }
+        const acknowledged = await goalRuntime.continuation({ goalId, action: "ack", leaseId: claim.leaseId });
+        return textResult(acknowledged.goal, `Dispatched Goal ${goalId} continuation through ChatGPT Classic host bridge.`, {
+          acknowledged: acknowledged.acknowledged,
+          consumed: acknowledged.consumed,
+          hostDispatch,
+        });
+      }
+
       const result = await goalRuntime.continuation({ goalId, action, leaseId });
       const text = action === "claim"
         ? `Claimed Goal ${goalId} continuation lease.`
@@ -280,14 +375,17 @@ export function registerGoalTools(server, goalRuntime, { resourceUri }) {
 
   registerAppTool(server, "devspace_goal_mount", {
     title: "Mount DevSpace Goal Dock",
-    description: "Re-mount the latest Goal Dock for an existing Goal after renderer reload, later-turn loss, or another missing-card condition. This is read-only and does not create or change Goal state.",
+    description: "Re-mount the latest Goal Dock for an existing Goal after renderer reload, later-turn loss, deleted-owner recovery, or another missing-card condition. This is read-only for Goal state; when Host Overlay is enabled, the explicit mount may briefly arm exact runtime+conversation owner recovery for the newly committed Dock.",
     inputSchema: { goalId: z.string().min(1) },
     outputSchema: goalOutputSchema,
     annotations: READ_ONLY,
     _meta: renderMeta(resourceUri),
-  }, async ({ goalId }) => {
+  }, async ({ goalId }, extra) => {
     try {
-      const goal = await goalRuntime.status(goalId);
+      const goal = await bindOrVerifyActiveGoal(goalId, extra);
+      if (typeof onMount === "function") {
+        try { await onMount({ goal }); } catch {}
+      }
       return textResult(goal, `Mounted Goal ${goal.id} at round ${goal.round}, revision ${goal.revision}.`);
     } catch (error) {
       return errorResult(error);

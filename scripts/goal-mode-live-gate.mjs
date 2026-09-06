@@ -10,11 +10,26 @@ import { GoalRuntime } from "../dist/goal-runtime.js";
 import { registerGoalTools } from "../dist/goal-tools.js";
 
 const GOAL_DOCK_URI = "ui://devspace/goal-dock.html";
+const GOAL_RELAY_URI = "ui://devspace/goal-continuation-relay.html";
 const dockHtml = await readFile(new URL("../dist/ui/goal-dock.html", import.meta.url), "utf8");
+const relayHtml = await readFile(new URL("../dist/ui/goal-continuation-relay.html", import.meta.url), "utf8");
 
 async function connectStack(stateDir, label) {
   const runtime = new GoalRuntime({ stateDir });
   await runtime.ready;
+  const hostDispatches = [];
+  const hostBridge = {
+    async dispatch(request) {
+      hostDispatches.push(request);
+      return {
+        ok: true,
+        transport: "classic-raw-host-rpc",
+        runtimeLabel: "Main-02",
+        runtimePort: 9732,
+        targetId: `goal-widget-${hostDispatches.length}`,
+      };
+    },
+  };
   const server = new McpServer({
     name: `devspace-goal-live-${label}`,
     version: "0.5.0-dev",
@@ -28,7 +43,20 @@ async function connectStack(stateDir, label) {
       text: dockHtml,
     }],
   }));
-  registerGoalTools(server, runtime, { resourceUri: GOAL_DOCK_URI });
+  registerAppResource(server, "DevSpace Goal Continuation Relay", GOAL_RELAY_URI, {
+    description: "Per-round hidden Goal continuation relay for Chat mode.",
+  }, async () => ({
+    contents: [{
+      uri: GOAL_RELAY_URI,
+      mimeType: RESOURCE_MIME_TYPE,
+      text: relayHtml,
+    }],
+  }));
+  registerGoalTools(server, runtime, {
+    resourceUri: GOAL_DOCK_URI,
+    relayResourceUri: GOAL_RELAY_URI,
+    hostBridge,
+  });
 
   const client = new Client({
     name: `devspace-goal-live-client-${label}`,
@@ -37,7 +65,7 @@ async function connectStack(stateDir, label) {
   const [serverTransport, clientTransport] = InMemoryTransport.createLinkedPair();
   await server.connect(serverTransport);
   await client.connect(clientTransport);
-  return { runtime, server, client };
+  return { runtime, server, client, hostDispatches };
 }
 
 async function closeStack(stack) {
@@ -73,11 +101,18 @@ try {
   assert.deepEqual(tools.get("devspace_goal_continuation")._meta.ui.visibility, ["app"]);
   assert.equal(tools.get("devspace_goal_start")._meta.ui.resourceUri, GOAL_DOCK_URI);
   assert.equal(tools.get("devspace_goal_mount")._meta.ui.resourceUri, GOAL_DOCK_URI);
+  assert.equal(tools.get("devspace_goal_turn_report")._meta.ui.resourceUri, GOAL_RELAY_URI);
 
   const resource = await first.client.readResource({ uri: GOAL_DOCK_URI });
   assert.equal(resource.contents[0].mimeType, RESOURCE_MIME_TYPE);
-  assert.match(resource.contents[0].text, /sendFollowUpMessage/);
+  assert.doesNotMatch(resource.contents[0].text, /sendFollowUpMessage/);
   assert.match(resource.contents[0].text, /devspace_goal_continuation/);
+  assert.match(resource.contents[0].text, /action:\s*["']dispatch["']/);
+  const relayResource = await first.client.readResource({ uri: GOAL_RELAY_URI });
+  assert.equal(relayResource.contents[0].mimeType, RESOURCE_MIME_TYPE);
+  assert.doesNotMatch(relayResource.contents[0].text, /sendFollowUpMessage/);
+  assert.match(relayResource.contents[0].text, /dispatchStarted/);
+  assert.match(relayResource.contents[0].text, /action:\s*["']dispatch["']/);
 
   const startedResult = await first.client.callTool({
     name: "devspace_goal_start",
@@ -105,25 +140,23 @@ try {
   assert.equal(reported1.roundState, "reported");
   assert.equal(reported1.continuation.state, "pending");
 
-  const claim1Result = await first.client.callTool({
+  const dispatch1Result = await first.client.callTool({
     name: "devspace_goal_continuation",
-    arguments: { goalId: goal1.id, action: "claim" },
+    arguments: { goalId: goal1.id, action: "dispatch" },
   });
-  assert.equal(claim1Result.isError, undefined);
-  const claim1 = claim1Result.structuredContent.claim;
-  assert.match(claim1.leaseId, /^lease_/);
-  assert.match(claim1.prompt, /devspace_goal_round_begin/);
-
-  const ack1Result = await first.client.callTool({
-    name: "devspace_goal_continuation",
-    arguments: { goalId: goal1.id, action: "ack", leaseId: claim1.leaseId },
-  });
-  assert.equal(ack1Result.structuredContent.goal.continuation.state, "dispatched");
-  assert.equal(ack1Result.structuredContent.acknowledged, true);
+  assert.equal(dispatch1Result.isError, undefined);
+  const dispatched1 = goalFrom(dispatch1Result);
+  assert.equal(dispatched1.continuation.state, "dispatched");
+  assert.equal(dispatch1Result.structuredContent.acknowledged, true);
+  assert.equal(dispatch1Result.structuredContent.hostDispatch.transport, "classic-raw-host-rpc");
+  assert.equal(first.hostDispatches.length, 1);
+  const continuation1 = dispatched1.continuation.continuationId;
+  assert.match(continuation1, /^continuation_/);
+  assert.match(first.hostDispatches[0].prompt, /devspace_goal_round_begin/);
 
   const round2Result = await first.client.callTool({
     name: "devspace_goal_round_begin",
-    arguments: { goalId: goal1.id, continuationId: claim1.continuationId },
+    arguments: { goalId: goal1.id, continuationId: continuation1 },
   });
   const round2 = goalFrom(round2Result);
   assert.equal(round2.round, 2);
@@ -131,7 +164,7 @@ try {
 
   const duplicateRound2Result = await first.client.callTool({
     name: "devspace_goal_round_begin",
-    arguments: { goalId: goal1.id, continuationId: claim1.continuationId },
+    arguments: { goalId: goal1.id, continuationId: continuation1 },
   });
   const duplicateRound2 = goalFrom(duplicateRound2Result);
   assert.equal(duplicateRound2.round, 2);
@@ -173,14 +206,18 @@ try {
   assert.equal(resumed.continuation.state, "pending");
   assert.notEqual(resumed.continuation.continuationId, continuationBeforePause);
 
-  const claim2Result = await first.client.callTool({
+  const dispatch2Result = await first.client.callTool({
     name: "devspace_goal_continuation",
-    arguments: { goalId: goal1.id, action: "claim" },
+    arguments: { goalId: goal1.id, action: "dispatch" },
   });
-  const claim2 = claim2Result.structuredContent.claim;
+  assert.equal(dispatch2Result.isError, undefined);
+  const dispatched2 = goalFrom(dispatch2Result);
+  assert.equal(dispatched2.continuation.state, "dispatched");
+  assert.equal(first.hostDispatches.length, 2);
+  const continuation2 = dispatched2.continuation.continuationId;
   const round3Result = await first.client.callTool({
     name: "devspace_goal_round_begin",
-    arguments: { goalId: goal1.id, continuationId: claim2.continuationId },
+    arguments: { goalId: goal1.id, continuationId: continuation2 },
   });
   const round3 = goalFrom(round3Result);
   assert.equal(round3.round, 3);
@@ -240,6 +277,7 @@ try {
     gate: "goal-mode-live",
     tools: tools.size,
     resourceMimeType: RESOURCE_MIME_TYPE,
+    relayResource: true,
     finalRound: restored.round,
     finalStatus: restored.status,
     restartRecoveredRevision: restored.revision,

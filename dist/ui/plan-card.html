@@ -28,7 +28,12 @@
       background: var(--plan-bg);
       box-shadow: var(--shadow-sm, 0 1px 5px rgba(0,0,0,.08));
       overflow: clip;
+      opacity: 1;
+      transform: translateY(0);
+      transition: opacity 140ms cubic-bezier(.23,1,.32,1), transform 140ms cubic-bezier(.23,1,.32,1);
     }
+    .card[data-dismissed="true"] { opacity: 0; transform: translateY(-4px); pointer-events: none; }
+    body[data-dismissed="true"] { padding: 0; }
     .top {
       display: grid;
       grid-template-columns: minmax(0, 1fr) auto;
@@ -81,7 +86,7 @@
     .error { padding: 9px 12px; border-top: 1px solid var(--plan-border); color: var(--color-text-danger, #ef4444); font-size: 11px; display: none; }
     .has-error .error { display: block; }
     @keyframes spin { to { transform: rotate(360deg); } }
-    @media (prefers-reduced-motion: reduce) { .spinner { animation: none; } .chevron { transition: none; } }
+    @media (prefers-reduced-motion: reduce) { .spinner { animation: none; } .chevron, .card { transition: none; } }
   </style>
 </head>
 <body>
@@ -105,6 +110,8 @@
     (() => {
       const ACTIVE_POLL_MS = 1500;
       const HIDDEN_POLL_MS = 6000;
+      const TERMINAL_DISMISS_MS = 650;
+      const TERMINAL_EXIT_MS = 140;
       const card = document.getElementById("card");
       const titleEl = document.getElementById("title");
       const currentEl = document.getElementById("current");
@@ -116,6 +123,7 @@
 
       let plan = null;
       let timer = null;
+      let dismissTimer = null;
       let pipRequested = false;
       let restoredInline = false;
       let expanded = Boolean(window.openai?.widgetState?.expanded);
@@ -172,6 +180,20 @@
         errorEl.textContent = message;
       };
 
+      const scheduleTerminalDismiss = () => {
+        if (dismissTimer !== null || card.dataset.dismissed === "true") return;
+        dismissTimer = window.setTimeout(() => {
+          dismissTimer = null;
+          card.dataset.dismissed = "true";
+          document.body.dataset.dismissed = "true";
+          window.setTimeout(() => {
+            card.hidden = true;
+            document.documentElement.style.height = "0";
+            document.body.style.height = "0";
+          }, TERMINAL_EXIT_MS);
+        }, TERMINAL_DISMISS_MS);
+      };
+
       const render = () => {
         if (!plan) return;
         const completed = plan.status === "completed";
@@ -209,6 +231,7 @@
             restoredInline = true;
             Promise.resolve(window.openai.requestDisplayMode({ mode: "inline" })).catch(() => {});
           }
+          scheduleTerminalDismiss();
         } else {
           requestPiP();
         }
