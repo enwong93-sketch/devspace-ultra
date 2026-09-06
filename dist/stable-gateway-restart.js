@@ -22,6 +22,22 @@ function normalizePath(value) {
   return String(value || "").replaceAll("/", "\\").toLowerCase();
 }
 
+function ownedByPackageOrLauncher(process, processByPid, expectedRoot) {
+  let current = process;
+  const seen = new Set();
+  for (let depth = 0; current && depth < 4; depth += 1) {
+    const pid = Number(current.processId);
+    if (seen.has(pid)) break;
+    seen.add(pid);
+    const commandLine = normalizePath(current.commandLine);
+    if (commandLine.includes(expectedRoot)) {
+      if (depth === 0 || /devspace-(?:stable-gateway|fixed-backend)\.mjs|dist\\cli\.js/.test(commandLine)) return true;
+    }
+    current = processByPid.get(Number(current.parentProcessId));
+  }
+  return false;
+}
+
 export function validateDevspaceListeners({ listeners, processes, packageRoot, gatewayPort, corePorts }) {
   const processByPid = new Map(processes.map((process) => [Number(process.processId), process]));
   const expectedRoot = normalizePath(packageRoot);
@@ -37,13 +53,13 @@ export function validateDevspaceListeners({ listeners, processes, packageRoot, g
     const listener = matches[0];
     const process = processByPid.get(listener.pid);
     const commandLine = normalizePath(process?.commandLine);
-    if (!commandLine || !commandLine.includes(expectedRoot)) {
-      throw new Error(`Listener ${listener.pid} on port ${port} is not owned by the expected DevSpace package root.`);
-    }
     const gateway = port === Number(gatewayPort);
     const expectedMarker = gateway ? "devspace-stable-gateway.mjs" : "dist\\cli.js";
-    if (!commandLine.includes(expectedMarker)) {
+    if (!commandLine || !commandLine.includes(expectedMarker)) {
       throw new Error(`Listener ${listener.pid} on port ${port} does not match the expected ${gateway ? "Gateway" : "Core"} command.`);
+    }
+    if (!ownedByPackageOrLauncher(process, processByPid, expectedRoot)) {
+      throw new Error(`Listener ${listener.pid} on port ${port} is not owned by the expected DevSpace package root.`);
     }
     observed.push({ port, pid: listener.pid, role: gateway ? "gateway" : "core" });
   }
@@ -111,7 +127,7 @@ export async function queryListenerProcesses(pids, { run = execFileAsync } = {})
   const script = [
     "$ErrorActionPreference='Stop'",
     "[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false)",
-    `@(Get-CimInstance Win32_Process | Where-Object { ${filter} } | ForEach-Object { [pscustomobject]@{processId=[int]$_.ProcessId;name=[string]$_.Name;commandLine=[string]$_.CommandLine} }) | ConvertTo-Json -Compress`,
+    `@(Get-CimInstance Win32_Process | Where-Object { ${filter} } | ForEach-Object { [pscustomobject]@{processId=[int]$_.ProcessId;parentProcessId=[int]$_.ParentProcessId;name=[string]$_.Name;executablePath=[string]$_.ExecutablePath;commandLine=[string]$_.CommandLine} }) | ConvertTo-Json -Compress`,
   ].join("; ");
   const result = await run("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
     windowsHide: true,

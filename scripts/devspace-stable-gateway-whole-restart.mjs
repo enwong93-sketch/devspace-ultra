@@ -52,7 +52,10 @@ const netstat = await execFileAsync("netstat.exe", ["-ano", "-p", "tcp"], {
   maxBuffer: 4 * 1024 * 1024,
 });
 const listeners = parseNetstatListeners(netstat.stdout, [gatewayPort, ...corePorts]);
-const processes = await queryListenerProcesses(listeners.map((listener) => listener.pid));
+const listenerProcesses = await queryListenerProcesses(listeners.map((listener) => listener.pid));
+const parentPids = listenerProcesses.map((process) => process.parentProcessId);
+const parentProcesses = await queryListenerProcesses(parentPids);
+const processes = [...listenerProcesses, ...parentProcesses];
 const owned = validateDevspaceListeners({
   listeners,
   processes,

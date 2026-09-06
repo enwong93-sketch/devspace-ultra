@@ -84,7 +84,7 @@ async function main() {
 
   let child;
   try {
-    child = spawn(process.execPath, ["scripts/devspace-stable-gateway.mjs"], {
+    child = spawn(process.execPath, [join(packageRoot, "scripts", "devspace-stable-gateway.mjs")], {
       cwd: packageRoot,
       env: childEnv,
       detached: !foreground,

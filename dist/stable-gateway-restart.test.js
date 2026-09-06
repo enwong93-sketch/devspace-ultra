@@ -30,10 +30,27 @@ assert.deepEqual(observed, [
   { port: 7678, pid: 100, role: "gateway" },
   { port: 7688, pid: 200, role: "core" },
 ]);
+
+const legacyRelativeObserved = validateDevspaceListeners({
+  listeners,
+  processes: [
+    { processId: 100, parentProcessId: 90, commandLine: '"C:\\Program Files\\nodejs\\node.exe" scripts/devspace-stable-gateway.mjs' },
+    { processId: 90, parentProcessId: 1, commandLine: '"C:\\Program Files\\nodejs\\node.exe" C:\\DevSpace\\scripts\\devspace-fixed-backend.mjs --foreground' },
+    { processId: 200, parentProcessId: 100, commandLine: '"C:\\Program Files\\nodejs\\node.exe" dist/cli.js serve' },
+  ],
+  packageRoot: "C:\\DevSpace",
+  gatewayPort: 7678,
+  corePorts: [7688, 7689],
+});
+assert.deepEqual(legacyRelativeObserved, [
+  { port: 7678, pid: 100, role: "gateway" },
+  { port: 7688, pid: 200, role: "core" },
+]);
 assert.throws(() => validateDevspaceListeners({
   listeners,
   processes: [
-    { processId: 100, commandLine: "C:\\Other\\server.exe" },
+    { processId: 100, parentProcessId: 90, commandLine: '"C:\\Program Files\\nodejs\\node.exe" scripts/devspace-stable-gateway.mjs' },
+    { processId: 90, commandLine: '"C:\\Program Files\\nodejs\\node.exe" C:\\Other\\scripts\\devspace-fixed-backend.mjs --foreground' },
     { processId: 200, commandLine: "C:\\DevSpace\\dist\\cli.js serve" },
   ],
   packageRoot: "C:\\DevSpace",
@@ -83,12 +100,14 @@ assert.throws(() => buildRestartPowerShell({
   });
   assert.equal(rows.length, 2);
   assert.equal(rows[0].processId, 100);
+  assert.equal(Object.hasOwn(rows[0], "parentProcessId"), false, "fixture confirms parser preserves only fields returned by PowerShell");
 }
 
 console.log(JSON.stringify({
   ok: true,
   gate: "stable-gateway-whole-restart",
   exactListenerOwnership: true,
+  legacyRelativeChildrenRequireOwnedParent: true,
   delayedResponseSafeRestart: true,
   healthVerification: true,
   secretValuesLogged: false,

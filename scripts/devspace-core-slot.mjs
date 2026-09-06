@@ -216,7 +216,7 @@ export async function startCoreSlot({
   const stderrPath = join(outputDir, `${coreId}.err.log`);
   const stdoutFd = openSync(stdoutPath, "a");
   const stderrFd = openSync(stderrPath, "a");
-  const child = spawn(process.execPath, [...safeNodeArgs, "dist/cli.js", "serve"], {
+  const child = spawn(process.execPath, [...safeNodeArgs, join(packageRoot, "dist", "cli.js"), "serve"], {
     cwd: packageRoot,
     env: buildCoreEnvironment({
       port: corePort,
