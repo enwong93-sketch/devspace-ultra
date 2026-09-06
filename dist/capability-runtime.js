@@ -46,6 +46,8 @@ const DEFAULT_INSTANCE_LEASE_MS = 30 * 60_000;
 const MAX_INSTANCE_LEASE_MS = 2 * 60 * 60_000;
 const MAX_MCP_PROBE_SERVERS = 16;
 const MCP_PROBE_CONCURRENCY = 4;
+const MAX_MCP_RESOURCE_SERVERS = 32;
+const MAX_MCP_RESOURCE_ITEMS = 200;
 const MANIFEST_NAMES = [
   "devspace-plugin.json",
   join(".devspace", "plugin.json"),
@@ -154,6 +156,29 @@ function normalizeId(value) {
     .replace(/\\/g, "/")
     .replace(/^\/+|\/+$/g, "")
     .slice(0, 180);
+}
+function publicMcpServerKey(pluginId, serverId) {
+  return `${pluginId}/${serverId}`;
+}
+function boundedPublicText(value, max = 2000) {
+  return String(value ?? "").slice(0, max);
+}
+function sanitizeListedResource(resource) {
+  return {
+    uri: boundedPublicText(resource?.uri, 4096),
+    name: boundedPublicText(resource?.name, 500),
+    description: resource?.description == null ? undefined : boundedPublicText(resource.description, 2000),
+    mimeType: resource?.mimeType == null ? undefined : boundedPublicText(resource.mimeType, 240),
+    size: Number.isFinite(Number(resource?.size)) ? Number(resource.size) : undefined,
+  };
+}
+function sanitizeListedResourceTemplate(resource) {
+  return {
+    uriTemplate: boundedPublicText(resource?.uriTemplate, 4096),
+    name: boundedPublicText(resource?.name, 500),
+    description: resource?.description == null ? undefined : boundedPublicText(resource.description, 2000),
+    mimeType: resource?.mimeType == null ? undefined : boundedPublicText(resource.mimeType, 240),
+  };
 }
 function normalizePathList(value) {
   const values = typeof value === "string" ? [value] : Array.isArray(value) ? value : [];
@@ -1632,6 +1657,157 @@ export class CapabilityRuntime {
     }
   }
 
+  mcpServerCatalog() {
+    const rows = [];
+    for (const [pluginId, plugin] of this.discovered) {
+      const entry = this.registryEntry(pluginId);
+      if (!entry?.enabled || !entry?.trusted) continue;
+      for (const definition of plugin.mcpServers || []) {
+        if (["metadata-only", "package-metadata"].includes(definition.type)) continue;
+        rows.push({
+          server: publicMcpServerKey(pluginId, definition.id),
+          pluginId,
+          serverId: definition.id,
+          description: boundedPublicText(definition.description, 1000),
+          type: definition.type,
+        });
+      }
+    }
+    return rows.sort((a, b) => a.server.localeCompare(b.server));
+  }
+
+  resolveMcpServer(serverValue) {
+    const requested = String(serverValue ?? "").trim();
+    if (!requested) throw new Error("MCP server is required. Call list_mcp_resources or capability_list first.");
+    const catalog = this.mcpServerCatalog();
+    const exact = catalog.find((row) => row.server === requested);
+    if (exact) return exact;
+    const normalizedAlias = requested.replace(/^mcp__/, "").replace(/__/g, "/");
+    const alias = catalog.find((row) => row.server === normalizedAlias);
+    if (alias) return alias;
+    const byServerId = catalog.filter((row) => row.serverId === requested);
+    if (byServerId.length === 1) return byServerId[0];
+    const available = catalog.slice(0, 20).map((row) => row.server).join(", ");
+    throw new Error(`Unknown or ambiguous MCP server '${requested}'. Available server keys: ${available || "none"}.`);
+  }
+
+  async listMcpResources({ server, cursor, limit = MAX_MCP_RESOURCE_ITEMS } = {}) {
+    await this.ready;
+    const itemLimit = clampInteger(limit, MAX_MCP_RESOURCE_ITEMS, 1, MAX_MCP_RESOURCE_ITEMS);
+    if (cursor && !server) throw new Error("cursor requires an explicit server key so pagination cannot cross MCP servers ambiguously.");
+    const targets = server
+      ? [this.resolveMcpServer(server)]
+      : this.mcpServerCatalog().slice(0, MAX_MCP_RESOURCE_SERVERS);
+    const results = [];
+    let total = 0;
+    for (const target of targets) {
+      if (total >= itemLimit) break;
+      try {
+        const holder = await this.getMcpClient(target.pluginId, target.serverId);
+        const capabilities = holder.client.getServerCapabilities() || {};
+        if (!capabilities.resources) {
+          results.push({ ...target, supported: false, resources: [], nextCursor: null });
+          continue;
+        }
+        const { result } = await this.executeMcpRequest(
+          target.pluginId,
+          target.serverId,
+          undefined,
+          (client, options) => client.listResources(cursor ? { cursor } : undefined, options),
+        );
+        const remaining = itemLimit - total;
+        const resources = (result?.resources || []).slice(0, remaining).map(sanitizeListedResource);
+        total += resources.length;
+        results.push({
+          ...target,
+          supported: true,
+          resources,
+          nextCursor: result?.nextCursor ? boundedPublicText(result.nextCursor, 4096) : null,
+          truncated: (result?.resources || []).length > resources.length,
+        });
+      }
+      catch (error) {
+        results.push({
+          ...target,
+          supported: null,
+          resources: [],
+          nextCursor: null,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+    return {
+      ok: true,
+      server: server || null,
+      resources: results,
+      totalResources: total,
+      serverCount: results.length,
+      serverLimitReached: !server && this.mcpServerCatalog().length > MAX_MCP_RESOURCE_SERVERS,
+    };
+  }
+
+  async listMcpResourceTemplates({ server, cursor, limit = MAX_MCP_RESOURCE_ITEMS } = {}) {
+    await this.ready;
+    const itemLimit = clampInteger(limit, MAX_MCP_RESOURCE_ITEMS, 1, MAX_MCP_RESOURCE_ITEMS);
+    if (cursor && !server) throw new Error("cursor requires an explicit server key so pagination cannot cross MCP servers ambiguously.");
+    const targets = server
+      ? [this.resolveMcpServer(server)]
+      : this.mcpServerCatalog().slice(0, MAX_MCP_RESOURCE_SERVERS);
+    const results = [];
+    let total = 0;
+    for (const target of targets) {
+      if (total >= itemLimit) break;
+      try {
+        const holder = await this.getMcpClient(target.pluginId, target.serverId);
+        const capabilities = holder.client.getServerCapabilities() || {};
+        if (!capabilities.resources) {
+          results.push({ ...target, supported: false, resourceTemplates: [], nextCursor: null });
+          continue;
+        }
+        const { result } = await this.executeMcpRequest(
+          target.pluginId,
+          target.serverId,
+          undefined,
+          (client, options) => client.listResourceTemplates(cursor ? { cursor } : undefined, options),
+        );
+        const remaining = itemLimit - total;
+        const resourceTemplates = (result?.resourceTemplates || []).slice(0, remaining).map(sanitizeListedResourceTemplate);
+        total += resourceTemplates.length;
+        results.push({
+          ...target,
+          supported: true,
+          resourceTemplates,
+          nextCursor: result?.nextCursor ? boundedPublicText(result.nextCursor, 4096) : null,
+          truncated: (result?.resourceTemplates || []).length > resourceTemplates.length,
+        });
+      }
+      catch (error) {
+        results.push({
+          ...target,
+          supported: null,
+          resourceTemplates: [],
+          nextCursor: null,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+    return {
+      ok: true,
+      server: server || null,
+      resourceTemplates: results,
+      totalResourceTemplates: total,
+      serverCount: results.length,
+      serverLimitReached: !server && this.mcpServerCatalog().length > MAX_MCP_RESOURCE_SERVERS,
+    };
+  }
+
+  async readMcpResourceByServer({ server, uri, instanceToken } = {}) {
+    const target = this.resolveMcpServer(server);
+    const resourceUri = String(uri ?? "").trim();
+    if (!resourceUri) throw new Error("MCP resource uri is required.");
+    return await this.readMcpResource(target.pluginId, target.serverId, resourceUri, instanceToken);
+  }
+
   async probePluginMcp(pluginId) {
     await this.ready;
     const { plugin } = this.requirePlugin(pluginId, { enabled: true, trusted: true });
@@ -2066,6 +2242,70 @@ export function registerCapabilityTools(server, runtime) {
         env: input.env,
         leaseSeconds: input.leaseSeconds,
       }));
+    }
+    catch (error) { return errorResult(error); }
+  });
+
+  server.registerTool("list_mcp_resources", {
+    title: "List MCP resources",
+    description: "List resources provided by enabled trusted DevSpace capability MCP servers. Omit server for a bounded first-page summary across all servers, then pass the exact returned server key for pagination. An empty resource list never means the server has no callable tools.",
+    inputSchema: {
+      server: z.string().min(1).max(400).optional(),
+      cursor: z.string().min(1).max(4096).optional(),
+      limit: z.number().int().min(1).max(MAX_MCP_RESOURCE_ITEMS).default(MAX_MCP_RESOURCE_ITEMS),
+    },
+    annotations: READ_ONLY,
+  }, async (input) => {
+    try { return textResult(await runtime.listMcpResources(input)); }
+    catch (error) { return errorResult(error); }
+  });
+
+  server.registerTool("list_mcp_resource_templates", {
+    title: "List MCP resource templates",
+    description: "List parameterized resource templates from enabled trusted DevSpace capability MCP servers. Omit server for a bounded first-page summary, or pass an exact server key and cursor for server-local pagination.",
+    inputSchema: {
+      server: z.string().min(1).max(400).optional(),
+      cursor: z.string().min(1).max(4096).optional(),
+      limit: z.number().int().min(1).max(MAX_MCP_RESOURCE_ITEMS).default(MAX_MCP_RESOURCE_ITEMS),
+    },
+    annotations: READ_ONLY,
+  }, async (input) => {
+    try { return textResult(await runtime.listMcpResourceTemplates(input)); }
+    catch (error) { return errorResult(error); }
+  });
+
+  server.registerTool("read_mcp_resource", {
+    title: "Read MCP resource",
+    description: "Read one resource from an enabled trusted DevSpace capability MCP server. Pass the exact server key returned by list_mcp_resources and one listed URI; arbitrary web URLs are not MCP resources unless the server explicitly listed or templated them.",
+    inputSchema: {
+      server: z.string().min(1).max(400),
+      uri: z.string().min(1).max(16_384),
+      instanceToken: z.string().min(16).optional(),
+    },
+    annotations: READ_ONLY,
+  }, async (input) => {
+    try {
+      const result = await runtime.readMcpResourceByServer(input);
+      const contents = Array.isArray(result?.result?.contents) ? result.result.contents : [];
+      const content = contents.map((resource) => ({
+        type: "resource",
+        resource: {
+          uri: String(resource?.uri || input.uri),
+          ...(resource?.mimeType ? { mimeType: String(resource.mimeType) } : {}),
+          ...(typeof resource?.text === "string" ? { text: resource.text } : { blob: String(resource?.blob || "") }),
+        },
+      }));
+      if (!content.length) content.push({ type: "text", text: `MCP resource ${input.uri} returned no contents.` });
+      return {
+        content,
+        structuredContent: {
+          ok: true,
+          server: input.server,
+          uri: input.uri,
+          contentCount: contents.length,
+          contentTypes: contents.map((item) => typeof item?.text === "string" ? "text" : "blob"),
+        },
+      };
     }
     catch (error) { return errorResult(error); }
   });

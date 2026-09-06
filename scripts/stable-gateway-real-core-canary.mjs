@@ -393,9 +393,45 @@ try {
     "apply_patch",
     "exec_command",
     "write_stdin",
+    "view_image",
+    "request_user_input",
+    "current_time",
+    "sleep",
+    "get_context_remaining",
+    "tool_search",
+    "list_mcp_resources",
+    "list_mcp_resource_templates",
+    "read_mcp_resource",
+    "codex_mcp_catalog",
+    "codex_mcp_refresh",
+    "codex_mcp_inspect",
+    "codex_mcp_call",
+    "codex_mcp_list_resources",
+    "codex_mcp_list_resource_templates",
+    "codex_mcp_read_resource",
   ]) {
     assert.equal(toolNamesBefore.has(requiredTool), true, `Ultra canary is missing ${requiredTool}.`);
   }
+  const codexCatalog = await postMcp(gatewayBaseUrl, {
+    jsonrpc: "2.0",
+    id: 20,
+    method: "tools/call",
+    params: {
+      name: "codex_mcp_catalog",
+      arguments: { includeDisabled: true },
+    },
+  }, { accessToken: refreshA.access_token, sessionId: publicSessionId, protocolVersion });
+  assert.equal(codexCatalog.status, 200);
+  const codexCatalogPayload = parseMcpBody(codexCatalog);
+  const codexCatalogResult = codexCatalogPayload?.result?.structuredContent;
+  assert.equal(codexCatalogResult?.ok, true, "Real Core must expose the linked Codex MCP catalogue even when the local config has no entries.");
+  assert.equal(Array.isArray(codexCatalogResult?.servers), true);
+  for (const server of codexCatalogResult.servers) {
+    for (const forbidden of ["command", "args", "env", "httpHeaders", "bearerToken", "bearer_token"]) {
+      assert.equal(Object.hasOwn(server, forbidden), false, `Linked Codex MCP catalogue leaked forbidden field ${forbidden}.`);
+    }
+  }
+
   if (backgroundPlugins) {
     for (const requiredTool of ["capability_list", "capability_inspect", "capability_call"]) {
       assert.equal(toolNamesBefore.has(requiredTool), true, `Capability canary is missing ${requiredTool}.`);

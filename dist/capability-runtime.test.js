@@ -377,6 +377,9 @@ async function run() {
       "capability_refresh",
       "capability_read",
       "capability_instance",
+      "list_mcp_resources",
+      "list_mcp_resource_templates",
+      "read_mcp_resource",
       "capability_call",
     ];
     assert.deepEqual(mainTools.map((item) => item.name), expectedNames);
