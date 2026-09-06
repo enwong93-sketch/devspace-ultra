@@ -570,6 +570,16 @@ async function scanPluginDirectory(pluginDir, options = {}) {
   const name = String(rootMetadata.title || rootMetadata.displayName || rootMetadata.name || packageJson?.displayName || packageJson?.name || pyproject?.name || id).slice(0, 180);
   const description = String(rootMetadata.description || packageJson?.description || pyproject?.description || "Installed DevSpace capability package").slice(0, 2000);
   const version = String(rootMetadata.version || packageJson?.version || pyproject?.version || "0.0.0").slice(0, 80);
+  const keywords = normalizeStringArray(rootMetadata.keywords).slice(0, 100);
+  const routingAliases = id === "computer-use"
+    ? [
+        "windows desktop application app automation",
+        "open launch control click type scroll drag screenshot accessibility",
+        "notepad calculator paint file explorer visual studio vscode",
+        "word excel powerpoint outlook teams discord whatsapp",
+        "blender unreal engine native windows ui",
+      ]
+    : [];
 
   const skills = [];
   for (const [rel, file] of relativeFiles) {
@@ -775,6 +785,8 @@ async function scanPluginDirectory(pluginDir, options = {}) {
     name,
     description,
     version,
+    keywords,
+    routingAliases,
     root,
     manifestPath,
     source: options.source || rootMetadata.source || sourceFromPackageJson(packageJson),
@@ -828,6 +840,8 @@ async function scanPluginDirectory(pluginDir, options = {}) {
     fingerprint: sha256(JSON.stringify({
       id,
       version,
+      keywords,
+      routingAliases,
       skills: skills.map((skill) => skill.filePath),
       instructions: instructions.map((item) => item.path),
       claudeCommands: claudeCommands.map((item) => item.path),
@@ -849,6 +863,8 @@ function safePluginSummary(discovered, registryEntry, probe) {
     name: discovered.name,
     description: discovered.description,
     version: discovered.version,
+    keywords: discovered.keywords || [],
+    routingAliases: discovered.routingAliases || [],
     enabled: Boolean(registryEntry?.enabled),
     trusted: Boolean(registryEntry?.trusted),
     managed: Boolean(registryEntry?.managed),
@@ -917,6 +933,8 @@ function compactPluginSummary(discovered, registryEntry, probe) {
     name: discovered.name,
     description: discovered.description,
     version: discovered.version,
+    keywords: discovered.keywords || [],
+    routingAliases: discovered.routingAliases || [],
     enabled: Boolean(registryEntry?.enabled),
     trusted: Boolean(registryEntry?.trusted),
     managed: Boolean(registryEntry?.managed),
@@ -1216,11 +1234,13 @@ export class CapabilityRuntime {
         id: plugin.id.toLowerCase(),
         name: plugin.name.toLowerCase(),
         description: plugin.description.toLowerCase(),
+        keywords: (plugin.keywords || []).join(" ").toLowerCase(),
+        routing: (plugin.routingAliases || []).join(" ").toLowerCase(),
         skills: plugin.skills.map((item) => `${item.name} ${item.description}`).join(" ").toLowerCase(),
         mcp: plugin.mcpServers.map((item) => `${item.id} ${item.description}`).join(" ").toLowerCase(),
         tools: plugin.tools.map((item) => `${item.name} ${item.description}`).join(" ").toLowerCase(),
         apps: (plugin.codexApps || []).map((item) => `${item.name} ${item.id}`).join(" ").toLowerCase(),
-        interface: (plugin.codexInterfaces || []).map((item) => `${item.displayName} ${item.shortDescription} ${item.longDescription} ${item.developerName} ${item.category} ${(item.capabilities || []).join(" ")}`).join(" ").toLowerCase(),
+        interface: (plugin.codexInterfaces || []).map((item) => `${item.displayName} ${item.shortDescription} ${item.longDescription} ${item.developerName} ${item.category} ${(item.capabilities || []).join(" ")} ${(item.defaultPrompt || []).join(" ")}`).join(" ").toLowerCase(),
         probed: Object.values(this.probes.get(id) || {}).flatMap((item) => [
           ...(item.tools || []).map((tool) => `${tool.name} ${tool.description || ""}`),
           ...(item.prompts || []).map((prompt) => `${prompt.name} ${prompt.description || ""}`),
@@ -1233,8 +1253,9 @@ export class CapabilityRuntime {
         let termScore = 0;
         if (fields.id.includes(term)) termScore = Math.max(termScore, 12);
         if (fields.name.includes(term)) termScore = Math.max(termScore, 10);
+        if (fields.routing.includes(term)) termScore = Math.max(termScore, 9);
         if (fields.tools.includes(term) || fields.probed.includes(term)) termScore = Math.max(termScore, 8);
-        if (fields.skills.includes(term) || fields.mcp.includes(term) || fields.apps.includes(term)) termScore = Math.max(termScore, 6);
+        if (fields.skills.includes(term) || fields.mcp.includes(term) || fields.apps.includes(term) || fields.keywords.includes(term)) termScore = Math.max(termScore, 6);
         if (fields.description.includes(term) || fields.interface.includes(term)) termScore = Math.max(termScore, 3);
         if (!termScore) { matched = false; break; }
         score += termScore;

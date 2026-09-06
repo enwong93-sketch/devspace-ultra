@@ -95,6 +95,7 @@ try {
   await bridge.ready;
   const catalog = await bridge.catalog({ includeDisabled: true });
   assert.equal(catalog.ok, true);
+  assert.equal(catalog.executionPolicy, "full-access");
   assert.equal(catalog.servers.length, 6);
   const serializedCatalog = JSON.stringify(catalog);
   for (const secret of [
@@ -140,33 +141,29 @@ try {
   assert.equal(readText.secretPresent, true);
   assert.equal(readCall.result.content[0].text.includes("super-secret-value"), false);
 
-  const pendingWrite = await bridge.callTool({
+  const writeCall = await bridge.callTool({
     serverId: "fixture",
     toolName: "write_fixture",
     arguments: { value: "change" },
   });
-  assert.equal(pendingWrite.ok, false);
-  assert.equal(pendingWrite.approvalRequired, true);
-  assert.equal(typeof pendingWrite.requestKey, "string");
-  const approvedWrite = await bridge.callTool({
-    serverId: "fixture",
-    toolName: "write_fixture",
-    arguments: { value: "change" },
-    userApproved: true,
-  });
-  assert.equal(approvedWrite.ok, true);
-  assert.equal(JSON.parse(approvedWrite.result.content[0].text).kind, "write");
+  assert.equal(writeCall.ok, true);
+  assert.equal(writeCall.approvalRequired, false);
+  assert.equal(writeCall.approvalMode, "full-access");
+  assert.equal(writeCall.configuredApprovalMode, "prompt");
+  assert.equal(typeof writeCall.requestKey, "string");
+  assert.equal(JSON.parse(writeCall.result.content[0].text).kind, "write");
   await assert.rejects(
     () => bridge.callTool({ serverId: "fixture", toolName: "blocked_fixture" }),
     /disabled by enabled_tools or disabled_tools/,
   );
 
-  const elevatedPending = await bridge.callTool({
+  const elevatedCall = await bridge.callTool({
     serverId: "windows-mcp-elevated",
     toolName: "read_fixture",
     arguments: {},
   });
-  assert.equal(elevatedPending.approvalRequired, true, "elevated server must require explicit per-call approval even when Codex config says approve");
+  assert.equal(elevatedCall.ok, true);
+  assert.equal(elevatedCall.approvalRequired, false, "full-access policy must not add a local elevated-server approval barrier");
 
   const resources = await bridge.listResources("fixture");
   assert.equal(resources.resources[0].uri, "fixture://status");
@@ -178,6 +175,7 @@ try {
   const search = await bridge.search("read fixture", { limit: 10 });
   assert.equal(search[0].id, "fixture");
   assert.equal(bridge.diagnostics().clients >= 2, true);
+  assert.equal(bridge.diagnostics().executionPolicy, "full-access");
 
   const registered = fakeServer();
   registerCodexMcpBridgeTools(registered, bridge);
@@ -211,8 +209,8 @@ try {
     gate: "codex-mcp-bridge",
     secretsNeverReturned: true,
     sameConfigNotCopied: true,
-    readOnlyApprovalSemantics: true,
-    elevatedFailsClosed: true,
+    fullAccessOnly: true,
+    configuredApprovalMetadataPreserved: true,
     toolFiltersEnforced: true,
     resourcesAndPrompts: true,
     invalidTomlFailsOpen: true,

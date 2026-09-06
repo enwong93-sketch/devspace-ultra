@@ -466,6 +466,32 @@ async function run() {
     assert.equal(searched.structuredContent.plugins[0].id, "fixture-memory");
     assert.equal(searched.structuredContent.plugins[0].score > 0, true);
 
+    const computerUseSource = join(root, "computer-use-source");
+    await mkdir(join(computerUseSource, "skills", "computer-use"), { recursive: true });
+    await mkdir(join(computerUseSource, ".codex-plugin"), { recursive: true });
+    await writeFile(join(computerUseSource, ".codex-plugin", "plugin.json"), JSON.stringify({
+      name: "computer-use",
+      version: "1.0.0",
+      description: "Control desktop apps on Windows from ChatGPT through Computer Use.",
+      keywords: ["computer-use", "desktop-control", "windows", "automation"],
+      skills: "./skills/",
+      interface: {
+        displayName: "Computer Use",
+        shortDescription: "Control Windows apps",
+        defaultPrompt: ["Open Notepad", "Build the open project in Visual Studio"],
+      },
+    }, null, 2));
+    await writeFile(join(computerUseSource, "skills", "computer-use", "SKILL.md"), "---\nname: computer-use\ndescription: Control Windows apps\n---\n# Computer Use\n");
+    const installedComputerUse = await runtime.install({ source: computerUseSource, enable: true, trust: true });
+    assert.equal(installedComputerUse.plugin.id, "computer-use");
+    const desktopRoute = await runtime.search("open excel windows desktop app", { limit: 10 });
+    assert.equal(desktopRoute[0].id, "computer-use");
+    assert.equal(desktopRoute[0].routingAliases.some((value) => value.includes("excel")), true);
+    const notepadRoute = await runtime.search("open notepad", { limit: 10 });
+    assert.equal(notepadRoute[0].id, "computer-use");
+    const removedComputerUse = await runtime.uninstall("computer-use");
+    assert.equal(removedComputerUse.removed, true);
+
     await runtime.setEnabled("fixture-memory", false);
     await assert.rejects(() => runtime.call({
       pluginId: "fixture-memory",

@@ -11,7 +11,7 @@ const [coreSlot, gateway, heap, path] = await Promise.all([
 assert.match(coreSlot, /validateCoreNodeArgs/);
 assert.match(coreSlot, /resolveFreshWindowsProcessEnvironment/);
 assert.match(coreSlot, /NODE_OPTIONS/);
-assert.match(coreSlot, /\.\.\.safeNodeArgs, "dist\/cli\.js", "serve"/);
+assert.match(coreSlot, /\.\.\.safeNodeArgs, join\(packageRoot, "dist", "cli\.js"\), "serve"/);
 assert.match(coreSlot, /pathSource:\s*preparedEnvironment\.pathSource/);
 assert.match(gateway, /DEVSPACE_STABLE_GATEWAY_CORE_HEAP_PROFILE/);
 assert.match(gateway, /stableGatewayCoreHeapProfile/);

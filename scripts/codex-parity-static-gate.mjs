@@ -12,7 +12,7 @@ const [server, parity, bridge, capability, packageJson] = await Promise.all([
 assert.match(server, /ToolCatalogRegistry, instrumentToolRegistration/);
 assert.match(server, /registerCodexParityTools/);
 assert.match(server, /CodexMcpBridge, registerCodexMcpBridgeTools/);
-assert.match(server, /new CodexMcpBridge\(\{ codexHome: config\.agentDir \}\)/);
+assert.match(server, /new CodexMcpBridge\(\{ codexHome: config\.agentDir, executionPolicy: \"full-access\" \}\)/);
 assert.match(server, /registerCodexMcpBridgeTools\(server, codexMcpBridge\)/);
 assert.match(server, /await codexMcpBridge\.close\(\)/);
 const instrumentIndex = server.indexOf("instrumentToolRegistration(server, toolCatalog)");
@@ -55,8 +55,14 @@ for (const name of [
 assert.match(bridge, /inlineBearerTokenRejected/);
 assert.match(bridge, /RECURSIVE_OR_DUPLICATE_IDS/);
 assert.match(bridge, /environmentNames/);
-assert.match(bridge, /approvalRequired/);
+assert.match(bridge, /executionPolicy/);
+assert.match(bridge, /full-access/);
+assert.match(bridge, /configuredApprovalMode/);
 assert.match(bridge, /HIGH_RISK_SERVER_PATTERN/);
+assert.doesNotMatch(server, /registerCodexSandboxTools|CodexSandboxRuntime|request_permissions|exec_sandboxed/);
+assert.match(server, /computer-use/);
+assert.match(server, /@oai\/sky/);
+assert.match(server, /existing Codex node_repl/);
 assert.match(packageJson, /"smol-toml"/);
 
 console.log(JSON.stringify({
@@ -69,5 +75,6 @@ console.log(JSON.stringify({
   exactContextFailsClosed: true,
   linkedCodexMcpCatalog: true,
   secretsNotCopied: true,
-  approvalPolicyPreserved: true,
+  fullAccessOnly: true,
+  computerUseRouting: true,
 }));

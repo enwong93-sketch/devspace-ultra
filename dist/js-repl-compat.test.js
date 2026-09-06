@@ -43,6 +43,47 @@ function plugin({ enabled = true, trusted = true, toolName = "evaluate", codeFie
 }
 
 {
+  const calls = [];
+  const bridge = {
+    async probe(serverId) {
+      calls.push({ kind: "probe", serverId });
+      return {
+        id: "node_repl",
+        status: "online",
+        tools: [{
+          name: "js",
+          inputSchema: {
+            type: "object",
+            properties: {
+              code: { type: "string" },
+              timeout_ms: { type: "integer" },
+            },
+          },
+        }],
+      };
+    },
+    async callTool(input) {
+      calls.push({ kind: "call", input });
+      return { ok: true, approvalRequired: false, result: "linked-sky-ready" };
+    },
+  };
+  const result = await callJsReplCompatibility({
+    codexMcpBridge: bridge,
+    capabilityRuntime: { async inspect() { throw new Error("fallback must not run"); } },
+  }, {
+    code: 'const { sky } = await import("@oai/sky")',
+    timeoutMs: 5_000,
+  });
+  assert.equal(result.source, "linked-codex-node-repl");
+  assert.equal(result.toolName, "js");
+  assert.equal(result.result, "linked-sky-ready");
+  assert.deepEqual(calls.at(-1).input.arguments, {
+    code: 'const { sky } = await import("@oai/sky")',
+    timeout_ms: 5_000,
+  });
+}
+
+{
   const runtime = {
     async inspect() { return plugin({ toolName: "custom_eval", codeField: "expression", timeoutField: null }); },
     async callMcp(pluginId, serverId, toolName, args) {
@@ -97,4 +138,5 @@ console.log(JSON.stringify({
   schemaAdaptation: true,
   trustRequired: true,
   persistentProviderDelegation: true,
+  linkedCodexNodeReplPrimary: true,
 }));

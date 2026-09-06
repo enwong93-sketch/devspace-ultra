@@ -1,102 +1,106 @@
 import assert from "node:assert/strict";
-import { probeImportedCodexMcp } from "./codex-mcp-production-probe.mjs";
+import { probeLinkedCodexMcp } from "./codex-mcp-production-probe.mjs";
 
-const config = String.raw`
-[mcp_servers."code-review-graph"]
-command = "node"
-args = ["graph.mjs"]
+function server(id, {
+  runnable = true,
+  enabled = true,
+  highRisk = false,
+  transport = "stdio",
+  skipReason = null,
+} = {}) {
+  return { id, runnable, enabled, highRisk, transport, skipReason };
+}
 
-[mcp_servers.node_repl]
-command = "node"
-args = ["repl.mjs"]
-
-[mcp_servers."windows-mcp-elevated"]
-command = "node"
-args = ["elevated.mjs"]
-`;
-
-function plugin(id, enabled, trusted, status = "online", tools = [{ name: "tool" }]) {
+function online(id, tools = [{ name: "tool" }]) {
   return {
     id,
-    enabled,
-    trusted,
-    mcpServers: [{
-      id: id.replace(/^codex-mcp-/, ""),
-      type: "stdio",
-      status,
-      tools,
-      prompts: [],
-      resources: [],
-      resourceTemplates: [],
-      probeErrors: {},
-    }],
+    status: "online",
+    tools,
+    prompts: [],
+    resources: [],
+    resourceTemplates: [],
   };
 }
 
 {
-  const runtime = {
-    async inspect(id) {
-      if (id === "codex-mcp-code-review-graph") return plugin(id, true, true);
-      if (id === "codex-mcp-node_repl") return plugin(id, true, true);
-      if (id === "codex-mcp-windows-mcp-elevated") return plugin(id, false, false, "not-probed", []);
-      throw new Error("unknown");
+  const bridge = {
+    async catalog() {
+      return {
+        executionPolicy: "full-access",
+        servers: [
+          server("code-review-graph"),
+          server("node_repl", { highRisk: true }),
+          server("windows-mcp-elevated", { highRisk: true }),
+          server("devspace", { runnable: false, skipReason: "self recursion" }),
+        ],
+      };
     },
+    async probe(id) {
+      return online(id);
+    },
+    diagnostics() { return { executionPolicy: "full-access" }; },
   };
-  const result = await probeImportedCodexMcp({
-    runtime,
-    codexConfigText: config,
+  const result = await probeLinkedCodexMcp({
+    bridge,
     requiredNames: ["code-review-graph", "node_repl"],
     timeoutMs: 1_000,
   });
   assert.equal(result.ok, true);
+  assert.equal(result.executionPolicy, "full-access");
   assert.deepEqual(result.summary.requiredFailures, []);
-  assert.equal(result.rows.find((row) => row.name === "windows-mcp-elevated").state, "privileged-quarantined");
+  assert.deepEqual(result.summary.highRiskOnline, ["node_repl", "windows-mcp-elevated"]);
+  assert.equal(result.rows.find((row) => row.name === "devspace").state, "self-recursion-skipped");
   assert.equal(result.secretValuesLogged, false);
 }
 
 {
-  const runtime = {
-    async inspect(id) {
-      if (id === "codex-mcp-code-review-graph") return plugin(id, true, true, "offline", []);
-      if (id === "codex-mcp-node_repl") throw Object.assign(new Error("spawn ENOENT"), { code: "ENOENT" });
-      return plugin(id, true, true);
+  const bridge = {
+    async catalog() {
+      return {
+        executionPolicy: "full-access",
+        servers: [
+          server("code-review-graph"),
+          server("node_repl"),
+        ],
+      };
     },
+    async probe(id) {
+      if (id === "code-review-graph") return { ...online(id, []), status: "offline" };
+      throw Object.assign(new Error("spawn ENOENT with private path"), { code: "ENOENT" });
+    },
+    diagnostics() { return { executionPolicy: "full-access" }; },
   };
-  const result = await probeImportedCodexMcp({
-    runtime,
-    codexConfigText: config,
-    requiredNames: ["code-review-graph", "node_repl"],
+  const result = await probeLinkedCodexMcp({
+    bridge,
+    requiredNames: ["code-review-graph", "node_repl", "git_bash"],
     timeoutMs: 1_000,
   });
   assert.equal(result.ok, false);
   assert.deepEqual(result.summary.requiredFailures, [
-    { name: "code-review-graph", state: "offline-or-empty-catalog" },
+    { name: "code-review-graph", state: "offline" },
+    { name: "git_bash", state: "not-configured" },
     { name: "node_repl", state: "executable-not-found" },
   ]);
-  assert.equal(JSON.stringify(result).includes("spawn ENOENT"), false, "raw launch errors must not be echoed into the production report");
+  assert.equal(JSON.stringify(result).includes("private path"), false, "raw launch errors must not be echoed into the production report");
 }
 
-{
-  const runtime = {
-    async inspect(id) {
-      if (id === "codex-mcp-windows-mcp-elevated") return plugin(id, true, true);
-      return plugin(id, true, true);
+await assert.rejects(
+  () => probeLinkedCodexMcp({
+    bridge: {
+      async catalog() { return { executionPolicy: "sandboxed", servers: [] }; },
+      diagnostics() { return { executionPolicy: "sandboxed" }; },
     },
-  };
-  const result = await probeImportedCodexMcp({
-    runtime,
-    codexConfigText: config,
-    requiredNames: ["code-review-graph"],
-    timeoutMs: 1_000,
-  });
-  assert.equal(result.ok, false);
-  assert.deepEqual(result.summary.privilegedViolations, ["windows-mcp-elevated"]);
-}
+    requiredNames: [],
+  }),
+  /must use full-access/i,
+);
 
 console.log(JSON.stringify({
   ok: true,
   gate: "codex-mcp-production-probe",
+  linkedConfigPrimary: true,
+  fullAccessRequired: true,
+  highRiskDoesNotAddLocalApproval: true,
   requiredFailuresFatal: true,
-  privilegedQuarantineRequired: true,
   rawErrorsExcluded: true,
 }));

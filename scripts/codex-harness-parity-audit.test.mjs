@@ -6,7 +6,7 @@ const codexText = [
   "list_mcp_resources", "list_mcp_resource_templates", "read_mcp_resource",
   "mcp_servers", "spawn_agent", "send_input", "wait", "resume_agent", "close_agent",
   "request_user_input", "web_search", "js_repl", "skills", "SKILL.md",
-  "computer", "screenshot", "browser", "sandbox", "approval", "memory", "compact", "compaction",
+  "computer", "screenshot", "browser", "sandbox", "danger-full-access", "memory", "compact", "compaction",
 ].join("\n");
 const devspaceText = [
   "open_workspace", "read", "write", "edit", "grep", "glob", "ls", "apply_patch",
@@ -20,6 +20,8 @@ const devspaceText = [
   "devspace_goal_control", "browser_control_claim", "node_repl", "show_changes", "reviewCheckpoints",
   "download_artifact", "registerArtifactTools", "installedCapabilitySkillPaths", "devspaceSkillsDir",
   "browser_control_status", "browser_control_inspect", "browser_control_act",
+  "computer-use", "@oai/sky", "linked-codex-node-repl",
+  "executionPolicy", "full-access",
   "allowedRoots", "trusted", "readOnlyHint", "destructiveHint",
   "powermem-shared", "search_memories_with_profile",
 ].join("\n");
@@ -28,8 +30,9 @@ const audit = evaluateParity({ codexText, devspaceText });
 assert.equal(audit.summary.p0, 8);
 assert.equal(audit.summary.p0Passed, 8);
 assert.deepEqual(audit.summary.hardBlockers, []);
-assert.equal(audit.summary.partial.includes("browser-and-computer-use"), true);
-assert.equal(audit.summary.partial.includes("sandbox-and-action-approval"), true);
+assert.deepEqual(audit.summary.partial, []);
+assert.equal(audit.rows.find((row) => row.id === "browser-and-computer-use").target, "bridged");
+assert.equal(audit.rows.find((row) => row.id === "full-access-execution-policy").target, "complete");
 assert.deepEqual(audit.summary.missing, ["same-conversation-auto-compact"]);
 assert.equal(audit.rows.find((row) => row.id === "javascript-repl").devspaceObserved, true);
 

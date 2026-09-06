@@ -159,23 +159,22 @@ After installation, a fresh registry-derived Windows PATH probe confirmed the co
 | Multi-agent orchestration | Complete semantically through Chat Swarm membership, leases, submission, elastic scaling, protected runtimes and update canaries |
 | Structured user input | ChatGPT conversation is the host-native user channel; Goal pause/resume provides durable waits. A duplicate form tool is optional, not a local execution blocker |
 | Web research | Host-native web search plus DevSpace signed-in Browser Control |
-| JavaScript REPL | Exact top-level alias bridged to the persistent imported Node REPL |
+| JavaScript REPL | Exact top-level alias directly reusing the existing linked Codex `node_repl`, with imported Capability fallback only when necessary |
+| Windows Computer Use | Official Codex `computer-use` skill routed through the same `node_repl` and bundled `@oai/sky` service; no second CUA backend or helper protocol |
 | Diff/review | `apply_patch`, per-operation diffs, review checkpoints and aggregate `show_changes` |
 | Artifact intake | Host-native attachment adapter and confined `download_artifact` |
 | Skills | User, workspace and trusted plugin `SKILL.md` discovery |
 | Durable memory | Shared PowerMem capability using the existing `codex-global/global` backend |
 
-## Explicit remaining non-P0 gaps
+## P2 execution and desktop routing
 
-### Arbitrary desktop Computer Use — partial
+### Windows desktop Computer Use — bridged complete
 
-DevSpace has signed-in Chrome semantic control, screenshots and raw CDP behind an explicit developer-mode boundary. It does not yet provide a universal arbitrary-desktop Computer Use harness equivalent to controlling every Windows application. This remains a post-foundation capability phase; it must supplement, not bypass, the conversation-authority and safety work.
+DevSpace does not implement another desktop automation engine. It loads the installed official Codex `computer-use` plugin as a trusted capability, routes Windows desktop intents to its skill and guidance, and uses the existing linked Codex `node_repl` to import `@oai/sky`. A live read-only acceptance called `sky.list_apps()` through that exact path and observed the current Windows app inventory. Browser work continues to prefer Browser Control, while desktop tasks use the official Computer Use skill's prohibited-surface and confirmation rules.
 
-### OS process sandbox and per-command approval — partial
+### Local execution policy — full access only
 
-DevSpace now exposes `codex_sandbox_status`, `request_permissions` and `exec_sandboxed` over the installed official Codex sandbox launcher. Default execution is workspace-confined with external network disabled; extra filesystem roots or network access require a session-bound, command-bound, single-use grant that expires in memory. Elevated capability plugins remain quarantined separately.
-
-This is still marked partial on Windows because DevSpace does not claim global read-deny isolation there: the official restricted-token sandbox and DevSpace write boundaries are used, but ordinary readable operating-system locations may remain readable. Full equivalence therefore requires a verified Windows read-isolation policy rather than relabelling the current boundary.
+The earlier DevSpace sandbox-permission bridge has been removed from the exposed server surface. `request_permissions`, `codex_sandbox_status`, and `exec_sandboxed` are not registered. Normal commands use `exec_command`, and linked Codex MCP calls use a single `full-access` local execution policy. Codex tool allow/deny lists, plugin trust for downloaded code, and higher-priority host safety or action-time confirmation rules remain enforced independently; there is no second local authorization round-trip that can block development.
 
 ### True same-conversation Auto Compact — missing
 
@@ -189,7 +188,9 @@ npm run verify:capabilities
 npm run verify:capabilities:codex-live
 npm run verify:toolchain
 npm run verify:codex-parity
-npm run verify:codex-parity:live
+npm run verify:full-access
+npm run verify:stable-gateway:real-core
+npm run verify:codex-harness-parity:live
 npm test
 ```
 

@@ -409,9 +409,10 @@ try {
     "codex_mcp_list_resources",
     "codex_mcp_list_resource_templates",
     "codex_mcp_read_resource",
-    "codex_sandbox_status",
-    "request_permissions",
-    "exec_sandboxed",
+    "js_repl",
+    "toolchain_status",
+    "toolchain_install",
+    "capability_import_codex",
   ]) {
     assert.equal(toolNamesBefore.has(requiredTool), true, `Ultra canary is missing ${requiredTool}.`);
   }
@@ -428,7 +429,11 @@ try {
   const codexCatalogPayload = parseMcpBody(codexCatalog);
   const codexCatalogResult = codexCatalogPayload?.result?.structuredContent;
   assert.equal(codexCatalogResult?.ok, true, "Real Core must expose the linked Codex MCP catalogue even when the local config has no entries.");
+  assert.equal(codexCatalogResult?.executionPolicy, "full-access");
   assert.equal(Array.isArray(codexCatalogResult?.servers), true);
+  for (const removedTool of ["codex_sandbox_status", "request_permissions", "exec_sandboxed"]) {
+    assert.equal(toolNamesBefore.has(removedTool), false, `Full-access-only Core must not expose legacy sandbox tool ${removedTool}.`);
+  }
   for (const server of codexCatalogResult.servers) {
     for (const forbidden of ["command", "args", "env", "httpHeaders", "bearerToken", "bearer_token"]) {
       assert.equal(Object.hasOwn(server, forbidden), false, `Linked Codex MCP catalogue leaked forbidden field ${forbidden}.`);

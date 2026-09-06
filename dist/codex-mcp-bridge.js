@@ -261,26 +261,23 @@ function toolAllowed(server, toolName) {
   return !server.disabledTools.has(toolName);
 }
 
-function approvalDecision(server, tool, userApproved) {
-  const mode = server.toolPolicies.get(tool.name) || server.defaultApprovalMode;
+function normalizeExecutionPolicy(value) {
+  const policy = String(value ?? "full-access").trim().toLowerCase();
+  if (policy !== "full-access") {
+    throw new Error(`Unsupported Codex MCP execution policy: ${policy}. DevSpace supports full-access only.`);
+  }
+  return policy;
+}
+
+function approvalDecision(server, tool, executionPolicy) {
+  const configuredMode = server.toolPolicies.get(tool.name) || server.defaultApprovalMode;
   const readOnly = tool.annotations?.readOnlyHint === true;
-  const needsPrompt = server.highRisk
-    || mode === "prompt"
-    || (mode === "writes" && !readOnly)
-    || (mode === "auto" && !readOnly);
   return {
-    mode,
+    mode: executionPolicy,
+    configuredMode,
     readOnly,
-    required: needsPrompt && userApproved !== true,
-    reason: server.highRisk
-      ? "This server is classified as elevated/high-risk and requires explicit user approval for each call."
-      : mode === "prompt"
-        ? "Codex config requires a prompt for this tool."
-        : mode === "writes" && !readOnly
-          ? "Codex config prompts for non-read-only tools."
-          : mode === "auto" && !readOnly
-            ? "Tool is not explicitly read-only, so DevSpace fails closed instead of auto-approving it."
-            : null,
+    required: false,
+    reason: null,
   };
 }
 
@@ -288,6 +285,7 @@ export class CodexMcpBridge {
   constructor(options = {}) {
     this.configPath = configPathFromOptions(options);
     this.env = options.env || process.env;
+    this.executionPolicy = normalizeExecutionPolicy(options.executionPolicy);
     this.servers = new Map();
     this.clients = new Map();
     this.connecting = new Map();
@@ -345,6 +343,7 @@ export class CodexMcpBridge {
       configPath: this.configPath,
       loadedAt: this.loadedAt,
       configError: this.lastError,
+      executionPolicy: this.executionPolicy,
       servers: [...this.servers.values()]
         .filter((server) => includeDisabled || server.enabled)
         .map((server) => publicServer(server, this.probes.get(server.id)))
@@ -561,7 +560,7 @@ export class CodexMcpBridge {
     return { ok: true, server: server.id, uri: resourceUri, result };
   }
 
-  async callTool({ serverId, toolName, arguments: args = {}, userApproved = false } = {}) {
+  async callTool({ serverId, toolName, arguments: args = {} } = {}) {
     const server = this.requireServer(serverId);
     const selected = String(toolName ?? "").trim();
     if (!selected) throw new Error("toolName is required.");
@@ -573,21 +572,8 @@ export class CodexMcpBridge {
     }
     const tool = probe?.tools?.find((candidate) => candidate.name === selected);
     if (!tool) throw new Error(`Unknown or unavailable Codex MCP tool ${server.id}/${selected}. Inspect the server first.`);
-    const approval = approvalDecision(server, tool, userApproved);
+    const approval = approvalDecision(server, tool, this.executionPolicy);
     const requestKey = sha256(JSON.stringify({ serverId: server.id, toolName: selected, arguments: args || {} })).slice(0, 24);
-    if (approval.required) {
-      return {
-        ok: false,
-        approvalRequired: true,
-        requestKey,
-        server: server.id,
-        toolName: selected,
-        approvalMode: approval.mode,
-        readOnlyHint: approval.readOnly,
-        reason: approval.reason,
-        instruction: "Ask the user for explicit approval for this exact server/tool/action. Retry with userApproved=true only after that approval; do not infer approval from silence or a previous unrelated request.",
-      };
-    }
     const { result } = await this.execute(server.id, (client, options) => client.callTool({ name: selected, arguments: args || {} }, undefined, options));
     return {
       ok: true,
@@ -596,6 +582,7 @@ export class CodexMcpBridge {
       server: server.id,
       toolName: selected,
       approvalMode: approval.mode,
+      configuredApprovalMode: approval.configuredMode,
       result,
     };
   }
@@ -609,6 +596,7 @@ export class CodexMcpBridge {
       probes: this.probes.size,
       loadedAt: this.loadedAt,
       configError: this.lastError,
+      executionPolicy: this.executionPolicy,
     };
   }
 
@@ -654,12 +642,12 @@ export function registerCodexMcpBridgeTools(server, bridge) {
 
   server.registerTool("codex_mcp_call", {
     title: "Call linked Codex MCP tool",
-    description: "Call one tool from the user's existing Codex MCP config. Tool allow/deny lists and approval modes are enforced. Set userApproved=true only after the user explicitly approves this exact pending call in the immediately preceding interaction; elevated or non-read-only calls otherwise fail closed with approvalRequired=true.",
+    description: "Call one tool from the user's existing Codex MCP config under DevSpace's single full-access execution policy. Tool allow/deny lists remain enforced, but local Codex approval modes do not add a second authorization barrier. Higher-priority host safety and action-time confirmation requirements still apply to the assistant's intended action.",
     inputSchema: {
       serverId: z.string().min(1).max(220),
       toolName: z.string().min(1).max(220),
       arguments: z.record(z.string(), z.unknown()).default({}),
-      userApproved: z.boolean().default(false),
+      userApproved: z.boolean().optional().describe("Deprecated compatibility field; full-access is the only local execution policy."),
     },
     annotations: CALLING,
   }, async (input) => {

@@ -2,6 +2,7 @@ import * as z from "zod/v4";
 
 const PLUGIN_ID = "codex-mcp-node_repl";
 const TOOL_NAMES = [
+  "js",
   "js_repl",
   "node_repl",
   "execute_javascript",
@@ -66,17 +67,67 @@ function selectTool(plugin) {
   };
 }
 
-export async function callJsReplCompatibility(runtime, { code, timeoutMs = 30_000 } = {}) {
-  if (!runtime) throw new Error("Capability runtime is required.");
-  const plugin = await runtime.inspect(PLUGIN_ID, { probeMcp: true });
+function dependenciesFrom(value) {
+  if (value?.codexMcpBridge || value?.capabilityRuntime) {
+    return {
+      codexMcpBridge: value.codexMcpBridge || null,
+      capabilityRuntime: value.capabilityRuntime || null,
+    };
+  }
+  return { codexMcpBridge: null, capabilityRuntime: value || null };
+}
+
+function callArguments(selected, code, timeoutMs) {
+  const args = { [selected.codeField]: String(code ?? "") };
+  if (selected.timeoutField) args[selected.timeoutField] = Number(timeoutMs);
+  return args;
+}
+
+export async function callJsReplCompatibility(dependencies, { code, timeoutMs = 30_000 } = {}) {
+  const { codexMcpBridge, capabilityRuntime } = dependenciesFrom(dependencies);
+  if (!codexMcpBridge && !capabilityRuntime) throw new Error("A linked Codex MCP bridge or Capability runtime is required.");
+
+  if (codexMcpBridge) {
+    let selected = null;
+    try {
+      const linkedServer = await codexMcpBridge.probe("node_repl");
+      if (linkedServer?.status !== "online") throw new Error("The linked Codex node_repl server is not online.");
+      selected = selectTool({ mcpServers: [linkedServer] });
+    } catch (error) {
+      if (!capabilityRuntime) throw error;
+    }
+    if (selected) {
+      const response = await codexMcpBridge.callTool({
+        serverId: "node_repl",
+        toolName: selected.toolName,
+        arguments: callArguments(selected, code, timeoutMs),
+      });
+      if (response?.approvalRequired) {
+        throw new Error("The linked Codex node_repl unexpectedly requested local bridge approval.");
+      }
+      return {
+        ok: true,
+        source: "linked-codex-node-repl",
+        serverId: "node_repl",
+        toolName: selected.toolName,
+        result: response?.result ?? response,
+      };
+    }
+  }
+
+  const plugin = await capabilityRuntime.inspect(PLUGIN_ID, { probeMcp: true });
   if (plugin?.enabled !== true) throw new Error("The imported node_repl capability is disabled.");
   if (plugin?.trusted !== true) throw new Error("The imported node_repl capability is not trusted.");
   const selected = selectTool(plugin);
-  const args = { [selected.codeField]: String(code ?? "") };
-  if (selected.timeoutField) args[selected.timeoutField] = Number(timeoutMs);
-  const response = await runtime.callMcp(PLUGIN_ID, selected.serverId, selected.toolName, args);
+  const response = await capabilityRuntime.callMcp(
+    PLUGIN_ID,
+    selected.serverId,
+    selected.toolName,
+    callArguments(selected, code, timeoutMs),
+  );
   return {
     ok: true,
+    source: "imported-capability-node-repl",
     pluginId: PLUGIN_ID,
     serverId: selected.serverId,
     toolName: selected.toolName,
@@ -84,10 +135,10 @@ export async function callJsReplCompatibility(runtime, { code, timeoutMs = 30_00
   };
 }
 
-export function registerJsReplCompatibilityTool(server, runtime) {
+export function registerJsReplCompatibilityTool(server, dependencies) {
   server.registerTool("js_repl", {
     title: "JavaScript REPL",
-    description: "Execute JavaScript through the trusted persistent node_repl capability imported from the user's Codex MCP catalogue. This top-level compatibility entry resolves the plugin/server/tool schema automatically. Use exec_command for isolated shell commands; use js_repl when JavaScript state should persist across evaluations.",
+    description: "Execute JavaScript through the user's existing persistent Codex node_repl. The linked Codex runtime is used directly before any imported fallback, so bundled services such as @oai/sky Computer Use remain available without a second helper or copied implementation. Use exec_command for isolated shell commands; use js_repl for persistent JavaScript state and, after reading the official computer-use skill, Windows desktop automation.",
     inputSchema: {
       code: z.string().min(1).max(200_000),
       timeoutMs: z.number().int().min(1_000).max(120_000).default(30_000),
@@ -99,7 +150,7 @@ export function registerJsReplCompatibilityTool(server, runtime) {
       openWorldHint: true,
     },
   }, async (input) => {
-    try { return textResult(await callJsReplCompatibility(runtime, input)); }
+    try { return textResult(await callJsReplCompatibility(dependencies, input)); }
     catch (error) { return errorResult(error); }
   });
 }
