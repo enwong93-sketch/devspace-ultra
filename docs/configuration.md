@@ -98,16 +98,31 @@ MCP clients discover metadata from:
 | `minimal` | Default. Exposes `open_workspace`, `read`, `write`, `edit`, and `bash`. Clients use `bash` with tools such as `rg`, `find`, and `ls` for inspection. |
 | `full` | Exposes the minimal tools plus dedicated `grep`, `glob`, and `ls` tools. |
 | `codex` | Experimental. Exposes `open_workspace`, `read`, `apply_patch`, `exec_command`, and `write_stdin`. Existing mutation and shell tools are hidden. |
+| `compact` | ChatGPT-focused compact surface. Exposes `open_workspace` plus `workspace_task` for batched reads, patches, commands, and process I/O. The low-level `read`, `apply_patch`, `exec_command`, `write_stdin`, `write`, `edit`, and `bash` tools are not model-visible. |
 
 `DEVSPACE_MINIMAL_TOOLS` remains a backward-compatible alias when
 `DEVSPACE_TOOL_MODE` is unset: `1` selects `minimal` and `0` selects `full`.
-The `codex` mode must be selected through `DEVSPACE_TOOL_MODE` and always uses
-its fixed short tool names regardless of `DEVSPACE_TOOL_NAMING`.
+The `codex` and `compact` modes must be selected through `DEVSPACE_TOOL_MODE`
+and always use their fixed short tool names regardless of
+`DEVSPACE_TOOL_NAMING`.
 
 Codex-mode commands run without a PTY by default. Set `tty: true` on
 `exec_command` for interactive terminal programs. PTY support uses the optional
 `node-pty` dependency; `write_stdin` can send input, poll output, and resize PTY
 sessions.
+
+Compact mode runs the same workspace-scoped primitives behind one
+`workspace_task` call. A task may contain up to 32 ordered `read`, `apply_patch`,
+`exec`, and `write_stdin` operations. Operations stop after the first failure by
+default. Batch only steps whose inputs are already known; when the model needs to
+inspect one result before deciding the next action, start a later
+`workspace_task` call. This keeps the model as the reasoning loop while reducing
+the number of visible ChatGPT host tool invocations.
+
+`compact` is intentionally not called `hidden` or `silent`: ChatGPT may still
+render its own trace for every remaining MCP call, and an MCP server cannot
+remove that host-owned trace. The mode reduces the number of calls rather than
+claiming to suppress them.
 
 ## Widgets
 

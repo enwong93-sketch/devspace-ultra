@@ -26,6 +26,7 @@ import { shutdownHttpServer } from "./server-shutdown.js";
 import { formatPathForPrompt } from "./skills.js";
 import { createWorkspaceStore } from "./workspace-store.js";
 import { formatAgentsPath, WorkspaceRegistry } from "./workspaces.js";
+import { executeWorkspaceTask } from "./workspace-task.js";
 import { summarizeLocalAgentProfile } from "./local-agent-profiles.js";
 import { formatLocalAgentProviderAvailabilitySummary, getLocalAgentProviderAvailabilitySnapshot, } from "./local-agent-availability.js";
 import { CHAT_SWARM_WORKER_UI_URI, ChatSwarmCoordinator, registerChatSwarmTools } from "./chat-swarm.js";
@@ -93,6 +94,7 @@ function toolWidgetDescriptorMeta(config, kind) {
 }
 const toolNames = {
     openWorkspace: "open_workspace",
+    workspaceTask: "workspace_task",
     read: "read",
     write: "write",
     edit: "edit",
@@ -113,6 +115,9 @@ function serverInstructions(config) {
     const showChangesInstruction = config.widgets === "changes"
         ? " If the turn successfully modifies files by creating, editing, overwriting, deleting, moving, or applying patches, call show_changes exactly once for that workspace after the final related file change and before your final response so the user can inspect the aggregate diff for that turn. Do not call it after every individual file change; do not skip it because individual file-change tools already returned diffs."
         : "";
+    if (config.toolMode === "compact") {
+        return `Use DevSpace as a local coding workspace with a compact ChatGPT tool surface. Call ${toolNames.openWorkspace} once per project folder or worktree and reuse its workspaceId. Perform workspace reads, Codex-style patches, shell commands, and process polling/input through ${toolNames.workspaceTask}. Batch operations that are already known and do not require model reasoning between them into the same ${toolNames.workspaceTask} call; good batches include baseline git checks plus searches, several independent file reads, an already-prepared patch followed by targeted verification, or final verification plus git inspection. Operations execute sequentially and stop on the first failure by default. Use a later ${toolNames.workspaceTask} call when you must inspect one result before deciding the next operation. This mode reduces visible host tool invocations; it does not and cannot suppress the host's trace for the remaining MCP calls. Follow instructions returned by ${toolNames.openWorkspace}; read applicable instruction and skill files before working in their scope.${artifactInstruction}${showChangesInstruction}${chatSwarmInstruction}${browserControlInstruction}${capabilityInstruction}${continuityInstruction}${contextBridgeInstruction}`;
+    }
     if (config.toolMode === "codex") {
         return `Use DevSpace as a local coding workspace. Call ${toolNames.openWorkspace} once per project folder or worktree and reuse its workspaceId. Use ${toolNames.read} for direct file reads, apply_patch for all file modifications, exec_command for inspection, tests, builds, and other commands, and write_stdin to poll or interact with running processes. Follow instructions returned by ${toolNames.openWorkspace}; read applicable instruction and skill files before working in their scope.${artifactInstruction}${showChangesInstruction}${chatSwarmInstruction}${browserControlInstruction}${capabilityInstruction}${continuityInstruction}${contextBridgeInstruction}`;
     }
@@ -659,6 +664,129 @@ function registerCodexProcessTools(server, config, workspaces, processSessions) 
         });
     });
 }
+
+const workspaceTaskOperationSchema = z.discriminatedUnion("type", [
+    z.object({
+        type: z.literal("read"),
+        label: z.string().min(1).max(120).optional().describe("Optional short label for this operation in the combined result."),
+        path: z.string().describe("File path to read, relative to the workspace root, or an advertised skill path."),
+        offset: z.number().int().positive().optional().describe("1-indexed line number to start reading from."),
+        limit: z.number().int().positive().optional().describe("Maximum number of lines to read."),
+    }),
+    z.object({
+        type: z.literal("exec"),
+        label: z.string().min(1).max(120).optional().describe("Optional short label for this operation in the combined result."),
+        cmd: z.string().min(1).describe("Shell command to execute."),
+        tty: z.boolean().optional().describe("Allocate a pseudo-terminal. Defaults to false."),
+        columns: z.number().int().min(1).max(1_000).optional(),
+        rows: z.number().int().min(1).max(1_000).optional(),
+        workingDirectory: z.string().optional().describe("Working directory relative to the workspace root."),
+        yieldTimeMs: z.number().int().min(0).max(30_000).optional(),
+        maxOutputTokens: z.number().int().positive().max(100_000).optional(),
+    }),
+    z.object({
+        type: z.literal("apply_patch"),
+        label: z.string().min(1).max(120).optional().describe("Optional short label for this operation in the combined result."),
+        patch: z.string().min(1).describe("Codex-style patch enclosed by *** Begin Patch and *** End Patch markers."),
+    }),
+    z.object({
+        type: z.literal("write_stdin"),
+        label: z.string().min(1).max(120).optional().describe("Optional short label for this operation in the combined result."),
+        sessionId: z.number().describe("Process session identifier returned by a previous workspace_task exec operation."),
+        chars: z.string().optional().describe("Characters to write. Omit or pass an empty string to poll."),
+        columns: z.number().int().min(1).max(1_000).optional(),
+        rows: z.number().int().min(1).max(1_000).optional(),
+        yieldTimeMs: z.number().int().min(0).max(30_000).optional(),
+        maxOutputTokens: z.number().int().positive().max(100_000).optional(),
+    }),
+]);
+
+const workspaceTaskFileOutputSchema = z.object({
+    path: z.string(),
+    previousPath: z.string().optional(),
+    operation: z.enum(["add", "update", "delete", "move"]),
+});
+
+const workspaceTaskOperationOutputSchema = z.object({
+    index: z.number().int().nonnegative(),
+    type: z.enum(["read", "exec", "apply_patch", "write_stdin"]),
+    label: z.string().optional(),
+    ok: z.boolean(),
+    result: z.string(),
+    durationMs: z.number().nonnegative(),
+    path: z.string().optional(),
+    sessionId: z.number().optional(),
+    running: z.boolean().optional(),
+    exitCode: z.number().int().optional(),
+    signal: z.string().optional(),
+    wallTimeMs: z.number().nonnegative().optional(),
+    outputTruncated: z.boolean().optional(),
+    additions: z.number().nonnegative().optional(),
+    removals: z.number().nonnegative().optional(),
+    files: z.array(workspaceTaskFileOutputSchema).optional(),
+});
+
+function registerCompactWorkspaceTask(server, config, workspaces, processSessions) {
+    registerAppTool(server, toolNames.workspaceTask, {
+        title: "Run workspace task",
+        description: "Execute a bounded sequence of workspace reads, Codex-style patches, shell commands, and process input/polling behind one MCP call. Operations run sequentially. Batch operations when their inputs are already known; use a later workspace_task call when you need to inspect one result before deciding the next step. By default the batch stops after the first failed operation, so a patch can safely be followed by tests without running those tests if the patch itself fails. This is the compact alternative to separate read/apply_patch/exec_command/write_stdin calls and is intended to reduce visible ChatGPT host tool traces, not to hide the remaining MCP invocation.",
+        inputSchema: {
+            workspaceId: z.string().describe("Workspace identifier returned by open_workspace."),
+            operations: z
+                .array(workspaceTaskOperationSchema)
+                .min(1)
+                .max(32)
+                .describe("Ordered operations to execute. Keep outputs bounded and batch only steps that do not require model reasoning between them."),
+            stopOnError: z
+                .boolean()
+                .optional()
+                .describe("Defaults to true. Set false only when later operations are genuinely independent of an earlier failure."),
+        },
+        outputSchema: resultOutputSchema({
+            ok: z.boolean(),
+            stoppedEarly: z.boolean(),
+            completed: z.number().int().nonnegative(),
+            total: z.number().int().positive(),
+            operations: z.array(workspaceTaskOperationOutputSchema),
+        }),
+        annotations: SHELL_TOOL_ANNOTATIONS,
+    }, async (input) => {
+        const startedAt = performance.now();
+        const execution = await executeWorkspaceTask(input, {
+            workspaces,
+            processSessions,
+        });
+        for (const operationResult of execution.operations) {
+            const operation = input.operations[operationResult.index];
+            logToolCall(config, {
+                tool: `${toolNames.workspaceTask}.${operationResult.type}`,
+                workspaceId: input.workspaceId,
+                path: operation?.type === "read" ? operation.path : undefined,
+                workingDirectory: operation?.type === "exec" ? operation.workingDirectory ?? "." : undefined,
+                command: operation?.type === "exec" ? operation.cmd : undefined,
+                commandLength: operation?.type === "exec" ? operation.cmd.length : undefined,
+                success: operationResult.ok,
+                durationMs: operationResult.durationMs,
+                exitCode: operationResult.exitCode,
+                running: operationResult.running,
+            });
+        }
+        logToolCall(config, {
+            tool: toolNames.workspaceTask,
+            workspaceId: input.workspaceId,
+            operations: input.operations.length,
+            completed: execution.completed,
+            stoppedEarly: execution.stoppedEarly,
+            success: execution.ok,
+            durationMs: Math.round(performance.now() - startedAt),
+        });
+        return {
+            content: [textBlock(execution.result)],
+            structuredContent: execution,
+        };
+    });
+}
+
 function createMcpServer(config, workspaces, reviewCheckpoints, processSessions, localAgentProviders, incomingArtifactAdapters, chatSwarm, browserControl, capabilityRuntime, conversationContinuity, codexContextBridge) {
     const server = new McpServer({
         name: "devspace",
@@ -875,89 +1003,91 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
             },
         };
     });
-    registerAppTool(server, toolNames.read, {
-        title: "Read file",
-        description: [
-            "Read a file inside an open workspace. Use this for file inspection instead of shell commands like cat or sed. Call open_workspace first and pass workspaceId.",
-            "Use this tool to inspect relevant AGENTS.md or CLAUDE.md files listed by open_workspace before working in nested directories.",
-            config.skillsEnabled
-                ? "If available skills were returned and a task matches one, read that skill's path before proceeding. Skill paths may be outside the workspace; only advertised SKILL.md files and files under already-loaded skill directories are readable."
-                : "",
-        ]
-            .filter(Boolean)
-            .join(" "),
-        inputSchema: {
-            workspaceId: z
-                .string()
-                .describe("Workspace identifier returned by open_workspace."),
-            path: z
-                .string()
-                .describe(config.skillsEnabled
-                ? "File path to read, relative to the workspace root. May also be an advertised skill path from open_workspace skills."
-                : "File path to read, relative to the workspace root."),
-            offset: z
-                .number()
-                .int()
-                .positive()
-                .optional()
-                .describe("1-indexed line number to start reading from."),
-            limit: z
-                .number()
-                .int()
-                .positive()
-                .optional()
-                .describe("Maximum number of lines to read."),
-        },
-        outputSchema: resultOutputSchema(),
-        ...toolWidgetDescriptorMeta(config, "read"),
-        annotations: { readOnlyHint: true },
-    }, async ({ workspaceId, ...input }) => {
-        const startedAt = performance.now();
-        const workspace = workspaces.getWorkspace(workspaceId);
-        const readPath = workspaces.resolveReadPath(workspace, input.path);
-        const response = await readFileTool({ ...input, path: readPath.absolutePath }, {
-            cwd: workspace.root,
-            root: workspace.root,
-            readRoots: readPath.readRoots,
-        });
-        if (response.isError) {
-            logFailedToolResponse(config, {
+    if (config.toolMode !== "compact") {
+        registerAppTool(server, toolNames.read, {
+            title: "Read file",
+            description: [
+                "Read a file inside an open workspace. Use this for file inspection instead of shell commands like cat or sed. Call open_workspace first and pass workspaceId.",
+                "Use this tool to inspect relevant AGENTS.md or CLAUDE.md files listed by open_workspace before working in nested directories.",
+                config.skillsEnabled
+                    ? "If available skills were returned and a task matches one, read that skill's path before proceeding. Skill paths may be outside the workspace; only advertised SKILL.md files and files under already-loaded skill directories are readable."
+                    : "",
+            ]
+                .filter(Boolean)
+                .join(" "),
+            inputSchema: {
+                workspaceId: z
+                    .string()
+                    .describe("Workspace identifier returned by open_workspace."),
+                path: z
+                    .string()
+                    .describe(config.skillsEnabled
+                    ? "File path to read, relative to the workspace root. May also be an advertised skill path from open_workspace skills."
+                    : "File path to read, relative to the workspace root."),
+                offset: z
+                    .number()
+                    .int()
+                    .positive()
+                    .optional()
+                    .describe("1-indexed line number to start reading from."),
+                limit: z
+                    .number()
+                    .int()
+                    .positive()
+                    .optional()
+                    .describe("Maximum number of lines to read."),
+            },
+            outputSchema: resultOutputSchema(),
+            ...toolWidgetDescriptorMeta(config, "read"),
+            annotations: { readOnlyHint: true },
+        }, async ({ workspaceId, ...input }) => {
+            const startedAt = performance.now();
+            const workspace = workspaces.getWorkspace(workspaceId);
+            const readPath = workspaces.resolveReadPath(workspace, input.path);
+            const response = await readFileTool({ ...input, path: readPath.absolutePath }, {
+                cwd: workspace.root,
+                root: workspace.root,
+                readRoots: readPath.readRoots,
+            });
+            if (response.isError) {
+                logFailedToolResponse(config, {
+                    tool: toolNames.read,
+                    workspaceId,
+                    path: input.path,
+                }, response.content, startedAt);
+                return response;
+            }
+            workspaces.markReadPathLoaded(workspace, readPath);
+            const summary = {
+                ...textSummary(response.content),
+                offset: input.offset ?? 1,
+                limited: input.limit !== undefined,
+            };
+            logToolCall(config, {
                 tool: toolNames.read,
                 workspaceId,
                 path: input.path,
-            }, response.content, startedAt);
-            return response;
-        }
-        workspaces.markReadPathLoaded(workspace, readPath);
-        const summary = {
-            ...textSummary(response.content),
-            offset: input.offset ?? 1,
-            limited: input.limit !== undefined,
-        };
-        logToolCall(config, {
-            tool: toolNames.read,
-            workspaceId,
-            path: input.path,
-            success: true,
-            durationMs: Math.round(performance.now() - startedAt),
-        });
-        return {
-            ...response,
-            _meta: {
-                tool: toolNames.read,
-                card: {
-                    workspaceId,
-                    path: input.path,
-                    summary,
-                    payload: { content: response.content },
+                success: true,
+                durationMs: Math.round(performance.now() - startedAt),
+            });
+            return {
+                ...response,
+                _meta: {
+                    tool: toolNames.read,
+                    card: {
+                        workspaceId,
+                        path: input.path,
+                        summary,
+                        payload: { content: response.content },
+                    },
                 },
-            },
-            structuredContent: {
-                result: contentText(response.content),
-            },
-        };
-    });
-    if (config.toolMode !== "codex") {
+                structuredContent: {
+                    result: contentText(response.content),
+                },
+            };
+        });
+    }
+    if (config.toolMode !== "codex" && config.toolMode !== "compact") {
         registerAppTool(server, toolNames.write, {
             title: "Write file",
             description: `Create or completely overwrite a file inside an open workspace. Prefer ${toolNames.edit} for targeted changes to existing files. Call open_workspace first and pass workspaceId.`,
@@ -1387,7 +1517,7 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
             };
         });
     }
-    if (config.toolMode !== "codex") {
+    if (config.toolMode !== "codex" && config.toolMode !== "compact") {
         registerAppTool(server, toolNames.shell, {
             title: "Bash",
             description: config.toolMode !== "full"
@@ -1465,6 +1595,9 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
     }
     if (config.toolMode === "codex") {
         registerCodexProcessTools(server, config, workspaces, processSessions);
+    }
+    if (config.toolMode === "compact") {
+        registerCompactWorkspaceTask(server, config, workspaces, processSessions);
     }
     if (config.artifactsEnabled && isArtifactDownloadSupportedPlatform()) {
         registerArtifactTools(server, {

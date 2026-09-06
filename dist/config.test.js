@@ -14,7 +14,8 @@ try {
   assert.equal(loadConfig(baseEnv).widgets, "off", "DevSpace should not attach per-tool widget cards by default");
   assert.equal(loadConfig({ ...baseEnv, DEVSPACE_WIDGETS: "changes" }).widgets, "changes");
   assert.equal(loadConfig({ ...baseEnv, DEVSPACE_WIDGETS: "full" }).widgets, "full");
-  console.log(JSON.stringify({ ok: true, defaultWidgets: "off", optInModes: ["changes", "full"] }));
+  assert.equal(loadConfig({ ...baseEnv, DEVSPACE_TOOL_MODE: "compact" }).toolMode, "compact");
+  console.log(JSON.stringify({ ok: true, defaultWidgets: "off", optInModes: ["changes", "full"], compactToolMode: true }));
 } finally {
   rmSync(configDir, { recursive: true, force: true });
 }

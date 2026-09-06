@@ -15,6 +15,7 @@ It keeps the original DevSpace local MCP workspace capabilities — local files,
 - **Same-worker context continuity** — a worker can be reopened at its exact saved ChatGPT conversation; ChatGPT workers are session-bound by the backend so fresh joins/continuations do not need to expose raw worker credentials in the transcript.
 - **Zero-copy bootstrap** — workers can be launched, minimized, sent into a configured `sub-agents` ChatGPT Project, joined to a Swarm, and parked without manual invite-code copy/paste.
 - **Backend-first routing** — normal work is always dispatched through the DevSpace Chat Swarm backend. UI/CDP automation is lifecycle/bootstrap/recovery only.
+- **Compact ChatGPT coding surface** — `DEVSPACE_TOOL_MODE=compact` keeps `open_workspace` plus one `workspace_task` orchestration tool that batches already-known reads, patches, commands, and process I/O, reducing host tool-trace spam without pretending an MCP server can hide ChatGPT-owned trace UI.
 - **Recovery** — detects missing runtimes, interrupted connections, stale worker loops, and blocking UI notices; can reopen the exact worker conversation and resume it.
 - **Update compatibility manager** — detects ChatGPT Classic version drift, supports a canary runtime, profile backup, rolling worker update, exact-conversation restore, verification, and rollback.
 - **Configurable runtime reservation** — operators can reserve any runtime numbers for standalone/private use; no runtime number is reserved by default in the public package.
