@@ -76,6 +76,7 @@ export function buildRestartPowerShell({
   gatewayPid,
   corePids,
   resultPath,
+  helperTaskName = null,
   delaySeconds = 5,
   timeoutSeconds = 90,
 }) {
@@ -116,6 +117,10 @@ export function buildRestartPowerShell({
     "$directory=Split-Path -Parent $resultPath",
     "New-Item -ItemType Directory -Path $directory -Force | Out-Null",
     "$payload | ConvertTo-Json -Compress | Set-Content -LiteralPath $resultPath -Encoding UTF8",
+    ...(helperTaskName ? [
+      `$helperTaskName=${psQuote(helperTaskName)}`,
+      "try { Unregister-ScheduledTask -TaskName $helperTaskName -Confirm:$false -ErrorAction SilentlyContinue } catch {}",
+    ] : []),
     "if (-not $ok) { exit 1 }",
   ].join("\r\n");
 }

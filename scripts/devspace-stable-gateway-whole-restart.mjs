@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-import { spawn } from "node:child_process";
 import { execFile } from "node:child_process";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -20,6 +19,10 @@ const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 function argument(name, fallback = "") {
   const index = process.argv.indexOf(`--${name}`);
   return index >= 0 && index + 1 < process.argv.length ? String(process.argv[index + 1]) : fallback;
+}
+
+function psQuote(value) {
+  return `'${String(value).replaceAll("'", "''")}'`;
 }
 
 const configDir = resolve(argument("config-dir", join(homedir(), ".devspace-tailscale-bootstrap")));
@@ -72,29 +75,38 @@ const resultPath = join(logDir, "stable-gateway-whole-restart-result.json");
 const scriptPath = join(logDir, "stable-gateway-whole-restart-pending.ps1");
 await mkdir(logDir, { recursive: true });
 await rm(resultPath, { force: true });
+const helperTaskName = `${taskName}-Restart-${Date.now().toString(36)}`.slice(0, 220);
 const script = buildRestartPowerShell({
   taskName,
   gatewayPort,
   gatewayPid: gateway.pid,
   corePids,
   resultPath,
+  helperTaskName,
   delaySeconds,
   timeoutSeconds,
 });
 await writeFile(scriptPath, `${script}\r\n`, { encoding: "utf8", mode: 0o600 });
 
-const child = spawn("powershell.exe", [
-  "-NoProfile",
-  "-NonInteractive",
-  "-ExecutionPolicy", "Bypass",
-  "-File", scriptPath,
-], {
-  detached: true,
+const helperCommand = [
+  "$ErrorActionPreference='Stop'",
+  `$helperTaskName=${psQuote(helperTaskName)}`,
+  `$scriptPath=${psQuote(scriptPath)}`,
+  "$execute=Join-Path $PSHOME 'powershell.exe'",
+  `$arguments='-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "'+$scriptPath+'"'`,
+  "$action=New-ScheduledTaskAction -Execute $execute -Argument $arguments",
+  "$trigger=New-ScheduledTaskTrigger -Once -At ((Get-Date).AddHours(1))",
+  "$settings=New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 10)",
+  "$principal=New-ScheduledTaskPrincipal -UserId ([Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel Limited",
+  "$definition=New-ScheduledTask -Action $action -Trigger $trigger -Settings $settings -Principal $principal",
+  "Register-ScheduledTask -TaskName $helperTaskName -InputObject $definition -Force | Out-Null",
+  "Start-ScheduledTask -TaskName $helperTaskName",
+].join("; ");
+await execFileAsync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", helperCommand], {
   windowsHide: true,
-  shell: false,
-  stdio: "ignore",
+  timeout: 30_000,
+  maxBuffer: 2 * 1024 * 1024,
 });
-child.unref();
 
 console.log(JSON.stringify({
   ok: true,
@@ -104,6 +116,7 @@ console.log(JSON.stringify({
   corePorts,
   oldGatewayPid: gateway.pid,
   oldCorePids: corePids,
+  helperTaskName,
   delaySeconds,
   timeoutSeconds,
   resultPath,

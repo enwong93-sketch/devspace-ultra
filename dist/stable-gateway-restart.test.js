@@ -71,6 +71,7 @@ const script = buildRestartPowerShell({
   gatewayPid: 100,
   corePids: [200, 200, 0],
   resultPath: "C:\\State\\restart-result.json",
+  helperTaskName: "DevSpace-Stable-Gateway-Restart-test",
   delaySeconds: 5,
   timeoutSeconds: 90,
 });
@@ -80,6 +81,7 @@ assert.match(script, /Start-ScheduledTask/);
 assert.match(script, /__devspace\/gateway\/healthz/);
 assert.match(script, /\$oldPids=@\(100,200\)/);
 assert.match(script, /secretValuesLogged=\$false/);
+assert.match(script, /Unregister-ScheduledTask -TaskName \$helperTaskName/);
 assert.equal(/token|authorization|password/i.test(script), false);
 assert.throws(() => buildRestartPowerShell({
   taskName: "x",
