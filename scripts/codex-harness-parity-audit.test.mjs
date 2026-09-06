@@ -1,0 +1,49 @@
+import assert from "node:assert/strict";
+import { evaluateParity } from "./codex-harness-parity-audit.mjs";
+
+const codexText = [
+  "exec_command", "apply_patch", "write_stdin", "view_image", "update_plan",
+  "list_mcp_resources", "list_mcp_resource_templates", "read_mcp_resource",
+  "mcp_servers", "spawn_agent", "send_input", "wait", "resume_agent", "close_agent",
+  "request_user_input", "web_search", "js_repl", "skills", "SKILL.md",
+  "computer", "screenshot", "browser", "sandbox", "approval", "memory", "compact", "compaction",
+].join("\n");
+const devspaceText = [
+  "open_workspace", "read", "write", "edit", "grep", "glob", "ls", "apply_patch",
+  "exec_command", "write_stdin", "view_image", "loadImageForMcp", "image/png", "image/jpeg",
+  "devspace_update_plan", "devspace_plan_status", "devspace_plan_start",
+  "list_mcp_resources", "list_mcp_resource_templates", "read_mcp_resource",
+  "capability_list", "capability_search", "capability_inspect", "capability_call", "capability_instance",
+  "capability_import_codex", "codex-mcp-stdio-bridge", "expected-fingerprint",
+  "toolchain_status", "toolchain_install", "winget.exe",
+  "chat_swarm_join", "chat_swarm_next", "chat_swarm_submit", "chat_swarm_elastic_scale",
+  "devspace_goal_control", "browser_control_claim", "node_repl", "show_changes", "reviewCheckpoints",
+  "download_artifact", "registerArtifactTools", "installedCapabilitySkillPaths", "devspaceSkillsDir",
+  "browser_control_status", "browser_control_inspect", "browser_control_act",
+  "allowedRoots", "trusted", "readOnlyHint", "destructiveHint",
+  "powermem-shared", "search_memories_with_profile",
+].join("\n");
+
+const audit = evaluateParity({ codexText, devspaceText });
+assert.equal(audit.summary.p0, 8);
+assert.equal(audit.summary.p0Passed, 8);
+assert.deepEqual(audit.summary.hardBlockers, []);
+assert.equal(audit.summary.partial.includes("browser-and-computer-use"), true);
+assert.equal(audit.summary.partial.includes("sandbox-and-action-approval"), true);
+assert.deepEqual(audit.summary.missing, ["same-conversation-auto-compact"]);
+assert.equal(audit.rows.find((row) => row.id === "javascript-repl").devspaceObserved, true);
+
+const broken = evaluateParity({
+  codexText,
+  devspaceText: devspaceText.replace("view_image", "missing-image-tool"),
+});
+assert.deepEqual(broken.summary.hardBlockers, ["native-image-inspection"]);
+assert.equal(broken.rows.find((row) => row.id === "native-image-inspection").hardBlocker, true);
+
+console.log(JSON.stringify({
+  ok: true,
+  gate: "codex-harness-parity-audit",
+  p0FailureIsFatal: true,
+  partialAndMissingRemainExplicit: true,
+  semanticEquivalenceSupported: true,
+}));
