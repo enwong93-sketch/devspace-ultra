@@ -13,6 +13,7 @@ import { handleStableGatewayLiveRequest } from "../dist/stable-gateway-live-ui.j
 import { createStableGatewayHumanProgress, handleStableGatewayHumanProgressRequest } from "../dist/stable-gateway-human-progress.js";
 import { probeCandidate, readCoreSchemaFingerprint } from "../dist/stable-gateway-candidate.js";
 import { loadDevspaceFiles } from "../dist/user-config.js";
+import { nodeArgsForCoreHeapProfile } from "../dist/core-node-options.js";
 import { createCandidateSnapshot, startCoreSlot, stopCoreSlot } from "./devspace-core-slot.mjs";
 
 const CONTROL_FILE_NAME = "stable-gateway-control.json";
@@ -190,10 +191,15 @@ export function stableGatewayOptionsFromEnvironment(env = process.env) {
   const stateDir = env.DEVSPACE_STATE_DIR ?? config.stableGatewayStateDir ?? config.edgeFixedStateDir ?? config.stateDir;
   const publicBaseUrl = env.DEVSPACE_PUBLIC_BASE_URL ?? config.stableGatewayPublicBaseUrl ?? config.edgePublicBaseUrl ?? config.publicBaseUrl;
   const configDir = env.DEVSPACE_CONFIG_DIR ?? files.dir;
+  const stableGatewayCoreHeapProfile = env.DEVSPACE_STABLE_GATEWAY_CORE_HEAP_PROFILE
+    ?? config.stableGatewayCoreHeapProfile
+    ?? "system";
+  const coreNodeArgs = nodeArgsForCoreHeapProfile(stableGatewayCoreHeapProfile);
   return {
     host: env.HOST ?? "127.0.0.1",
     gatewayPort,
     configDir,
+    stableGatewayCoreHeapProfile,
     controllerOptions: {
       publicBaseUrl,
       configDir,
@@ -204,7 +210,7 @@ export function stableGatewayOptionsFromEnvironment(env = process.env) {
       },
       dependencies: {
         createCandidateSnapshot,
-        startCoreSlot,
+        startCoreSlot: (options) => startCoreSlot({ ...options, nodeArgs: coreNodeArgs }),
         stopCoreSlot,
         probeCandidate,
         readCoreSchemaFingerprint,
@@ -246,6 +252,7 @@ if (await isMainModule()) {
     gatewayPort: runtime.gatewayPort,
     activeSlot: controller.status().activeSlot,
     activePid: controller.status().activePid,
+    coreHeapProfile: options.stableGatewayCoreHeapProfile,
     liveUiUrl: `http://127.0.0.1:${runtime.gatewayPort}/__devspace/live`,
     secretValuesLogged: false,
   }));

@@ -15,6 +15,7 @@ const contaminated = {
   DEVSPACE_AUTO_COMPACT: "false",
   DEVSPACE_PLUGIN_PATHS: "C:\\wrong\\plugins",
   DEVSPACE_CLASSIC_MAIN_DEBUG_PORTS: "19991,19992",
+  NODE_OPTIONS: "--require=malicious.js",
 };
 
 const common = {
@@ -31,6 +32,7 @@ assert.equal(active.PORT, "7688");
 assert.equal(active.DEVSPACE_CONFIG_DIR, common.configDir);
 assert.equal(active.DEVSPACE_STATE_DIR, common.stateDir);
 assert.equal(active.DEVSPACE_PUBLIC_BASE_URL, common.publicBaseUrl);
+assert.equal(Object.hasOwn(active, "NODE_OPTIONS"), false, "Core must not inherit arbitrary NODE_OPTIONS");
 for (const key of [
   "DEVSPACE_PASSIVE_CORE",
   "DEVSPACE_PLUGINS",
@@ -82,4 +84,5 @@ console.log(JSON.stringify({
   gate: "devspace-core-slot-env",
   recoveryFlagsDoNotLeakIntoActiveCore: true,
   candidateAutomationDisabledWithoutToolLoss: true,
+  arbitraryNodeOptionsStripped: true,
 }));

@@ -5,6 +5,8 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
+import { validateCoreNodeArgs } from "../dist/core-node-options.js";
+import { resolveFreshWindowsProcessEnvironment } from "../dist/windows-process-path.js";
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const DEFAULT_START_TIMEOUT_MS = 15_000;
@@ -131,6 +133,7 @@ export function buildCoreEnvironment({
 }) {
   const publicHost = new URL(publicBaseUrl).hostname;
   const environment = { ...baseEnv };
+  delete environment.NODE_OPTIONS;
   for (const key of CORE_RUNTIME_ENV_KEYS) delete environment[key];
   for (const [key, value] of Object.entries(runtimeEnvOverrides || {})) {
     if (!CORE_RUNTIME_ENV_KEYS.has(key)) throw new Error(`Unsupported Core runtime environment override: ${key}`);
@@ -197,20 +200,23 @@ export async function startCoreSlot({
   startTimeoutMs = DEFAULT_START_TIMEOUT_MS,
   baseEnv = process.env,
   runtimeEnvOverrides = {},
+  nodeArgs = [],
 } = {}) {
   const coreId = String(id ?? "").trim();
+  const safeNodeArgs = validateCoreNodeArgs(nodeArgs);
   if (!coreId) throw new Error("Core slot id is required.");
   const corePort = requirePort(port, "Core port");
   const coreConfigDir = requireDirectory(configDir, "configDir");
   const coreStateDir = requireDirectory(stateDir, "stateDir");
   const publicBase = normalizePublicBaseUrl(publicBaseUrl);
   const outputDir = resolve(logDir || join(coreConfigDir, "logs", "stable-gateway"));
+  const preparedEnvironment = await resolveFreshWindowsProcessEnvironment(baseEnv);
   mkdirSync(outputDir, { recursive: true });
   const stdoutPath = join(outputDir, `${coreId}.out.log`);
   const stderrPath = join(outputDir, `${coreId}.err.log`);
   const stdoutFd = openSync(stdoutPath, "a");
   const stderrFd = openSync(stderrPath, "a");
-  const child = spawn(process.execPath, ["dist/cli.js", "serve"], {
+  const child = spawn(process.execPath, [...safeNodeArgs, "dist/cli.js", "serve"], {
     cwd: packageRoot,
     env: buildCoreEnvironment({
       port: corePort,
@@ -218,7 +224,7 @@ export async function startCoreSlot({
       stateDir: coreStateDir,
       publicBaseUrl: publicBase,
       candidate: Boolean(candidate),
-      baseEnv,
+      baseEnv: preparedEnvironment.env,
       runtimeEnvOverrides,
     }),
     windowsHide: true,
@@ -244,6 +250,9 @@ export async function startCoreSlot({
     stateDir: coreStateDir,
     stdoutPath,
     stderrPath,
+    nodeArgs: safeNodeArgs,
+    pathSource: preparedEnvironment.pathSource,
+    pathRefreshed: preparedEnvironment.refreshed,
   };
 }
 
