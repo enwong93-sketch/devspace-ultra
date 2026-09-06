@@ -32,6 +32,7 @@ import {
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 import { ErrorCode } from "@modelcontextprotocol/sdk/types.js";
+import { importCodexMcpCatalog } from "./codex-mcp-import.js";
 
 const REGISTRY_VERSION = 1;
 const MAX_PLUGIN_FILES = 5000;
@@ -2098,6 +2099,38 @@ export function registerCapabilityTools(server, runtime) {
     try {
       const plugins = await runtime.search(input.query, input);
       return textResult({ ok: true, query: input.query, plugins });
+    }
+    catch (error) { return errorResult(error); }
+  });
+
+  server.registerTool("capability_import_codex", {
+    title: "Import Codex MCP Catalog",
+    description: "Audit or import local Codex MCP servers into DevSpace as separately reviewable managed capability plugins. Dry-run is the default. Secret values are never copied into plugin manifests or the registry; executable-surface drift fails closed. Standard-risk entries may be bulk-enabled with enableSafe, high-impact/stateful entries require explicit names, and privileged entries additionally require allowPrivileged=true.",
+    inputSchema: {
+      configPath: z.string().min(1).max(4096).optional(),
+      serverIds: z.array(z.string().min(1).max(180)).max(100).default([]),
+      excludeServerIds: z.array(z.string().min(1).max(180)).max(100).default([]),
+      apply: z.boolean().default(false),
+      enableSafe: z.boolean().default(false),
+      enableServerIds: z.array(z.string().min(1).max(180)).max(100).default([]),
+      allowPrivileged: z.boolean().default(false),
+    },
+    annotations: MUTATING,
+  }, async (input) => {
+    try {
+      const operation = () => importCodexMcpCatalog({
+        runtime,
+        ...(input.configPath ? { codexConfigPath: input.configPath } : {}),
+        serverIds: input.serverIds,
+        excludeServerIds: input.excludeServerIds,
+        apply: input.apply,
+        enableSafe: input.enableSafe,
+        enableServerIds: input.enableServerIds,
+        allowPrivileged: input.allowPrivileged,
+      });
+      return textResult(input.apply
+        ? await runtime.serializeMutation(operation)
+        : await operation());
     }
     catch (error) { return errorResult(error); }
   });

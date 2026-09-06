@@ -1,9 +1,16 @@
 import { execFile } from "node:child_process";
+import { join } from "node:path";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 const VERSION_TIMEOUT_MS = 8_000;
-const INSTALL_TIMEOUT_MS = 12 * 60 * 1_000;
+const INSTALL_TIMEOUT_MS = 45 * 60 * 1_000;
+const VSWHERE = join(
+  process.env["ProgramFiles(x86)"] || "C:\\Program Files (x86)",
+  "Microsoft Visual Studio",
+  "Installer",
+  "vswhere.exe",
+);
 
 export const TOOLCHAIN_CATALOG = Object.freeze([
   { id: "git", label: "Git", tier: "core", candidates: [["git", ["--version"]]], wingetId: "Git.Git" },
@@ -27,6 +34,19 @@ export const TOOLCHAIN_CATALOG = Object.freeze([
   { id: "ffmpeg", label: "FFmpeg", tier: "media", candidates: [["ffmpeg", ["-version"]]], wingetId: "Gyan.FFmpeg" },
   { id: "imagemagick", label: "ImageMagick", tier: "media", candidates: [["magick", ["-version"]]], wingetId: "ImageMagick.ImageMagick" },
   { id: "poppler", label: "Poppler pdftoppm", tier: "media", candidates: [["pdftoppm", ["-v"]]], wingetId: "oschwartz10612.Poppler" },
+  {
+    id: "msvc",
+    label: "MSVC C++ Build Tools",
+    tier: "build",
+    candidates: [[VSWHERE, [
+      "-latest",
+      "-products", "*",
+      "-requires", "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+      "-property", "installationVersion",
+    ]]],
+    wingetId: "Microsoft.VisualStudio.2022.BuildTools",
+    wingetOverride: "--wait --passive --norestart --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended",
+  },
   { id: "cmake", label: "CMake", tier: "build", candidates: [["cmake", ["--version"]]], wingetId: "Kitware.CMake" },
   { id: "ninja", label: "Ninja", tier: "build", candidates: [["ninja", ["--version"]]], wingetId: "Ninja-build.Ninja" },
   { id: "rust", label: "Rust/Cargo", tier: "build", candidates: [["cargo", ["--version"]], ["rustc", ["--version"]]], wingetId: "Rustlang.Rustup" },
@@ -92,7 +112,7 @@ export async function toolchainStatus(options = {}) {
   rows.sort((left, right) => TOOLCHAIN_CATALOG.findIndex((tool) => tool.id === left.id) - TOOLCHAIN_CATALOG.findIndex((tool) => tool.id === right.id));
   return {
     ok: true,
-    platform: process.platform,
+    platform: options.platform || process.platform,
     tools: rows,
     summary: {
       total: rows.length,
@@ -114,19 +134,22 @@ export async function installToolchain({
   apply = false,
   run = defaultInstaller,
   statusOptions = {},
+  platform = process.platform,
 } = {}) {
   const selected = selectCatalog({ ids, tiers });
   if (!selected.length) throw new Error("Select at least one known toolchain id or tier.");
   const before = await toolchainStatus({ ...statusOptions, ids: selected.map((tool) => tool.id) });
   const missing = before.tools.filter((row) => !row.available);
+  const catalogById = new Map(selected.map((tool) => [tool.id, tool]));
   const plan = missing.map((row) => ({
     id: row.id,
     label: row.label,
     provider: row.wingetId ? "winget" : "manual",
     packageId: row.wingetId,
+    override: catalogById.get(row.id)?.wingetOverride || null,
   }));
   if (!apply) return { ok: true, applied: false, before, plan };
-  if (process.platform !== "win32") throw new Error("Automatic toolchain installation currently supports Windows winget only.");
+  if (platform !== "win32") throw new Error("Automatic toolchain installation currently supports Windows winget only.");
 
   const results = [];
   for (const item of plan) {
@@ -135,7 +158,7 @@ export async function installToolchain({
       continue;
     }
     try {
-      const result = await run("winget.exe", [
+      const installArgs = [
         "install",
         "--id", item.packageId,
         "--exact",
@@ -143,7 +166,9 @@ export async function installToolchain({
         "--disable-interactivity",
         "--accept-package-agreements",
         "--accept-source-agreements",
-      ], {
+        ...(item.override ? ["--override", item.override] : []),
+      ];
+      const result = await run("winget.exe", installArgs, {
         windowsHide: true,
         timeout: INSTALL_TIMEOUT_MS,
         maxBuffer: 4 * 1024 * 1024,

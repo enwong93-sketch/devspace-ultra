@@ -27,7 +27,7 @@ function terminalSize(value, fallback) {
     return value;
 }
 function processEnvironment(input) {
-    return {
+    const environment = {
         ...Object.fromEntries(Object.entries(process.env).filter((entry) => entry[1] !== undefined)),
         NO_COLOR: "1",
         TERM: "dumb",
@@ -40,6 +40,13 @@ function processEnvironment(input) {
         ...(input?.workspaceId ? { DEVSPACE_WORKSPACE_ID: input.workspaceId } : {}),
         ...(input?.workspaceRoot ? { DEVSPACE_WORKSPACE_ROOT: input.workspaceRoot } : {}),
     };
+    for (const [name, value] of Object.entries(input?.environment || {})) {
+        if (value === undefined || value === null)
+            delete environment[name];
+        else
+            environment[name] = String(value);
+    }
+    return environment;
 }
 function codePointLength(value) {
     return Array.from(value).length;
@@ -198,6 +205,7 @@ export class ProcessSessionManager {
                 clearTimeout(session.cleanupTimer);
             if (session.running)
                 session.process?.kill("SIGTERM");
+            this.disposeSession(session);
         }
         this.sessions.clear();
     }
@@ -231,22 +239,39 @@ export class ProcessSessionManager {
             running: true,
             exitPromise,
             resolveExit,
+            onDispose: typeof input.onDispose === "function" ? input.onDispose : undefined,
+            disposed: false,
         };
     }
     startPipe(session, input) {
-        const shell = resolveShellCommand(input.command);
+        const directExecutable = String(input.executable || "").trim();
+        const shell = directExecutable ? null : resolveShellCommand(input.command);
         const detached = process.platform !== "win32";
-        const child = spawn(input.command, {
-            cwd: input.cwd,
-            env: processEnvironment({
-                workspaceId: input.workspaceId,
-                workspaceRoot: input.workspaceRoot,
-            }),
-            stdio: "pipe",
-            windowsHide: true,
-            detached,
-            shell: shell.executable,
-        });
+        const child = directExecutable
+            ? spawn(directExecutable, Array.isArray(input.args) ? input.args.map(String) : [], {
+                cwd: input.cwd,
+                env: processEnvironment({
+                    workspaceId: input.workspaceId,
+                    workspaceRoot: input.workspaceRoot,
+                    environment: input.environment,
+                }),
+                stdio: "pipe",
+                windowsHide: true,
+                detached,
+                shell: false,
+            })
+            : spawn(input.command, {
+                cwd: input.cwd,
+                env: processEnvironment({
+                    workspaceId: input.workspaceId,
+                    workspaceRoot: input.workspaceRoot,
+                    environment: input.environment,
+                }),
+                stdio: "pipe",
+                windowsHide: true,
+                detached,
+                shell: shell.executable,
+            });
         session.process = {
             write: (data) => child.stdin.write(data),
             kill: (signal = "SIGTERM") => terminateProcessTree(child, signal, detached),
@@ -265,7 +290,10 @@ export class ProcessSessionManager {
         catch {
             throw new Error("PTY support requires the optional node-pty dependency.");
         }
-        const shell = resolveShellCommand(input.command);
+        const directExecutable = String(input.executable || "").trim();
+        const shell = directExecutable
+            ? { executable: directExecutable, args: Array.isArray(input.args) ? input.args.map(String) : [] }
+            : resolveShellCommand(input.command);
         let pty;
         try {
             pty = nodePty.spawn(shell.executable, shell.args, {
@@ -273,6 +301,7 @@ export class ProcessSessionManager {
                 env: processEnvironment({
                     workspaceId: input.workspaceId,
                     workspaceRoot: input.workspaceRoot,
+                    environment: input.environment,
                 }),
                 name: "xterm-256color",
                 cols: session.columns,
@@ -328,10 +357,21 @@ export class ProcessSessionManager {
         }
         return session;
     }
+    disposeSession(session) {
+        if (!session || session.disposed)
+            return;
+        session.disposed = true;
+        try {
+            const result = session.onDispose?.();
+            result?.catch?.(() => {});
+        }
+        catch { }
+    }
     removeSession(sessionId) {
         const session = this.sessions.get(sessionId);
         if (session?.cleanupTimer)
             clearTimeout(session.cleanupTimer);
         this.sessions.delete(sessionId);
+        this.disposeSession(session);
     }
 }

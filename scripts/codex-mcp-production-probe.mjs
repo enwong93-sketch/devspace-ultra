@@ -86,9 +86,9 @@ export async function probeImportedCodexMcp({
     const online = servers.length > 0 && servers.every((server) => server.status === "online" && server.toolCount > 0);
     let state = "online";
     if (entry.privileged && (!enabled || !trusted)) state = "privileged-quarantined";
+    else if (probeFailure) state = probeFailure;
     else if (!enabled) state = "disabled";
     else if (!trusted) state = "untrusted";
-    else if (probeFailure) state = probeFailure;
     else if (!servers.length) state = "server-metadata-missing";
     else if (!online) state = "offline-or-empty-catalog";
 

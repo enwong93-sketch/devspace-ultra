@@ -409,6 +409,9 @@ try {
     "codex_mcp_list_resources",
     "codex_mcp_list_resource_templates",
     "codex_mcp_read_resource",
+    "codex_sandbox_status",
+    "request_permissions",
+    "exec_sandboxed",
   ]) {
     assert.equal(toolNamesBefore.has(requiredTool), true, `Ultra canary is missing ${requiredTool}.`);
   }

@@ -368,6 +368,7 @@ async function run() {
     const expectedNames = [
       "capability_list",
       "capability_search",
+      "capability_import_codex",
       "capability_inspect",
       "capability_install",
       "capability_enable",

@@ -60,7 +60,7 @@ try {
   assert.deepEqual(JSON.parse(result.stdout), { input: "mcp-wire-data", secretPresent: true });
   assert.equal(result.stderr.includes("private-value"), false);
 
-  const changedConfig = configText.replace(childScript, `${childScript}.changed`);
+  const changedConfig = configText.replace(JSON.stringify(childScript), JSON.stringify(`${childScript}.changed`));
   await writeFile(configPath, changedConfig);
   const refused = await run(process.execPath, [
     bridgePath,

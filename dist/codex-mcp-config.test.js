@@ -55,7 +55,13 @@ assert.equal(safe.status, "importable-stdio");
 assert.deepEqual(safe.envKeys, ["API_KEY", "PORT"]);
 assert.deepEqual(safe.envVars, ["HOME", "TEMP"]);
 assert.equal(safe.highRisk, false);
-assert.equal(catalog.find((server) => server.name === "danger-elevated").highRisk, true);
+assert.equal(safe.riskClass, "standard");
+assert.equal(safe.autoEnableEligible, true);
+const elevated = catalog.find((server) => server.name === "danger-elevated");
+assert.equal(elevated.privileged, true);
+assert.equal(elevated.highRisk, true);
+assert.equal(elevated.riskClass, "high-impact");
+assert.equal(elevated.autoEnableEligible, false);
 assert.equal(catalog.find((server) => server.name === "leaky").status, "blocked-command-line-secret");
 assert.equal(catalog.find((server) => server.name === "remote").status, "remote-review-required");
 assert.equal(catalog.find((server) => server.name === "devspace").status, "skipped-existing-native");
@@ -83,7 +89,7 @@ assert.equal(manifest.mcpServers.safe.args.includes(safe.executionFingerprint), 
 const rotatedSecret = sanitizeCodexMcpServer("safe", {
   command: "node",
   args: ["server.js", "--port", "8848"],
-  cwd: String.raw`C:\tools\safe`,
+  cwd: String.raw`C:\\tools\\safe`,
   env: { API_KEY: "rotated", PORT: "9999" },
   env_vars: ["HOME", "TEMP"],
 });

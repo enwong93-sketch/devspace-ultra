@@ -21,6 +21,8 @@ const env = configDir ? { ...process.env, DEVSPACE_CONFIG_DIR: resolve(configDir
 const codexConfigPath = resolve(argument("codex-config", join(homedir(), ".codex", "config.toml")));
 const apply = flag("apply");
 const enableSafe = flag("enable-safe");
+const enableServerIds = names(argument("enable"));
+const allowPrivileged = flag("allow-privileged");
 const serverIds = names(argument("include"));
 const excludeServerIds = names(argument("exclude"));
 
@@ -42,6 +44,8 @@ try {
     excludeServerIds,
     apply,
     enableSafe,
+    enableServerIds,
+    allowPrivileged,
   });
   console.log(JSON.stringify(result, null, 2));
 } finally {

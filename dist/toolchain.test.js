@@ -9,6 +9,7 @@ import {
 assert.equal(TOOLCHAIN_CATALOG.some((tool) => tool.id === "git" && tool.tier === "core"), true);
 assert.equal(TOOLCHAIN_CATALOG.some((tool) => tool.id === "rg" && tool.wingetId), true);
 assert.equal(TOOLCHAIN_CATALOG.some((tool) => tool.id === "ffmpeg" && tool.tier === "media"), true);
+assert.equal(TOOLCHAIN_CATALOG.some((tool) => tool.id === "msvc" && tool.wingetOverride?.includes("VCTools")), true);
 
 {
   const calls = [];
@@ -91,6 +92,29 @@ assert.equal(TOOLCHAIN_CATALOG.some((tool) => tool.id === "ffmpeg" && tool.tier 
   assert.equal(installs[0][0], "winget.exe");
   assert.equal(installs[0][1].includes("jqlang.jq"), true);
   assert.equal(installs[0][1].includes("--disable-interactivity"), true);
+}
+
+{
+  const installs = [];
+  const applied = await installToolchain({
+    ids: ["msvc"],
+    apply: true,
+    platform: "win32",
+    statusOptions: {
+      run: async () => {
+        const error = new Error("missing");
+        error.code = "ENOENT";
+        throw error;
+      },
+    },
+    run: async (command, args) => {
+      installs.push([command, args]);
+      return { stdout: "installed", stderr: "" };
+    },
+  });
+  assert.equal(applied.ok, true);
+  assert.equal(installs[0][1].includes("--override"), true);
+  assert.equal(installs[0][1].some((value) => value.includes("Microsoft.VisualStudio.Workload.VCTools")), true);
 }
 
 await assert.rejects(() => installToolchain({ ids: ["unknown"], apply: false }), /known toolchain/i);

@@ -2,6 +2,9 @@ import { createHash } from "node:crypto";
 
 const SELF_MANAGED_SERVER_NAMES = new Set(["devspace", "powermem", "powermem-shared"]);
 const SENSITIVE_ARGUMENT = /(?:^|[-_])(api[-_]?key|token|secret|password|passwd|authorization|bearer|cookie|credential)(?:$|[=:_-])/i;
+const PRIVILEGED_NAME = /(?:^|[-_.])(elevated|admin|administrator|root)(?:$|[-_.])/i;
+const HIGH_IMPACT_NAME = /(?:^|[-_.])(elevated|admin|administrator|root|windows|docker|bash|shell|terminal|exec|computer|cua|repl)(?:$|[-_.])/i;
+const STATEFUL_APP_NAME = /(?:^|[-_.])(blender|comfyui|unreal|gaea|eagle|minimax|h3)(?:$|[-_.])/i;
 
 function stripComment(line) {
   let quote = null;
@@ -257,7 +260,11 @@ export function sanitizeCodexMcpServer(name, rawValue) {
   const envHeaderTable = raw.env_http_headers && typeof raw.env_http_headers === "object" ? raw.env_http_headers : {};
   const headerNames = [...new Set([...Object.keys(headerTable), ...Object.keys(envHeaderTable)])].sort();
   const enabled = raw.enabled !== false && raw.disabled !== true;
-  const highRisk = /(?:^|[-_.])(elevated|admin|administrator|root)(?:$|[-_.])/i.test(normalizedName);
+  const privileged = PRIVILEGED_NAME.test(normalizedName);
+  const highRisk = HIGH_IMPACT_NAME.test(normalizedName);
+  const statefulApp = STATEFUL_APP_NAME.test(normalizedName);
+  const riskClass = privileged || highRisk ? "high-impact" : statefulApp ? "stateful-app" : "standard";
+  const autoEnableEligible = riskClass === "standard";
 
   let status = "importable-stdio";
   let reason = null;
@@ -293,7 +300,11 @@ export function sanitizeCodexMcpServer(name, rawValue) {
     envKeys,
     envVars,
     headerNames,
+    privileged,
     highRisk,
+    statefulApp,
+    riskClass,
+    autoEnableEligible,
     enabledInCodex: enabled,
   };
   result.executionFingerprint = codexMcpExecutionFingerprint(result);
@@ -349,7 +360,11 @@ export function publicCodexMcpCatalog(catalog) {
     envKeys: server.envKeys,
     envVars: server.envVars,
     headerNames: server.headerNames,
+    privileged: server.privileged,
     highRisk: server.highRisk,
+    statefulApp: server.statefulApp,
+    riskClass: server.riskClass,
+    autoEnableEligible: server.autoEnableEligible,
     enabledInCodex: server.enabledInCodex,
     executionFingerprint: server.executionFingerprint,
   }));

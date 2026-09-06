@@ -185,9 +185,9 @@ export function evaluateParity({ codexText, devspaceText }) {
       id: "sandbox-and-action-approval",
       priority: "P2",
       codexAny: ["sandbox", "approval"],
-      devspaceAll: ["allowedRoots", "trusted", "readOnlyHint", "destructiveHint"],
+      devspaceAll: ["CodexSandboxRuntime", "request_permissions", "exec_sandboxed", "allowedRoots", "trusted"],
       target: "partial",
-      note: "Path confinement and explicit plugin trust exist; Codex-grade OS process sandbox and per-command approval policy are not yet equivalent.",
+      note: "Official Codex sandbox execution and single-use command-bound permission grants are present. Windows does not yet claim global read-deny isolation, so full OS-policy equivalence remains partial.",
     },
     {
       id: "durable-memory",

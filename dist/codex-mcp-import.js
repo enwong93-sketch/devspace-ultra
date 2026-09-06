@@ -22,15 +22,20 @@ export async function importCodexMcpCatalog({
   excludeServerIds = [],
   apply = false,
   enableSafe = false,
+  enableServerIds = [],
+  allowPrivileged = false,
   nodePath = process.execPath,
   bridgeScriptPath = join(packageRoot, "scripts", "codex-mcp-stdio-bridge.mjs"),
 } = {}) {
-  if (enableSafe && !apply) throw new Error("enableSafe requires apply=true.");
+  if ((enableSafe || (Array.isArray(enableServerIds) && enableServerIds.length > 0)) && !apply) {
+    throw new Error("Enabling imported Codex MCP servers requires apply=true.");
+  }
   if (apply && !runtime) throw new Error("Capability runtime is required when apply=true.");
   const configPath = resolve(String(codexConfigPath));
   const text = await readFile(configPath, "utf8");
   const include = normalizeSelection(serverIds);
   const exclude = normalizeSelection(excludeServerIds);
+  const explicitlyEnabled = normalizeSelection(enableServerIds);
   const allCatalog = discoverCodexMcpCatalog(text);
   const catalog = allCatalog.filter((server) => {
     if (include.size && !include.has(server.name)) return false;
@@ -61,11 +66,51 @@ export async function importCodexMcpCatalog({
   const existing = new Set((await runtime.list({ includeDisabled: true, probeMcp: false })).map((plugin) => plugin.id));
   for (const server of catalog) {
     if (server.status !== "importable-stdio") {
-      results.push({ name: server.name, pluginId: server.pluginId, state: server.status, highRisk: server.highRisk });
+      results.push({
+        name: server.name,
+        pluginId: server.pluginId,
+        state: server.status,
+        riskClass: server.riskClass,
+        privileged: server.privileged,
+        autoEnableEligible: server.autoEnableEligible,
+      });
       continue;
     }
+    const explicitTrust = explicitlyEnabled.has(server.name);
+    const autoTrust = enableSafe && server.autoEnableEligible;
+    if (explicitTrust && server.privileged && !allowPrivileged) {
+      results.push({
+        name: server.name,
+        pluginId: server.pluginId,
+        state: "privileged-approval-required",
+        riskClass: server.riskClass,
+        privileged: true,
+        autoEnableEligible: server.autoEnableEligible,
+      });
+      continue;
+    }
+    const trusted = explicitTrust || autoTrust;
     if (existing.has(server.pluginId)) {
-      results.push({ name: server.name, pluginId: server.pluginId, state: "already-imported", highRisk: server.highRisk });
+      if (trusted) {
+        await runtime.setEnabled(server.pluginId, true, { trust: true });
+        results.push({
+          name: server.name,
+          pluginId: server.pluginId,
+          state: explicitTrust ? "existing-enabled-explicitly" : "existing-enabled-safe",
+          riskClass: server.riskClass,
+          privileged: server.privileged,
+          autoEnableEligible: server.autoEnableEligible,
+        });
+      } else {
+        results.push({
+          name: server.name,
+          pluginId: server.pluginId,
+          state: "already-imported",
+          riskClass: server.riskClass,
+          privileged: server.privileged,
+          autoEnableEligible: server.autoEnableEligible,
+        });
+      }
       continue;
     }
     const sourceDir = await mkdtemp(join(tmpdir(), "devspace-codex-mcp-import-"));
@@ -76,7 +121,6 @@ export async function importCodexMcpCatalog({
         configPath,
       });
       await writeFile(join(sourceDir, "devspace-plugin.json"), `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600 });
-      const trusted = enableSafe && !server.highRisk;
       const installed = await runtime.install({
         source: sourceDir,
         id: server.pluginId,
@@ -87,8 +131,12 @@ export async function importCodexMcpCatalog({
       results.push({
         name: server.name,
         pluginId: server.pluginId,
-        state: trusted ? "installed-enabled-trusted" : "installed-disabled-untrusted",
-        highRisk: server.highRisk,
+        state: trusted
+          ? (explicitTrust ? "installed-enabled-explicitly" : "installed-enabled-safe")
+          : "installed-disabled-untrusted",
+        riskClass: server.riskClass,
+        privileged: server.privileged,
+        autoEnableEligible: server.autoEnableEligible,
         detectedFormats: installed?.plugin?.detectedFormats || [],
       });
     } finally {
@@ -103,9 +151,10 @@ export async function importCodexMcpCatalog({
     results,
     summary: {
       installed: results.filter((entry) => entry.state.startsWith("installed-")).length,
-      enabledTrusted: results.filter((entry) => entry.state === "installed-enabled-trusted").length,
+      enabledTrusted: results.filter((entry) => /enabled-(?:explicitly|safe)$/.test(entry.state)).length,
       disabledUntrusted: results.filter((entry) => entry.state === "installed-disabled-untrusted").length,
       alreadyImported: results.filter((entry) => entry.state === "already-imported").length,
+      privilegedApprovalRequired: results.filter((entry) => entry.state === "privileged-approval-required").length,
     },
     secretValuesLogged: false,
   };

@@ -53,6 +53,10 @@ try {
     `command = ${JSON.stringify(process.execPath)}`,
     'args = ["elevated.mjs"]',
     "",
+    "[mcp_servers.node_repl]",
+    `command = ${JSON.stringify(process.execPath)}`,
+    'args = ["repl.mjs"]',
+    "",
     "[mcp_servers.devspace]",
     'command = "devspace"',
     'args = ["serve"]',
@@ -65,15 +69,16 @@ try {
   assert.equal(dry.code, 0, dry.stderr);
   const dryPayload = JSON.parse(dry.stdout);
   assert.equal(dryPayload.applied, false);
-  assert.equal(dryPayload.summary.importableStdio, 2);
+  assert.equal(dryPayload.summary.importableStdio, 3);
   assert.equal(dryPayload.catalog.find((entry) => entry.name === "devspace").status, "skipped-existing-native");
   assert.equal(dry.stdout.includes("never-persist-this"), false);
 
   const applied = await run([...common, "--apply", "--enable-safe"]);
   assert.equal(applied.code, 0, applied.stderr);
   const appliedPayload = JSON.parse(applied.stdout);
-  assert.equal(appliedPayload.summary.installed, 2);
-  assert.equal(appliedPayload.results.find((entry) => entry.name === "safe").state, "installed-enabled-trusted");
+  assert.equal(appliedPayload.summary.installed, 3);
+  assert.equal(appliedPayload.results.find((entry) => entry.name === "safe").state, "installed-enabled-safe");
+  assert.equal(appliedPayload.results.find((entry) => entry.name === "node_repl").state, "installed-disabled-untrusted");
   assert.equal(appliedPayload.results.find((entry) => entry.name === "windows-mcp-elevated").state, "installed-disabled-untrusted");
   assert.equal(applied.stdout.includes("never-persist-this"), false);
 
@@ -82,16 +87,35 @@ try {
   const registry = JSON.parse(registryText);
   assert.equal(registry.plugins["codex-mcp-safe"].enabled, true);
   assert.equal(registry.plugins["codex-mcp-safe"].trusted, true);
+  assert.equal(registry.plugins["codex-mcp-node_repl"].enabled, false);
+  assert.equal(registry.plugins["codex-mcp-node_repl"].trusted, false);
   assert.equal(registry.plugins["codex-mcp-windows-mcp-elevated"].enabled, false);
   assert.equal(registry.plugins["codex-mcp-windows-mcp-elevated"].trusted, false);
   assert.equal(registryText.includes("never-persist-this"), false);
   const safeManifest = await readFile(join(registry.plugins["codex-mcp-safe"].dir, "devspace-plugin.json"), "utf8");
   assert.equal(safeManifest.includes("never-persist-this"), false);
 
-  const repeated = await run([...common, "--apply", "--enable-safe"]);
+  const explicit = await run([...common, "--apply", "--enable", "node_repl,windows-mcp-elevated"]);
+  assert.equal(explicit.code, 0, explicit.stderr);
+  const explicitPayload = JSON.parse(explicit.stdout);
+  assert.equal(explicitPayload.results.find((entry) => entry.name === "node_repl").state, "existing-enabled-explicitly");
+  assert.equal(explicitPayload.results.find((entry) => entry.name === "windows-mcp-elevated").state, "privileged-approval-required");
+  assert.equal(explicitPayload.summary.privilegedApprovalRequired, 1);
+
+  const afterExplicit = JSON.parse(await readFile(registryPath, "utf8"));
+  assert.equal(afterExplicit.plugins["codex-mcp-node_repl"].enabled, true);
+  assert.equal(afterExplicit.plugins["codex-mcp-node_repl"].trusted, true);
+  assert.equal(afterExplicit.plugins["codex-mcp-windows-mcp-elevated"].enabled, false);
+
+  const privileged = await run([...common, "--apply", "--enable", "windows-mcp-elevated", "--allow-privileged"]);
+  assert.equal(privileged.code, 0, privileged.stderr);
+  const privilegedPayload = JSON.parse(privileged.stdout);
+  assert.equal(privilegedPayload.results.find((entry) => entry.name === "windows-mcp-elevated").state, "existing-enabled-explicitly");
+
+  const repeated = await run([...common, "--apply"]);
   assert.equal(repeated.code, 0, repeated.stderr);
   const repeatedPayload = JSON.parse(repeated.stdout);
-  assert.equal(repeatedPayload.summary.alreadyImported, 2);
+  assert.equal(repeatedPayload.summary.alreadyImported, 3);
 
   console.log(JSON.stringify({
     ok: true,
@@ -99,7 +123,8 @@ try {
     dryRun: true,
     idempotent: true,
     safeEntriesTrusted: true,
-    elevatedEntriesQuarantined: true,
+    highImpactExplicitEnable: true,
+    elevatedEntriesQuarantinedUntilExplicitApproval: true,
     secretValuesPersisted: false,
   }));
 } finally {
