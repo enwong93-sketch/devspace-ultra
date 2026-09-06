@@ -25,6 +25,7 @@ import {
 import * as YAML from "yaml";
 import * as z from "zod/v4";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { ContentBlockSchema } from "@modelcontextprotocol/sdk/types.js";
 import {
   StdioClientTransport,
   getDefaultEnvironment,
@@ -97,6 +98,26 @@ function sha256(value) {
 }
 function textResult(structuredContent, text = JSON.stringify(structuredContent, null, 2)) {
   return { content: [{ type: "text", text }], structuredContent };
+}
+function capabilityCallResult(callResult) {
+  if (callResult?.kind !== "mcp") {
+    return textResult(callResult);
+  }
+  const innerResult = callResult.result;
+  // Validate against the installed SDK without replacing native blocks with JSON text.
+  const validContent = z.array(ContentBlockSchema).safeParse(innerResult?.content).success;
+  const { content: _content, ...innerMetadata } = innerResult ?? {};
+  const structuredContent = {
+    ...callResult,
+    result: innerMetadata,
+  };
+  return {
+    ...(innerResult?.isError === true ? { isError: true } : {}),
+    content: validContent
+      ? innerResult.content.map((item) => ({ ...item }))
+      : textResult(structuredContent).content,
+    structuredContent,
+  };
 }
 function errorResult(error) {
   const message = error instanceof Error ? error.message : String(error);
@@ -2024,7 +2045,7 @@ export function registerCapabilityTools(server, runtime) {
     },
     annotations: CALLING,
   }, async (input) => {
-    try { return textResult(await runtime.call(input)); }
+    try { return capabilityCallResult(await runtime.call(input)); }
     catch (error) { return errorResult(error); }
   });
 }

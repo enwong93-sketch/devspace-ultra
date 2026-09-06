@@ -148,13 +148,29 @@ registered. `exec_command` returns a process session ID when a command is still
 running after its yield window. Use `write_stdin` to poll it, send input, resize
 a PTY, or send Ctrl-C. Set `tty: true` only for commands that need a terminal.
 
+For ChatGPT sessions where the host tool trace itself is too noisy, use
+`DEVSPACE_TOOL_MODE=compact`. Its core workspace surface is only:
+
+- `open_workspace`
+- `workspace_task`
+
+`workspace_task` executes up to 32 ordered `read`, `apply_patch`, `exec`, and
+`write_stdin` operations behind one MCP invocation. Batch baseline inspection,
+independent reads, prepared edit-plus-test sequences, and final verification
+when no model decision is required between those steps. If one result determines
+the next action, make a later `workspace_task` call instead of trying to hide the
+reasoning boundary inside the server.
+
 ## Show Changes
 
 By default, `DEVSPACE_WIDGETS=off`.
 
-In that mode, DevSpace does not attach Apps iframe UI to workspace/file/edit/shell
-tools, so repetitive cards such as `Ran command` do not appear. Tool execution
-and model-readable results are unchanged.
+In that mode, DevSpace does not attach its own Apps iframe UI to
+workspace/file/edit/shell tools. Tool execution and model-readable results are
+unchanged. ChatGPT can still render a host-owned tool trace such as `Ran command`
+or `Opened workspace`; the MCP server cannot suppress that UI. If those host
+entries are the problem, use `DEVSPACE_TOOL_MODE=compact` to reduce how many MCP
+calls are needed.
 
 Use `DEVSPACE_WIDGETS=changes` to expose only the aggregate show-changes flow,
 or `DEVSPACE_WIDGETS=full` to opt back into per-tool widget cards.

@@ -47,7 +47,7 @@ function parseBoolean(value) {
 }
 function parseToolMode(env) {
     const mode = env.DEVSPACE_TOOL_MODE;
-    if (mode === "minimal" || mode === "full" || mode === "codex")
+    if (mode === "minimal" || mode === "full" || mode === "codex" || mode === "compact")
         return mode;
     if (mode)
         throw new Error(`Invalid DEVSPACE_TOOL_MODE: ${mode}`);

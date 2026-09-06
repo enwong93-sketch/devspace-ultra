@@ -117,7 +117,7 @@ async function makeFixtureSource(root) {
   const mcpServerModule = import.meta.resolve("@modelcontextprotocol/sdk/server/mcp.js");
   const stdioServerModule = import.meta.resolve("@modelcontextprotocol/sdk/server/stdio.js");
   const zodModule = import.meta.resolve("zod/v4");
-  await writeFile(join(source, "fixture-mcp-server.mjs"), `import { McpServer } from ${JSON.stringify(mcpServerModule)};\nimport { StdioServerTransport } from ${JSON.stringify(stdioServerModule)};\nimport * as z from ${JSON.stringify(zodModule)};\nconst server = new McpServer({name:'fixture-memory', version:'1.0.0'});\nserver.registerTool('remember', {description:'Store a test memory', inputSchema:{text:z.string()}}, async ({text}) => ({content:[{type:'text', text:'stored:'+text}], structuredContent:{stored:text, secretPresent:Boolean(process.env.CAP_FIXTURE_SECRET), instanceMarker:process.env.CAP_INSTANCE_MARKER||null}}));\nserver.registerResource('fixture-memory-resource', 'memory://fixture/status', {description:'Fixture memory status', mimeType:'text/plain'}, async (uri) => ({contents:[{uri:String(uri), mimeType:'text/plain', text:'fixture-resource-ok'}]}));\nserver.registerPrompt('memory-review', {description:'Review a memory topic', argsSchema:{topic:z.string()}}, async ({topic}) => ({messages:[{role:'user', content:{type:'text', text:'review-memory:'+topic}}]}));\nawait server.connect(new StdioServerTransport());\n`);
+  await writeFile(join(source, "fixture-mcp-server.mjs"), `import { McpServer } from ${JSON.stringify(mcpServerModule)};\nimport { StdioServerTransport } from ${JSON.stringify(stdioServerModule)};\nimport * as z from ${JSON.stringify(zodModule)};\nconst server = new McpServer({name:'fixture-memory', version:'1.0.0'});\nserver.registerTool('remember', {description:'Store a test memory', inputSchema:{text:z.string()}}, async ({text}) => ({content:[{type:'text', text:'stored:'+text}], structuredContent:{stored:text, secretPresent:Boolean(process.env.CAP_FIXTURE_SECRET), instanceMarker:process.env.CAP_INSTANCE_MARKER||null}}));\nserver.registerTool('observe', {description:'Return text and a native PNG image', inputSchema:{}}, async () => ({content:[{type:'text', text:'fixture-observation'},{type:'image', mimeType:'image/png', data:'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9ZrVIAAAAASUVORK5CYII='}], structuredContent:{observationId:'fixture-observation-1', source:'fixture'}}));\nserver.registerTool('fail', {description:'Return an MCP tool error', inputSchema:{}}, async () => ({isError:true, content:[{type:'text', text:'fixture-error'}], structuredContent:{code:'FIXTURE_ERROR'}}));\nserver.registerResource('fixture-memory-resource', 'memory://fixture/status', {description:'Fixture memory status', mimeType:'text/plain'}, async (uri) => ({contents:[{uri:String(uri), mimeType:'text/plain', text:'fixture-resource-ok'}]}));\nserver.registerPrompt('memory-review', {description:'Review a memory topic', argsSchema:{topic:z.string()}}, async ({topic}) => ({messages:[{role:'user', content:{type:'text', text:'review-memory:'+topic}}]}));\nawait server.connect(new StdioServerTransport());\n`);
   return source;
 }
 
@@ -140,6 +140,7 @@ async function connectCapabilityMcpSession(runtime, label) {
 }
 
 async function run() {
+  await verifyMcpForwardingBoundary();
   const root = await mkdtemp(join(tmpdir(), "devspace-capability-runtime-"));
   const pluginsDir = join(root, "plugins");
   const registryPath = join(pluginsDir, "registry.json");
@@ -277,7 +278,7 @@ async function run() {
 
     const probe = await runtime.probePluginMcp("fixture-memory");
     assert.equal(probe.memory.status, "online");
-    assert.deepEqual(probe.memory.tools.map((tool) => tool.name), ["remember"]);
+    assert.deepEqual(probe.memory.tools.map((tool) => tool.name).sort(), ["fail", "observe", "remember"]);
     assert.deepEqual(probe.memory.prompts.map((prompt) => prompt.name), ["memory-review"]);
     assert.deepEqual(probe.memory.resources.map((resource) => resource.uri), ["memory://fixture/status"]);
     assert.equal(probe["claude-memory"].status, "online");
@@ -405,6 +406,83 @@ async function run() {
         },
       });
       assert.equal(protocolInstanceCall.structuredContent.result.structuredContent.instanceMarker, "PROTOCOL");
+      assert.deepEqual(protocolInstanceCall.content, [{ type: "text", text: "stored:protocol-instance" }]);
+      assert.equal(Object.hasOwn(protocolInstanceCall.structuredContent.result, "content"), false);
+      const protocolObservation = await protocolMain.client.callTool({
+        name: "capability_call",
+        arguments: {
+          pluginId: "fixture-memory",
+          kind: "mcp",
+          serverId: "memory",
+          instanceToken: protocolInstanceToken,
+          toolName: "observe",
+          arguments: {},
+        },
+      });
+      assert.deepEqual(protocolObservation.content.map((item) => item.type), ["text", "image"]);
+      assert.equal(protocolObservation.content[0].text, "fixture-observation");
+      assert.equal(protocolObservation.content[1].mimeType, "image/png");
+      assert.equal(protocolObservation.content[1].data, "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9ZrVIAAAAASUVORK5CYII=");
+      assert.equal(Object.hasOwn(protocolObservation.structuredContent.result, "content"), false);
+      assert.equal(protocolObservation.structuredContent.result.structuredContent.observationId, "fixture-observation-1");
+      assert.equal(JSON.stringify(protocolObservation.structuredContent).includes("iVBORw0KGgo"), false);
+      const protocolFailure = await protocolMain.client.callTool({
+        name: "capability_call",
+        arguments: {
+          pluginId: "fixture-memory",
+          kind: "mcp",
+          serverId: "memory",
+          instanceToken: protocolInstanceToken,
+          toolName: "fail",
+          arguments: {},
+        },
+      });
+      assert.equal(protocolFailure.isError, true);
+      assert.equal(protocolFailure.content[0].text, "fixture-error");
+      assert.equal(protocolFailure.structuredContent.result.structuredContent.code, "FIXTURE_ERROR");
+      const protocolResource = await protocolMain.client.callTool({
+        name: "capability_call",
+        arguments: {
+          pluginId: "fixture-memory",
+          kind: "mcp-resource",
+          serverId: "memory",
+          instanceToken: protocolInstanceToken,
+          resourceUri: "memory://fixture/status",
+          arguments: {},
+        },
+      });
+      assert.equal(protocolResource.content.length, 1);
+      assert.equal(protocolResource.content[0].type, "text");
+      assert.equal(protocolResource.structuredContent.kind, "mcp-resource");
+      assert.equal(protocolResource.structuredContent.result.contents[0].text, "fixture-resource-ok");
+      const protocolPrompt = await protocolMain.client.callTool({
+        name: "capability_call",
+        arguments: {
+          pluginId: "fixture-memory",
+          kind: "mcp-prompt",
+          serverId: "memory",
+          instanceToken: protocolInstanceToken,
+          promptName: "memory-review",
+          arguments: { topic: "protocol" },
+        },
+      });
+      assert.equal(protocolPrompt.content.length, 1);
+      assert.equal(protocolPrompt.content[0].type, "text");
+      assert.equal(protocolPrompt.structuredContent.kind, "mcp-prompt");
+      assert.equal(protocolPrompt.structuredContent.result.messages[0].content.text, "review-memory:protocol");
+      const protocolCommand = await protocolMain.client.callTool({
+        name: "capability_call",
+        arguments: {
+          pluginId: "fixture-memory",
+          kind: "tool",
+          toolName: "echo-json",
+          arguments: { value: "protocol" },
+        },
+      });
+      assert.equal(protocolCommand.content.length, 1);
+      assert.equal(protocolCommand.content[0].type, "text");
+      assert.equal(protocolCommand.structuredContent.kind, "tool");
+      assert.equal(protocolCommand.structuredContent.result.echo.value, "protocol");
       const protocolRelease = await protocolMain.client.callTool({
         name: "capability_instance",
         arguments: { action: "release", instanceToken: protocolInstanceToken },
@@ -474,6 +552,62 @@ async function run() {
     await runtime.close();
     delete process.env.CAP_FIXTURE_SECRET;
     await rm(root, { recursive: true, force: true });
+  }
+}
+
+async function verifyMcpForwardingBoundary() {
+  let innerResult;
+  const envelope = () => ({ ok: true, pluginId: "fixture", kind: "mcp", serverId: "memory", toolName: "observe", result: innerResult });
+  const session = await connectCapabilityMcpSession({
+    async call() {
+      if (innerResult instanceof Error) throw innerResult;
+      return envelope();
+    },
+  }, "forwarding-boundary");
+  const call = () => session.client.callTool({ name: "capability_call", arguments: { pluginId: "fixture", kind: "mcp", serverId: "memory", toolName: "observe" } });
+  try {
+    // All SDK CallToolResult block types are generic, not provider-specific.
+    innerResult = {
+      content: [
+        { type: "text", text: "native", annotations: { audience: ["user"] }, _meta: { source: "fixture" } },
+        { type: "image", data: "aGk=", mimeType: "image/png" },
+        { type: "audio", data: "aGk=", mimeType: "audio/wav" },
+        { type: "resource_link", name: "fixture", uri: "memory://fixture" },
+        { type: "resource", resource: { uri: "memory://fixture", text: "embedded" } },
+      ],
+      structuredContent: { retained: true },
+      _meta: { trace: "fixture" },
+      isError: false,
+    };
+    const original = structuredClone(innerResult);
+    const forwarded = await call();
+    assert.deepEqual(forwarded.content, original.content);
+    assert.deepEqual(forwarded.structuredContent, { ...envelope(), result: { structuredContent: original.structuredContent, _meta: original._meta, isError: false } });
+    assert.notEqual(forwarded.isError, true);
+    assert.deepEqual(innerResult, original, "forwarding must not mutate the inner result");
+
+    innerResult = { content: [] };
+    assert.deepEqual((await call()).content, []);
+    for (const content of [undefined, null, {}, "invalid", [null], [{ type: "unknown" }], [{ type: "text", text: 7 }], [{ type: "image", data: "aGk=" }], [{ type: "text", text: "valid" }, { type: "unknown", data: "aGk=" }]]) {
+      for (const isError of [false, true]) {
+        innerResult = { content, isError, structuredContent: { retained: true } };
+        const fallback = await call();
+        assert.deepEqual(fallback.content, [{ type: "text", text: JSON.stringify(fallback.structuredContent, null, 2) }]);
+        assert.equal(fallback.isError === true, isError);
+        assert.equal(Object.hasOwn(fallback.structuredContent.result, "content"), false);
+        assert.deepEqual(fallback.structuredContent.result.structuredContent, { retained: true });
+      }
+    }
+    innerResult = new Error("fixture MCP transport failure");
+    assert.deepEqual(await call(), {
+      isError: true,
+      content: [{ type: "text", text: "fixture MCP transport failure" }],
+      structuredContent: { ok: false, error: "fixture MCP transport failure" },
+    });
+  }
+  finally {
+    await session.client.close();
+    await session.server.close();
   }
 }
 
