@@ -64,7 +64,7 @@ async function main() {
         const failures = [];
         if (!plugin.detectedFormats.includes("codex-plugin")) failures.push("codex-plugin manifest not detected");
 
-        const knownManifestKeys = new Set(["name", "version", "description", "author", "homepage", "repository", "license", "keywords", "skills", "apps", "interface", "bundledContentVariant", "mcpServers", "hooks"]);
+        const knownManifestKeys = new Set(["name", "version", "description", "author", "homepage", "repository", "license", "keywords", "skills", "apps", "interface", "bundledContentVariant", "mcpServers", "hooks", "requires_local_executor"]);
         const unknownKeys = Object.keys(manifest).filter((key) => !knownManifestKeys.has(key));
         if (unknownKeys.length) failures.push(`unknown manifest keys: ${unknownKeys.join(", ")}`);
 
@@ -109,6 +109,12 @@ async function main() {
         if (plugin.codexHooks.length < expectedHooks) failures.push(`hooks incomplete ${plugin.codexHooks.length}/${expectedHooks}`);
         if (manifest.interface && plugin.codexInterfaces.length === 0) failures.push("interface metadata missing");
         if (manifest.bundledContentVariant !== undefined && plugin.bundledContentVariants.length === 0) failures.push("bundledContentVariant missing");
+        if (manifest.requires_local_executor !== undefined) {
+          const requirements = Array.isArray(plugin.codexExecutionRequirements) ? plugin.codexExecutionRequirements : [];
+          if (!requirements.length) failures.push("requires_local_executor metadata missing");
+          else if (requirements.some((item) => item.declaredValueValid !== true)) failures.push("requires_local_executor must be boolean");
+          else if (!requirements.some((item) => item.requiresLocalExecutor === (manifest.requires_local_executor === true))) failures.push("requires_local_executor value mismatch");
+        }
 
         rows.push({
           name: manifest.name || plugin.id,
@@ -121,6 +127,7 @@ async function main() {
           hooks: plugin.codexHooks.length,
           interface: plugin.codexInterfaces.length > 0,
           bundledContentVariant: plugin.bundledContentVariants.length > 0,
+          requiresLocalExecutor: plugin.codexExecutionRequirements?.some((item) => item.requiresLocalExecutor === true) || false,
           compatible: failures.length === 0,
           failures,
         });

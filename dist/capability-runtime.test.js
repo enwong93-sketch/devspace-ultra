@@ -64,6 +64,7 @@ async function makeFixtureSource(root) {
     mcpServers: "./config/mcp-mode.mcp.json",
     hooks: ["./hooks/codex-session.json", "./hooks/codex-post-tool.json"],
     bundledContentVariant: "test-variant",
+    requires_local_executor: false,
     interface: {
       displayName: "Fixture Codex Plugin",
       shortDescription: "Codex compatibility fixture",
@@ -166,7 +167,7 @@ async function run() {
     assert.equal(installed.plugin.id, "fixture-memory");
     assert.equal(installed.plugin.enabled, false);
     assert.equal(installed.plugin.trusted, false);
-    assert.deepEqual(installed.plugin.detectedFormats.sort(), ["agent-instructions", "agent-skills", "claude-agents", "claude-commands", "claude-hooks-metadata", "claude-plugin", "codex-app-dependencies", "codex-bundled-content-metadata", "codex-hooks-metadata", "codex-interface-metadata", "codex-plugin", "command-tools", "devspace-plugin", "mcp", "mcp-registry-server-json", "nested-mcp-profiles"].sort());
+    assert.deepEqual(installed.plugin.detectedFormats.sort(), ["agent-instructions", "agent-skills", "claude-agents", "claude-commands", "claude-hooks-metadata", "claude-plugin", "codex-app-dependencies", "codex-bundled-content-metadata", "codex-execution-requirements-metadata", "codex-hooks-metadata", "codex-interface-metadata", "codex-plugin", "command-tools", "devspace-plugin", "mcp", "mcp-registry-server-json", "nested-mcp-profiles"].sort());
     assert.equal(installed.plugin.skills[0].name, "powermem-like");
     assert.equal(installed.plugin.mcpServers.some((server) => server.id === "memory"), true);
     assert.equal(installed.plugin.mcpServers.some((server) => server.id === "io.github.fixture/memory:package-1" && server.status === "not-probed"), true);
@@ -191,6 +192,11 @@ async function run() {
     assert.equal(installed.plugin.codexInterfaces[0].displayName, "Fixture Codex Plugin");
     assert.deepEqual(installed.plugin.codexInterfaces[0].capabilities, ["Read", "Write"]);
     assert.deepEqual(installed.plugin.bundledContentVariants, [{ pluginRoot: "", value: "test-variant" }]);
+    assert.deepEqual(installed.plugin.codexExecutionRequirements, [{
+      pluginRoot: "",
+      requiresLocalExecutor: false,
+      declaredValueValid: true,
+    }]);
     assert.equal(installed.plugin.mcpServers.some((server) => server.id === "claude-memory"), true);
     assert.equal(installed.plugin.mcpServers.some((server) => server.id === "profile:config/mcp-mode::profile-memory"), true);
 

@@ -698,6 +698,7 @@ async function scanPluginDirectory(pluginDir, options = {}) {
   const codexApps = [];
   const codexInterfaces = [];
   const bundledContentVariants = [];
+  const codexExecutionRequirements = [];
   for (const entry of claudeManifestEntries.filter((item) => item.pluginKind === "codex")) {
     for (const declared of normalizePathList(entry.manifest?.apps)) {
       try {
@@ -739,6 +740,13 @@ async function scanPluginDirectory(pluginDir, options = {}) {
       bundledContentVariants.push({
         pluginRoot: entry.pluginRootPath,
         value: String(entry.manifest.bundledContentVariant).slice(0, 200),
+      });
+    }
+    if (entry.manifest?.requires_local_executor !== undefined) {
+      codexExecutionRequirements.push({
+        pluginRoot: entry.pluginRootPath,
+        requiresLocalExecutor: entry.manifest.requires_local_executor === true,
+        declaredValueValid: typeof entry.manifest.requires_local_executor === "boolean",
       });
     }
   }
@@ -785,6 +793,7 @@ async function scanPluginDirectory(pluginDir, options = {}) {
       codexApps.length ? "codex-app-dependencies" : undefined,
       codexInterfaces.length ? "codex-interface-metadata" : undefined,
       bundledContentVariants.length ? "codex-bundled-content-metadata" : undefined,
+      codexExecutionRequirements.length ? "codex-execution-requirements-metadata" : undefined,
       nestedMcpProfiles ? "nested-mcp-profiles" : undefined,
       relativeFiles.has("server.json") ? "mcp-registry-server-json" : undefined,
       pyproject ? "python-project-metadata" : undefined,
@@ -812,6 +821,7 @@ async function scanPluginDirectory(pluginDir, options = {}) {
     codexApps,
     codexInterfaces,
     bundledContentVariants,
+    codexExecutionRequirements,
     mcpServers: [...mcpMap.values()],
     tools,
     fileCount: files.length,
@@ -826,6 +836,7 @@ async function scanPluginDirectory(pluginDir, options = {}) {
       codexApps: codexApps.map((item) => `${item.name}:${item.id}:${item.path}`),
       codexInterfaces: codexInterfaces.map((item) => `${item.pluginRoot}:${item.displayName}:${item.category}`),
       bundledContentVariants: bundledContentVariants.map((item) => `${item.pluginRoot}:${item.value}`),
+      codexExecutionRequirements: codexExecutionRequirements.map((item) => `${item.pluginRoot}:${item.requiresLocalExecutor}:${item.declaredValueValid}`),
       mcp: [...mcpMap.values()].map((item) => ({ id: item.id, type: item.type, sourcePath: item.sourcePath })),
       tools: tools.map((item) => item.name),
     })),
@@ -856,6 +867,7 @@ function safePluginSummary(discovered, registryEntry, probe) {
     codexApps: discovered.codexApps || [],
     codexInterfaces: discovered.codexInterfaces || [],
     bundledContentVariants: discovered.bundledContentVariants || [],
+    codexExecutionRequirements: discovered.codexExecutionRequirements || [],
     mcpServers: discovered.mcpServers.map((server) => ({
       id: server.id,
       type: server.type,
@@ -922,6 +934,7 @@ function compactPluginSummary(discovered, registryEntry, probe) {
       codexApps: discovered.codexApps?.length || 0,
       codexInterfaces: discovered.codexInterfaces?.length || 0,
       bundledContentVariants: discovered.bundledContentVariants?.length || 0,
+      codexExecutionRequirements: discovered.codexExecutionRequirements?.length || 0,
       mcpServers: discovered.mcpServers.length,
       commandTools: discovered.tools.length,
     },
