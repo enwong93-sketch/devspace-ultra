@@ -727,7 +727,7 @@ const workspaceTaskOperationOutputSchema = z.object({
 });
 
 function registerCompactWorkspaceTask(server, config, workspaces, processSessions) {
-    registerAppTool(server, toolNames.workspaceTask, {
+    server.registerTool(toolNames.workspaceTask, {
         title: "Run workspace task",
         description: "Execute a bounded sequence of workspace reads, Codex-style patches, shell commands, and process input/polling behind one MCP call. Operations run sequentially. Batch operations when their inputs are already known; use a later workspace_task call when you need to inspect one result before deciding the next step. By default the batch stops after the first failed operation, so a patch can safely be followed by tests without running those tests if the patch itself fails. This is the compact alternative to separate read/apply_patch/exec_command/write_stdin calls and is intended to reduce visible ChatGPT host tool traces, not to hide the remaining MCP invocation.",
         inputSchema: {
