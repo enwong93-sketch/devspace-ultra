@@ -61,7 +61,6 @@ import { ToolCatalogRegistry, instrumentToolRegistration } from "./tool-catalog.
 import { registerCodexParityTools } from "./codex-parity-tools.js";
 import { CodexMcpBridge, registerCodexMcpBridgeTools } from "./codex-mcp-bridge.js";
 import { CodexSandboxRuntime, registerCodexSandboxTools } from "./codex-sandbox.js";
-import { registerCodexMcpCompatibilityTools } from "./mcp-compat-tools.js";
 import { registerJsReplCompatibilityTool } from "./js-repl-compat.js";
 import { registerToolchainTools } from "./toolchain-tools.js";
 // ChatGPT/OpenAI MCP clients may reconnect without closing the previous transport.
@@ -851,7 +850,6 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
     registerChatSwarmClassicRuntimeTools(server, chatSwarm);
     registerBrowserControlTools(server, browserControl);
     registerCapabilityTools(server, capabilityRuntime);
-    registerCodexMcpCompatibilityTools(server, capabilityRuntime);
     registerJsReplCompatibilityTool(server, capabilityRuntime);
     registerToolchainTools(server);
     registerCodexMcpBridgeTools(server, codexMcpBridge);
