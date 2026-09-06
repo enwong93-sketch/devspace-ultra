@@ -2702,3 +2702,95 @@ docs/DEVSPACE-ULTRA-V0.5-WORKTREE-AUDIT-2026-09-07.md
 ```
 
 The accompanying `docs: record v0.5 architecture and convergence evidence` commit is now present. After that commit, `git status` was clean on `v0.5-convergence`. Phase 3 is therefore complete. The next and only active phase is full-Core memory/lifecycle isolation under a verified total V8 heap ceiling. Classic Context Guardian, Host Overlay, Stream Recovery and Main Auto Compact remain production-disabled; no Goal binding or frontend work begins before the memory phase passes.
+
+## 2026-09-07 — Full-Core memory/lifecycle isolation complete; production deployment still pending
+
+Phase 4 is now independently complete at source/canary level. This section does **not** claim that the newest Core has been promoted into production or that Classic automation/front-end recovery is live.
+
+### Reproduced lifecycle owners and fixes
+
+The Core already bounded inactive sessions and event streams, but it did not enforce one global transport ceiling. Under reconnect pressure an initialize request could therefore receive a session ID that was not durably admitted after the registry reached capacity. The runtime now has three distinct protections:
+
+```text
+maxInactiveSessions = 32
+maxEventStreams      = 40
+maxSessions          = 40
+```
+
+`McpSessionRegistry.register()` first evicts only safe inactive entries and pure idle SSE streams. If every remaining transport protects active tool work, registration fails closed. `dist/server.js` now checks that return value inside `onsessioninitialized`; a rejected initialize throws before an untracked session can be reported. Existing in-flight tool work is never evicted merely to admit another reconnect.
+
+Memory diagnostics were expanded without storing prompt, response or credential content. The loopback-only snapshot now includes the actual V8 `heap_size_limit`, MCP/process/workspace registry counts, bounded Capability Runtime connection/startup/instance counts, and every Classic CDP observer's connected/pending state. Capability diagnostics expose only bounded keys/counts and never environment values or authorization material.
+
+The first Capability profile exposed a separate **test-harness** defect rather than a Core OOM: Streamable HTTP returned an empty SSE priming event before the real JSON-RPC result, and the canary parser treated the first `{}` as completion. `parseMcpResponseText()` now ignores priming/non-response frames and selects the matching JSON-RPC ID. A focused RED→GREEN test locks this behavior. The capability gate also distinguishes compact `capability_list` discovery from full `capability_inspect(probeMcp=true)` status.
+
+### Verified 512 MiB total-heap profile matrix
+
+The gate verifies V8's real total heap limit before starting; it does not mislabel `--max-old-space-size` as the total ceiling. On the installed Node runtime it uses:
+
+```text
+--max-old-space-size=464
+--max-semi-space-size=16
+--expose-gc
+actual heap_size_limit <= 512 MiB
+```
+
+Each profile used temporary state/config/OAuth/ports, real MCP initialize/tool traffic and SSE churn, and did not connect to production Classic ports:
+
+```text
+baseline      PASS
+context       PASS
+stream        PASS
+overlay       PASS
+capability    PASS — existing shared PowerMem endpoint online
+full-product  PASS — all bounded observers and capability runtime together
+```
+
+After each 30-second profile, active requests, SSE streams, process sessions and CDP pending calls returned to zero. Retained Core sessions settled at the configured inactive bound; Capability Runtime connecting/startup/instance registries returned to zero, with only the expected pooled PowerMem connection retained in capability/full-product modes.
+
+A higher-pressure full-product run then exercised the previous production boundary directly:
+
+```text
+sessionCount          = 40
+longSseStreams        = 40
+extraInitializeBursts = 32 per wave
+waves                 = 4
+actualHeapLimit       = 512 MiB
+heap after waves      ≈ 282.9, 294.1, 303.1, 292.0 MiB
+final heap            ≈ 273.5 MiB
+final RSS             ≈ 412.1 MiB
+final Core sessions   = 32
+active requests       = 0
+SSE streams           = 0
+process sessions      = 0
+Context/Stream pending= 0
+PowerMem connections  = 1 pooled
+production ports      = unchanged
+```
+
+This is evidence of bounded lifecycle recovery under the agreed heap ceiling; it is not a claim that RSS must return to the initial cold-start value after V8 has expanded its heap.
+
+### Verification and phase isolation
+
+New normal gates:
+
+```text
+npm run verify:memory-isolation       PASS
+npm test                              PASS
+npm run verify:goal                   PASS
+npm run verify:context-guardian       PASS
+node scripts/mcp-session-lifecycle-static-gate.mjs PASS
+```
+
+Several static gates still encoded constructors from before the configured Classic-port option was introduced. They were tightened to require the shared `classicCdpOptions` derived from `config.classicMainDebugPorts`, rather than weakened to accept arbitrary wiring.
+
+Four later-phase model-audit prototypes were not mixed into Phase 4. Their utility tests and syntax checks passed, then the files were preserved in a named path-limited stash:
+
+```text
+stash@{0}: phase9-classic-model-audit-research-2026-09-07
+```
+
+One prototype invokes `Page.reload`; it remains superseded by the zero-refresh architecture and must not be executed or restored as production logic without redesign. The stash exists only to prevent lost work while keeping the memory phase coherent.
+
+PowerMem checkpoint **`751892648050032640`** records the same Phase 4 evidence under `user_id=codex-global`, namespace `global`, without creating a second memory store.
+
+**Phase 4 exit gate: PASS.** The next and only active phase is **Phase 5 — controlled full-feature production deployment**. That phase must use an inactive-slot candidate, compare OAuth/tool schema/state, preserve the public Gateway/App session, promote atomically with rollback, and perform no ChatGPT page refresh or re-OAuth. Goal binding, frontend A→B→A acceptance, delivery-timeout recovery and Main Auto Compact remain later isolated phases.
