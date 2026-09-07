@@ -122,7 +122,7 @@ assert.match(interactiveAuthLiveGate, /ValidateSet\("start",\s*"finish",\s*"full
 assert.match(interactiveAuthLiveGate, /browser-auth-started/, "stage=start must return after opening browser authentication instead of blocking on user account selection");
 assert.match(interactiveAuthLiveGate, /provisioningMode\s*=\s*"oauth-relay"/, "successful OAuth relay must persist only a non-secret provisioning marker");
 
-assert.equal(packageJson.version, "0.5.0", "current DevSpace Ultra release metadata must be v0.5.0");
+assert.match(packageJson.version, /^0\.5\.\d+(?:[-+][0-9A-Za-z.-]+)?$/, "current DevSpace Ultra release metadata must remain on the v0.5 line");
 const packageVersionPattern = packageJson.version.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 assert.match(server, new RegExp(`name: "devspace",[\\s\\S]{0,160}version: "${packageVersionPattern}"`), "MCP server identity version must match package.json instead of lagging a prior release");
 assert.ok(!packageJson.files.includes("!scripts/chat-swarm-classic-auth-seed.mjs"), "public package must include the no-secret Session Seed helper required by Interactive setup");

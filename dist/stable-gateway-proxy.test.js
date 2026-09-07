@@ -2,6 +2,16 @@ import assert from "node:assert/strict";
 import { createServer, request as httpRequest } from "node:http";
 import { StableGatewaySessionRegistry } from "./stable-gateway-runtime.js";
 import { createStableGatewayProxy } from "./stable-gateway-proxy.js";
+import { schemaFingerprint } from "./stable-gateway-candidate.js";
+
+const FAKE_TOOLS = [
+  { name: "read", inputSchema: { type: "object", properties: { path: { type: "string" } } }, annotations: { readOnlyHint: true } },
+  { name: "view_image", inputSchema: { type: "object", properties: { path: { type: "string" } } }, annotations: { readOnlyHint: true } },
+];
+const CHANGED_TOOLS = [
+  ...FAKE_TOOLS,
+  { name: "inspect_attached_image", inputSchema: { type: "object", properties: { file: { type: "object" } } }, annotations: { readOnlyHint: true } },
+];
 
 async function listen(server) {
   await new Promise((resolve, reject) => {
@@ -54,7 +64,7 @@ function postJson(baseUrl, body, headers = {}, { onData } = {}) {
   });
 }
 
-async function createFakeCore(id, { failInitializeAt, unknownSessionOnce = false, genericFailureStatus = null } = {}) {
+async function createFakeCore(id, { failInitializeAt, unknownSessionOnce = false, genericFailureStatus = null, tools = FAKE_TOOLS } = {}) {
   const observed = [];
   const state = {
     streamEnded: false,
@@ -69,6 +79,7 @@ async function createFakeCore(id, { failInitializeAt, unknownSessionOnce = false
     const raw = await readRequestBody(req);
     const body = raw ? JSON.parse(raw) : {};
     observed.push({
+      id: body.id,
       method: body.method,
       authorization: req.headers.authorization,
       sessionId: req.headers["mcp-session-id"],
@@ -114,6 +125,22 @@ async function createFakeCore(id, { failInitializeAt, unknownSessionOnce = false
       res.statusCode = Number(genericFailureStatus);
       res.setHeader("content-type", "application/json");
       res.end(JSON.stringify({ error: `${id}-generic-failure-${genericFailureStatus}` }));
+      return;
+    }
+
+    if (body.method === "tools/list") {
+      res.statusCode = 200;
+      res.setHeader("content-type", "application/json");
+      res.setHeader("mcp-session-id", req.headers["mcp-session-id"] ?? "");
+      res.end(JSON.stringify({
+        jsonrpc: "2.0",
+        id: body.id,
+        result: {
+          core: id,
+          backendSessionId: req.headers["mcp-session-id"],
+          tools,
+        },
+      }));
       return;
     }
 
@@ -201,7 +228,13 @@ async function testSessionBoundRequestTranslation() {
     assert.equal(response.headers["mcp-session-id"], publicSessionId, "Core backend id must be rewritten back to the stable public id");
     assert.equal(core.observed.at(-1).sessionId, "core-a-backend-1", "Gateway must translate public id to Core backend id");
     assert.equal(core.observed.at(-1).authorization, "Bearer refreshed-replay-secret", "Gateway must forward the latest OAuth access token");
-    assert.deepEqual(JSON.parse(response.body).result, { core: "core-a", backendSessionId: "core-a-backend-1" });
+    assert.deepEqual(JSON.parse(response.body).result, {
+      core: "core-a",
+      backendSessionId: "core-a-backend-1",
+      tools: FAKE_TOOLS,
+    });
+    assert.match(registry.lookup(publicSessionId).schemaFingerprint, /^[a-f0-9]{64}$/);
+    assert.equal(registry.lookup(publicSessionId).toolCount, 2);
     assert.equal(registry.lookup(publicSessionId).authorization, "Bearer refreshed-replay-secret", "Gateway must rotate the in-memory replay/schema-probe credential whenever ChatGPT refreshes OAuth");
     assert.equal(registry.lookup(publicSessionId).activeRequests, 0, "request accounting must release after response completion");
   } finally {
@@ -334,7 +367,12 @@ async function testReplayPreservesPublicSessionAndInitializedNotification() {
       authorization: "Bearer replay-secret",
       "mcp-session-id": publicSessionId,
     });
+    await postJson(gatewayBaseUrl, { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }, {
+      authorization: "Bearer replay-secret",
+      "mcp-session-id": publicSessionId,
+    });
     assert.equal(registry.lookup(publicSessionId).initialized, true);
+    assert.match(registry.lookup(publicSessionId).schemaFingerprint, /^[a-f0-9]{64}$/);
 
     const tentative = await gateway.replaySessionsToCore({ id: coreB.id, baseUrl: coreB.baseUrl });
     assert.deepEqual(tentative, {
@@ -342,7 +380,7 @@ async function testReplayPreservesPublicSessionAndInitializedNotification() {
       droppedPublicSessionIds: [],
     });
     assert.equal(registry.lookup(publicSessionId).coreId, "core-a", "replay must remain tentative until an atomic commit");
-    assert.deepEqual(coreB.observed.map((entry) => entry.method), ["initialize", "notifications/initialized"]);
+    assert.deepEqual(coreB.observed.map((entry) => entry.method), ["initialize", "notifications/initialized", "tools/list"]);
     assert.equal(coreB.observed[1].sessionId, "core-b-backend-1");
     assert.equal(coreB.observed[0].authorization, "Bearer replay-secret");
   } finally {
@@ -418,7 +456,9 @@ async function testPromotionWaitsForDrainThenSwitchesAtomically() {
       authorization: "Bearer replay-secret",
       "mcp-session-id": publicSessionId,
     });
-    assert.deepEqual(JSON.parse(after.body).result, { core: "core-b", backendSessionId: "core-b-backend-1" });
+    assert.equal(JSON.parse(after.body).result.core, "core-b");
+    assert.equal(JSON.parse(after.body).result.backendSessionId, "core-b-backend-1");
+    assert.equal(JSON.parse(after.body).result.tools.length, 2);
   } finally {
     if (coreA.state.releaseHold) coreA.state.releaseHold();
     registry.abortBarrier();
@@ -481,7 +521,8 @@ async function testExactUnknownSession404ResurrectsAndRetriesOnce() {
     assert.equal(result.status, 200, "exact downstream unknown-session 404 must be healed inside the same public request");
     assert.equal(result.headers["mcp-session-id"], publicSessionId, "404 recovery must preserve the external public session id");
     assert.equal(core.observed.filter((entry) => entry.method === "initialize").length, 2, "404 recovery must perform exactly one replacement initialize");
-    assert.equal(core.observed.filter((entry) => entry.method === "tools/list").length, 2, "original request must be retried exactly once after 404 recovery");
+    assert.equal(core.observed.filter((entry) => entry.method === "tools/list" && entry.id !== "devspace-schema-fingerprint").length, 2, "original request must be retried exactly once after 404 recovery");
+    assert.equal(core.observed.filter((entry) => entry.id === "devspace-schema-fingerprint").length, 1, "resurrection must verify the current Core tool schema exactly once");
     assert.equal(registry.lookup(publicSessionId).backendSessionId, "core-404-backend-2");
   } finally {
     await close(gatewayServer);
@@ -525,6 +566,8 @@ async function testRestoredPublicSessionLazyResurrectionIsSingleFlight() {
     initializeBody: { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-11-25" } },
     initialized: true,
     lastActivityAt: Date.now(),
+    schemaFingerprint: schemaFingerprint(FAKE_TOOLS),
+    toolCount: 2,
   }]);
   const gateway = createStableGatewayProxy({
     activeCore: { id: core.id, baseUrl: core.baseUrl },
@@ -553,6 +596,68 @@ async function testRestoredPublicSessionLazyResurrectionIsSingleFlight() {
   }
 }
 
+async function testReplayDropsSessionWhenToolSchemaChanges() {
+  const coreA = await createFakeCore("core-a", { tools: FAKE_TOOLS });
+  const coreB = await createFakeCore("core-b", { tools: CHANGED_TOOLS });
+  const registry = new StableGatewaySessionRegistry();
+  const gateway = createStableGatewayProxy({ activeCore: { id: coreA.id, baseUrl: coreA.baseUrl }, publicBaseUrl: "https://devspace-gateway.example.test", registry });
+  const gatewayServer = createServer(gateway.handler);
+  const gatewayBaseUrl = await listen(gatewayServer);
+  try {
+    const initialized = await postJson(gatewayBaseUrl, { jsonrpc: "2.0", id: 1, method: "initialize", params: {} }, { authorization: "Bearer schema-secret" });
+    const publicSessionId = initialized.headers["mcp-session-id"];
+    await postJson(gatewayBaseUrl, { jsonrpc: "2.0", method: "notifications/initialized", params: {} }, {
+      authorization: "Bearer schema-secret",
+      "mcp-session-id": publicSessionId,
+    });
+    await postJson(gatewayBaseUrl, { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }, {
+      authorization: "Bearer schema-secret",
+      "mcp-session-id": publicSessionId,
+    });
+    assert.equal(registry.lookup(publicSessionId).schemaFingerprint, schemaFingerprint(FAKE_TOOLS));
+
+    const replayed = await gateway.replaySessionsToCore({ id: coreB.id, baseUrl: coreB.baseUrl });
+    assert.deepEqual(replayed.mappings, []);
+    assert.deepEqual(replayed.droppedPublicSessionIds, [publicSessionId]);
+    assert.equal(registry.lookup(publicSessionId), undefined, "schema-stale public sessions must be removed so the host performs a fresh initialize");
+  } finally {
+    await close(gatewayServer);
+    await close(coreA.server);
+    await close(coreB.server);
+  }
+}
+
+async function testLegacyDescriptorWithoutSchemaRequiresFreshInitialize() {
+  const core = await createFakeCore("core-legacy", { tools: FAKE_TOOLS });
+  const registry = new StableGatewaySessionRegistry();
+  const publicSessionId = "32345678-1234-1234-1234-123456789abc";
+  registry.restoreDescriptors([{
+    publicSessionId,
+    initializeBody: { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-11-25" } },
+    initialized: true,
+    lastActivityAt: Date.now(),
+    schemaFingerprint: null,
+    toolCount: null,
+  }]);
+  const gateway = createStableGatewayProxy({ activeCore: { id: core.id, baseUrl: core.baseUrl }, publicBaseUrl: "https://devspace-gateway.example.test", registry });
+  const gatewayServer = createServer(gateway.handler);
+  const gatewayBaseUrl = await listen(gatewayServer);
+  try {
+    const response = await postJson(gatewayBaseUrl, { jsonrpc: "2.0", id: 10, method: "tools/list", params: {} }, {
+      authorization: "Bearer current-token",
+      "mcp-session-id": publicSessionId,
+    });
+    assert.equal(response.status, 404);
+    assert.match(response.body, /schema changed|reinitialize/i);
+    assert.equal(registry.lookup(publicSessionId), undefined);
+    assert.equal(core.observed.filter((entry) => entry.method === "initialize").length, 1);
+    assert.equal(core.observed.filter((entry) => entry.id === "devspace-schema-fingerprint").length, 1);
+  } finally {
+    await close(gatewayServer);
+    await close(core.server);
+  }
+}
+
 await testInitializeAndStablePublicSession();
 await testSessionBoundRequestTranslation();
 await testLongLivedMcpGetDoesNotBlockDrainAccounting();
@@ -565,5 +670,7 @@ await testPromotionDropsOnlyFailedReplaySession();
 await testExactUnknownSession404ResurrectsAndRetriesOnce();
 await testNon404CoreFailureIsNeverResurrected();
 await testRestoredPublicSessionLazyResurrectionIsSingleFlight();
+await testReplayDropsSessionWhenToolSchemaChanges();
+await testLegacyDescriptorWithoutSchemaRequiresFreshInitialize();
 
-console.log(JSON.stringify({ ok: true, gate: "stable-gateway-proxy", lazyResurrection: true, resurrectionSingleFlight: true, exact404RetryOnce: true, no5xxReplay: true }));
+console.log(JSON.stringify({ ok: true, gate: "stable-gateway-proxy", lazyResurrection: true, resurrectionSingleFlight: true, exact404RetryOnce: true, no5xxReplay: true, schemaFingerprintCaptured: true, staleSchemaForcesFreshInitialize: true }));

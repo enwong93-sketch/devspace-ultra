@@ -1,7 +1,9 @@
 import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
+import { schemaFingerprint } from "./stable-gateway-candidate.js";
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+const MAX_TOOL_LIST_CAPTURE_BYTES = 4 * 1024 * 1024;
 const DEFAULT_BACKEND_SESSION_REINIT_IDLE_MS = 25_000;
 const HOP_BY_HOP_HEADERS = new Set([
   "connection",
@@ -49,6 +51,28 @@ function parseJsonBody(buffer) {
     return JSON.parse(buffer.toString("utf8"));
   } catch {
     return undefined;
+  }
+}
+
+function parseMcpPayload(value) {
+  const raw = Buffer.isBuffer(value) ? value.toString("utf8") : String(value ?? "");
+  const text = raw.trim();
+  if (!text) return null;
+  try { return JSON.parse(text); } catch {}
+  for (const line of text.split(/\r?\n/)) {
+    if (!line.startsWith("data:")) continue;
+    const data = line.slice(5).trim();
+    if (!data || data === "[DONE]") continue;
+    try { return JSON.parse(data); } catch {}
+  }
+  return null;
+}
+
+class StaleSessionSchemaError extends Error {
+  constructor(message = "MCP tool schema changed; reinitialize the session.") {
+    super(message);
+    this.name = "StaleSessionSchemaError";
+    this.code = "MCP_SCHEMA_STALE";
   }
 }
 
@@ -136,6 +160,35 @@ export function createStableGatewayProxy({
   const reinitIdleMs = Math.max(1_000, Number(backendSessionReinitIdleMs) || DEFAULT_BACKEND_SESSION_REINIT_IDLE_MS);
   const resurrectionLocks = new Map();
 
+  const readBackendToolSchema = async (core, { authorization, backendSessionId } = {}) => {
+    const listed = await requestCoreJson(core, {
+      jsonrpc: "2.0",
+      id: "devspace-schema-fingerprint",
+      method: "tools/list",
+      params: {},
+    }, {
+      authorization,
+      backendSessionId,
+      timeoutMs,
+    });
+    const payload = parseMcpPayload(listed.body);
+    const tools = payload?.result?.tools;
+    if (listed.status < 200 || listed.status >= 300 || !Array.isArray(tools)) {
+      throw new Error(`Core tools/list schema probe failed with HTTP ${listed.status}.`);
+    }
+    return {
+      schemaFingerprint: schemaFingerprint(tools),
+      toolCount: tools.length,
+    };
+  };
+
+  const assertSessionSchemaCompatible = (descriptor, current) => {
+    if (!descriptor?.initialized) return;
+    if (!descriptor.schemaFingerprint || descriptor.schemaFingerprint !== current.schemaFingerprint) {
+      throw new StaleSessionSchemaError();
+    }
+  };
+
   const setActiveCore = (core) => {
     currentCore = requireCore(core);
     return { ...currentCore };
@@ -172,13 +225,20 @@ export function createStableGatewayProxy({
             throw new Error("initialized-notification-replay-failed");
           }
         }
+        const currentSchema = await readBackendToolSchema(nextCore, {
+          authorization: session.authorization,
+          backendSessionId,
+        });
+        assertSessionSchemaCompatible(session, currentSchema);
+        registry.updateSchema?.(session.publicSessionId, currentSchema);
         mappings.push({
           publicSessionId: session.publicSessionId,
           coreId: nextCore.id,
           backendSessionId,
         });
       } catch (error) {
-        registry.invalidateMapping?.(session.publicSessionId);
+        if (error?.code === "MCP_SCHEMA_STALE") registry.remove?.(session.publicSessionId);
+        else registry.invalidateMapping?.(session.publicSessionId);
         droppedPublicSessionIds.push(session.publicSessionId);
         try {
           activityJournal?.noteSystem?.({
@@ -223,8 +283,19 @@ export function createStableGatewayProxy({
           throw new Error(`Core session resurrection initialized notification failed with HTTP ${ready.status}.`);
         }
       }
+      const currentSchema = await readBackendToolSchema(currentCore, {
+        authorization: currentAuthorization,
+        backendSessionId,
+      });
+      try {
+        assertSessionSchemaCompatible(descriptor, currentSchema);
+      } catch (error) {
+        registry.remove?.(id);
+        throw error;
+      }
       registry.commitMappings([{ publicSessionId: id, coreId: currentCore.id, backendSessionId }]);
       registry.updateAuthorization(id, currentAuthorization);
+      registry.updateSchema?.(id, currentSchema);
       return registry.lookup(id);
     })().finally(() => resurrectionLocks.delete(id));
     resurrectionLocks.set(id, promise);
@@ -295,8 +366,11 @@ export function createStableGatewayProxy({
         try {
           descriptor = await resurrectSession(publicSessionId, currentAuthorization);
         } catch (error) {
-          finishActivity({ ok: false, statusCode: 502, error: error instanceof Error ? error.message : "MCP session resurrection failed" });
-          sendGatewayError(res, 502, error instanceof Error ? error.message : "MCP session resurrection failed");
+          const staleSchema = error?.code === "MCP_SCHEMA_STALE";
+          const statusCode = staleSchema ? 404 : 502;
+          const message = error instanceof Error ? error.message : "MCP session resurrection failed";
+          finishActivity({ ok: false, statusCode, error: message });
+          sendGatewayError(res, statusCode, message);
           return;
         }
       }
@@ -358,10 +432,34 @@ export function createStableGatewayProxy({
       const pipeFinalResponse = (upstreamRes, responsePublicSessionId) => {
         res.statusCode = upstreamRes.statusCode ?? 502;
         setResponseHeaders(res, upstreamRes.headers, responsePublicSessionId);
+        const captureToolList = Boolean(publicSessionId && parsedBody?.method === "tools/list");
+        const schemaChunks = [];
+        let schemaBytes = 0;
+        let schemaOverflow = false;
         upstreamRes.on("data", (chunk) => {
+          if (captureToolList && !schemaOverflow) {
+            const data = Buffer.from(chunk);
+            if (schemaBytes + data.length <= MAX_TOOL_LIST_CAPTURE_BYTES) {
+              schemaChunks.push(data);
+              schemaBytes += data.length;
+            } else {
+              schemaOverflow = true;
+              schemaChunks.length = 0;
+            }
+          }
           if (!res.writableEnded) res.write(chunk);
         });
         upstreamRes.once("end", () => {
+          if (captureToolList && !schemaOverflow && res.statusCode < 400) {
+            const payload = parseMcpPayload(Buffer.concat(schemaChunks, schemaBytes));
+            const tools = payload?.result?.tools;
+            if (Array.isArray(tools)) {
+              registry.updateSchema?.(publicSessionId, {
+                schemaFingerprint: schemaFingerprint(tools),
+                toolCount: tools.length,
+              });
+            }
+          }
           if (publicSessionId && isInitializedNotification(parsedBody) && res.statusCode < 400) {
             registry.markInitialized(publicSessionId);
           }

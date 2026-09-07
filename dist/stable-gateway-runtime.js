@@ -11,6 +11,17 @@ function cloneInitializeBody(value) {
   return structuredClone(value);
 }
 
+function cleanSchemaFingerprint(value) {
+  const text = String(value ?? "").trim().toLowerCase();
+  return /^[a-f0-9]{64}$/.test(text) ? text : null;
+}
+
+function cleanToolCount(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const count = Number(value);
+  return Number.isInteger(count) && count >= 0 ? count : null;
+}
+
 function requireText(value, label) {
   const text = String(value ?? "").trim();
   if (!text) throw new Error(`${label} is required.`);
@@ -63,6 +74,8 @@ export class StableGatewaySessionRegistry {
       authorization: requireText(authorization, "authorization"),
       initialized: false,
       activeRequests: 0,
+      schemaFingerprint: null,
+      toolCount: null,
       lastActivityAt: this.now(),
     });
     this.#pruneInactive();
@@ -88,6 +101,8 @@ export class StableGatewaySessionRegistry {
         authorization: "",
         initialized: descriptor?.initialized === true,
         activeRequests: 0,
+        schemaFingerprint: cleanSchemaFingerprint(descriptor?.schemaFingerprint),
+        toolCount: cleanToolCount(descriptor?.toolCount),
         lastActivityAt: Number.isFinite(lastActivityAt) ? lastActivityAt : this.now(),
       });
     }
@@ -102,6 +117,8 @@ export class StableGatewaySessionRegistry {
       initializeBody: cloneInitializeBody(entry.initializeBody),
       initialized: entry.initialized === true,
       lastActivityAt: Number(entry.lastActivityAt || 0),
+      schemaFingerprint: cleanSchemaFingerprint(entry.schemaFingerprint),
+      toolCount: cleanToolCount(entry.toolCount),
     }));
   }
 
@@ -125,6 +142,18 @@ export class StableGatewaySessionRegistry {
     const entry = this.sessions.get(String(publicSessionId ?? ""));
     if (!entry) return false;
     entry.authorization = requireText(authorization, "authorization");
+    entry.lastActivityAt = this.now();
+    return true;
+  }
+
+  updateSchema(publicSessionId, { schemaFingerprint, toolCount } = {}) {
+    const entry = this.sessions.get(String(publicSessionId ?? ""));
+    if (!entry) return false;
+    const fingerprint = cleanSchemaFingerprint(schemaFingerprint);
+    const count = cleanToolCount(toolCount);
+    if (!fingerprint || count == null) return false;
+    entry.schemaFingerprint = fingerprint;
+    entry.toolCount = count;
     entry.lastActivityAt = this.now();
     return true;
   }
@@ -238,6 +267,8 @@ export class StableGatewaySessionRegistry {
         coreId: entry.coreId,
         initialized: entry.initialized,
         activeRequests: entry.activeRequests,
+        schemaFingerprint: cleanSchemaFingerprint(entry.schemaFingerprint),
+        toolCount: cleanToolCount(entry.toolCount),
       })),
     };
   }
@@ -252,6 +283,8 @@ export class StableGatewaySessionRegistry {
       initialized: entry.initialized,
       activeRequests: entry.activeRequests,
       lastActivityAt: Number(entry.lastActivityAt || 0),
+      schemaFingerprint: cleanSchemaFingerprint(entry.schemaFingerprint),
+      toolCount: cleanToolCount(entry.toolCount),
     };
   }
 

@@ -12,6 +12,10 @@ import { startStableGatewayRuntime } from "./devspace-stable-gateway.mjs";
 const execFileAsync = promisify(execFile);
 const PUBLIC_BASE = "https://devspace-gateway.example.test";
 const CONTROL_TOKEN = "gate-control-token-0123456789abcdef";
+const FAKE_TOOLS = Object.freeze([
+  { name: "read", description: "Read a workspace file", inputSchema: { type: "object", properties: { path: { type: "string" } }, required: ["path"] } },
+  { name: "view_image", description: "Inspect a workspace image", inputSchema: { type: "object", properties: { path: { type: "string" } }, required: ["path"] } },
+]);
 
 async function productionPortSnapshot() {
   if (process.platform !== "win32") return [];
@@ -62,6 +66,13 @@ async function createFakeCore(id, { failInitialize = false, failInitializeAt = n
     if (body.method === "notifications/initialized") {
       res.statusCode = 202;
       res.end();
+      return;
+    }
+    if (body.method === "tools/list") {
+      res.statusCode = 200;
+      res.setHeader("content-type", "application/json");
+      res.setHeader("mcp-session-id", req.headers["mcp-session-id"] ?? "");
+      res.end(JSON.stringify({ jsonrpc: "2.0", id: body.id, result: { tools: FAKE_TOOLS, core: id } }));
       return;
     }
     res.statusCode = 200;
@@ -170,6 +181,12 @@ async function initializePublicSession(harness) {
     body: { jsonrpc: "2.0", method: "notifications/initialized" },
     headers: { authorization: "Bearer replay-secret", "mcp-session-id": publicSessionId },
   });
+  const listed = await requestJson(harness.baseUrl, "/mcp", {
+    body: { jsonrpc: "2.0", id: 99, method: "tools/list", params: {} },
+    headers: { authorization: "Bearer replay-secret", "mcp-session-id": publicSessionId },
+  });
+  assert.equal(listed.status, 200);
+  assert.deepEqual(listed.json?.result?.tools, FAKE_TOOLS);
   return publicSessionId;
 }
 

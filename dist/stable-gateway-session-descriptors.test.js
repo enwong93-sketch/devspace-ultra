@@ -12,6 +12,8 @@ try {
     initializeBody: { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-11-25", clientInfo: { name: "test", version: "1" } } },
     initialized: true,
     lastActivityAt: 1234,
+    schemaFingerprint: "a".repeat(64),
+    toolCount: 116,
     authorization: "Bearer MUST-NOT-PERSIST",
     backendSessionId: "backend-secret-ish",
   }]);
@@ -21,7 +23,24 @@ try {
   assert.equal(loaded.length, 1);
   assert.equal(loaded[0].initialized, true);
   assert.equal(loaded[0].publicSessionId, "12345678-1234-1234-1234-123456789abc");
-  console.log(JSON.stringify({ ok: true, gate: "stable-gateway-session-descriptors", credentialsPersisted: false, restartDurable: true }));
+  assert.equal(loaded[0].schemaFingerprint, "a".repeat(64));
+  assert.equal(loaded[0].toolCount, 116);
+
+  const legacyPath = join(root, "legacy-sessions.json");
+  await import("node:fs/promises").then(({ writeFile }) => writeFile(legacyPath, JSON.stringify({
+    version: 1,
+    descriptors: [{
+      publicSessionId: "22345678-1234-1234-1234-123456789abc",
+      initializeBody: { jsonrpc: "2.0", id: 1, method: "initialize", params: {} },
+      initialized: true,
+      lastActivityAt: 5678,
+    }],
+  })));
+  const legacy = await loadStableGatewaySessionDescriptors(legacyPath);
+  assert.equal(legacy.length, 1);
+  assert.equal(legacy[0].schemaFingerprint, null);
+  assert.equal(legacy[0].toolCount, null);
+  console.log(JSON.stringify({ ok: true, gate: "stable-gateway-session-descriptors", credentialsPersisted: false, restartDurable: true, schemaRevisionPersisted: true, legacyForcesRefresh: true }));
 } finally {
   await rm(root, { recursive: true, force: true });
 }

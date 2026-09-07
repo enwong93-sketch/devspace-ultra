@@ -11,7 +11,7 @@ function clip(value, max) {
   const text = String(value ?? "").replace(/\s+/g, " ").trim();
   return text ? text.slice(0, max) : null;
 }
-function key(goal) { return `${goal.id ?? goal.goalId}:${goal.round}`; }
+function key(goal) { return `${goal.id ?? goal.goalId ?? goal.runId}:${goal.round}`; }
 function category(name) {
   if (/^(read|grep|glob|ls|context_|browser_control_status|chat_.*_status|devspace_.*_status)/.test(name)) return "inspection";
   if (/^(edit|write|apply_patch|show_changes)/.test(name)) return "change";
@@ -29,11 +29,12 @@ async function atomicWrite(path, payload) {
 
 /** Observability only: a heartbeat never authorizes recovery or proves model activity. */
 export class GoalRunProgressSupervisor {
-  constructor({ statePath, goalRuntime, heartbeatMs = DEFAULT_HEARTBEAT_MS, staleAfterMs = 60_000, now = () => Date.now(), writeState = atomicWrite } = {}) {
+  constructor({ statePath, goalRuntime, planRuntime = null, heartbeatMs = DEFAULT_HEARTBEAT_MS, staleAfterMs = 60_000, now = () => Date.now(), writeState = atomicWrite } = {}) {
     this.statePath = clip(statePath, 4096);
     if (!this.statePath) throw new Error("GoalRunProgressSupervisor requires statePath.");
     if (!goalRuntime || typeof goalRuntime.activeGoals !== "function") throw new Error("GoalRunProgressSupervisor requires GoalRuntime.");
     this.goalRuntime = goalRuntime;
+    this.planRuntime = planRuntime && typeof planRuntime.activePlans === "function" ? planRuntime : null;
     this.heartbeatMs = Math.max(2_000, Number(heartbeatMs) || DEFAULT_HEARTBEAT_MS);
     this.staleAfterMs = Math.max(2_000, Number(staleAfterMs) || 60_000);
     this.now = now;
@@ -82,10 +83,11 @@ export class GoalRunProgressSupervisor {
     return this.snapshot();
   }
 
-  async resolveGoal({ conversationId = null, goalId = null, monitor = false } = {}) {
-    const goals = (await this.goalRuntime.activeGoals({ limit: 128 })).filter((g) => g.status === "active");
+  async resolveGoal({ conversationId = null, goalId = null, runtimeKey = null, monitor = false } = {}) {
     const conversation = clip(conversationId, 240);
     const id = clip(goalId, 240);
+    const runtime = clip(runtimeKey, 80);
+    const goals = (await this.goalRuntime.activeGoals({ limit: 128 })).filter((g) => g.status === "active");
     const matches = goals.filter((g) => {
       if (id && g.id !== id) return false;
       if (conversation) return g.conversationId === conversation;
@@ -93,7 +95,46 @@ export class GoalRunProgressSupervisor {
       if (id) return monitor || !g.conversationId;
       return monitor;
     });
-    return matches.length === 1 ? matches[0] : null;
+    if (matches.length === 1) return { ...matches[0], progressKind: "goal" };
+
+    const requestedPlanId = id?.startsWith("plan:") ? id.slice("plan:".length) : null;
+    const requestedConversationId = id?.startsWith("conversation:") ? id.slice("conversation:".length) : null;
+    if (id && !requestedPlanId && !requestedConversationId) return null;
+    const plans = this.planRuntime
+      ? (await this.planRuntime.activePlans({ limit: 128 })).filter((plan) => plan.status === "active")
+      : [];
+    const planMatches = plans.filter((plan) => {
+      if (requestedPlanId && plan.id !== requestedPlanId) return false;
+      if (conversation) return plan.conversationId === conversation;
+      return Boolean(requestedPlanId && monitor);
+    });
+    if (planMatches.length === 1) {
+      const plan = planMatches[0];
+      const current = Array.isArray(plan.steps) ? plan.steps.find((step) => step.status === "in_progress") : null;
+      return {
+        id: `plan:${plan.id}`,
+        planId: plan.id,
+        progressKind: "plan",
+        conversationId: plan.conversationId || conversation || null,
+        status: "active",
+        objective: clip(current?.text, 260) || clip(plan.title, 260) || "目前多步工作",
+        round: 1,
+        revision: Number(plan.revision || 1),
+      };
+    }
+
+    const directConversation = requestedConversationId || (!id && conversation && /^main-\d{2}$/i.test(runtime || "") ? conversation : null);
+    if (!directConversation || (conversation && directConversation !== conversation)) return null;
+    return {
+      id: `conversation:${directConversation}`,
+      planId: null,
+      progressKind: "conversation",
+      conversationId: directConversation,
+      status: "active",
+      objective: "目前對話工作",
+      round: 1,
+      revision: 1,
+    };
   }
 
   runFor(goal) {
@@ -105,10 +146,10 @@ export class GoalRunProgressSupervisor {
         if (!evict) return null;
         this.runs.delete(evict);
       }
-      row = { goalId: goal.id, round: goal.round, stepCount: 0, successfulSteps: 0, failedSteps: 0, lastBoundaryAt: null, lastToolName: null, lastToolCategory: null, lastSuccess: null, lastDurationMs: null, interrupted: false };
+      row = { goalId: goal.id, planId: goal.planId || null, progressKind: goal.progressKind || "goal", round: goal.round, stepCount: 0, successfulSteps: 0, failedSteps: 0, lastBoundaryAt: null, lastToolName: null, lastToolCategory: null, lastSuccess: null, lastDurationMs: null, interrupted: false };
       this.runs.set(runKey, row);
     }
-    Object.assign(row, { goalRevision: goal.revision, objective: clip(goal.objective, 260) || "目前任務", conversationId: goal.conversationId || null });
+    Object.assign(row, { goalRevision: goal.revision, planId: goal.planId || row.planId || null, progressKind: goal.progressKind || row.progressKind || "goal", objective: clip(goal.objective, 260) || "目前任務", conversationId: goal.conversationId || null });
     return row;
   }
 
@@ -147,13 +188,13 @@ export class GoalRunProgressSupervisor {
     if (this.closed || signal?.aborted) return this.snapshot();
     const id = clip(operationId, 160);
     if (!id || this.inFlight.has(id) || this.inFlight.size >= MAX_IN_FLIGHT) return this.snapshot();
-    const goal = await this.resolveGoal({ conversationId, goalId });
+    const goal = await this.resolveGoal({ conversationId, goalId, runtimeKey });
     if (this.closed || signal?.aborted || !goal || this.inFlight.has(id) || this.inFlight.size >= MAX_IN_FLIGHT) return this.snapshot();
     const row = this.runFor(goal);
     if (!row) return this.snapshot();
     row.interrupted = false;
     row.runtimeKey = clip(runtimeKey, 80) || row.runtimeKey || null;
-    this.inFlight.set(id, { runKey: key(goal), goalId: goal.id, round: goal.round, conversationId: goal.conversationId || null, toolName: clip(toolName, 120) || "unknown", category: category(String(toolName || "")), startedAt: new Date(this.now()).toISOString() });
+    this.inFlight.set(id, { runKey: key(goal), goalId: goal.id, round: goal.round, conversationId: goal.conversationId || null, runtimeKey: clip(runtimeKey, 80) || null, toolName: clip(toolName, 120) || "unknown", category: category(String(toolName || "")), startedAt: new Date(this.now()).toISOString() });
     await this.publish(row);
     return this.snapshot();
   }
@@ -163,7 +204,7 @@ export class GoalRunProgressSupervisor {
     const id = clip(operationId, 160);
     const op = this.inFlight.get(id);
     if (!op || (conversationId && conversationId !== op.conversationId)) return this.snapshot();
-    const goal = await this.resolveGoal({ conversationId: op.conversationId, goalId: op.goalId });
+    const goal = await this.resolveGoal({ conversationId: op.conversationId, goalId: op.goalId, runtimeKey: op.runtimeKey, monitor: true });
     if (this.closed || this.inFlight.get(id) !== op) return this.snapshot();
     this.inFlight.delete(id);
     if (!goal || goal.round !== op.round) return this.refreshHeartbeat();
@@ -180,7 +221,12 @@ export class GoalRunProgressSupervisor {
     if (this.closed) return Promise.resolve(this.snapshot());
     if (this.heartbeatPending) return this.heartbeatPending;
     this.heartbeatPending = (async () => {
-      const goal = await this.resolveGoal({ goalId: this.state.active?.goalId, monitor: true });
+      const goal = await this.resolveGoal({
+        conversationId: this.state.active?.conversationId,
+        goalId: this.state.active?.goalId,
+        runtimeKey: this.state.active?.runtimeKey,
+        monitor: true,
+      });
       if (this.closed) return this.snapshot();
       await this.publish(goal ? this.runFor(goal) : null);
       return this.snapshot();

@@ -25,11 +25,40 @@ const progress = await createStableGatewayHumanProgress({ statePath: join(root, 
 const server = createServer((req, res) => { void handleStableGatewayHumanProgressRequest(req, res, { progress }); });
 const base = await listen(server);
 try {
-  const post = await request(base, "POST", { message: "啱啱我已經完成本機浮窗資料層。依家會直接驗證你真正見到嘅自然語言更新。" });
+  const post = await request(base, "POST", {
+    message: "啱啱我已經完成本機浮窗資料層。依家會直接驗證你真正見到嘅自然語言更新。",
+    conversationId: "conversation-a",
+    goalId: "goal-a",
+    round: 1,
+    planId: "plan-a",
+    planStepId: "step-a",
+    source: "goal-run-events",
+    kind: "milestone",
+    dedupeKey: "goal-a:1:milestone:one",
+    toolCategory: "verification",
+    toolStepCount: 4,
+  });
   assert.equal(post.status, 200);
   const posted = JSON.parse(post.body);
   assert.equal(posted.messages.length, 1);
   assert.match(posted.messages[0].text, /自然語言更新/);
+  assert.equal(posted.messages[0].conversationId, "conversation-a");
+  assert.equal(posted.messages[0].goalId, "goal-a");
+  assert.equal(posted.messages[0].dedupeKey, "goal-a:1:milestone:one");
+  assert.equal(posted.messages[0].toolCategory, "verification");
+  assert.equal(posted.messages[0].toolStepCount, 4);
+
+  const duplicate = await request(base, "POST", {
+    message: "唔應該重複顯示",
+    conversationId: "conversation-a",
+    goalId: "goal-a",
+    round: 1,
+    source: "goal-run-events",
+    kind: "milestone",
+    dedupeKey: "goal-a:1:milestone:one",
+  });
+  assert.equal(duplicate.status, 200);
+  assert.equal(JSON.parse(duplicate.body).messages.length, 1);
 
   const get = await request(base, "GET");
   assert.equal(get.status, 200);

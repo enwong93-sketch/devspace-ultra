@@ -39,6 +39,7 @@ export function installGoalToolProgress(server, { supervisor, resolveConversatio
         operationId: randomUUID(),
         toolName,
         conversationId: identity?.conversationId || null,
+        runtimeKey: identity?.runtimeKey || null,
         goalId: typeof request.params?.arguments?.goalId === "string" ? request.params.arguments.goalId : null,
       };
       await observe(() => supervisor.noteToolStart(context), () => observation.abort());

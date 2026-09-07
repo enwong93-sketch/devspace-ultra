@@ -22,6 +22,8 @@ async function testStableSessionMapping() {
     initialized: false,
     activeRequests: 0,
     lastActivityAt: 123_456,
+    schemaFingerprint: null,
+    toolCount: null,
   });
 
   assert.equal(registry.markInitialized(publicSessionId), true);
@@ -31,6 +33,10 @@ async function testStableSessionMapping() {
   assert.equal(registry.lookup(publicSessionId).authorization, "Bearer refreshed-secret");
   assert.equal(registry.updateAuthorization("missing-session", "Bearer ignored"), false);
   assert.throws(() => registry.updateAuthorization(publicSessionId, ""), /authorization/i);
+  assert.equal(registry.updateSchema(publicSessionId, { schemaFingerprint: "a".repeat(64), toolCount: 116 }), true);
+  assert.equal(registry.lookup(publicSessionId).schemaFingerprint, "a".repeat(64));
+  assert.equal(registry.lookup(publicSessionId).toolCount, 116);
+  assert.equal(registry.updateSchema(publicSessionId, { schemaFingerprint: "invalid", toolCount: 1 }), false);
 }
 
 async function testActiveRequestAccountingAndDrain() {
@@ -131,6 +137,8 @@ async function testPublicSnapshotRedactsReplaySecrets() {
     coreId: "core-a",
     initialized: true,
     activeRequests: 0,
+    schemaFingerprint: null,
+    toolCount: null,
   });
   assert.doesNotMatch(serialized, /must-never-leak|raw-init-payload|backend-a-1/);
 }
@@ -162,11 +170,15 @@ await testPublicSnapshotRedactsReplaySecrets();
     initializeBody: { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-11-25" } },
     initialized: true,
     lastActivityAt: 9_000,
+    schemaFingerprint: "b".repeat(64),
+    toolCount: 77,
   }]);
   const restored = registry.lookup(publicSessionId);
   assert.equal(restored.coreId, "restored-unmapped");
   assert.equal(restored.authorization, "", "restored descriptors must never contain persisted OAuth credentials");
   assert.equal(restored.initialized, true);
+  assert.equal(restored.schemaFingerprint, "b".repeat(64));
+  assert.equal(restored.toolCount, 77);
   assert.equal(registry.snapshotDescriptors()[0].publicSessionId, publicSessionId);
 }
 

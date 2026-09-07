@@ -16,7 +16,7 @@ async function setup(t, customSupervisor) {
   const goal = { id: "goal_a", conversationId: "conv-a", status: "active", objective: "Test actual results", round: 1, revision: 1 };
   const supervisor = customSupervisor || new GoalRunProgressSupervisor({ statePath: join(root, "progress.json"), goalRuntime: { async activeGoals() { return [goal]; } } });
   const server = new McpServer({ name: "progress-test", version: "1" });
-  module.installGoalToolProgress(server, { supervisor, resolveConversation: async () => ({ conversationId: "conv-a" }) });
+  module.installGoalToolProgress(server, { supervisor, resolveConversation: async () => ({ conversationId: "conv-a", runtimeKey: "main-01" }) });
   const client = new Client({ name: "test-client", version: "1" });
   const [a, b] = InMemoryTransport.createLinkedPair();
   t.after(async () => { await client.close(); await server.close(); await supervisor.close?.(); await rm(root, { recursive: true, force: true }); });
@@ -92,6 +92,24 @@ test("late identity lookup cannot resurrect a tool after the observation deadlin
   release();
   await startPromise;
   assert.equal(supervisor.snapshot().active?.inFlightCount || 0, 0, "a timed-out start observer must not create a ghost in-flight operation");
+});
+
+test("native runtime identity is forwarded to progress observation", async (t) => {
+  const starts = [];
+  const boundaries = [];
+  const observer = {
+    async noteToolStart(event) { starts.push(event); },
+    async noteToolBoundary(event) { boundaries.push(event); },
+  };
+  const { server, client, connect } = await setup(t, observer);
+  server.registerTool("runtime_scoped_work", { inputSchema: {} }, async () => ({ content: [{ type: "text", text: "done" }] }));
+  await connect();
+  await client.callTool({ name: "runtime_scoped_work", arguments: {} });
+  assert.equal(starts.length, 1);
+  assert.equal(starts[0].conversationId, "conv-a");
+  assert.equal(starts[0].runtimeKey, "main-01");
+  assert.equal(boundaries.length, 1);
+  assert.equal(boundaries[0].runtimeKey, "main-01");
 });
 
 test("observer errors cannot replace a successful tool result or replay the tool", async (t) => {

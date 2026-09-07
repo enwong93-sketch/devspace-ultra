@@ -8,11 +8,39 @@ const root = await mkdtemp(join(tmpdir(), "devspace-human-progress-test-"));
 const statePath = join(root, "devspace-live-progress.json");
 try {
   const progress = await createStableGatewayHumanProgress({ statePath, limit: 3 });
-  await progress.update({ message: "啱啱我已經確認 Stable Gateway 正常。依家我會直接驗證原生 session 同 conversation ID 嘅對應，唔再靠畫面估。" });
+  await progress.update({
+    message: "啱啱我已經確認 Stable Gateway 正常。依家我會直接驗證原生 session 同 conversation ID 嘅對應，唔再靠畫面估。",
+    conversationId: "conversation-a",
+    goalId: "goal-a",
+    round: 1,
+    planId: "plan-a",
+    planStepId: "step-a",
+    source: "goal-run-events",
+    kind: "objective",
+    dedupeKey: "goal-a:1:objective:step-a",
+    toolCategory: "inspection",
+    toolStepCount: 0,
+  });
   let snapshot = progress.snapshot();
   assert.equal(snapshot.version, 2);
   assert.equal(snapshot.messages.length, 1);
   assert.match(snapshot.messages[0].text, /啱啱我已經確認 Stable Gateway 正常/);
+  assert.equal(snapshot.messages[0].conversationId, "conversation-a");
+  assert.equal(snapshot.messages[0].goalId, "goal-a");
+  assert.equal(snapshot.messages[0].source, "goal-run-events");
+  assert.equal(snapshot.messages[0].kind, "objective");
+  assert.equal(snapshot.messages[0].toolStepCount, 0);
+
+  await progress.update({
+    message: "呢個重複事件唔應該再次加入。",
+    conversationId: "conversation-a",
+    goalId: "goal-a",
+    round: 1,
+    source: "goal-run-events",
+    kind: "objective",
+    dedupeKey: "goal-a:1:objective:step-a",
+  });
+  assert.equal(progress.snapshot().messages.length, 1, "dedupeKey must suppress restart/event replay duplicates");
 
   await progress.update({ message: "第一個驗證已經通過。下一步我會將 Goal 同 Plan 真正綁落 conversation，而唔係 runtime。" });
   await progress.update({ message: "我而家開始做 conversation-bound state migration；舊資料會保留，唔會假完成。" });
@@ -25,6 +53,7 @@ try {
   const restoredSnapshot = restored.snapshot();
   assert.equal(restoredSnapshot.messages.length, 3, "natural-language messages must survive Gateway restart");
   assert.match(restoredSnapshot.messages.at(-1).text, /真實前端 A→B→A/);
+  assert.equal(restoredSnapshot.messages.some((item) => item.dedupeKey === "goal-a:1:objective:step-a"), false, "bounded history may evict old metadata without corrupting later messages");
 
   await assert.rejects(() => restored.update({ message: "x".repeat(1601) }), /1600 characters/i);
   await assert.rejects(() => restored.update({ message: "Bearer secret-token-value" }), /sensitive/i);

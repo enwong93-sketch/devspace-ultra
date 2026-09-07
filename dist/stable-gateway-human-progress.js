@@ -1,9 +1,10 @@
 import { readFile } from "node:fs/promises";
 import { atomicWriteJson } from "./atomic-file.js";
 
-const DEFAULT_LIMIT = 8;
+const DEFAULT_LIMIT = 12;
 const MAX_LEGACY_TEXT = 400;
 const MAX_MESSAGE_TEXT = 1600;
+const MAX_METADATA_TEXT = 200;
 const SENSITIVE = /(Bearer\s+\S+|(?:password|passwd|pwd|token|secret|api[_-]?key|access[_-]?key|client[_-]?secret)\s*[=:]\s*\S+)/i;
 
 function cleanText(value, label, maxLength) {
@@ -55,10 +56,36 @@ function sendJson(res, status, value) {
   res.end(body);
 }
 
+function cleanMetadataText(value, maxLength = MAX_METADATA_TEXT) {
+  const text = typeof value === "string" ? value.trim() : "";
+  return text && text.length <= maxLength && !SENSITIVE.test(text) ? text : null;
+}
+
+function cleanRound(value) {
+  const round = Number(value);
+  return Number.isInteger(round) && round > 0 ? round : null;
+}
+
 function normalizePersistedMessage(item) {
   const text = typeof item?.text === "string" ? item.text.trim() : "";
   if (!text || text.length > MAX_MESSAGE_TEXT || SENSITIVE.test(text)) return null;
-  return { text, at: item?.at || null };
+  const message = { text, at: item?.at || null };
+  const fields = {
+    conversationId: cleanMetadataText(item?.conversationId),
+    goalId: cleanMetadataText(item?.goalId),
+    planId: cleanMetadataText(item?.planId),
+    planStepId: cleanMetadataText(item?.planStepId),
+    source: cleanMetadataText(item?.source, 80),
+    kind: cleanMetadataText(item?.kind, 80),
+    dedupeKey: cleanMetadataText(item?.dedupeKey, 500),
+    toolCategory: cleanMetadataText(item?.toolCategory, 80),
+  };
+  for (const [key, value] of Object.entries(fields)) if (value) message[key] = value;
+  const round = cleanRound(item?.round);
+  if (round) message.round = round;
+  const toolStepCount = Number(item?.toolStepCount);
+  if (Number.isInteger(toolStepCount) && toolStepCount >= 0) message.toolStepCount = toolStepCount;
+  return message;
 }
 
 export async function createStableGatewayHumanProgress({ statePath, limit = DEFAULT_LIMIT, now = Date.now } = {}) {
@@ -83,14 +110,45 @@ export async function createStableGatewayHumanProgress({ statePath, limit = DEFA
     await writeAtomic(path, state);
   };
 
-  const update = async ({ message, doing, completed, clearCurrent = false } = {}) => {
+  const update = async ({
+    message,
+    doing,
+    completed,
+    clearCurrent = false,
+    conversationId,
+    goalId,
+    round,
+    planId,
+    planStepId,
+    source,
+    kind,
+    dedupeKey,
+    toolCategory,
+    toolStepCount,
+  } = {}) => {
     const messageText = cleanText(message, "message", MAX_MESSAGE_TEXT);
     const doingText = cleanText(doing, "doing", MAX_LEGACY_TEXT);
     const completedText = cleanText(completed, "completed", MAX_LEGACY_TEXT);
     const at = new Date(Number(now())).toISOString();
 
     if (messageText) {
-      state.messages.push({ text: messageText, at });
+      const normalized = normalizePersistedMessage({
+        text: messageText,
+        at,
+        conversationId,
+        goalId,
+        round,
+        planId,
+        planStepId,
+        source,
+        kind,
+        dedupeKey,
+        toolCategory,
+        toolStepCount,
+      });
+      const duplicate = normalized?.dedupeKey
+        && state.messages.some((item) => item?.dedupeKey === normalized.dedupeKey);
+      if (normalized && !duplicate) state.messages.push(normalized);
       if (state.messages.length > maxItems) state.messages.splice(0, state.messages.length - maxItems);
     }
     if (completedText) {
@@ -135,6 +193,16 @@ export async function handleStableGatewayHumanProgressRequest(req, res, { progre
       doing: body?.doing,
       completed: body?.completed,
       clearCurrent: body?.clearCurrent === true,
+      conversationId: body?.conversationId,
+      goalId: body?.goalId,
+      round: body?.round,
+      planId: body?.planId,
+      planStepId: body?.planStepId,
+      source: body?.source,
+      kind: body?.kind,
+      dedupeKey: body?.dedupeKey,
+      toolCategory: body?.toolCategory,
+      toolStepCount: body?.toolStepCount,
     });
     sendJson(res, 200, snapshot);
   } catch (error) {

@@ -6,6 +6,10 @@ import { join } from "node:path";
 import { createStableGatewayController } from "./stable-gateway-controller.js";
 
 const PUBLIC_BASE = "https://devspace-gateway.example.test";
+const FAKE_TOOLS = Object.freeze([
+  { name: "read", description: "Read a workspace file", inputSchema: { type: "object", properties: { path: { type: "string" } }, required: ["path"] } },
+  { name: "view_image", description: "Inspect a workspace image", inputSchema: { type: "object", properties: { path: { type: "string" } }, required: ["path"] } },
+]);
 
 async function listen(server) {
   await new Promise((resolve, reject) => {
@@ -61,6 +65,13 @@ async function createFakeCore(id, { failInitialize = false, failInitializeAt = n
     if (body.method === "notifications/initialized") {
       res.statusCode = 202;
       res.end();
+      return;
+    }
+    if (body.method === "tools/list") {
+      res.statusCode = 200;
+      res.setHeader("content-type", "application/json");
+      res.setHeader("mcp-session-id", req.headers["mcp-session-id"] ?? "");
+      res.end(JSON.stringify({ jsonrpc: "2.0", id: body.id, result: { tools: FAKE_TOOLS } }));
       return;
     }
     res.statusCode = 200;
@@ -191,6 +202,12 @@ async function initializeSession(harness) {
     authorization: "Bearer replay-secret",
     "mcp-session-id": publicSessionId,
   });
+  const tools = await postJson(harness.gatewayBaseUrl, { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }, {
+    authorization: "Bearer replay-secret",
+    "mcp-session-id": publicSessionId,
+  });
+  assert.equal(tools.status, 200);
+  assert.deepEqual(JSON.parse(tools.body).result.tools, FAKE_TOOLS);
   return publicSessionId;
 }
 
@@ -233,8 +250,9 @@ async function testSuccessfulHandover() {
       "mcp-session-id": beforePublic,
     });
     assert.equal(response.headers["mcp-session-id"], beforePublic);
-    assert.equal(JSON.parse(response.body).result.core, "core-b");
+    assert.deepEqual(JSON.parse(response.body).result.tools, FAKE_TOOLS);
     assert.equal(h.controller.status().sessions.sessions[0].publicSessionId, beforePublic);
+    assert.equal(h.controller.status().sessions.sessions[0].toolCount, FAKE_TOOLS.length);
   } finally {
     await h.close();
   }
@@ -260,7 +278,7 @@ async function testReplayFailureDropsStaleSessionButKeepsHealthyCoreB() {
     });
     assert.equal(resurrected.status, 200, "a dropped live Core mapping must resurrect transparently when the lightweight public descriptor still exists");
     assert.equal(resurrected.headers["mcp-session-id"], publicSessionId, "transparent resurrection must preserve the ChatGPT-held public session id");
-    assert.equal(JSON.parse(resurrected.body).result.core, "core-b");
+    assert.deepEqual(JSON.parse(resurrected.body).result.tools, FAKE_TOOLS);
 
     const fresh = await postJson(h.gatewayBaseUrl, { jsonrpc: "2.0", id: 4, method: "initialize", params: {} }, { authorization: "Bearer replay-secret" });
     assert.equal(fresh.status, 200, "fresh client initialization must remain available after all old sessions were dropped");
@@ -269,7 +287,7 @@ async function testReplayFailureDropsStaleSessionButKeepsHealthyCoreB() {
       authorization: "Bearer replay-secret",
       "mcp-session-id": freshSessionId,
     });
-    assert.equal(JSON.parse(after.body).result.core, "core-b");
+    assert.deepEqual(JSON.parse(after.body).result.tools, FAKE_TOOLS);
     assert.equal(h.controller.status().admission.closed, false);
   } finally {
     await h.close();

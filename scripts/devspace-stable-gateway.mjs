@@ -11,6 +11,7 @@ import { loadStableGatewaySessionDescriptors, saveStableGatewaySessionDescriptor
 import { createStableGatewayActivityJournal } from "../dist/stable-gateway-activity.js";
 import { handleStableGatewayLiveRequest } from "../dist/stable-gateway-live-ui.js";
 import { createStableGatewayHumanProgress, handleStableGatewayHumanProgressRequest } from "../dist/stable-gateway-human-progress.js";
+import { GoalProgressNarrator } from "../dist/goal-progress-narrator.js";
 import { createLogRetentionSupervisor } from "../dist/log-retention.js";
 import { probeCandidate, readCoreSchemaFingerprint } from "../dist/stable-gateway-candidate.js";
 import { loadDevspaceFiles } from "../dist/user-config.js";
@@ -288,6 +289,13 @@ if (await isMainModule()) {
   const humanProgress = await createStableGatewayHumanProgress({
     statePath: join(options.controllerOptions.stateDir, "devspace-live-progress.json"),
   });
+  const progressNarrator = new GoalProgressNarrator({
+    progressStatePath: join(options.controllerOptions.stateDir, "devspace-goal-run-live.json"),
+    planStatePath: join(options.controllerOptions.stateDir, "plan-state.json"),
+    goalStatePath: join(options.controllerOptions.stateDir, "goal-state.json"),
+    humanProgress,
+  });
+  await progressNarrator.start();
   const logRetention = createLogRetentionSupervisor({
     roots: [join(options.configDir, "logs"), options.controllerOptions.logDir],
   });
@@ -324,6 +332,8 @@ if (await isMainModule()) {
     shuttingDown = true;
     clearInterval(descriptorTimer);
     await persistDescriptors();
+    await progressNarrator.close();
+    await logRetention.close();
     await runtime.close();
     process.exit(0);
   };

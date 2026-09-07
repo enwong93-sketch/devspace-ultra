@@ -8,6 +8,10 @@ import { createStableGatewayController } from "./stable-gateway-controller.js";
 import { createStableGatewayActivityJournal } from "./stable-gateway-activity.js";
 
 const PUBLIC_BASE = "https://devspace-gateway.example.test";
+const FAKE_TOOLS = Object.freeze([
+  { name: "read", description: "Read a workspace file", inputSchema: { type: "object", properties: { path: { type: "string" } }, required: ["path"] } },
+  { name: "view_image", description: "Inspect a workspace image", inputSchema: { type: "object", properties: { path: { type: "string" } }, required: ["path"] } },
+]);
 
 async function listen(server) {
   await new Promise((resolve, reject) => {
@@ -51,6 +55,13 @@ async function createFakeCore(id, marker, { failInitializeAt = null } = {}) {
     if (body.method === "notifications/initialized") {
       res.statusCode = 202;
       res.end();
+      return;
+    }
+    if (body.method === "tools/list") {
+      res.statusCode = 200;
+      res.setHeader("content-type", "application/json");
+      res.setHeader("mcp-session-id", req.headers["mcp-session-id"] ?? "");
+      res.end(JSON.stringify({ jsonrpc: "2.0", id: body.id, result: { tools: FAKE_TOOLS, marker } }));
       return;
     }
     res.statusCode = 200;
@@ -166,6 +177,12 @@ try {
       authorization: `Bearer replay-secret-${index}`,
       "mcp-session-id": publicSessionId,
     });
+    const listed = await postJson(gatewayBaseUrl, { jsonrpc: "2.0", id: 10 + index, method: "tools/list", params: {} }, {
+      authorization: `Bearer replay-secret-${index}`,
+      "mcp-session-id": publicSessionId,
+    });
+    assert.equal(listed.status, 200);
+    assert.deepEqual(JSON.parse(listed.body).result.tools, FAKE_TOOLS);
   }
 
   const handover = await controller.handover();

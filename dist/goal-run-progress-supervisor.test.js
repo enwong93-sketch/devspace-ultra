@@ -38,7 +38,79 @@ try {
   assert.equal(snap.active.lastDurationMs, null);
   assert.match(snap.active.currentText, /未通過/);
   assert.doesNotMatch(await readFile(path, "utf8"), /Bearer|password|secret/i);
-  console.log(JSON.stringify({ ok: true, gate: "goal-run-progress-supervisor", automaticToolStart: true, automaticToolBoundary: true, autonomousHeartbeat: true, durable: true, evidenceNotInvented: true }));
+
+  const planPath = join(root, "plan-run-live.json");
+  const plan = {
+    id: "plan_work_agent",
+    conversationId: "conv-work",
+    title: "完成 NPR 圖片參考驗收",
+    status: "active",
+    revision: 3,
+    steps: [{ id: "step-image", text: "檢視參考圖片並核對造型", status: "in_progress" }],
+  };
+  const planOnly = new GoalRunProgressSupervisor({
+    statePath: planPath,
+    goalRuntime: { async activeGoals() { return []; } },
+    planRuntime: { async activePlans() { return [plan]; } },
+    now: () => now,
+    heartbeatMs: 60_000,
+  });
+  try {
+    await planOnly.start();
+    let planSnap = await planOnly.noteToolStart({ conversationId: "conv-work", operationId: "image-read", toolName: "view_image" });
+    assert.equal(planSnap.active.goalId, "plan:plan_work_agent");
+    assert.equal(planSnap.active.planId, "plan_work_agent");
+    assert.equal(planSnap.active.progressKind, "plan");
+    assert.equal(planSnap.active.objective, "檢視參考圖片並核對造型");
+    planSnap = await planOnly.noteToolBoundary({ conversationId: "conv-work", operationId: "image-read", success: true, durationMs: 2_000 });
+    assert.equal(planSnap.active.stepCount, 1);
+    planSnap = await planOnly.refreshHeartbeat();
+    assert.equal(planSnap.active.goalId, "plan:plan_work_agent", "heartbeat must retain a plan-only Work agent run");
+  } finally {
+    await planOnly.close();
+  }
+
+  const conversationPath = join(root, "conversation-run-live.json");
+  const conversationOnly = new GoalRunProgressSupervisor({
+    statePath: conversationPath,
+    goalRuntime: { async activeGoals() { return []; } },
+    planRuntime: { async activePlans() { return []; } },
+    now: () => now,
+    heartbeatMs: 60_000,
+  });
+  try {
+    await conversationOnly.start();
+    let conversationSnap = await conversationOnly.noteToolStart({
+      conversationId: "conv-main-01",
+      runtimeKey: "main-01",
+      operationId: "blender-inspect",
+      toolName: "capability_call",
+    });
+    assert.equal(conversationSnap.active.goalId, "conversation:conv-main-01");
+    assert.equal(conversationSnap.active.progressKind, "conversation");
+    assert.equal(conversationSnap.active.runtimeKey, "main-01");
+    conversationSnap = await conversationOnly.noteToolBoundary({
+      conversationId: "conv-main-01",
+      operationId: "blender-inspect",
+      success: true,
+      durationMs: 3_000,
+    });
+    assert.equal(conversationSnap.active.stepCount, 1);
+    conversationSnap = await conversationOnly.refreshHeartbeat();
+    assert.equal(conversationSnap.active.goalId, "conversation:conv-main-01");
+
+    const workerIgnored = await conversationOnly.noteToolStart({
+      conversationId: "conv-worker",
+      runtimeKey: "worker-01",
+      operationId: "worker-call",
+      toolName: "capability_call",
+    });
+    assert.notEqual(workerIgnored.active?.conversationId, "conv-worker", "non-Main worker calls must remain backend-only");
+  } finally {
+    await conversationOnly.close();
+  }
+
+  console.log(JSON.stringify({ ok: true, gate: "goal-run-progress-supervisor", automaticToolStart: true, automaticToolBoundary: true, autonomousHeartbeat: true, durable: true, planOnlyWorkAgent: true, ordinaryMainConversation: true, workerBackendOnly: true, evidenceNotInvented: true }));
 } finally {
   await supervisor?.close();
   await rm(root, { recursive: true, force: true });
