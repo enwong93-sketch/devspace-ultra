@@ -6,6 +6,7 @@
 - Replaced the optional Codex sandbox/permission-grant surface with one owner-selected `danger-full-access` / `never` approval policy.
 - Added support for Codex `requires_local_executor` plugin metadata and 77/77 live manifest compatibility.
 - Added a model-independent interactive progress contract for Thinking/XHi and Pro, with concise in-conversation milestone updates and the existing bounded human-progress transcript as a no-refresh fallback.
+- Added bounded append-only diagnostic log retention: per-file tail trimming without whole-file heap reads, total root quota, file-count cap, age expiry, and Gateway lifecycle integration; durable JSON authority/state files remain excluded.
 
 ## 0.5.0 — 2026-09-05
 

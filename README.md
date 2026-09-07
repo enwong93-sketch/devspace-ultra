@@ -287,3 +287,9 @@ This single-user installation exposes one command policy: `danger-full-access`, 
 Interactive ChatGPT Classic Main conversations receive the same progress contract for Thinking/XHi and Pro: one concise visible objective before substantive tool use, then another operational summary after meaningful verified milestones, approach changes, genuine blockers, or roughly five minutes of continued work. These updates describe observable work and next actions; they are not hidden chain-of-thought and must not mirror every low-level tool call.
 
 The normal target is an in-conversation assistant progress paragraph. Because the ChatGPT host and selected model ultimately decide whether an intermediate assistant commentary block is rendered, DevSpace also retains its bounded human-progress transcript as a no-refresh, no-synthetic-turn fallback. Repeated collapsed tool previews and mechanical status boards are not treated as equivalent progress reporting.
+
+## Bounded diagnostic log retention
+
+Stable Gateway diagnostic output is observability, not task authority. DevSpace trims append-only `.log`, `.out`, `.err`, JSONL/NDJSON, trace, and history-style diagnostic files without loading a complete file into the Node heap: each active file keeps a bounded tail, each log root has a total byte/file-count quota, and old diagnostics expire automatically. Durable Goal, Plan, conversation-authority, OAuth, capability-registry, and other JSON state files are outside this policy and are never deleted as logs.
+
+The default policy is 16 MiB per file, a retained 4 MiB tail, 256 MiB per log root, 256 files, fourteen days, and a five-minute single-flight sweep. Interactive PowerShell PSReadLine history is disk-backed and is not retained by the non-interactive Gateway process; the live `/__devspace/memory/status` registry/heap snapshot remains the authority for V8 OOM analysis.

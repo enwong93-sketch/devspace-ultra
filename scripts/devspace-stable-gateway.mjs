@@ -11,6 +11,7 @@ import { loadStableGatewaySessionDescriptors, saveStableGatewaySessionDescriptor
 import { createStableGatewayActivityJournal } from "../dist/stable-gateway-activity.js";
 import { handleStableGatewayLiveRequest } from "../dist/stable-gateway-live-ui.js";
 import { createStableGatewayHumanProgress, handleStableGatewayHumanProgressRequest } from "../dist/stable-gateway-human-progress.js";
+import { createLogRetentionSupervisor } from "../dist/log-retention.js";
 import { probeCandidate, readCoreSchemaFingerprint } from "../dist/stable-gateway-candidate.js";
 import { loadDevspaceFiles } from "../dist/user-config.js";
 import { nodeArgsForCoreHeapProfile } from "../dist/core-node-options.js";
@@ -287,6 +288,10 @@ if (await isMainModule()) {
   const humanProgress = await createStableGatewayHumanProgress({
     statePath: join(options.controllerOptions.stateDir, "devspace-live-progress.json"),
   });
+  const logRetention = createLogRetentionSupervisor({
+    roots: [join(options.configDir, "logs"), options.controllerOptions.logDir],
+  });
+  await logRetention.start();
   const descriptorPath = join(options.controllerOptions.stateDir, "stable-gateway-session-descriptors.json");
   const registry = new StableGatewaySessionRegistry();
   registry.restoreDescriptors(await loadStableGatewaySessionDescriptors(descriptorPath));
