@@ -5,6 +5,7 @@
 - Added Codex Computer Use routing/skill delegation with automatic visual-task routing through the shared persistent Codex `node_repl` and OpenAI bundled `@oai/sky` runtime, with no DevSpace fallback GUI driver.
 - Replaced the optional Codex sandbox/permission-grant surface with one owner-selected `danger-full-access` / `never` approval policy.
 - Added support for Codex `requires_local_executor` plugin metadata and 77/77 live manifest compatibility.
+- Added a model-independent interactive progress contract for Thinking/XHi and Pro, with concise in-conversation milestone updates and the existing bounded human-progress transcript as a no-refresh fallback.
 
 ## 0.5.0 — 2026-09-05
 

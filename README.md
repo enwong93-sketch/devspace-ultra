@@ -281,3 +281,9 @@ The router is intended for visible controls, dialogs, screenshots, accessibility
 ### Local execution policy
 
 This single-user installation exposes one command policy: `danger-full-access`, approval policy `never`, with no sandbox alternative. This avoids unattended development being blocked by permission prompts. Install DevSpace Ultra only on a trusted machine and connect only to a trusted single-user edge endpoint.
+
+## Visible progress across reasoning modes
+
+Interactive ChatGPT Classic Main conversations receive the same progress contract for Thinking/XHi and Pro: one concise visible objective before substantive tool use, then another operational summary after meaningful verified milestones, approach changes, genuine blockers, or roughly five minutes of continued work. These updates describe observable work and next actions; they are not hidden chain-of-thought and must not mirror every low-level tool call.
+
+The normal target is an in-conversation assistant progress paragraph. Because the ChatGPT host and selected model ultimately decide whether an intermediate assistant commentary block is rendered, DevSpace also retains its bounded human-progress transcript as a no-refresh, no-synthetic-turn fallback. Repeated collapsed tool previews and mechanical status boards are not treated as equivalent progress reporting.
