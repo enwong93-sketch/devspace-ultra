@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import {
   ClassicMcpCallCorrelator,
   fingerprintMcpToolCall,
+  isNativeCallMcpRequest,
   parseNativeCallMcpRequest,
 } from "./classic-mcp-call-correlation.js";
 
@@ -17,6 +18,9 @@ assert.match(first, /^[a-f0-9]{64}$/);
 assert.equal(first, reordered, "canonical object ordering must not change the correlation fingerprint");
 assert.notEqual(first, fingerprintMcpToolCall("tools/call", { name: "devspace_goal_status", arguments: { goalId: "goal-b" } }));
 assert.equal(fingerprintMcpToolCall("resources/read", { uri: "x" }), null);
+
+assert.equal(isNativeCallMcpRequest({ url: "https://chatgpt.com/backend-api/ecosystem/call_mcp", method: "POST" }), true);
+assert.equal(isNativeCallMcpRequest({ url: "https://chatgpt.com/backend-api/ecosystem/call_mcp", method: "GET" }), false);
 
 const parsed = parseNativeCallMcpRequest({
   url: "https://chatgpt.com/backend-api/ecosystem/call_mcp",

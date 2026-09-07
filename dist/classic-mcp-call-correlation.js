@@ -45,12 +45,17 @@ export function fingerprintMcpToolCall(methodOrBody, maybeParams) {
   return createHash("sha256").update(JSON.stringify(canonical)).digest("hex");
 }
 
-export function parseNativeCallMcpRequest(request = {}) {
+export function isNativeCallMcpRequest(request = {}) {
   let url;
   try { url = new URL(String(request?.url || "")); }
-  catch { return null; }
-  if (url.hostname !== "chatgpt.com" || url.pathname !== CALL_MCP_PATH) return null;
-  if (String(request?.method || "").toUpperCase() !== "POST") return null;
+  catch { return false; }
+  return url.hostname === "chatgpt.com"
+    && url.pathname === CALL_MCP_PATH
+    && String(request?.method || "").toUpperCase() === "POST";
+}
+
+export function parseNativeCallMcpRequest(request = {}) {
+  if (!isNativeCallMcpRequest(request)) return null;
   let body;
   try { body = JSON.parse(String(request?.postData || "")); }
   catch { return null; }

@@ -2,7 +2,7 @@ import { ClassicCdpClient } from "./classic-cdp-client.js";
 import { ClassicTurnIdentityCorrelator, parseClassicTurnRequest } from "./context-guardian-cdp.js";
 import { defaultMainDebugPorts } from "./goal-host-bridge.js";
 import { runtimeKeyForPort } from "./classic-stream-recovery-cdp.js";
-import { parseNativeCallMcpRequest } from "./classic-mcp-call-correlation.js";
+import { isNativeCallMcpRequest, parseNativeCallMcpRequest } from "./classic-mcp-call-correlation.js";
 
 const DEFAULT_CONNECTION_POLL_MS = 15_000;
 const DEFAULT_PROBE_TIMEOUT_MS = 700;
@@ -179,7 +179,19 @@ export async function connectClassicTurnTransportPort(port, {
     onNativeMcpCall: (event) => onNativeMcpCall?.({ runtimeKey, port, ...event }),
   });
   const disposers = [
-    client.on("Network.requestWillBeSent", (params) => tracker.noteRequest(params)),
+    client.on("Network.requestWillBeSent", (params) => {
+      const request = params?.request;
+      if (isNativeCallMcpRequest(request) && !request?.postData && params?.requestId) {
+        void client.call("Network.getRequestPostData", { requestId: params.requestId })
+          .then((result) => tracker.noteRequest({
+            ...params,
+            request: { ...request, postData: result?.postData || "" },
+          }))
+          .catch(() => {});
+        return;
+      }
+      tracker.noteRequest(params);
+    }),
     client.on("Network.requestWillBeSentExtraInfo", (params) => tracker.noteExtraInfo(params)),
     client.on("Network.responseReceived", (params) => tracker.noteResponse(params)),
     client.on("Network.loadingFailed", (params) => tracker.noteFailure(params)),

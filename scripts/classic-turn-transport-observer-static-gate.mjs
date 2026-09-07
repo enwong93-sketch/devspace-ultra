@@ -12,6 +12,8 @@ assert.match(observer, /loadingFailed/);
 assert.match(observer, /loadingFinished/);
 assert.match(observer, /parseNativeCallMcpRequest/);
 assert.match(observer, /onNativeMcpCall/);
+assert.match(observer, /Network\.getRequestPostData/);
+assert.match(observer, /isNativeCallMcpRequest/);
 assert.doesNotMatch(observer, /Runtime\.enable|Runtime\.evaluate|Page\.reload|Page\.navigate|Network\.getResponseBody/, "always-on delivery observer must stay network-only and low-memory");
 assert.match(observer, /maxPending/);
 assert.match(observer, /pendingTtlMs/);
