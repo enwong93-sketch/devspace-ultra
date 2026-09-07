@@ -5,6 +5,7 @@ import { activeProgressRows } from "./goal-progress-narrator.js";
 const ROOT_ID = "devspace-progress-narration-root";
 const STYLE_ID = "devspace-progress-narration-style";
 const LEASE_KEY = "__devspaceProgressNarrationLeaseV1";
+const UI_VERSION = "3";
 const LEASE_MS = 60_000;
 const DEFAULT_POLL_MS = 500;
 const DEFAULT_MAX_MESSAGES = 48;
@@ -137,6 +138,7 @@ export function buildProgressNarrationScript(map) {
     const ROOT_ID = ${JSON.stringify(ROOT_ID)};
     const STYLE_ID = ${JSON.stringify(STYLE_ID)};
     const LEASE_KEY = ${JSON.stringify(LEASE_KEY)};
+    const UI_VERSION = ${JSON.stringify(UI_VERSION)};
     const LEASE_MS = ${LEASE_MS};
     const conversationId = location.pathname.match(/\\/c\\/([^/?#]+)/)?.[1] || null;
     const state = (${serialized})[conversationId] || null;
@@ -145,9 +147,13 @@ export function buildProgressNarrationScript(map) {
     const mode = work?.getAttribute('aria-checked') === 'true' || /[?&]surface=work(?:&|$)/i.test(location.search) ? 'work' : 'chat';
     const ensureStyle = () => {
       let style = document.getElementById(STYLE_ID);
-      if (style) return style;
-      style = document.createElement('style');
-      style.id = STYLE_ID;
+      if (!style) {
+        style = document.createElement('style');
+        style.id = STYLE_ID;
+        document.head.appendChild(style);
+      }
+      if (style.dataset.uiVersion === UI_VERSION) return style;
+      style.dataset.uiVersion = UI_VERSION;
       style.textContent = \`
 #${ROOT_ID}{position:fixed;z-index:44;box-sizing:border-box;pointer-events:auto;overflow:hidden;padding:0;border:1px solid rgba(0,0,0,.10);border-radius:14px;background:rgba(255,255,255,.97);box-shadow:0 8px 26px rgba(0,0,0,.10);font-family:"Söhne",Inter,system-ui,-apple-system,"Segoe UI",sans-serif;color:#0d0d0d;opacity:1;visibility:visible;transform:translateY(0);transition:opacity 160ms ease,transform 160ms ease,width 160ms ease,max-height 160ms ease}
 #${ROOT_ID}[data-visible="false"]{opacity:0;visibility:hidden;pointer-events:none;transform:translateY(4px)}
@@ -187,7 +193,6 @@ html.dark #${ROOT_ID} .devspace-progress-scroll{scrollbar-color:rgba(220,220,220
 @media (max-width:760px){#${ROOT_ID}{left:12px!important;right:12px!important;width:auto!important}#${ROOT_ID}[data-size="normal"] .devspace-progress-scroll{max-height:112px}#${ROOT_ID}[data-size="expanded"] .devspace-progress-scroll{max-height:42vh}#${ROOT_ID} .devspace-progress-message{font-size:12px}}
 @media (prefers-reduced-motion:reduce){#${ROOT_ID},#${ROOT_ID} .devspace-progress-scroll{transition:none!important;scroll-behavior:auto!important}}
       \`;
-      document.head.appendChild(style);
       return style;
     };
     ensureStyle();
@@ -245,7 +250,9 @@ html.dark #${ROOT_ID} .devspace-progress-scroll{scrollbar-color:rgba(220,220,220
     };
     const ensureStructure = () => {
       let header = root.querySelector('.devspace-progress-header');
-      if (header) return;
+      const controls = root.querySelectorAll('.devspace-progress-button').length;
+      if (header && root.dataset.uiVersion === UI_VERSION && controls === 4) return;
+      root.dataset.uiVersion = UI_VERSION;
       root.replaceChildren();
       header = document.createElement('div');
       header.className = 'devspace-progress-header';
@@ -392,6 +399,7 @@ html.dark #${ROOT_ID} .devspace-progress-scroll{scrollbar-color:rgba(220,220,220
       goalId:state?.goalId || null,
       round:state?.round || null,
       mode,
+      uiVersion:root.dataset.uiVersion || null,
       size:root.dataset.size || 'normal',
       messageCount:messages.length,
       renderedMessageCount:root.querySelectorAll('.devspace-progress-message').length,
@@ -418,6 +426,7 @@ export function inspectProgressNarrationExpression() {
       goalId:root?.dataset.goalId || null,
       round:root?.dataset.round ? Number(root.dataset.round) : null,
       mode:work?.getAttribute('aria-checked') === 'true' || /[?&]surface=work(?:&|$)/i.test(location.search) ? 'work' : 'chat',
+      uiVersion:root?.dataset.uiVersion || null,
       size:root?.dataset.size || null,
       messageCount:Array.isArray(root?.__devspaceProgressMessages) ? root.__devspaceProgressMessages.length : 0,
       renderedMessageCount:root?.querySelectorAll('.devspace-progress-message').length || 0,
