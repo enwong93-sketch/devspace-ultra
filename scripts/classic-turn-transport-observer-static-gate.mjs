@@ -10,6 +10,8 @@ assert.match(observer, /requestWillBeSent/);
 assert.match(observer, /requestWillBeSentExtraInfo/);
 assert.match(observer, /loadingFailed/);
 assert.match(observer, /loadingFinished/);
+assert.match(observer, /parseNativeCallMcpRequest/);
+assert.match(observer, /onNativeMcpCall/);
 assert.doesNotMatch(observer, /Runtime\.enable|Runtime\.evaluate|Page\.reload|Page\.navigate|Network\.getResponseBody/, "always-on delivery observer must stay network-only and low-memory");
 assert.match(observer, /maxPending/);
 assert.match(observer, /pendingTtlMs/);
@@ -20,6 +22,8 @@ assert.match(server, /turnTransportObserver\.close\(\)/);
 assert.match(server, /sessionFingerprintFromClassicRequest/);
 assert.match(server, /resolveAndBindMcpConversation/);
 assert.match(server, /goalRuntime\.bindConversation/);
+assert.match(server, /ClassicMcpCallCorrelator/);
+assert.match(server, /fingerprintMcpToolCall\(req\?\.body\)/);
 assert.match(guard, /DEFAULT_NATIVE_COMPLETE_GRACE_MS/);
 assert.match(guard, /nativeCompleteStableMs/);
 assert.match(guard, /safetyCheckVisible !== true/);
@@ -31,6 +35,7 @@ console.log(JSON.stringify({
   networkOnly: true,
   bounded: true,
   automaticGoalConversationBinding: true,
+  nativeCallMcpCorrelation: true,
   staleGuiGeneratingCannotBlockForever: true,
   safetyCheckFailsClosed: true,
 }));

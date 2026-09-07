@@ -4,13 +4,37 @@ import { ClassicTurnTransportTracker } from "./classic-turn-transport-observer.j
 let now = 1_000;
 const identities = [];
 const events = [];
+const nativeMcpCalls = [];
 const tracker = new ClassicTurnTransportTracker({
   now: () => now,
   maxPending: 2,
   pendingTtlMs: 1_000,
   onConversationIdentity: (value) => identities.push(value),
   onTurnTransportEvent: (value) => events.push(value),
+  onNativeMcpCall: (value) => nativeMcpCalls.push(value),
 });
+
+tracker.noteRequest({
+  requestId: "mcp-native-1",
+  request: {
+    url: "https://chatgpt.com/backend-api/ecosystem/call_mcp",
+    method: "POST",
+    postData: JSON.stringify({
+      method: "tools/call",
+      params: { name: "devspace_goal_status", arguments: { goalId: "goal-a" } },
+      conversation_id: "conversation-native-mcp",
+      message_id: "message-a",
+    }),
+    headers: { authorization: "Bearer never-persist" },
+  },
+});
+assert.equal(nativeMcpCalls.length, 1);
+assert.equal(nativeMcpCalls[0].conversationId, "conversation-native-mcp");
+assert.equal(nativeMcpCalls[0].toolName, "devspace_goal_status");
+assert.match(nativeMcpCalls[0].callFingerprint, /^[a-f0-9]{64}$/);
+assert.equal(JSON.stringify(nativeMcpCalls).includes("goal-a"), false);
+assert.equal(JSON.stringify(nativeMcpCalls).includes("never-persist"), false);
+assert.equal(tracker.pendingSize, 0, "native MCP call correlation must not enter turn-delivery pending state");
 
 tracker.noteRequest({
   requestId: "r1",
@@ -51,4 +75,4 @@ tracker.noteRequest({ requestId: "r5", request: { url: "https://chatgpt.com/back
 tracker.noteRequest({ requestId: "r6", request: { url: "https://chatgpt.com/backend-api/f/conversation", method: "POST", postData: JSON.stringify({ conversation_id: "conversation-f", model: "gpt-test" }), headers: {} } });
 assert.equal(tracker.pendingSize, 2, "native transport tracking must have a hard cap");
 
-console.log(JSON.stringify({ ok: true, gate: "classic-turn-transport-observer", networkOnly: true, nativeIdentity: true, deliveryLifecycle: true, bounded: true, rawSessionPersisted: false }));
+console.log(JSON.stringify({ ok: true, gate: "classic-turn-transport-observer", networkOnly: true, nativeIdentity: true, nativeCallMcpCorrelation: true, deliveryLifecycle: true, bounded: true, rawSessionPersisted: false, rawToolArgumentsPersisted: false }));

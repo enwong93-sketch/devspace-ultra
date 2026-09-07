@@ -36,6 +36,7 @@ export function createMemoryDiagnostics({
   workspaces,
   capabilityRuntime,
   turnTransportObserver,
+  mcpCallCorrelator,
   contextMetadataAdapter,
   streamRecoveryAdapter,
   config = {},
@@ -49,6 +50,7 @@ export function createMemoryDiagnostics({
   const mcp = safeDiagnostics(transports);
   const capabilities = safeDiagnostics(capabilityRuntime);
   const turn = safeStatus(turnTransportObserver);
+  const callCorrelation = safeDiagnostics(mcpCallCorrelator);
   const context = safeStatus(contextMetadataAdapter);
   const stream = safeStatus(streamRecoveryAdapter);
   const contextRuntimes = Array.isArray(context?.runtimes) ? context.runtimes : [];
@@ -79,6 +81,11 @@ export function createMemoryDiagnostics({
       mcpNewestActivityAgeMs: finiteNumber(mcp?.newestActivityAgeMs),
       processSessions: finiteNumber(processSessions?.sessions?.size),
       workspaceContexts: finiteNumber(workspaces?.inMemorySize),
+      nativeMcpCallsPending: finiteNumber(callCorrelation?.nativePending),
+      gatewayMcpCallsPending: finiteNumber(callCorrelation?.gatewayPending),
+      mcpCallCorrelationsResolved: finiteNumber(callCorrelation?.recentResolved),
+      mcpCallCorrelationWaiters: finiteNumber(callCorrelation?.waiters),
+      mcpCallCorrelationAmbiguities: finiteNumber(callCorrelation?.ambiguousMatches),
     },
     capabilities: {
       enabled: capabilities?.enabled === true,

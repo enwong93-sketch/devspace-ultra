@@ -32,6 +32,17 @@ const snapshot = createMemoryDiagnostics({
   turnTransportObserver: {
     status() { return { connected: 1, pending: 2 }; },
   },
+  mcpCallCorrelator: {
+    diagnostics() {
+      return {
+        nativePending: 3,
+        gatewayPending: 4,
+        recentResolved: 5,
+        waiters: 1,
+        ambiguousMatches: 2,
+      };
+    },
+  },
   contextMetadataAdapter: {
     status() {
       return {
@@ -79,6 +90,11 @@ assert.equal(snapshot.registries.mcpSessions, 7);
 assert.equal(snapshot.registries.mcpActiveRequests, 2);
 assert.equal(snapshot.registries.processSessions, 1);
 assert.equal(snapshot.registries.workspaceContexts, 4);
+assert.equal(snapshot.registries.nativeMcpCallsPending, 3);
+assert.equal(snapshot.registries.gatewayMcpCallsPending, 4);
+assert.equal(snapshot.registries.mcpCallCorrelationsResolved, 5);
+assert.equal(snapshot.registries.mcpCallCorrelationWaiters, 1);
+assert.equal(snapshot.registries.mcpCallCorrelationAmbiguities, 2);
 assert.equal(snapshot.capabilities.enabled, true);
 assert.equal(snapshot.capabilities.mcpClients, 1);
 assert.equal(snapshot.turnTransportCdp.connected, 1);
@@ -131,4 +147,5 @@ console.log(JSON.stringify({
   actualTotalHeapLimit: true,
   capabilityLifecycleVisible: true,
   allClassicObserversVisible: true,
+  nativeMcpCallCorrelationVisible: true,
 }));

@@ -52,6 +52,7 @@ import { ContextGuardianRuntime, registerContextGuardianTools } from "./context-
 import { ClassicContextMetadataCdpAdapter } from "./context-guardian-cdp.js";
 import { ContextGuardianRolloverCoordinator } from "./context-guardian-rollover.js";
 import { ClassicConversationAuthorityRegistry, sessionFingerprintFromClassicRequest } from "./classic-conversation-authority.js";
+import { ClassicMcpCallCorrelator, fingerprintMcpToolCall } from "./classic-mcp-call-correlation.js";
 import { ClassicTurnTransportObserver } from "./classic-turn-transport-observer.js";
 import { ClassicNativeUsageEvidenceStore } from "./classic-native-usage-evidence.js";
 import { ClassicTurnDeliveryEvidenceStore } from "./classic-turn-delivery-evidence.js";
@@ -1763,9 +1764,30 @@ export function createServer(config = loadConfig(), options = {}) {
         statePath: join(config.stateDir, "classic-conversation-authority.json"),
     });
     const conversationAuthorityReady = conversationAuthority.load().catch(() => conversationAuthority.snapshot());
+    const mcpCallCorrelator = new ClassicMcpCallCorrelator();
+    const persistConversationIdentity = async (event) => {
+        if (!event?.sessionFingerprint || !event?.conversationId || !event?.runtimeKey) return null;
+        await conversationAuthorityReady;
+        return await conversationAuthority.observeNativeTurn({
+            sessionFingerprint: event.sessionFingerprint,
+            conversationId: event.conversationId,
+            runtimeKey: event.runtimeKey,
+            observedAt: event.observedAt,
+        });
+    };
     const resolveAndBindMcpConversation = async (req) => {
         const sessionFingerprint = sessionFingerprintFromClassicRequest({ headers: req?.headers || {} });
         if (!sessionFingerprint) return null;
+        const callFingerprint = fingerprintMcpToolCall(req?.body);
+        if (callFingerprint) {
+            const correlated = mcpCallCorrelator.noteGateway({
+                callFingerprint,
+                sessionFingerprint,
+                toolName: req?.body?.params?.name,
+                observedAtMs: Date.now(),
+            }) || await mcpCallCorrelator.waitForIdentity({ callFingerprint, sessionFingerprint, timeoutMs: 1_000 });
+            if (correlated) await persistConversationIdentity(correlated);
+        }
         await conversationAuthorityReady;
         const authority = conversationAuthority.resolveFingerprint(sessionFingerprint);
         if (!authority?.conversationId) return null;
@@ -1789,13 +1811,20 @@ export function createServer(config = loadConfig(), options = {}) {
     const nativeUsageEvidenceReady = nativeUsageEvidence.load().catch(() => nativeUsageEvidence.snapshot());
     const turnTransportObserver = new ClassicTurnTransportObserver(classicCdpOptions);
     turnTransportObserver.setHandlers({
-        onConversationIdentity: async (event) => {
-            await conversationAuthorityReady;
-            await conversationAuthority.observeNativeTurn({
-                sessionFingerprint: event.sessionFingerprint,
-                conversationId: event.conversationId,
-                runtimeKey: event.runtimeKey,
-                observedAt: event.observedAt,
+        onConversationIdentity: (event) => {
+            void persistConversationIdentity(event).catch((error) => {
+                logEvent(config.logging, "debug", "classic_conversation_identity_persist_failed", {
+                    error: error instanceof Error ? error.message : String(error),
+                });
+            });
+        },
+        onNativeMcpCall: (event) => {
+            const correlated = mcpCallCorrelator.noteNative(event);
+            if (!correlated) return;
+            void persistConversationIdentity(correlated).catch((error) => {
+                logEvent(config.logging, "debug", "classic_mcp_call_identity_persist_failed", {
+                    error: error instanceof Error ? error.message : String(error),
+                });
             });
         },
         onTurnTransportEvent: async (event) => {
@@ -2065,6 +2094,7 @@ export function createServer(config = loadConfig(), options = {}) {
             workspaces,
             capabilityRuntime,
             turnTransportObserver,
+            mcpCallCorrelator,
             contextMetadataAdapter,
             streamRecoveryAdapter,
             config,

@@ -2,6 +2,7 @@ import { ClassicCdpClient } from "./classic-cdp-client.js";
 import { ClassicTurnIdentityCorrelator, parseClassicTurnRequest } from "./context-guardian-cdp.js";
 import { defaultMainDebugPorts } from "./goal-host-bridge.js";
 import { runtimeKeyForPort } from "./classic-stream-recovery-cdp.js";
+import { parseNativeCallMcpRequest } from "./classic-mcp-call-correlation.js";
 
 const DEFAULT_CONNECTION_POLL_MS = 15_000;
 const DEFAULT_PROBE_TIMEOUT_MS = 700;
@@ -38,6 +39,7 @@ export class ClassicTurnTransportTracker {
     maxPending = DEFAULT_MAX_PENDING,
     onConversationIdentity,
     onTurnTransportEvent,
+    onNativeMcpCall,
   } = {}) {
     this.now = now;
     this.pendingTtlMs = Math.max(1_000, Number(pendingTtlMs) || DEFAULT_PENDING_TTL_MS);
@@ -46,11 +48,17 @@ export class ClassicTurnTransportTracker {
     this.identity = new ClassicTurnIdentityCorrelator({ now, pendingTtlMs: this.pendingTtlMs, maxPending: this.maxPending });
     this.onConversationIdentity = typeof onConversationIdentity === "function" ? onConversationIdentity : null;
     this.onTurnTransportEvent = typeof onTurnTransportEvent === "function" ? onTurnTransportEvent : null;
+    this.onNativeMcpCall = typeof onNativeMcpCall === "function" ? onNativeMcpCall : null;
   }
 
   get pendingSize() { return this.pending.size; }
 
   noteRequest(params = {}) {
+    const nativeMcpCall = parseNativeCallMcpRequest(params?.request);
+    if (nativeMcpCall) {
+      this.#emitNativeMcpCall({ ...nativeMcpCall, observedAt: observedAt(this.now()), observedAtMs: this.now() });
+      return nativeMcpCall;
+    }
     const metadata = parseClassicTurnRequest(params?.request);
     if (!metadata?.conversationId) return null;
     const requestId = String(params?.requestId || "").trim();
@@ -137,6 +145,11 @@ export class ClassicTurnTransportTracker {
     if (!this.onTurnTransportEvent) return;
     try { this.onTurnTransportEvent(event); } catch {}
   }
+
+  #emitNativeMcpCall(event) {
+    if (!this.onNativeMcpCall) return;
+    try { this.onNativeMcpCall(event); } catch {}
+  }
 }
 
 export async function connectClassicTurnTransportPort(port, {
@@ -145,6 +158,7 @@ export async function connectClassicTurnTransportPort(port, {
   probeTimeoutMs = DEFAULT_PROBE_TIMEOUT_MS,
   onConversationIdentity,
   onTurnTransportEvent,
+  onNativeMcpCall,
   onDisconnected,
 } = {}) {
   let targets;
@@ -162,6 +176,7 @@ export async function connectClassicTurnTransportPort(port, {
   const tracker = new ClassicTurnTransportTracker({
     onConversationIdentity: (identity) => onConversationIdentity?.({ runtimeKey, port, ...identity, observedAt: observedAt() }),
     onTurnTransportEvent: (event) => onTurnTransportEvent?.({ runtimeKey, port, ...event }),
+    onNativeMcpCall: (event) => onNativeMcpCall?.({ runtimeKey, port, ...event }),
   });
   const disposers = [
     client.on("Network.requestWillBeSent", (params) => tracker.noteRequest(params)),
@@ -204,8 +219,8 @@ export class ClassicTurnTransportObserver {
     this.closed = false;
   }
 
-  setHandlers({ onConversationIdentity, onTurnTransportEvent } = {}) {
-    this.handlers = { onConversationIdentity, onTurnTransportEvent };
+  setHandlers({ onConversationIdentity, onTurnTransportEvent, onNativeMcpCall } = {}) {
+    this.handlers = { onConversationIdentity, onTurnTransportEvent, onNativeMcpCall };
   }
 
   async start({ schedule = true } = {}) {
