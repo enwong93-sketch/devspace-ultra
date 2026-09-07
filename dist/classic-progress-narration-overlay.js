@@ -5,7 +5,7 @@ import { activeProgressRows } from "./goal-progress-narrator.js";
 const ROOT_ID = "devspace-progress-narration-root";
 const STYLE_ID = "devspace-progress-narration-style";
 const LEASE_KEY = "__devspaceProgressNarrationLeaseV1";
-const UI_VERSION = "3";
+const UI_VERSION = "4";
 const LEASE_MS = 60_000;
 const DEFAULT_POLL_MS = 500;
 const DEFAULT_MAX_MESSAGES = 48;
@@ -235,16 +235,21 @@ html.dark #${ROOT_ID} .devspace-progress-scroll{scrollbar-color:rgba(220,220,220
       const formRect = form?.getBoundingClientRect();
       const goalRect = goalStrip?.getBoundingClientRect();
       const size = current.dataset.size || 'normal';
-      const cap = size === 'expanded' ? 640 : size === 'compact' ? 400 : 500;
-      if (formRect?.width > 0) {
-        const width = Math.max(260, Math.min(Math.round(formRect.width), cap));
-        current.style.left = Math.max(12, Math.round(formRect.right - width)) + 'px';
-        current.style.width = width + 'px';
-        const anchorTop = goalRect?.height > 0 ? goalRect.top : formRect.top;
+      const anchorRect = goalRect?.width > 0 ? goalRect : formRect;
+      const cap = size === 'expanded' ? 640 : 560;
+      if (anchorRect?.width > 0) {
+        const width = size === 'compact'
+          ? Math.max(260, Math.round(anchorRect.width))
+          : Math.max(260, Math.min(Math.round(anchorRect.width), cap));
+        const centeredLeft = Math.round(anchorRect.left + (anchorRect.width - width) / 2);
+        current.style.left = Math.max(12, Math.min(centeredLeft, Math.max(12, innerWidth - width - 12))) + 'px';
+        current.style.width = Math.min(width, Math.max(260, innerWidth - 24)) + 'px';
+        const anchorTop = anchorRect.top;
         current.style.bottom = Math.max(12, Math.round(innerHeight - anchorTop + 8)) + 'px';
       } else {
-        current.style.left = size === 'expanded' ? 'max(12px,calc(50vw - 320px))' : size === 'compact' ? 'max(12px,calc(50vw - 200px))' : 'max(12px,calc(50vw - 250px))';
-        current.style.width = size === 'expanded' ? 'min(640px,calc(100vw - 24px))' : size === 'compact' ? 'min(400px,calc(100vw - 24px))' : 'min(500px,calc(100vw - 24px))';
+        const width = size === 'expanded' ? 640 : 560;
+        current.style.left = 'max(12px,calc(50vw - ' + Math.round(width / 2) + 'px))';
+        current.style.width = 'min(' + width + 'px,calc(100vw - 24px))';
         current.style.bottom = '72px';
       }
     };

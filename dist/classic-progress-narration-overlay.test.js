@@ -36,7 +36,7 @@ assert.deepEqual(conversationProgressNarrationMap({ humanProgress, goalProgress:
 const script = buildProgressNarrationScript(map);
 assert.match(script, /DevSpace 進度旁白/);
 assert.match(script, /aria-live','polite'/);
-assert.match(script, /const UI_VERSION = "3"/);
+assert.match(script, /const UI_VERSION = "4"/);
 assert.match(script, /style\.dataset\.uiVersion === UI_VERSION/);
 assert.match(script, /root\.dataset\.uiVersion === UI_VERSION && controls === 4/);
 assert.match(script, /const structureRebuilt = ensureStructure\(\)/);
@@ -51,6 +51,9 @@ assert.match(script, /data-action = 'newer'|dataset\.action = 'newer'/);
 assert.match(script, /data-action = 'expand'|dataset\.action = 'expand'/);
 assert.match(script, /dataset\.action = 'compact'/);
 assert.match(script, /__devspaceProgressNarrationUiV3/);
+assert.match(script, /const anchorRect = goalRect\?\.width > 0 \? goalRect : formRect/);
+assert.match(script, /anchorRect\.left \+ \(anchorRect\.width - width\) \/ 2/);
+assert.match(script, /size === 'compact'[\s\S]*Math\.round\(anchorRect\.width\)/);
 assert.match(script, /localStorage\.setItem/);
 assert.match(script, /size:'compact'/);
 assert.match(script, /overflow-y:scroll/);

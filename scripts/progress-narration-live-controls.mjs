@@ -48,7 +48,13 @@ const stateExpression = `(() => {
     clientHeight: scroll?.clientHeight || 0,
     olderDisabled: root?.querySelector('[data-action="older"]')?.disabled ?? null,
     newerDisabled: root?.querySelector('[data-action="newer"]')?.disabled ?? null,
+    rootLeft: rootRect?.left ?? null,
+    rootRight: rootRect?.right ?? null,
+    rootWidth: rootRect?.width ?? null,
     rootBottom: rootRect?.bottom ?? null,
+    goalLeft: goalRect?.left ?? null,
+    goalRight: goalRect?.right ?? null,
+    goalWidth: goalRect?.width ?? null,
     goalTop: goalRect?.top ?? null,
     formTop: formRect?.top ?? null,
     overlapsGoal: Boolean(rootRect && goalRect && rootRect.bottom > goalRect.top),
@@ -59,9 +65,13 @@ const stateExpression = `(() => {
 try {
   await client.open();
   const before = await evaluate(stateExpression);
-  assert.equal(before?.uiVersion, "3");
+  assert.equal(before?.uiVersion, "4");
   assert.equal(before?.size, "compact");
   assert.equal(before?.controls, 4);
+  if (Number(before?.goalWidth) > 0) {
+    assert.ok(Math.abs(before.rootLeft - before.goalLeft) <= 2, `Compact card left edge is not aligned to Goal strip: ${before.rootLeft} vs ${before.goalLeft}`);
+    assert.ok(Math.abs(before.rootRight - before.goalRight) <= 2, `Compact card right edge is not aligned to Goal strip: ${before.rootRight} vs ${before.goalRight}`);
+  }
 
   await evaluate(`(() => {
     document.querySelector('#devspace-progress-narration-root [data-action="expand"]')?.click();
