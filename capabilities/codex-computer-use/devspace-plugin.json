@@ -1,0 +1,8 @@
+{
+  "id": "codex-computer-use",
+  "name": "OpenAI Codex Computer Use",
+  "version": "0.5.0-builtin",
+  "description": "Routing/skill package for the installed OpenAI bundled Computer Use runtime. GUI implementation is provided only by the shared persistent Codex node_repl + @oai/sky; DevSpace implements no second GUI driver or per-call node_repl subprocess.",
+  "routingAliases": ["computer use", "desktop control", "gui automation", "visual interaction"],
+  "skills": ["skills"]
+}

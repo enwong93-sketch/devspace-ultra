@@ -271,3 +271,13 @@ Windows lifecycle testing additionally covers isolated runtime startup, minimize
 MIT. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
 
 DevSpace Ultra is an independent community fork/distribution and is not an official OpenAI product. ChatGPT and OpenAI product names are trademarks of their respective owners.
+
+## Codex Computer Use delegation
+
+DevSpace Ultra exposes visual desktop interaction through the built-in `codex-computer-use` routing/skill capability. The top-level `codex_computer_use` tool delegates directly to the installed OpenAI bundled Computer Use runtime through the existing persistent Codex `node_repl`, which imports `@oai/sky`. DevSpace does not ship a second mouse, keyboard, screenshot, Selenium, Playwright, Browser Control, PowerShell UIAutomation, SendInput, or UI Automation implementation under that name.
+
+The router is intended for visible controls, dialogs, screenshots, accessibility state, scrolling, dragging, GUI typing, and rendered-state verification. Source editing, repository search, shell commands, and APIs stay on normal workspace tools. Computer Use follows the bundled OpenAI observe → decide → one action → re-observe workflow and accepts only structured, allowlisted `sky.*` actions rather than arbitrary JavaScript.
+
+### Local execution policy
+
+This single-user installation exposes one command policy: `danger-full-access`, approval policy `never`, with no sandbox alternative. This avoids unattended development being blocked by permission prompts. Install DevSpace Ultra only on a trusted machine and connect only to a trusted single-user edge endpoint.

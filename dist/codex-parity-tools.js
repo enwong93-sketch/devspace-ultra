@@ -1,6 +1,7 @@
 import { readFile, realpath, stat } from "node:fs/promises";
 import { isPathInsideRoot } from "./roots.js";
 import * as z from "zod/v4";
+import { codexComputerUseRoute } from "./codex-computer-use-router.js";
 
 const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
 const MAX_SLEEP_SECONDS = 300;
@@ -347,12 +348,16 @@ export function registerCodexParityTools(server, {
       const linkedCodexMcp = includeCapabilities && linkedRemaining > 0 && codexMcpBridge
         ? await codexMcpBridge.search(query, { limit: linkedRemaining })
         : [];
+      const computerRoute = codexComputerUseRoute(query);
       return textResult({
         ok: true,
         query,
         coreTools,
         capabilities,
         linkedCodexMcp,
+        recommendedRoute: computerRoute.useComputer
+          ? { tool: "codex_computer_use", reason: computerRoute.reason, score: computerRoute.score }
+          : null,
         resultCount: coreTools.length + capabilities.length + linkedCodexMcp.length,
       });
     } catch (error) {

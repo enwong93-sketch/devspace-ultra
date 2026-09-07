@@ -60,12 +60,14 @@ import { installGoalToolProgress } from "./goal-tool-progress.js";
 import { createMemoryDiagnostics } from "./memory-diagnostics.js";
 import { ToolCatalogRegistry, instrumentToolRegistration } from "./tool-catalog.js";
 import { registerCodexParityTools } from "./codex-parity-tools.js";
+import { registerCodexComputerUseRouter } from "./codex-computer-use-router.js";
 import { CodexMcpBridge, registerCodexMcpBridgeTools } from "./codex-mcp-bridge.js";
 import { registerJsReplCompatibilityTool } from "./js-repl-compat.js";
 import { registerToolchainTools } from "./toolchain-tools.js";
 // ChatGPT/OpenAI MCP clients may reconnect without closing the previous transport.
 // Keep only a short reconnect window and a small inactive-session tail. Long-lived
 // in-flight calls are protected separately by McpSessionRegistry acquire/release.
+const BUILTIN_CODEX_COMPUTER_USE_PLUGIN = fileURLToPath(new URL("../capabilities/codex-computer-use/", import.meta.url));
 const MCP_SESSION_IDLE_TIMEOUT_MS = 30 * 1_000;
 const MCP_SESSION_CLEANUP_INTERVAL_MS = 5 * 1_000;
 const MCP_MAX_INACTIVE_SESSIONS = 32;
@@ -851,6 +853,7 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
     registerChatSwarmClassicRuntimeTools(server, chatSwarm);
     registerBrowserControlTools(server, browserControl);
     registerCapabilityTools(server, capabilityRuntime);
+    registerCodexComputerUseRouter(server, { capabilityRuntime, codexMcpBridge });
     registerJsReplCompatibilityTool(server, { capabilityRuntime, codexMcpBridge });
     registerToolchainTools(server);
     registerCodexMcpBridgeTools(server, codexMcpBridge);
@@ -1859,7 +1862,7 @@ export function createServer(config = loadConfig(), options = {}) {
         enabled: config.pluginsEnabled,
         pluginsDir: config.pluginsDir,
         registryPath: config.capabilityRegistryPath,
-        pluginPaths: config.pluginPaths,
+        pluginPaths: [...new Set([BUILTIN_CODEX_COMPUTER_USE_PLUGIN, ...(config.pluginPaths || [])])],
     });
     const codexMcpBridge = new CodexMcpBridge({ codexHome: config.agentDir, executionPolicy: "full-access" });
     const conversationContinuity = new ConversationContinuityRuntime({

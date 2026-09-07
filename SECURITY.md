@@ -34,3 +34,9 @@ Include:
 DevSpace Ultra includes upstream DevSpace functionality and additional Chat Swarm/runtime orchestration. Reports about upstream-only behavior may also be applicable to the upstream DevSpace project.
 
 The Windows autonomous runtime layer uses local AppX development-package clones and authenticated ChatGPT profile state. Bugs that expose or cross-contaminate those profiles are considered security relevant.
+
+## Full-access local execution policy
+
+DevSpace Ultra is a local single-user development harness. The owner-selected command policy is intentionally `danger-full-access` with approvals disabled and no restricted sandbox mode. `exec_command` and delegated OpenAI Codex Computer Use can access the user's machine with the user's permissions.
+
+Do not expose the local Gateway or control endpoints to untrusted users. Keep OAuth owner credentials private, review third-party capability plugins before enabling them, and use a dedicated operating-system account or virtual machine when running untrusted repositories. The `codex_computer_use` route delegates through the shared persistent Codex `node_repl` to OpenAI's bundled `@oai/sky` Computer Use runtime and does not add a separate DevSpace GUI driver.

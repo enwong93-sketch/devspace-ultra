@@ -413,6 +413,8 @@ try {
     "toolchain_status",
     "toolchain_install",
     "capability_import_codex",
+    "codex_computer_use_status",
+    "codex_computer_use",
   ]) {
     assert.equal(toolNamesBefore.has(requiredTool), true, `Ultra canary is missing ${requiredTool}.`);
   }
