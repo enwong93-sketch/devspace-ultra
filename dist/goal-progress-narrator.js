@@ -37,6 +37,64 @@ function goalRows(payload) {
   return [];
 }
 
+function goalById(payload, goalId) {
+  const id = clip(goalId, 240);
+  return id ? goalRows(payload).find((goal) => goal?.id === id) || null : null;
+}
+
+function splitRoundReportSummary(value, maxChars = 420, maxParts = 8) {
+  const text = String(value ?? "").replace(/\r/g, "").trim();
+  if (!text) return [];
+  const paragraphs = text.split(/\n{2,}/).map((item) => item.replace(/\s+/g, " ").trim()).filter(Boolean);
+  const chunks = [];
+  const pushChunk = (raw) => {
+    let remaining = raw;
+    while (remaining.length > maxChars && chunks.length < maxParts) {
+      const window = remaining.slice(0, maxChars + 1);
+      const boundary = Math.max(window.lastIndexOf("。"), window.lastIndexOf("；"), window.lastIndexOf(". "), window.lastIndexOf("; "), window.lastIndexOf("，"), window.lastIndexOf(", "), window.lastIndexOf(" "));
+      const take = boundary >= Math.floor(maxChars * 0.55) ? boundary + 1 : maxChars;
+      chunks.push(remaining.slice(0, take).trim());
+      remaining = remaining.slice(take).trim();
+    }
+    if (remaining && chunks.length < maxParts) chunks.push(remaining.slice(0, maxChars).trim());
+  };
+  for (const paragraph of paragraphs.length ? paragraphs : [text]) {
+    pushChunk(paragraph);
+    if (chunks.length >= maxParts) break;
+  }
+  return chunks.filter(Boolean).slice(0, maxParts);
+}
+
+export function goalRoundReportNarration(goal) {
+  const report = goal?.lastRoundReport;
+  const round = Math.max(1, Math.floor(number(report?.round, goal?.round || 1)));
+  const reportedAt = clip(report?.reportedAt, 80);
+  const summary = splitRoundReportSummary(report?.summary);
+  if (!goal?.id || !reportedAt || !summary.length) return [];
+  const prefix = `${goal.id}:${round}:round-report:${reportedAt}`;
+  const rows = [{
+    round,
+    kind: "round-report-heading",
+    key: `${prefix}:heading`,
+    text: `第 ${round} 輪工作匯報已提交。以下係本輪已核實進度，完整內容可喺旁白卡向上捲動查看。`,
+  }];
+  summary.forEach((text, index) => rows.push({
+    round,
+    kind: "round-report",
+    key: `${prefix}:part:${index + 1}`,
+    text: `本輪進度 ${index + 1}/${summary.length}：${text}`,
+  }));
+  rows.push({
+    round,
+    kind: "round-report-status",
+    key: `${prefix}:status`,
+    text: report?.meaningfulProgress === false
+      ? `第 ${round} 輪暫未形成足夠實質進展；Goal 仍會保留原目標同阻塞證據，唔會因完成匯報而當成完成。`
+      : `第 ${round} 輪已有實質進展並已寫入後端；Goal 狀態同下一輪 execution frontier 會繼續沿用，唔會重做已完成工作。`,
+  });
+  return rows;
+}
+
 function progressRows(payload) {
   const rows = [];
   const byKey = new Map();
@@ -170,6 +228,10 @@ function existingNarration(messages, goalId, round) {
   return (Array.isArray(messages) ? messages : [])
     .filter((item) => item?.source === "goal-run-events" && item?.goalId === goalId && Number(item?.round) === round)
     .sort((left, right) => Date.parse(right?.at || 0) - Date.parse(left?.at || 0))[0] || null;
+}
+
+function existingDedupeKeys(messages) {
+  return new Set((Array.isArray(messages) ? messages : []).map((item) => clip(item?.dedupeKey, 500)).filter(Boolean));
 }
 
 function normalizedBoundaries(row) {
@@ -321,6 +383,7 @@ export class GoalProgressNarrator {
     }
     const published = [];
     const observed = [];
+    const knownDedupeKeys = existingDedupeKeys(this.humanProgress.snapshot()?.messages);
     let latestMessageCount = this.humanProgress.snapshot()?.messages?.length || 0;
 
     for (const row of rows) {
@@ -347,6 +410,37 @@ export class GoalProgressNarrator {
           lastNarratedStepCount: number(existing?.toolStepCount),
         };
         this.sessions.set(key, session);
+      }
+      const reportGoal = !["plan", "conversation"].includes(String(row.progressKind || "goal")) ? goalById(goalState, row.goalId) : null;
+      const reportRows = goalRoundReportNarration(reportGoal);
+      let reportPublished = false;
+      for (const reportRow of reportRows) {
+        if (knownDedupeKeys.has(reportRow.key)) continue;
+        const snapshot = await this.humanProgress.update({
+          message: reportRow.text,
+          conversationId: reportGoal?.conversationId || row.conversationId,
+          goalId: row.goalId,
+          round: reportRow.round,
+          planId: plan.planId,
+          planStepId: plan.stepId,
+          source: "goal-round-report",
+          kind: reportRow.kind,
+          dedupeKey: reportRow.key,
+          toolCategory: "goal-control",
+          toolStepCount: number(row.stepCount),
+        });
+        knownDedupeKeys.add(reportRow.key);
+        latestMessageCount = snapshot?.messages?.length || latestMessageCount;
+        published.push({ runKey: key, conversationId: reportGoal?.conversationId || row.conversationId, kind: reportRow.kind, dedupeKey: reportRow.key });
+        reportPublished = true;
+      }
+      if (reportPublished) {
+        Object.assign(session, {
+          initialized: true,
+          lastMessageAtMs: nowMs,
+          lastKey: reportRows.at(-1)?.key || session.lastKey,
+          lastPlanStepId: plan.stepId || session.lastPlanStepId || null,
+        });
       }
       const decision = decideGoalProgressNarration({
         row,

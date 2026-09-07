@@ -184,6 +184,7 @@ export function registerCodexParityTools(server, {
   capabilityRuntime,
   codexMcpBridge,
   contextGuardian,
+  exactUsageAuthority,
   toolCatalog,
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   now = () => new Date(),
@@ -305,22 +306,34 @@ export function registerCodexParityTools(server, {
       const runtimeKey = `main-${String(mainNumber).padStart(2, "0")}`;
       const status = await contextGuardian.status(runtimeKey);
       const rawWindow = status?.contextWindowTokens;
-      const rawUsed = status?.hostMeasuredTokens;
       const window = rawWindow === null || rawWindow === undefined ? Number.NaN : Number(rawWindow);
-      const used = rawUsed === null || rawUsed === undefined ? Number.NaN : Number(rawUsed);
+      const conversationId = status?.conversationId ?? null;
+      const exact = exactUsageAuthority && conversationId
+        ? await exactUsageAuthority.status({ conversationId })
+        : {
+            available: false,
+            reason: conversationId ? "exact-usage-authority-unavailable" : "conversation-id-unresolved",
+            source: "unavailable",
+          };
+      const used = exact?.available ? Number(exact.exactUsedTokens) : Number.NaN;
       const available = Number.isFinite(window) && window > 0 && Number.isFinite(used) && used >= 0;
       const result = {
         ok: true,
         available,
         runtimeKey,
-        conversationId: status?.conversationId ?? null,
+        conversationId,
         modelSlug: status?.currentModelSlug ?? null,
         contextWindowTokens: Number.isFinite(window) ? window : null,
         usedTokens: available ? used : null,
         remainingTokens: available ? Math.max(0, window - used) : null,
-        usageObservedAt: available ? status?.hostUsageObservedAt ?? null : null,
-        source: available ? "classic-native-host-measured" : "unavailable",
-        reason: available ? null : "Fresh exact Classic-native usage evidence is unavailable; estimates are intentionally not substituted.",
+        usageObservedAt: exact?.available ? exact.observedAt ?? null : null,
+        usageKind: exact?.available ? exact.usageKind ?? null : null,
+        evidencePath: exact?.available ? exact.evidencePath ?? null : null,
+        source: available ? "classic-native-protocol" : "unavailable",
+        reason: available ? null : exact?.reason || "Fresh exact Classic-native usage evidence is unavailable; estimates are intentionally not substituted.",
+        estimatorFallbackUsed: false,
+        ledgerFallbackUsed: false,
+        domFallbackUsed: false,
       };
       return textResult(result);
     } catch (error) {

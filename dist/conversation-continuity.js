@@ -159,10 +159,77 @@ function normalizeFiles(value) {
   }).filter((item) => item?.path);
 }
 
+function safeInteger(value) {
+  const number = Number(value);
+  return Number.isSafeInteger(number) && number >= 0 ? number : undefined;
+}
+
+function safeRatio(value) {
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 0 && number <= 1 ? number : undefined;
+}
+
+function normalizeContinuity(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const result = {
+    schemaVersion: safeInteger(value.schemaVersion) || 1,
+    strategy: cleanString(value.strategy, 120),
+    mode: cleanString(value.mode, 80),
+    createdAt: cleanString(value.createdAt, 80),
+    uiContinuityKey: cleanString(value.uiContinuityKey, 300),
+    sourceConversationId: cleanString(value.sourceConversationId, 240),
+    sourceBoundaryMessageId: cleanString(value.sourceBoundaryMessageId, 240),
+    sourceTitle: cleanString(value.sourceTitle, 500),
+    sourceModelSlug: cleanString(value.sourceModelSlug, 200),
+    runtimeKey: cleanString(value.runtimeKey, 100),
+    goalId: cleanString(value.goalId, 200),
+    planId: cleanString(value.planId, 200),
+    capsuleFingerprint: cleanString(value.capsuleFingerprint, 80),
+  };
+  for (const key of Object.keys(result)) if (result[key] === undefined) delete result[key];
+  return Object.keys(result).length > 1 ? result : undefined;
+}
+
+function normalizeCompression(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  if (value.fullHistoryInherited === true) throw new Error("Auto Compact capsule cannot inherit the full conversation history.");
+  if (value.zeroContextContinuation === true) throw new Error("Auto Compact capsule cannot create a zero-context continuation.");
+  const ratios = value.ratios && typeof value.ratios === "object" && !Array.isArray(value.ratios)
+    ? {
+        exactTokenRatio: safeRatio(value.ratios.exactTokenRatio),
+        payloadByteRatio: safeRatio(value.ratios.payloadByteRatio),
+        branchMessageRatio: safeRatio(value.ratios.branchMessageRatio),
+      }
+    : undefined;
+  if (ratios) for (const key of Object.keys(ratios)) if (ratios[key] === undefined) delete ratios[key];
+  const result = {
+    strategy: cleanString(value.strategy, 120),
+    sourcePayloadBytes: safeInteger(value.sourcePayloadBytes),
+    sourceBranchMessageCount: safeInteger(value.sourceBranchMessageCount),
+    sourceTextChars: safeInteger(value.sourceTextChars),
+    sourceExactUsedTokens: safeInteger(value.sourceExactUsedTokens),
+    carryMessageCount: safeInteger(value.carryMessageCount),
+    carryChars: safeInteger(value.carryChars),
+    carryBytes: safeInteger(value.carryBytes),
+    carryEstimatedTokens: safeInteger(value.carryEstimatedTokens),
+    ratios: ratios && Object.keys(ratios).length ? ratios : undefined,
+    maxCarryRatio: safeRatio(value.maxCarryRatio),
+    preservedCategories: cleanStringArray(value.preservedCategories, 40, 120),
+    excludedCategories: cleanStringArray(value.excludedCategories, 40, 120),
+    fullHistoryInherited: false,
+    zeroContextContinuation: false,
+    accepted: value.accepted === true,
+  };
+  for (const key of Object.keys(result)) {
+    if (result[key] === undefined || (Array.isArray(result[key]) && result[key].length === 0)) delete result[key];
+  }
+  return result.strategy && result.accepted ? result : undefined;
+}
+
 export function normalizeCompactCapsule(input, maxChars = DEFAULT_CAPSULE_MAX_CHARS) {
   const source = input && typeof input === "object" ? input : {};
   const capsule = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     goal: cleanString(source.goal, 6_000) || "Continue the active task faithfully.",
     userIntent: cleanString(source.userIntent, 5_000),
     constraints: cleanStringArray(source.constraints, 50, 2_000),
@@ -176,6 +243,8 @@ export function normalizeCompactCapsule(input, maxChars = DEFAULT_CAPSULE_MAX_CH
     toolState: cleanStringArray(source.toolState, 40, 2_500),
     memoryRefs: cleanStringArray(source.memoryRefs, 40, 1_500),
     notes: cleanString(source.notes, 4_000),
+    continuity: normalizeContinuity(source.continuity),
+    compression: normalizeCompression(source.compression),
   };
   for (const key of Object.keys(capsule)) {
     if (capsule[key] === undefined || (Array.isArray(capsule[key]) && capsule[key].length === 0)) delete capsule[key];
@@ -385,7 +454,26 @@ export class ConversationContinuityRuntime {
     const filePath = join(this.capsulesDir, `${id}.json`);
     const record = { id, createdAt: nowIso(), fingerprint: sha256(JSON.stringify(normalized)), ...meta, capsule: normalized };
     await atomicJson(filePath, record);
-    this.state.capsules[id] = { id, createdAt: record.createdAt, fingerprint: record.fingerprint, continuityKey: meta.continuityKey, workerId: meta.workerId, workerLabel: meta.workerLabel, swarmId: meta.swarmId, fromConversationUrl: meta.fromConversationUrl, toConversationUrl: meta.toConversationUrl, status: meta.status || "saved", filePath };
+    this.state.capsules[id] = {
+      id,
+      createdAt: record.createdAt,
+      fingerprint: record.fingerprint,
+      continuityKey: meta.continuityKey,
+      workerId: meta.workerId,
+      workerLabel: meta.workerLabel,
+      swarmId: meta.swarmId,
+      fromConversationUrl: meta.fromConversationUrl,
+      toConversationUrl: meta.toConversationUrl,
+      status: meta.status || "saved",
+      filePath,
+      strategy: normalized.compression?.strategy || null,
+      uiContinuityKey: normalized.continuity?.uiContinuityKey || null,
+      sourceConversationId: normalized.continuity?.sourceConversationId || null,
+      sourceBoundaryMessageId: normalized.continuity?.sourceBoundaryMessageId || null,
+      carryEstimatedTokens: normalized.compression?.carryEstimatedTokens ?? null,
+      sourceBranchMessageCount: normalized.compression?.sourceBranchMessageCount ?? null,
+      acceptedCompressionContract: normalized.compression?.accepted === true,
+    };
     await this.saveState();
     return record;
   }

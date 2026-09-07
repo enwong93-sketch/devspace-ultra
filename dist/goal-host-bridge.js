@@ -665,6 +665,13 @@ export class ClassicGoalHostBridge {
       }
       if (typeof this.beforeRawDispatch === "function") {
         const guarded = await this.beforeRawDispatch(matching, payload);
+        if (guarded?.blocked === true) {
+          return {
+            ok: false,
+            definiteFailure: true,
+            error: guarded.error || guarded.reason || "Context Guardian blocked Goal continuation dispatch.",
+          };
+        }
         if (guarded?.handled === true) {
           return {
             ok: true,

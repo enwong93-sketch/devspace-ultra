@@ -101,23 +101,20 @@ Before allowing another request, Context Guardian reserves space for:
 
 It reports `normal`, `watch`, `prepare`, or `rollover` pressure and can request rollover **before** the next request would be unsafe. This avoids both a fixed token ceiling and a blind fixed-percentage trigger.
 
-### Main rollover
+### Main selective Auto Compact
 
-Context Guardian separates **pressure detection/checkpointing** from **authorization to create a fresh Chat**.
+Context Guardian separates **pressure detection/checkpointing** from **authorization to rewrite the next continuation request**. ChatGPT may assign a new backend conversation ID, but DevSpace treats the result as the same user-facing conversation only after the entire continuity transaction verifies.
 
-Background polling is checkpoint-only. At `prepare` or `rollover` pressure it can capture a bounded Classic-native conversation snapshot and write a structured compact capsule containing Goal/Plan state, decisions, completed work, evidence, next steps, and the do-not-redo frontier, but background polling never navigates to a fresh Chat and never sends `@DevSpace Ultra`. This remains true on startup/reconnect and with multiple Main runtimes.
+At `prepare` or `rollover` pressure, background polling reads only a sanitized structural descriptor and writes a bounded capsule containing the Goal objective/success criteria, active Plan frontier, accepted decisions, completed-work summary, blockers, next actions, important file/test references, durable memory references, and a small recent visible-context tail. It never copies the old mapping, full transcript, raw tool-output history, hidden reasoning, expired request state, or credentials. Background polling never clicks Send, creates a synthetic visible user message, reloads, or navigates ChatGPT.
 
-A fresh hidden rollover is allowed only on an already-authorized Goal Host Bridge continuation when the prospective guard says the continuation itself cannot safely fit. That path:
+At a safe Chat-mode boundary DevSpace arms one of two already-authorized transports:
 
-1. verifies an idle Chat-mode boundary with no unsent composer text;
-2. creates the structured compact checkpoint;
-3. opens and pairs a fresh ChatGPT Classic Chat;
-4. intercepts the first turn request and replaces it with a native hidden Tool message;
-5. fails the intercepted request closed if rewriting cannot be proven, rather than allowing a visible fallback;
-6. verifies the fresh conversation has zero visible user messages before returning success;
-7. transfers Host Overlay ownership only after that verification succeeds.
+1. **real user turn** — the user's next normal Send is rewritten to remove the old `conversation_id`, add one hidden capsule, preserve the user's actual visible message byte-structurally, and attach `is_context_truncation_continuation`, source conversation, source boundary, UI continuity, and capsule fingerprint metadata;
+2. **hidden Goal continuation** — the Goal Host Bridge's already-authorized hidden follow-up request is rewritten to one hidden capsule/continuation prompt and no visible synthetic user message.
 
-The fresh conversation contains no synthetic visible user bubble. Work mode, an actively generating turn, or non-empty unsent composer text refuses the rollover path. A reported Goal continuation can be carried directly through the fresh hidden rollover path; the Goal continuation instructions decide the new round state rather than inventing a user turn.
+Before arming, the capsule contract rejects missing Goal/frontier/constraints, raw transcript-like structures, zero carry state, oversized carry data, or any available source-to-carry ratio above the limit. After ChatGPT creates the target backend thread, DevSpace performs a direct authenticated in-page structural read whose token never leaves the page. The target must have a different stable backend ID, matching continuity/source/fingerprint markers, at least one hidden capsule and assistant response, the expected real user message in user-turn mode, and mapping/current-branch/payload sizes below the source ratio limit. First-party `context_truncation_continuation` source metadata is checked when exposed.
+
+Only after target verification succeeds does one guarded transaction transfer native MCP conversation authority, the active Plan, the Goal, progress-narration history, and Host Overlay ownership. Any partial failure rolls those bindings back to the old conversation. Work mode, active generation, non-empty unsent composer text, missing structural metrics, full-history inheritance, zero-context continuation, or ambiguous native authority fails closed.
 
 ## Relationship to Worker Auto Compact
 

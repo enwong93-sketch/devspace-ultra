@@ -160,12 +160,13 @@ export function computeContextGuardianPressure({
 }
 
 export class ContextGuardianRuntime {
-  constructor({ stateDir, now = nowIso } = {}) {
+  constructor({ stateDir, now = nowIso, exactUsageAuthority = null } = {}) {
     if (!stateDir) throw new Error("ContextGuardianRuntime requires stateDir.");
     this.stateDir = resolve(stateDir);
     this.dir = join(this.stateDir, "context-guardian");
     this.statePath = join(this.dir, "state.json");
     this.now = now;
+    this.exactUsageAuthority = exactUsageAuthority && typeof exactUsageAuthority.status === "function" ? exactUsageAuthority : null;
     this.state = {
       version: 1,
       modelCatalog: {},
@@ -312,13 +313,13 @@ export class ContextGuardianRuntime {
       Date.parse(runtime.snapshotObservedAt || "") || 0,
       Date.parse(runtime.ledgerObservedAt || "") || 0,
     );
-    const hostObservedAt = Date.parse(runtime.hostUsageObservedAt || "") || 0;
-    const freshHostMeasuredTokens = hostObservedAt >= latestEstimateAt && hostObservedAt > 0
-      ? runtime.hostMeasuredTokens
-      : null;
+    const exact = this.exactUsageAuthority && runtime.conversationId
+      ? await this.exactUsageAuthority.status({ conversationId: runtime.conversationId })
+      : { available: false, reason: runtime.conversationId ? "exact-usage-authority-unavailable" : "conversation-id-unresolved", source: "unavailable" };
+    const exactMeasuredTokens = exact?.available === true ? boundedTokens(exact.exactUsedTokens) : null;
     const pressure = computeContextGuardianPressure({
       contextWindowTokens: resolved.contextWindowTokens,
-      hostMeasuredTokens: freshHostMeasuredTokens,
+      hostMeasuredTokens: exactMeasuredTokens,
       snapshotTokens: runtime.snapshotTokens,
       ledgerTokens: runtime.ledgerTokens,
       nextInputTokens,
@@ -340,8 +341,16 @@ export class ContextGuardianRuntime {
       snapshotObservedAt: runtime.snapshotObservedAt ?? null,
       ledgerTokens: boundedTokens(runtime.ledgerTokens),
       ledgerObservedAt: runtime.ledgerObservedAt ?? null,
-      hostMeasuredTokens: freshHostMeasuredTokens,
-      hostUsageObservedAt: freshHostMeasuredTokens === null ? null : runtime.hostUsageObservedAt ?? null,
+      hostMeasuredTokens: exactMeasuredTokens,
+      hostUsageObservedAt: exactMeasuredTokens === null ? null : exact.observedAt ?? null,
+      hostUsageSource: exactMeasuredTokens === null ? null : "classic-native-protocol",
+      exactUsageAvailable: exact?.available === true,
+      exactUsageReason: exact?.available === true ? null : exact?.reason || "exact-native-token-field-not-exposed",
+      exactUsageKind: exact?.available === true ? exact.usageKind ?? null : null,
+      exactUsageEvidencePath: exact?.available === true ? exact.evidencePath ?? null : null,
+      estimatorFallbackUsedForExact: false,
+      ledgerFallbackUsedForExact: false,
+      domFallbackUsedForExact: false,
       pressure,
       catalogObservedAt: this.state.catalogObservedAt,
       catalogSize: Object.keys(this.state.modelCatalog).length,

@@ -79,7 +79,23 @@ const nativeModels = [
 
 const stateDir = await mkdtemp(join(tmpdir(), "devspace-context-guardian-"));
 try {
-  const first = new ContextGuardianRuntime({ stateDir });
+  let nativeExactTokens = null;
+  const exactUsageAuthority = {
+    async status({ conversationId }) {
+      if (conversationId === "conv-main-02" && Number.isSafeInteger(nativeExactTokens)) {
+        return {
+          available: true,
+          exactUsedTokens: nativeExactTokens,
+          observedAt: "2026-09-05T02:43:30.000Z",
+          usageKind: "input_tokens",
+          evidencePath: "event.usage.input_tokens",
+          source: "classic-native-protocol",
+        };
+      }
+      return { available: false, reason: "exact-native-token-field-not-exposed", source: "unavailable" };
+    },
+  };
+  const first = new ContextGuardianRuntime({ stateDir, exactUsageAuthority });
   await first.ready;
   await first.observeNativeModelCatalog({ models: nativeModels, observedAt: "2026-09-05T02:40:00.000Z" });
   await first.observeTurnRequest({
@@ -122,7 +138,17 @@ try {
   assert.equal(main02.pressure.predictedInputTokens, 133000);
 
   await first.observeHostUsage({ runtimeKey: "main-02", conversationId: "conv-main-02", usedTokens: 125000, observedAt: "2026-09-05T02:43:20.000Z" });
-  assert.equal((await first.status("main-02")).pressure.usageSource, "host-measured");
+  const untrustedHostObservation = await first.status("main-02");
+  assert.equal(untrustedHostObservation.pressure.usageSource, "devspace-ledger", "legacy host observations must not become exact authority");
+  assert.equal(untrustedHostObservation.hostMeasuredTokens, null);
+  assert.equal(untrustedHostObservation.exactUsageAvailable, false);
+  nativeExactTokens = 125000;
+  const exactStatus = await first.status("main-02");
+  assert.equal(exactStatus.pressure.usageSource, "host-measured");
+  assert.equal(exactStatus.hostMeasuredTokens, 125000);
+  assert.equal(exactStatus.hostUsageSource, "classic-native-protocol");
+  assert.equal(exactStatus.exactUsageAvailable, true);
+  assert.equal(exactStatus.estimatorFallbackUsedForExact, false);
 
   await first.observeRuntimeSnapshot({
     runtimeKey: "main-03",

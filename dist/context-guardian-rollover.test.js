@@ -3,7 +3,7 @@ import { ContextGuardianRolloverCoordinator, buildMainCompactCapsule } from "./c
 
 const goal = {
   id: "goal_1111111111111111",
-  objective: "Ship true same-conversation Context Guardian",
+  objective: "Ship selective UI-continuous Auto Compact",
   status: "active",
   round: 3,
   roundState: "working",
@@ -19,10 +19,10 @@ const plan = {
   title: "Context Guardian v2",
   status: "active",
   revision: 4,
-  lastExplanation: "Fresh-chat rollover is forbidden; true compact is next.",
+  lastExplanation: "Backend ID may change, but full history and zero-context continuation are both forbidden.",
   steps: [
     { id: "step_1111111111111111", text: "Dynamic model windows", status: "completed" },
-    { id: "step_2222222222222222", text: "True same-conversation compact", status: "in_progress" },
+    { id: "step_2222222222222222", text: "Selective Auto Compact continuation", status: "in_progress" },
   ],
 };
 const pressure = {
@@ -37,8 +37,17 @@ const pressure = {
 };
 const recentMessages = [
   { role: "user", text: "Keep the Goal and Plan state intact." },
-  { role: "assistant", text: "Continue in the same conversation." },
+  { role: "assistant", text: "Continue in the same user-facing conversation." },
 ];
+const sourceDescriptor = {
+  conversationId: "conversation-old",
+  currentNode: "source-boundary-message",
+  title: "Context Guardian v2",
+  modelSlug: "gpt-5-6-thinking",
+  payloadBytes: 2_000_000,
+  branchMessageCount: 3_400,
+  textChars: 800_000,
+};
 
 {
   const capsule = buildMainCompactCapsule({
@@ -53,11 +62,19 @@ const recentMessages = [
   assert.ok(capsule.completed.some((item) => /Dynamic model windows/.test(item)));
   assert.match(capsule.currentState, /goal_1111111111111111/);
   assert.match(capsule.currentState, /plan_1111111111111111/);
-  assert.ok(capsule.nextSteps.some((item) => /True same-conversation compact/.test(item)));
+  assert.ok(capsule.nextSteps.some((item) => /Selective Auto Compact continuation/.test(item)));
 }
 
-function makeHarness({ stage = "rollover", workingGoal = goal, snapshot = {}, runtimes = null } = {}) {
-  const calls = { checkpoints: [], forbiddenFreshChatCalls: [], statuses: [], snapshots: [] };
+function makeHarness({ stage = "rollover", workingGoal = goal, snapshot = {}, runtimes = null, armResult = null } = {}) {
+  const calls = {
+    checkpoints: [],
+    userArms: [],
+    hiddenArms: [],
+    verified: [],
+    statuses: [],
+    snapshots: [],
+    capsuleMeta: [],
+  };
   const contextGuardian = {
     async observeRuntimeSnapshot() {},
     async status(runtimeKey, options = {}) {
@@ -96,28 +113,50 @@ function makeHarness({ stage = "rollover", workingGoal = goal, snapshot = {}, ru
       return value;
     },
     async recentVisibleMessages() { return recentMessages; },
-    async captureNativeSnapshot() { calls.forbiddenFreshChatCalls.push("captureNativeSnapshot"); throw new Error("forbidden"); },
-    async armUserTurnRollover() { calls.forbiddenFreshChatCalls.push("armUserTurnRollover"); throw new Error("forbidden"); },
-    async startHiddenRollover() { calls.forbiddenFreshChatCalls.push("startHiddenRollover"); throw new Error("forbidden"); },
+    async nativeConversationDescriptor() { return { ...sourceDescriptor }; },
+    async captureNativeSnapshot() { throw new Error("forbidden legacy reload"); },
+    async armUserTurnRollover(_runtimeKey, input) {
+      calls.userArms.push(input);
+      return armResult || { armed: true, mode: "user-turn" };
+    },
+    async startHiddenRollover(_runtimeKey, input) {
+      calls.hiddenArms.push(input);
+      return armResult || { armed: true, mode: "hidden-goal-continuation" };
+    },
     async cancelUserTurnRollover() { return { cancelled: false }; },
   };
   const continuityRuntime = {
     async checkpoint(input) {
       calls.checkpoints.push(input);
-      return { ok: true, capsuleId: `capsule_${calls.checkpoints.length}`, continuityKey: input.continuityKey, capsule: input };
+      return {
+        ok: true,
+        capsuleId: `capsule_${calls.checkpoints.length}`,
+        continuityKey: input.continuityKey,
+        capsule: input,
+      };
     },
+    async updateCapsuleMeta(id, patch) { calls.capsuleMeta.push({ id, patch }); },
   };
   const goalRuntime = {
     async status(id) { assert.equal(id, goal.id); return workingGoal; },
-    async activeGoals() { return workingGoal ? [workingGoal] : []; },
+    async activeGoals(options = {}) {
+      assert.equal(options.conversationId === undefined || options.conversationId === "conversation-old", true);
+      return workingGoal ? [workingGoal] : [];
+    },
   };
-  const planRuntime = { async activePlans() { return [plan]; } };
+  const planRuntime = {
+    async activePlans(options = {}) {
+      assert.equal(options.conversationId === undefined || options.conversationId === "conversation-old", true);
+      return [plan];
+    },
+  };
   const coordinator = new ContextGuardianRolloverCoordinator({
     contextGuardian,
     contextAdapter,
     continuityRuntime,
     goalRuntime,
     planRuntime,
+    onVerifiedRollover: async (event) => { calls.verified.push(event); },
     pollMs: 0,
   });
   return { coordinator, calls };
@@ -127,24 +166,71 @@ function makeHarness({ stage = "rollover", workingGoal = goal, snapshot = {}, ru
   const { coordinator, calls } = makeHarness({ stage: "normal" });
   const result = await coordinator.pollOnce();
   assert.equal(result.results[0].action, "normal");
-  assert.deepEqual(calls.forbiddenFreshChatCalls, [], "normal observation must never call legacy native snapshot reload/fresh-chat helpers");
+  assert.equal(calls.userArms.length, 0);
+  assert.equal(calls.hiddenArms.length, 0);
 }
 
 {
   const { coordinator, calls } = makeHarness({ stage: "prepare" });
   const result = await coordinator.pollOnce();
-  assert.equal(result.results[0].action, "prepared");
+  assert.equal(result.results[0].action, "prepared-selective-capsule");
   assert.equal(calls.checkpoints.length, 1);
-  assert.deepEqual(calls.forbiddenFreshChatCalls, []);
+  const checkpoint = calls.checkpoints[0];
+  assert.equal(checkpoint.compression.accepted, true);
+  assert.equal(checkpoint.compression.fullHistoryInherited, false);
+  assert.equal(checkpoint.compression.zeroContextContinuation, false);
+  assert.equal(checkpoint.continuity.sourceConversationId, "conversation-old");
+  assert.equal(checkpoint.continuity.sourceBoundaryMessageId, "source-boundary-message");
+  assert.equal(checkpoint.continuity.uiContinuityKey, `goal:${goal.id}`);
+  assert.equal(calls.userArms.length, 0);
 }
 
 {
   const { coordinator, calls } = makeHarness({ stage: "rollover" });
   const result = await coordinator.pollOnce();
-  assert.equal(result.results[0].action, "true-compact-required");
-  assert.equal(result.results[0].reason, "legacy-fresh-conversation-rollover-disabled");
-  assert.equal(calls.checkpoints.length, 1, "pressure may checkpoint state without mutating the ChatGPT page or conversation");
-  assert.deepEqual(calls.forbiddenFreshChatCalls, [], "rollover pressure must not call fresh-conversation paths");
+  assert.equal(result.results[0].action, "armed-user-turn-auto-compact");
+  assert.equal(calls.checkpoints.length, 1);
+  assert.equal(calls.userArms.length, 1);
+  const arm = calls.userArms[0];
+  assert.equal(arm.mode, "user-turn");
+  assert.equal(arm.oldConversationId, "conversation-old");
+  assert.equal(arm.sourceMessageId, "source-boundary-message");
+  assert.equal(arm.uiContinuityKey, `goal:${goal.id}`);
+  assert.match(arm.capsulePrompt, /selective capsule/i);
+  assert.equal(arm.compressionContract.compression.fullHistoryInherited, false);
+
+  const accepted = await coordinator.noteUserTurnRollover({
+    ok: true,
+    mode: "user-turn",
+    runtimeKey: "main-01",
+    goalId: goal.id,
+    planId: plan.id,
+    capsuleId: "capsule_1",
+    oldConversationId: "conversation-old",
+    newConversationId: "conversation-new",
+    conversationId: "conversation-new",
+    visibleUsers: 1,
+    visibleAssistants: 1,
+    hiddenMessages: 1,
+    uiContinuityKey: arm.uiContinuityKey,
+    compressionContract: arm.compressionContract,
+    targetDescriptor: {
+      conversationId: "conversation-new",
+      payloadBytes: 18_000,
+      branchMessageCount: 3,
+      devspaceContinuity: {
+        sourceConversationId: "conversation-old",
+        sourceBoundaryMessageId: "source-boundary-message",
+        uiContinuityKey: arm.uiContinuityKey,
+        capsuleFingerprint: arm.capsuleFingerprint,
+      },
+    },
+  });
+  assert.equal(accepted, true);
+  assert.equal(calls.verified.length, 1);
+  assert.equal(calls.verified[0].oldConversationId, "conversation-old");
+  assert.equal(calls.verified[0].newConversationId, "conversation-new");
+  assert.equal(calls.capsuleMeta.at(-1).patch.status, "verified-continuation");
 }
 
 {
@@ -152,7 +238,7 @@ function makeHarness({ stage = "rollover", workingGoal = goal, snapshot = {}, ru
   const result = await coordinator.pollOnce();
   assert.equal(result.results[0].action, "skipped-generating");
   assert.equal(calls.checkpoints.length, 0);
-  assert.deepEqual(calls.forbiddenFreshChatCalls, []);
+  assert.equal(calls.userArms.length, 0);
 }
 
 {
@@ -161,7 +247,7 @@ function makeHarness({ stage = "rollover", workingGoal = goal, snapshot = {}, ru
   const result = await coordinator.pollOnce();
   assert.equal(result.results[0].action, "prepared-reported-goal");
   assert.equal(calls.checkpoints.length, 1);
-  assert.deepEqual(calls.forbiddenFreshChatCalls, []);
+  assert.equal(calls.userArms.length, 0);
 }
 
 {
@@ -171,10 +257,26 @@ function makeHarness({ stage = "rollover", workingGoal = goal, snapshot = {}, ru
     goalId: goal.id,
     continuationPrompt: "[DEVSPACE_GOAL_CONTINUATION] begin next Goal round",
   });
-  assert.equal(result.handled, false, "Goal continuation must never be rerouted to a fresh Chat as fake compaction");
-  assert.equal(result.reason, "true-same-conversation-compact-required");
+  assert.equal(result.handled, false, "Raw dispatch must proceed after the Fetch transform is armed.");
+  assert.equal(result.armed, true);
+  assert.equal(result.reason, "hidden-goal-auto-compact-armed");
   assert.equal(calls.checkpoints.length, 1);
-  assert.deepEqual(calls.forbiddenFreshChatCalls, []);
+  assert.equal(calls.hiddenArms.length, 1);
+  assert.equal(calls.hiddenArms[0].oldConversationId, "conversation-old");
+  assert.equal(calls.hiddenArms[0].sourceMessageId, "source-boundary-message");
+  assert.match(calls.hiddenArms[0].prompt, /DEVSPACE_AUTO_COMPACT_CONTINUATION/);
+  assert.match(calls.hiddenArms[0].prompt, /DEVSPACE_GOAL_CONTINUATION/);
+}
+
+{
+  const { coordinator } = makeHarness({ stage: "rollover", armResult: { armed: false, reason: "devspace-plugin-not-paired" } });
+  const result = await coordinator.beforeGoalContinuation({
+    runtimeKey: "main-01",
+    goalId: goal.id,
+    continuationPrompt: "next round",
+  });
+  assert.equal(result.blocked, true);
+  assert.match(result.reason, /auto-compact-arm-failed/);
 }
 
 {
@@ -186,14 +288,19 @@ function makeHarness({ stage = "rollover", workingGoal = goal, snapshot = {}, ru
   });
   assert.equal(result.handled, false);
   assert.equal(result.reason, "headroom-available");
-  assert.deepEqual(calls.forbiddenFreshChatCalls, []);
+  assert.equal(calls.hiddenArms.length, 0);
 }
 
 console.log(JSON.stringify({
   ok: true,
   gate: "context-guardian-rollover",
   checkpointOnlyAtPressure: true,
-  freshConversationCompaction: false,
-  pageMutationCapability: false,
-  goalContinuationFreshChatReroute: false,
+  selectiveContinuationCompaction: true,
+  backendConversationIdMayChange: true,
+  uiContinuityKeyRequired: true,
+  fullHistoryInheritanceRejected: true,
+  zeroContextRejected: true,
+  userTurnArmedAtRollover: true,
+  hiddenGoalContinuationArmedAtRollover: true,
+  authorityRebindAfterVerificationOnly: true,
 }));

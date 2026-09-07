@@ -101,6 +101,40 @@ export class ClassicConversationAuthorityRegistry {
     };
   }
 
+  async acceptVerifiedRollover({ oldConversationId, newConversationId, runtimeKey, observedAt } = {}) {
+    const prior = requireText(oldConversationId, "oldConversationId");
+    const next = requireText(newConversationId, "newConversationId");
+    if (prior === next) throw new Error("Verified conversation rollover requires distinct old and new conversation ids.");
+    const runtime = String(runtimeKey || "").trim();
+    const at = String(observedAt || new Date().toISOString());
+    const matches = [...this.entries.values()].filter((entry) => (
+      entry.conversationIds.includes(prior)
+      && (!runtime || entry.runtimeKeys.includes(runtime))
+    ));
+    const selected = matches.length ? matches : [...this.entries.values()].filter((entry) => entry.conversationIds.includes(prior));
+    if (!selected.length) throw new Error(`No Classic MCP session authority is bound to source conversation ${prior}.`);
+    for (const entry of selected) {
+      entry.conversationIds = [next];
+      if (runtime && !entry.runtimeKeys.includes(runtime)) entry.runtimeKeys.push(runtime);
+      entry.ambiguous = false;
+      entry.updatedAt = at;
+      entry.continuity = [
+        ...(Array.isArray(entry.continuity) ? entry.continuity : []),
+        { from: prior, to: next, at, reason: "verified-auto-compact" },
+      ].slice(-20);
+      this.entries.set(entry.fingerprint, entry);
+    }
+    await this.#persist();
+    return {
+      ok: true,
+      oldConversationId: prior,
+      newConversationId: next,
+      runtimeKey: runtime || null,
+      updatedSessions: selected.length,
+      observedAt: at,
+    };
+  }
+
   resolveMcpExtra(extra) {
     const fingerprint = sessionFingerprintFromMcpExtra(extra);
     if (!fingerprint) return null;

@@ -209,6 +209,32 @@ export class PlanRuntime {
     return clone(plan);
   }
 
+  async rebindConversation({ planId, oldConversationId, newConversationId, reason = "verified-auto-compact" }) {
+    await this.ready;
+    const id = String(planId ?? "");
+    const plan = this.state.plans[id];
+    if (!plan) throw new Error(`Unknown plan ${id}.`);
+    if (plan.status !== "active") throw new Error(`Plan ${id} is terminal (${plan.status}) and cannot move conversations.`);
+    const prior = normalizeConversationId(oldConversationId);
+    const next = normalizeConversationId(newConversationId);
+    if (!prior || !next || prior === next) throw new Error("Verified Plan conversation rebind requires distinct old and new conversation ids.");
+    const current = normalizeConversationId(plan.conversationId);
+    if (current === next) return clone(plan);
+    if (current !== prior) throw new Error(`Plan ${id} is bound to ${current || "none"}, not expected source ${prior}.`);
+    const collision = Object.values(this.state.plans).find((item) => item?.id !== plan.id && item?.status === "active" && normalizeConversationId(item.conversationId) === next);
+    if (collision) throw new Error(`Target conversation ${next} already has active Plan ${collision.id}.`);
+    const timestamp = nowIso();
+    plan.conversationId = next;
+    plan.conversationContinuity = [
+      ...(Array.isArray(plan.conversationContinuity) ? plan.conversationContinuity : []),
+      { from: prior, to: next, at: timestamp, reason: cleanText(reason, 240, "Conversation rebind reason") },
+    ].slice(-20);
+    plan.revision = Number(plan.revision ?? 0) + 1;
+    plan.updatedAt = timestamp;
+    await this.save();
+    return clone(plan);
+  }
+
   async activePlans({ limit = 12, conversationId } = {}) {
     await this.ready;
     const hasConversationFilter = conversationId !== undefined;

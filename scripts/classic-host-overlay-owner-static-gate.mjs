@@ -13,7 +13,18 @@ assert.match(overlay, /resolveClassicHostOverlayOwner/);
 assert.match(overlay, /goalHostBridge\.findMatchingCandidate\(goalId\)/, "normal initial owner resolution must prefer the real Goal Host Bridge");
 assert.match(overlay, /hiddenActive\.length === 1/, "upgrade bootstrap must require exactly one hidden-style active Chat");
 assert.match(overlay, /snapshot\.visibleMessageCount/, "upgrade bootstrap must refuse ordinary visible conversations");
-assert.match(server, /onVerifiedRollover:\s*\(event\)\s*=>\s*hostOverlayProjection\.noteVerifiedRollover\(event\)/, "verified Context Guardian rollover must transfer Host Overlay ownership to the fresh conversation");
+assert.match(server, /onVerifiedRollover:\s*async \(event\)\s*=>/,
+  "verified Context Guardian rollover must use the guarded authority-transfer callback");
+assert.match(server, /conversationAuthority\.acceptVerifiedRollover/,
+  "verified rollover must rotate native MCP conversation authority");
+assert.match(server, /planRuntime\.rebindConversation/,
+  "verified rollover must transfer the active Plan to the continuation conversation");
+assert.match(server, /goalRuntime\.rebindConversation/,
+  "verified rollover must transfer the active Goal to the continuation conversation");
+assert.match(server, /goalRunProgress\.rebindConversation/,
+  "verified rollover must preserve progress narration continuity");
+assert.match(server, /hostOverlayProjection\.noteVerifiedRollover/,
+  "verified rollover must transfer Host Overlay ownership to the continuation conversation");
 assert.match(rollover, /onVerifiedRollover/);
 assert.match(rollover, /oldConversationId/);
 assert.match(rollover, /newConversationId/);

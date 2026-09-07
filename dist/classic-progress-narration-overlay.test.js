@@ -13,6 +13,7 @@ const now = Date.parse("2026-09-07T06:30:00.000Z");
 const humanProgress = {
   messages: [
     { text: "Main 01 建模進度", at: new Date(now - 1_000).toISOString(), conversationId: "conversation-b", goalId: "plan:plan-b", round: 1, source: "goal-run-events", kind: "objective" },
+    { text: "第 1 輪完整工作匯報", at: new Date(now - 4_000).toISOString(), conversationId: "conversation-source", goalId: "goal-a", round: 1, source: "goal-round-report", kind: "round-report", dedupeKey: "round-one" },
     { text: "第一段自然進度旁白", at: new Date(now - 3_000).toISOString(), conversationId: "conversation-a", goalId: "goal-a", round: 2, source: "goal-run-events", kind: "objective", dedupeKey: "one" },
     { text: "第二段驗證進度旁白", at: new Date(now - 2_000).toISOString(), conversationId: "conversation-a", goalId: "goal-a", round: 2, source: "goal-run-events", kind: "milestone", dedupeKey: "two" },
     { text: "第二段驗證進度旁白", at: new Date(now - 1_500).toISOString(), conversationId: "conversation-a", goalId: "goal-a", round: 2, source: "goal-run-events", kind: "milestone", dedupeKey: "same-text-new-key" },
@@ -26,9 +27,10 @@ const planState = { plans: { "plan-b": { id: "plan-b", status: "active", convers
 const goalState = { goals: { "goal-a": { id: "goal-a", status: "active", round: 2, conversationId: "conversation-a" } } };
 const map = conversationProgressNarrationMap({ humanProgress, goalProgress, planState, goalState, nowMs: now });
 assert.deepEqual(Object.keys(map).sort(), ["conversation-a", "conversation-b"]);
-assert.equal(map["conversation-a"].messages.length, 2);
-assert.equal(map["conversation-a"].messages[0].text, "第一段自然進度旁白");
-assert.equal(map["conversation-a"].messages[1].text, "第二段驗證進度旁白");
+assert.equal(map["conversation-a"].messages.length, 3);
+assert.equal(map["conversation-a"].messages[0].text, "第 1 輪完整工作匯報");
+assert.equal(map["conversation-a"].messages[1].text, "第一段自然進度旁白");
+assert.equal(map["conversation-a"].messages[2].text, "第二段驗證進度旁白");
 assert.equal(map["conversation-b"].messages[0].text, "Main 01 建模進度");
 assert.equal(map["conversation-b"].progressKind, "plan");
 assert.deepEqual(conversationProgressNarrationMap({ humanProgress, goalProgress: { active: null, runs: [] }, planState: { plans: {} }, goalState: { goals: {} }, nowMs: now }), {});

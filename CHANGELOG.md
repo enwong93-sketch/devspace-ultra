@@ -7,6 +7,9 @@
 - Added support for Codex `requires_local_executor` plugin metadata and 77/77 live manifest compatibility.
 - Added a model-independent interactive progress contract for Thinking/XHi and Pro, with concise in-conversation milestone updates and the existing bounded human-progress transcript as a no-refresh fallback.
 - Added bounded append-only diagnostic log retention: per-file tail trimming without whole-file heap reads, total root quota, file-count cap, age expiry, and Gateway lifecycle integration; durable JSON authority/state files remain excluded.
+- Productized Main selective Auto Compact as the built-in `devspace-auto-compact` capability. ChatGPT may assign a new backend conversation ID, but acceptance now requires a non-empty bounded capsule, all available source/carry ratios, a materially smaller target mapping/current branch/payload, continuity markers, and a guarded atomic rebind of native authority, Goal, Plan, progress narration, and Host Overlay. Full mapping inheritance and zero-context continuation fail closed.
+- Added authenticated in-page structural conversation descriptors whose access token and raw mapping never leave the ChatGPT renderer; target continuation verification no longer races a previously completed network response.
+- Added multi-paragraph Goal round reports to the progress narration history: title, up to eight bounded summary segments, and final round status, retained across the latest eight rounds with restart-safe deduplication.
 
 ## 0.5.0 — 2026-09-05
 

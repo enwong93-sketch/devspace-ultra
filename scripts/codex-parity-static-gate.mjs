@@ -34,9 +34,10 @@ for (const name of [
 for (const name of ["list_mcp_resources", "list_mcp_resource_templates", "read_mcp_resource"]) {
   assert.match(capability, new RegExp(`registerTool\\(\\"${name}\\"`), `missing ${name}`);
 }
-assert.match(parity, /rawUsed === null \|\| rawUsed === undefined/);
+assert.match(parity, /await exactUsageAuthority\.status\(\{ conversationId \}\)/);
+assert.match(parity, /source:\s*available \? "classic-native-protocol" : "unavailable"/);
 assert.match(parity, /Fresh exact Classic-native usage evidence is unavailable/);
-assert.doesNotMatch(parity, /ledgerTokens[^\n]*remainingTokens|snapshotTokens[^\n]*remainingTokens/);
+assert.doesNotMatch(parity, /hostMeasuredTokens|ledgerTokens[^\n]*remainingTokens|snapshotTokens[^\n]*remainingTokens/);
 assert.match(parity, /realpath\(workspace\.root\)/);
 assert.match(parity, /isPathInsideRoot\(resolvedPath, rootPath\)/);
 assert.match(parity, /server\.server\.elicitInput/);

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { GoalProgressNarrator, decideGoalProgressNarration } from "./goal-progress-narrator.js";
+import { GoalProgressNarrator, decideGoalProgressNarration, goalRoundReportNarration } from "./goal-progress-narrator.js";
 
 const base = Date.parse("2026-09-07T06:30:00.000Z");
 const row = {
@@ -135,6 +135,22 @@ const silence = decideGoalProgressNarration({
 assert.equal(silence.kind, "continuing");
 assert.match(silence.text, /等候真實結果/);
 
+const structuredRoundReport = goalRoundReportNarration({
+  id: "goal-a",
+  round: 2,
+  lastRoundReport: {
+    round: 1,
+    reportedAt: "2026-09-07T06:31:00.000Z",
+    meaningfulProgress: true,
+    summary: "第一部分完成 Gateway schema 穩定化、圖片工具同旁白卡驗收。\n\n第二部分建立真正 selective Auto Compact 合約，禁止全量歷史同零上下文。",
+  },
+});
+assert.equal(structuredRoundReport.length, 4);
+assert.equal(structuredRoundReport[0].kind, "round-report-heading");
+assert.equal(structuredRoundReport[1].kind, "round-report");
+assert.match(structuredRoundReport[1].text, /本輪進度 1\/2/);
+assert.equal(structuredRoundReport.at(-1).kind, "round-report-status");
+
 const root = await mkdtemp(join(tmpdir(), "devspace-goal-narrator-"));
 try {
   const progressPath = join(root, "goal-progress.json");
@@ -193,6 +209,67 @@ try {
   assert.equal(afterRestart.published, false, "restart must not duplicate the last narration event");
   assert.equal(messages.length, 2);
   await restored.close();
+
+  const reportProgressPath = join(root, "report-progress.json");
+  const reportPlanPath = join(root, "report-plan.json");
+  const reportGoalPath = join(root, "report-goal.json");
+  await writeFile(reportProgressPath, JSON.stringify({
+    active: { ...row, inFlightCount: 0, heartbeatAt: new Date(now).toISOString() },
+    runs: [{ ...row, inFlightCount: 0, heartbeatAt: new Date(now).toISOString() }],
+    updatedAt: new Date(now).toISOString(),
+  }));
+  await writeFile(reportPlanPath, JSON.stringify({ plans: {
+    "plan-a": { id: "plan-a", status: "active", conversationId: "conversation-a", updatedAt: new Date(now).toISOString(), steps: [{ id: "step-a", text: "Auto Compact 產品化", status: "in_progress" }] },
+  } }));
+  await writeFile(reportGoalPath, JSON.stringify({ goals: {
+    "goal-a": {
+      id: "goal-a",
+      status: "active",
+      round: 1,
+      roundState: "reported",
+      conversationId: "conversation-a",
+      lastRoundReport: {
+        round: 1,
+        reportedAt: "2026-09-07T06:31:00.000Z",
+        meaningfulProgress: true,
+        summary: "第一部分完成 Gateway schema 穩定化、圖片工具同旁白卡驗收。\n\n第二部分建立真正 selective Auto Compact 合約，禁止全量歷史同零上下文。",
+      },
+    },
+  } }));
+  const reportMessages = [];
+  const reportNarrator = new GoalProgressNarrator({
+    progressStatePath: reportProgressPath,
+    planStatePath: reportPlanPath,
+    goalStatePath: reportGoalPath,
+    humanProgress: {
+      snapshot() { return { messages: structuredClone(reportMessages) }; },
+      async update(value) {
+        if (!reportMessages.some((item) => item.dedupeKey === value.dedupeKey)) reportMessages.push({ ...value, text: value.message, at: new Date(now).toISOString() });
+        return { messages: structuredClone(reportMessages) };
+      },
+    },
+    now: () => now,
+  });
+  const reportPublished = await reportNarrator.start({ schedule: false });
+  assert.equal(reportPublished.published, true);
+  assert.equal(reportMessages.length, 4);
+  assert.equal(reportMessages.every((item) => item.source === "goal-round-report"), true);
+  assert.deepEqual(reportMessages.map((item) => item.kind), ["round-report-heading", "round-report", "round-report", "round-report-status"]);
+  const reportDuplicate = await reportNarrator.pollOnce();
+  assert.equal(reportDuplicate.published, false);
+  assert.equal(reportMessages.length, 4, "round report must not duplicate on the next poll");
+  await writeFile(reportProgressPath, JSON.stringify({
+    active: { ...row, conversationId: "conversation-continuation", inFlightCount: 0, heartbeatAt: new Date(now).toISOString() },
+    runs: [{ ...row, conversationId: "conversation-continuation", inFlightCount: 0, heartbeatAt: new Date(now).toISOString() }],
+    updatedAt: new Date(now).toISOString(),
+  }));
+  await writeFile(reportGoalPath, JSON.stringify({ goals: {
+    "goal-a": { ...JSON.parse(await (await import("node:fs/promises")).readFile(reportGoalPath, "utf8")).goals["goal-a"], conversationId: "conversation-continuation" },
+  } }));
+  const afterConversationRebind = await reportNarrator.pollOnce();
+  assert.equal(afterConversationRebind.published, false);
+  assert.equal(reportMessages.length, 4, "backend conversation migration must not duplicate the same Goal round report");
+  await reportNarrator.close();
 
   const multiProgressPath = join(root, "multi-progress.json");
   const multiPlanPath = join(root, "multi-plan.json");

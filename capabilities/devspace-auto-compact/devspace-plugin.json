@@ -1,0 +1,37 @@
+{
+  "id": "devspace-auto-compact",
+  "name": "DevSpace Auto Compact",
+  "version": "0.5.1",
+  "description": "UI-continuous ChatGPT Classic context compression using a selective hidden capsule, measurable source-to-carry reduction, and verified Goal/Plan authority migration.",
+  "instructions": ["AGENTS.md"],
+  "skills": ["skills"],
+  "tools": [
+    {
+      "name": "auto-compact-status",
+      "description": "Read the production Auto Compact policy, latest selective capsule, compression ratios, backend continuation IDs, and verification state without exposing transcript content or credentials.",
+      "command": "node",
+      "args": ["scripts/status.mjs"],
+      "cwd": ".",
+      "env": {
+        "DEVSPACE_CONFIG_DIR": "${DEVSPACE_CONFIG_DIR}"
+      },
+      "input": "json-stdin",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": ["status", "latest"],
+            "default": "status"
+          },
+          "continuityKey": {
+            "type": "string",
+            "maxLength": 300
+          }
+        },
+        "additionalProperties": false
+      },
+      "timeoutMs": 15000
+    }
+  ]
+}

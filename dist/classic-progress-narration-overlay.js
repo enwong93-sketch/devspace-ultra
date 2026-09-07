@@ -107,10 +107,13 @@ export function conversationProgressNarrationMap({
     .sort((left, right) => Date.parse(left.at) - Date.parse(right.at));
   const result = {};
   for (const [conversationId, context] of selectedByConversation) {
+    const goalScoped = !String(context.goalId || "").startsWith("plan:") && !String(context.goalId || "").startsWith("conversation:");
+    const minimumRound = Math.max(1, context.round - 7);
     const messages = uniqueMessages(normalized.filter((item) => (
-      item.conversationId === conversationId
-      && item.goalId === context.goalId
-      && item.round === context.round
+      item.goalId === context.goalId
+      && (goalScoped
+        ? item.round >= minimumRound && item.round <= context.round
+        : item.conversationId === conversationId && item.round === context.round)
     ))).slice(-Math.max(1, Math.min(64, number(maxMessages, DEFAULT_MAX_MESSAGES))));
     if (!messages.length) continue;
     result[conversationId] = {

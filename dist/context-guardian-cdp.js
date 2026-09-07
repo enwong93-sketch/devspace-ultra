@@ -90,6 +90,139 @@ export function estimateClassicConversationPayloadTokens(payload = {}) {
   return estimateMessageTokens(conversationPayloadMessages(payload));
 }
 
+export function summarizeClassicConversationPayload(payload = {}) {
+  const encoder = new TextEncoder();
+  const estimateTextTokens = (value) => {
+    const text = String(value ?? "");
+    if (!text) return 0;
+    const cjk = (text.match(/[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uac00-\ud7af]/gu) || []).length;
+    const emoji = (text.match(/\p{Extended_Pictographic}/gu) || []).length;
+    const words = (text.match(/[A-Za-z0-9_]+(?:[-'][A-Za-z0-9_]+)*/g) || []).length;
+    const punctuation = (text.match(/[^\sA-Za-z0-9_\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uac00-\ud7af]/gu) || []).length;
+    const ascii = (text.match(/[\x00-\x7f]/g) || []).length;
+    return Math.max(1, cjk + emoji * 2 + Math.max(words, Math.ceil(ascii / 4)) + Math.ceil(punctuation / 2));
+  };
+  const estimateContent = (value, depth = 0) => {
+    if (depth > 12 || value == null) return 0;
+    if (typeof value === "string") return estimateTextTokens(value);
+    if (typeof value !== "object") return 0;
+    if (Array.isArray(value)) return value.reduce((sum, item) => sum + estimateContent(item, depth + 1), 0);
+    return Object.entries(value).reduce((sum, [key, item]) => /^(?:metadata|author|recipient|status)$/i.test(key) ? sum : sum + estimateContent(item, depth + 1), 0);
+  };
+  const visibleText = (message) => {
+    const parts = Array.isArray(message?.content?.parts)
+      ? message.content.parts.filter((part) => typeof part === "string")
+      : [];
+    return parts.join("").trim().slice(0, 2_400);
+  };
+  const textLength = (value, depth = 0) => {
+    if (depth > 12 || value == null) return 0;
+    if (typeof value === "string") return value.length;
+    if (typeof value !== "object") return 0;
+    if (Array.isArray(value)) return value.reduce((sum, item) => sum + textLength(item, depth + 1), 0);
+    return Object.entries(value).reduce((sum, [key, item]) => /^(?:metadata|author|recipient|status)$/i.test(key) ? sum : sum + textLength(item, depth + 1), 0);
+  };
+  const mapping = payload?.mapping && typeof payload.mapping === "object" ? payload.mapping : null;
+  const currentNode = typeof payload?.current_node === "string" ? payload.current_node : null;
+  const allMessages = Array.isArray(payload?.messages)
+    ? payload.messages
+    : mapping ? Object.values(mapping).map((node) => node?.message).filter(Boolean) : [];
+  const branch = [];
+  if (mapping && currentNode) {
+    const seen = new Set();
+    let cursor = currentNode;
+    while (cursor && !seen.has(cursor) && branch.length < 20_000) {
+      seen.add(cursor);
+      const node = mapping[cursor];
+      if (!node) break;
+      if (node.message) branch.push(node.message);
+      cursor = typeof node.parent === "string" ? node.parent : null;
+    }
+    branch.reverse();
+  } else {
+    branch.push(...allMessages);
+  }
+  const roleCounts = {};
+  let sourceTextChars = 0;
+  let estimatedTokens = 0;
+  let hiddenMessages = 0;
+  let visibleUsers = 0;
+  let visibleAssistants = 0;
+  let devspaceContinuity = null;
+  const recentVisibleMessages = [];
+  for (const message of branch) {
+    const role = String(message?.author?.role || message?.role || "unknown");
+    roleCounts[role] = (roleCounts[role] || 0) + 1;
+    sourceTextChars += textLength(message?.content);
+    estimatedTokens += 8 + estimateContent(message?.content);
+    const hidden = message?.metadata?.is_visually_hidden_from_conversation === true;
+    if (hidden) {
+      hiddenMessages += 1;
+      const metadata = message?.metadata || {};
+      if (!devspaceContinuity && (metadata.devspace_source_conversation_id || metadata.devspace_ui_continuity_key || metadata.devspace_capsule_fingerprint)) {
+        devspaceContinuity = {
+          sourceConversationId: typeof metadata.devspace_source_conversation_id === "string" ? metadata.devspace_source_conversation_id : null,
+          sourceBoundaryMessageId: typeof metadata.devspace_source_boundary_message_id === "string" ? metadata.devspace_source_boundary_message_id : null,
+          uiContinuityKey: typeof metadata.devspace_ui_continuity_key === "string" ? metadata.devspace_ui_continuity_key : null,
+          capsuleFingerprint: typeof metadata.devspace_capsule_fingerprint === "string" ? metadata.devspace_capsule_fingerprint : null,
+        };
+      }
+    } else if (role === "user") {
+      visibleUsers += 1;
+      const text = visibleText(message);
+      if (text) recentVisibleMessages.push({ role: "user", text });
+    } else if (role === "assistant" && (!message?.recipient || message.recipient === "all")) {
+      visibleAssistants += 1;
+      const text = visibleText(message);
+      if (text) recentVisibleMessages.push({ role: "assistant", text });
+    }
+  }
+  const continuation = payload?.context_truncation_continuation;
+  return {
+    conversationId: typeof payload?.conversation_id === "string" ? payload.conversation_id : null,
+    currentNode,
+    title: typeof payload?.title === "string" ? payload.title.slice(0, 500) : null,
+    modelSlug: typeof payload?.default_model_slug === "string" ? payload.default_model_slug.slice(0, 200) : null,
+    payloadBytes: encoder.encode(JSON.stringify(payload)).length,
+    mappingCount: mapping ? Object.keys(mapping).length : null,
+    branchMessageCount: branch.length,
+    textChars: sourceTextChars,
+    estimatedTokens,
+    recentVisibleMessages: recentVisibleMessages.slice(-12),
+    roleCounts,
+    hiddenMessages,
+    visibleUsers,
+    visibleAssistants,
+    devspaceContinuity,
+    contextTruncationContinuation: continuation && typeof continuation === "object" ? {
+      sourceConversationId: typeof continuation.source_conversation_id === "string" ? continuation.source_conversation_id : null,
+      boundaryMessageId: typeof continuation.boundary_message_id === "string" ? continuation.boundary_message_id : null,
+      visibleFromMessageId: typeof continuation.visible_from_message_id === "string" ? continuation.visible_from_message_id : null,
+    } : null,
+  };
+}
+
+function nativeConversationDescriptorExpression(conversationId) {
+  return `(${async function collect(id, summarize) {
+    let accessToken = null;
+    const auth = await fetch('/api/auth/session', { credentials:'include', cache:'no-store' });
+    if (auth.ok) {
+      const session = await auth.json();
+      accessToken = typeof session?.accessToken === 'string' ? session.accessToken
+        : typeof session?.access_token === 'string' ? session.access_token
+          : null;
+    }
+    const response = await fetch('/backend-api/conversation/' + encodeURIComponent(id), {
+      credentials:'include',
+      cache:'no-store',
+      headers: accessToken ? { authorization:'Bearer ' + accessToken } : undefined,
+    });
+    if (!response.ok) throw new Error('Native conversation descriptor HTTP ' + response.status);
+    const payload = await response.json();
+    return { ...summarize(payload), authenticatedBackendFetch:Boolean(accessToken), rawContentReturned:false, credentialsReturned:false };
+  }.toString()})(${JSON.stringify(conversationId)}, (${summarizeClassicConversationPayload.toString()}))`;
+}
+
 function visibleMessagesFromPayload(payload = {}, limit = 8) {
   const bounded = Math.max(1, Math.min(20, Number(limit) || 8));
   return conversationPayloadMessages(payload)
@@ -119,6 +252,10 @@ export function buildClassicHiddenRolloverBody(originalBody = {}, {
   attribution = "devspace-ultra",
   messageId,
   toolName = "devspace_context_guardian",
+  sourceConversationId,
+  sourceMessageId,
+  uiContinuityKey,
+  capsuleFingerprint,
 } = {}) {
   const text = String(prompt ?? "").trim();
   if (!text) throw new Error("Hidden rollover prompt is required.");
@@ -126,13 +263,25 @@ export function buildClassicHiddenRolloverBody(originalBody = {}, {
   const first = Array.isArray(source.messages) && source.messages[0] && typeof source.messages[0] === "object"
     ? source.messages[0]
     : {};
+  const originalConversationId = typeof source.conversation_id === "string" ? source.conversation_id.trim() : "";
+  const continuationSourceId = String(sourceConversationId || originalConversationId || "").trim();
+  const continuationBoundaryId = String(sourceMessageId || "").trim();
   const body = { ...source };
   delete body.conversation_id;
+  if (continuationSourceId) {
+    body.is_context_truncation_continuation = true;
+    body.branching_from_conversation_id = continuationSourceId;
+    if (continuationBoundaryId) body.branching_from_message_id = continuationBoundaryId;
+  }
   const metadata = {
     ...(Array.isArray(first?.metadata?.system_hints) ? { system_hints: [...first.metadata.system_hints] } : {}),
     chatgpt_sdk_attribution: String(attribution || "devspace-ultra").slice(0, 160),
     chatgpt_sdk_followup_prompt: true,
     is_visually_hidden_from_conversation: true,
+    ...(continuationSourceId ? { devspace_source_conversation_id: continuationSourceId } : {}),
+    ...(continuationBoundaryId ? { devspace_source_boundary_message_id: continuationBoundaryId } : {}),
+    ...(uiContinuityKey ? { devspace_ui_continuity_key: String(uiContinuityKey).slice(0, 300) } : {}),
+    ...(capsuleFingerprint ? { devspace_capsule_fingerprint: String(capsuleFingerprint).slice(0, 80) } : {}),
   };
   body.messages = [{
     ...(messageId || first.id ? { id: String(messageId || first.id) } : {}),
@@ -151,6 +300,10 @@ export function buildClassicUserTurnRolloverBody(originalBody = {}, {
   hiddenMessageId,
   parentMessageId,
   toolName = "devspace_context_guardian",
+  sourceConversationId,
+  sourceMessageId,
+  uiContinuityKey,
+  capsuleFingerprint,
 } = {}) {
   const text = String(capsulePrompt ?? "").trim();
   if (!text) throw new Error("User-turn rollover compact capsule is required.");
@@ -159,11 +312,19 @@ export function buildClassicUserTurnRolloverBody(originalBody = {}, {
   if (!messages.some((message) => message?.author?.role === "user" && message?.metadata?.is_visually_hidden_from_conversation !== true)) {
     throw new Error("User-turn rollover requires one visible user-submitted message.");
   }
+  const originalConversationId = typeof source.conversation_id === "string" ? source.conversation_id.trim() : "";
+  const continuationSourceId = String(sourceConversationId || originalConversationId || "").trim();
+  const continuationBoundaryId = String(sourceMessageId || "").trim();
   const body = {
     ...source,
     parent_message_id: String(parentMessageId || randomUUID()),
   };
   delete body.conversation_id;
+  if (continuationSourceId) {
+    body.is_context_truncation_continuation = true;
+    body.branching_from_conversation_id = continuationSourceId;
+    if (continuationBoundaryId) body.branching_from_message_id = continuationBoundaryId;
+  }
   const first = messages[0] && typeof messages[0] === "object" ? messages[0] : {};
   body.messages = [{
     id: String(hiddenMessageId || randomUUID()),
@@ -176,6 +337,10 @@ export function buildClassicUserTurnRolloverBody(originalBody = {}, {
       chatgpt_sdk_attribution: String(attribution || "devspace-ultra").slice(0, 160),
       chatgpt_sdk_followup_prompt: true,
       is_visually_hidden_from_conversation: true,
+      ...(continuationSourceId ? { devspace_source_conversation_id: continuationSourceId } : {}),
+      ...(continuationBoundaryId ? { devspace_source_boundary_message_id: continuationBoundaryId } : {}),
+      ...(uiContinuityKey ? { devspace_ui_continuity_key: String(uiContinuityKey).slice(0, 300) } : {}),
+      ...(capsuleFingerprint ? { devspace_capsule_fingerprint: String(capsuleFingerprint).slice(0, 80) } : {}),
     },
   }, ...messages];
   return body;
@@ -187,6 +352,10 @@ export async function rewriteUserTurnRolloverPausedRequest(client, params, {
   hiddenMessageId,
   parentMessageId,
   toolName = "devspace_context_guardian",
+  sourceConversationId,
+  sourceMessageId,
+  uiContinuityKey,
+  capsuleFingerprint,
 } = {}) {
   const requestId = params?.requestId;
   if (!requestId) return { handled: false, modified: false };
@@ -211,6 +380,10 @@ export async function rewriteUserTurnRolloverPausedRequest(client, params, {
       hiddenMessageId,
       parentMessageId,
       toolName,
+      sourceConversationId,
+      sourceMessageId,
+      uiContinuityKey,
+      capsuleFingerprint,
     });
     await client.call("Fetch.continueRequest", {
       requestId,
@@ -231,6 +404,10 @@ export async function rewriteHiddenRolloverPausedRequest(client, params, {
   prompt,
   attribution = "devspace-ultra",
   toolName = "devspace_context_guardian",
+  sourceConversationId,
+  sourceMessageId,
+  uiContinuityKey,
+  capsuleFingerprint,
 } = {}) {
   const requestId = params?.requestId;
   if (!requestId) return { handled: false, modified: false };
@@ -247,6 +424,10 @@ export async function rewriteHiddenRolloverPausedRequest(client, params, {
       prompt,
       attribution,
       toolName,
+      sourceConversationId,
+      sourceMessageId,
+      uiContinuityKey,
+      capsuleFingerprint,
     });
     await client.call("Fetch.continueRequest", {
       requestId,
@@ -467,47 +648,6 @@ function emit(handler, event) {
   void Promise.resolve(handler(event)).catch(() => {});
 }
 
-function nativeConversationUrlMatches(url, conversationId) {
-  try {
-    const parsed = new URL(String(url || ""));
-    return parsed.hostname === "chatgpt.com" && parsed.pathname === `/backend-api/conversations/${conversationId}`;
-  } catch { return false; }
-}
-
-async function captureNativeConversationPayload(client, conversationId, {
-  timeoutMs = 20_000,
-} = {}) {
-  const id = String(conversationId || "").trim();
-  if (!id) throw new Error("Native conversation capture requires conversationId.");
-  let captured = null;
-  const finished = new Set();
-  const offResponse = client.on("Network.responseReceived", (params) => {
-    if (params?.response?.status === 200 && nativeConversationUrlMatches(params?.response?.url, id)) {
-      captured = { requestId: params.requestId, url: params.response.url };
-    }
-  });
-  const offFinished = client.on("Network.loadingFinished", (params) => {
-    if (params?.requestId) finished.add(params.requestId);
-  });
-  try {
-    const found = await waitForCondition(async () => captured, { timeoutMs, pollMs: 125 });
-    if (!found?.requestId) throw new Error(`Classic native conversation response was not observed for ${id}.`);
-    const done = await waitForCondition(async () => finished.has(found.requestId), { timeoutMs, pollMs: 100 });
-    if (!done) throw new Error(`Classic native conversation response did not finish for ${id}.`);
-    const body = await client.call("Network.getResponseBody", { requestId: found.requestId });
-    const text = body?.base64Encoded
-      ? Buffer.from(body.body, "base64").toString("utf8")
-      : String(body?.body || "");
-    return {
-      url: found.url,
-      payload: JSON.parse(text || "{}"),
-    };
-  } finally {
-    offResponse();
-    offFinished();
-  }
-}
-
 export async function connectClassicContextMetadataPort(port, {
   fetchImpl = globalThis.fetch,
   WebSocketImpl = globalThis.WebSocket,
@@ -563,16 +703,18 @@ export async function connectClassicContextMetadataPort(port, {
   let userTurnRolloverArm = null;
   let userTurnPausedHandler = null;
   let userTurnFetchEnabled = false;
-  const adoptNativePayload = async (conversationId, payload, inspected = null) => {
+  const adoptNativeDescriptor = async (conversationId, descriptor, inspected = null) => {
     const current = inspected || await evaluate(client, inspectExpression());
-    const observedTokens = estimateClassicConversationPayloadTokens(payload);
-    const messages = conversationPayloadMessages(payload);
+    const observedTokens = Math.max(0, Number(descriptor?.estimatedTokens || 0));
+    const messageCount = Math.max(0, Number(descriptor?.branchMessageCount || 0));
     nativeBaseline = {
       conversationId,
       observedTokens,
       domObservedTokens: Number(current?.domObservedTokens || 0),
-      messageCount: messages.length,
-      recentVisibleMessages: visibleMessagesFromPayload(payload, 12),
+      messageCount,
+      recentVisibleMessages: Array.isArray(descriptor?.recentVisibleMessages)
+        ? descriptor.recentVisibleMessages.slice(-12)
+        : [],
       capturedAt: observedAt(),
     };
     const snapshot = {
@@ -582,7 +724,7 @@ export async function connectClassicContextMetadataPort(port, {
       ...current,
       conversationId,
       observedTokens,
-      messageCount: messages.length,
+      messageCount,
       nativeSnapshot: true,
       observedAt: nativeBaseline.capturedAt,
     };
@@ -602,10 +744,11 @@ export async function connectClassicContextMetadataPort(port, {
 
   const verifyUserTurnRollover = async ({ arm, outcome }) => {
     const oldConversationId = String(outcome?.oldConversationId || arm?.oldConversationId || "").trim();
+    const rolloverMode = arm?.mode === "hidden-goal-continuation" ? "hidden-goal-continuation" : "user-turn";
     try {
       const stable = await waitForCondition(async () => {
         const state = await evaluate(client, inspectExpression());
-        if (state?.mode === "work") throw new Error("User-turn rollover unexpectedly entered Work mode.");
+        if (state?.mode === "work") throw new Error("Auto Compact continuation unexpectedly entered Work mode.");
         return state?.conversationId
           && state.conversationId !== oldConversationId
           && state.generating === false
@@ -613,39 +756,60 @@ export async function connectClassicContextMetadataPort(port, {
           ? state
           : null;
       }, { timeoutMs: Math.max(30_000, Number(arm?.verifyTimeoutMs) || DEFAULT_ROLLOVER_TIMEOUT_MS), pollMs: 300 });
-      if (!stable?.conversationId) throw new Error("User-turn rollover did not reach a stable fresh conversation.");
-      const captured = await captureNativeConversationPayload(client, stable.conversationId, { reload: true, timeoutMs: 25_000 });
-      const messages = conversationPayloadMessages(captured.payload);
-      const visibleUsers = messages.filter((message) => (message?.author?.role || message?.role) === "user" && message?.metadata?.is_visually_hidden_from_conversation !== true).length;
-      const visibleAssistants = messages.filter((message) => (message?.author?.role || message?.role) === "assistant" && message?.metadata?.is_visually_hidden_from_conversation !== true && (!message?.recipient || message.recipient === "all")).length;
-      const hiddenMessages = messages.filter((message) => message?.metadata?.is_visually_hidden_from_conversation === true).length;
-      const expectedVisibleUsers = Math.max(1, Number(outcome?.visibleUserMessages || 1));
-      if (visibleUsers < expectedVisibleUsers || visibleAssistants < 1 || hiddenMessages < 1) {
-        throw new Error(`User-turn rollover verification failed: ${JSON.stringify({ visibleUsers, visibleAssistants, hiddenMessages, expectedVisibleUsers })}`);
+      if (!stable?.conversationId) throw new Error("Auto Compact continuation did not reach a stable target conversation.");
+      const targetDescriptor = await evaluate(client, nativeConversationDescriptorExpression(stable.conversationId));
+      if (targetDescriptor?.conversationId !== stable.conversationId) {
+        throw new Error("Auto Compact target descriptor does not match the stable continuation conversation.");
+      }
+      const expectedVisibleUsers = rolloverMode === "user-turn" ? Math.max(1, Number(outcome?.visibleUserMessages || 1)) : 0;
+      if (targetDescriptor.visibleUsers < expectedVisibleUsers || targetDescriptor.visibleAssistants < 1 || targetDescriptor.hiddenMessages < 1) {
+        throw new Error(`Auto Compact continuation verification failed: ${JSON.stringify({ mode: rolloverMode, visibleUsers: targetDescriptor.visibleUsers, visibleAssistants: targetDescriptor.visibleAssistants, hiddenMessages: targetDescriptor.hiddenMessages, expectedVisibleUsers })}`);
+      }
+      if (targetDescriptor.devspaceContinuity?.sourceConversationId !== oldConversationId) {
+        throw new Error("Auto Compact target did not retain the hidden source-conversation marker.");
+      }
+      if (arm?.uiContinuityKey && targetDescriptor.devspaceContinuity?.uiContinuityKey !== arm.uiContinuityKey) {
+        throw new Error("Auto Compact target did not retain the UI continuity key.");
+      }
+      if (arm?.capsuleFingerprint && targetDescriptor.devspaceContinuity?.capsuleFingerprint !== arm.capsuleFingerprint) {
+        throw new Error("Auto Compact target did not retain the capsule fingerprint.");
       }
       const after = await evaluate(client, inspectExpression());
-      const snapshot = await adoptNativePayload(stable.conversationId, captured.payload, after);
+      const snapshot = await adoptNativeDescriptor(stable.conversationId, targetDescriptor, after);
       emit(onUserTurnRollover, {
         ok: true,
+        mode: rolloverMode,
         runtimeKey,
         port,
         goalId: arm?.goalId || null,
+        planId: arm?.planId || null,
         oldConversationId,
         newConversationId: stable.conversationId,
         conversationId: stable.conversationId,
-        visibleUsers,
-        visibleAssistants,
-        hiddenMessages,
+        visibleUsers: targetDescriptor.visibleUsers,
+        visibleAssistants: targetDescriptor.visibleAssistants,
+        hiddenMessages: targetDescriptor.hiddenMessages,
         observedTokens: snapshot?.observedTokens ?? null,
+        uiContinuityKey: arm?.uiContinuityKey || null,
+        capsuleFingerprint: arm?.capsuleFingerprint || null,
+        capsuleId: arm?.capsuleId || null,
+        sourceDescriptor: arm?.sourceDescriptor || null,
+        targetDescriptor,
+        compressionContract: arm?.compressionContract || null,
+        nativeContinuationSourceId: targetDescriptor.contextTruncationContinuation?.sourceConversationId || null,
+        devspaceContinuationSourceId: targetDescriptor.devspaceContinuity?.sourceConversationId || null,
         observedAt: observedAt(),
       });
     } catch (error) {
       emit(onUserTurnRollover, {
         ok: false,
+        mode: rolloverMode,
         runtimeKey,
         port,
         goalId: arm?.goalId || null,
+        planId: arm?.planId || null,
         oldConversationId,
+        uiContinuityKey: arm?.uiContinuityKey || null,
         error: error instanceof Error ? error.message : String(error),
         observedAt: observedAt(),
       });
@@ -656,28 +820,37 @@ export async function connectClassicContextMetadataPort(port, {
     capsulePrompt,
     oldConversationId,
     goalId = null,
+    planId = null,
+    mode = "user-turn",
+    sourceMessageId = null,
+    uiContinuityKey = null,
+    capsuleFingerprint = null,
+    sourceDescriptor = null,
+    compressionContract = null,
+    capsuleId = null,
     ttlMs = 60_000,
     verifyTimeoutMs = DEFAULT_ROLLOVER_TIMEOUT_MS,
   } = {}) => {
     const prompt = String(capsulePrompt ?? "").trim();
     const oldId = String(oldConversationId ?? "").trim();
-    if (!prompt || !oldId) return { armed: false, reason: "missing-input" };
+    const rolloverMode = mode === "hidden-goal-continuation" ? "hidden-goal-continuation" : "user-turn";
+    if (!prompt || !oldId || !sourceMessageId || !uiContinuityKey || !capsuleFingerprint) return { armed: false, reason: "missing-input" };
     const current = await evaluate(client, inspectExpression());
     if (current?.mode === "work") return { armed: false, reason: "work-mode" };
     if (current?.generating) return { armed: false, reason: "generating" };
     if (current?.conversationId !== oldId) return { armed: false, reason: "conversation-changed" };
     if (current?.devspacePluginPaired !== true) return { armed: false, reason: "devspace-plugin-not-paired" };
     const expiresAt = Date.now() + Math.max(5_000, Math.min(300_000, Number(ttlMs) || 60_000));
-    if (userTurnRolloverArm?.oldConversationId === oldId) {
-      userTurnRolloverArm = { ...userTurnRolloverArm, capsulePrompt: prompt, goalId, expiresAt, verifyTimeoutMs };
-      return { armed: true, reused: true, oldConversationId: oldId };
+    if (userTurnRolloverArm?.oldConversationId === oldId && userTurnRolloverArm?.mode === rolloverMode) {
+      userTurnRolloverArm = { ...userTurnRolloverArm, capsulePrompt: prompt, goalId, planId, sourceMessageId, uiContinuityKey, capsuleFingerprint, sourceDescriptor, compressionContract, capsuleId, expiresAt, verifyTimeoutMs };
+      return { armed: true, reused: true, mode: rolloverMode, oldConversationId: oldId };
     }
     await clearUserTurnRolloverArm();
     await client.call("Fetch.enable", {
       patterns: [{ urlPattern: "*backend-api/f/conversation*", requestStage: "Request" }],
     });
     userTurnFetchEnabled = true;
-    userTurnRolloverArm = { capsulePrompt: prompt, oldConversationId: oldId, goalId, expiresAt, verifyTimeoutMs, consuming: false };
+    userTurnRolloverArm = { capsulePrompt: prompt, oldConversationId: oldId, goalId, planId, mode: rolloverMode, sourceMessageId, uiContinuityKey, capsuleFingerprint, sourceDescriptor, compressionContract, capsuleId, expiresAt, verifyTimeoutMs, consuming: false };
     userTurnPausedHandler = client.on("Fetch.requestPaused", (params) => {
       void (async () => {
         const arm = userTurnRolloverArm;
@@ -692,21 +865,47 @@ export async function connectClassicContextMetadataPort(port, {
           await client.call("Fetch.continueRequest", { requestId }).catch(() => {});
           return;
         }
+        let requestBody = null;
         let requestConversationId = null;
+        let visibleUserMessages = 0;
         try {
-          const body = JSON.parse(String(params?.request?.postData || "{}"));
-          requestConversationId = typeof body?.conversation_id === "string" ? body.conversation_id.trim() : null;
+          requestBody = JSON.parse(String(params?.request?.postData || "{}"));
+          requestConversationId = typeof requestBody?.conversation_id === "string" ? requestBody.conversation_id.trim() : null;
+          visibleUserMessages = Array.isArray(requestBody?.messages)
+            ? requestBody.messages.filter((message) => message?.author?.role === "user" && message?.metadata?.is_visually_hidden_from_conversation !== true).length
+            : 0;
         } catch {}
         if (requestConversationId !== arm.oldConversationId) {
           await client.call("Fetch.continueRequest", { requestId }).catch(() => {});
           return;
         }
+        if (arm.mode === "hidden-goal-continuation" && visibleUserMessages > 0) {
+          await client.call("Fetch.continueRequest", { requestId }).catch(() => {});
+          await clearUserTurnRolloverArm();
+          emit(onUserTurnRollover, {
+            ok: false,
+            mode: arm.mode,
+            runtimeKey,
+            port,
+            goalId: arm.goalId || null,
+            oldConversationId: arm.oldConversationId,
+            error: "A real user turn arrived before the hidden Goal continuation; the user request was not rewritten.",
+            observedAt: observedAt(),
+          });
+          return;
+        }
         arm.consuming = true;
-        const outcome = await rewriteUserTurnRolloverPausedRequest(client, params, {
-          capsulePrompt: arm.capsulePrompt,
+        const common = {
           attribution: "devspace-ultra",
           toolName: "devspace_context_guardian",
-        });
+          sourceConversationId: arm.oldConversationId,
+          sourceMessageId: arm.sourceMessageId,
+          uiContinuityKey: arm.uiContinuityKey,
+          capsuleFingerprint: arm.capsuleFingerprint,
+        };
+        const outcome = arm.mode === "hidden-goal-continuation"
+          ? await rewriteHiddenRolloverPausedRequest(client, params, { prompt: arm.capsulePrompt, ...common })
+          : await rewriteUserTurnRolloverPausedRequest(client, params, { capsulePrompt: arm.capsulePrompt, ...common });
         if (!outcome.handled) {
           arm.consuming = false;
           await client.call("Fetch.continueRequest", { requestId }).catch(() => {});
@@ -717,16 +916,25 @@ export async function connectClassicContextMetadataPort(port, {
         if (!outcome.modified) {
           emit(onUserTurnRollover, {
             ok: false,
+            mode: consumedArm.mode,
             runtimeKey,
             port,
             goalId: consumedArm.goalId || null,
+            planId: consumedArm.planId || null,
             oldConversationId: consumedArm.oldConversationId,
-            error: outcome.error || "User-turn rollover request rewrite failed closed.",
+            error: outcome.error || "Auto Compact request rewrite failed closed.",
             observedAt: observedAt(),
           });
           return;
         }
-        void verifyUserTurnRollover({ arm: consumedArm, outcome });
+        void verifyUserTurnRollover({
+          arm: consumedArm,
+          outcome: {
+            ...outcome,
+            oldConversationId: consumedArm.oldConversationId,
+            visibleUserMessages,
+          },
+        });
       })().catch(async (error) => {
         const requestId = params?.requestId;
         if (requestId) await client.call("Fetch.failRequest", { requestId, errorReason: "Aborted" }).catch(() => {});
@@ -734,16 +942,18 @@ export async function connectClassicContextMetadataPort(port, {
         await clearUserTurnRolloverArm();
         emit(onUserTurnRollover, {
           ok: false,
+          mode: arm?.mode || "user-turn",
           runtimeKey,
           port,
           goalId: arm?.goalId || null,
+          planId: arm?.planId || null,
           oldConversationId: arm?.oldConversationId || null,
           error: error instanceof Error ? error.message : String(error),
           observedAt: observedAt(),
         });
       });
     });
-    return { armed: true, reused: false, oldConversationId: oldId };
+    return { armed: true, reused: false, mode: rolloverMode, oldConversationId: oldId };
   };
 
   const disposers = [];
@@ -878,6 +1088,16 @@ export async function connectClassicContextMetadataPort(port, {
       if (!text) throw new Error("Context Guardian runtime evaluation requires an expression.");
       return await evaluate(client, text);
     },
+    async nativeConversationDescriptor() {
+      const current = await evaluate(client, inspectExpression());
+      const conversationId = String(current?.conversationId || "").trim();
+      if (!conversationId) throw new Error("Native conversation descriptor requires the current ChatGPT conversation id.");
+      const descriptor = await evaluate(client, nativeConversationDescriptorExpression(conversationId));
+      if (!descriptor || descriptor.conversationId !== conversationId || !descriptor.currentNode) {
+        throw new Error("Native conversation descriptor did not return the current conversation boundary.");
+      }
+      return { runtimeKey, port, ...descriptor, observedAt: observedAt() };
+    },
     async refreshSnapshot() {
       const current = await evaluate(client, inspectExpression());
       if (userTurnRolloverArm && (
@@ -908,8 +1128,8 @@ export async function connectClassicContextMetadataPort(port, {
     async captureNativeSnapshot() {
       throw new Error("Context Guardian native snapshot reload is forbidden; wait for passively observed Classic-native metadata.");
     },
-    async armUserTurnRollover() {
-      return { armed: false, reason: "legacy-fresh-conversation-rollover-disabled" };
+    async armUserTurnRollover(input) {
+      return await armUserTurnRollover({ ...input, mode: input?.mode || "user-turn" });
     },
     async cancelUserTurnRollover() {
       const wasArmed = Boolean(userTurnRolloverArm);
@@ -925,8 +1145,8 @@ export async function connectClassicContextMetadataPort(port, {
       const rows = await evaluate(client, recentVisibleMessagesExpression(limit));
       return Array.isArray(rows) ? rows : [];
     },
-    async startHiddenRollover() {
-      throw new Error("Legacy fresh-conversation rollover is disabled; true Auto Compact must remain in the same conversation.");
+    async startHiddenRollover(input) {
+      return await armUserTurnRollover({ ...input, capsulePrompt: input?.prompt || input?.capsulePrompt, mode: "hidden-goal-continuation" });
     },
     get connectedAt() { return connectedAt; },
     get lastTurnRequestObservedAt() { return lastTurnRequestObservedAt; },
@@ -1009,6 +1229,10 @@ export class ClassicContextMetadataCdpAdapter {
 
   async refreshSnapshot(runtimeKey) {
     return await this.#session(runtimeKey).refreshSnapshot();
+  }
+
+  async nativeConversationDescriptor(runtimeKey) {
+    return await this.#session(runtimeKey).nativeConversationDescriptor();
   }
 
   async evaluateRuntime(runtimeKey, expression) {

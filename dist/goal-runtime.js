@@ -338,9 +338,31 @@ export class GoalRuntime {
     const current = normalizeConversationId(goal.conversationId);
     if (current === target) return clone(goal);
     if (current) {
-      throw new Error(`Goal ${goal.id} is already bound to conversation ${current} and cannot move to a different conversation.`);
+      throw new Error(`Goal ${goal.id} is already bound to conversation ${current} and cannot move without a verified Auto Compact continuation.`);
     }
     goal.conversationId = target;
+    this.touch(goal);
+    await this.save();
+    return clone(goal);
+  }
+
+  async rebindConversation({ goalId, oldConversationId, newConversationId, reason = "verified-auto-compact" }) {
+    await this.ready;
+    const goal = this.getGoal(goalId);
+    if (!["active", "paused", "blocked"].includes(goal.status)) throw new Error(`Goal ${goal.id} is terminal (${goal.status}) and cannot move conversations.`);
+    const prior = normalizeConversationId(oldConversationId);
+    const next = normalizeConversationId(newConversationId);
+    if (!prior || !next || prior === next) throw new Error("Verified Goal conversation rebind requires distinct old and new conversation ids.");
+    const current = normalizeConversationId(goal.conversationId);
+    if (current === next) return clone(goal);
+    if (current !== prior) throw new Error(`Goal ${goal.id} is bound to ${current || "none"}, not expected source ${prior}.`);
+    const collision = Object.values(this.state.goals).find((item) => item?.id !== goal.id && item?.status === "active" && normalizeConversationId(item.conversationId) === next);
+    if (collision) throw new Error(`Target conversation ${next} is already bound to active Goal ${collision.id}.`);
+    goal.conversationId = next;
+    goal.conversationContinuity = [
+      ...(Array.isArray(goal.conversationContinuity) ? goal.conversationContinuity : []),
+      { from: prior, to: next, at: this.nowIso(), reason: cleanText(reason, 240, "Conversation rebind reason") },
+    ].slice(-20);
     this.touch(goal);
     await this.save();
     return clone(goal);

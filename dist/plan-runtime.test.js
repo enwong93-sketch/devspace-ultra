@@ -186,9 +186,31 @@ try {
         "only an active Plan in the same conversation may block a fresh Plan",
       );
 
+      await assert.rejects(
+        () => bound.rebindConversation({ planId: planA.id, oldConversationId: "conversation-a", newConversationId: "conversation-b" }),
+        /already has active Plan/i,
+      );
+      const rebound = await bound.rebindConversation({
+        planId: planA.id,
+        oldConversationId: "conversation-a",
+        newConversationId: "conversation-continuation",
+      });
+      assert.equal(rebound.conversationId, "conversation-continuation");
+      assert.equal(rebound.conversationContinuity.at(-1).from, "conversation-a");
+      assert.equal(rebound.conversationContinuity.at(-1).to, "conversation-continuation");
+      assert.deepEqual((await bound.activePlans({ conversationId: "conversation-a" })).map((plan) => plan.id), []);
+      assert.deepEqual((await bound.activePlans({ conversationId: "conversation-continuation" })).map((plan) => plan.id), [planA.id]);
+      const reboundIdempotent = await bound.rebindConversation({
+        planId: planA.id,
+        oldConversationId: "conversation-a",
+        newConversationId: "conversation-continuation",
+      });
+      assert.equal(reboundIdempotent.conversationId, "conversation-continuation");
+
       const boundReloaded = new PlanRuntime({ stateDir: boundRoot });
       await boundReloaded.ready;
-      assert.equal((await boundReloaded.status(planA.id)).conversationId, "conversation-a");
+      assert.equal((await boundReloaded.status(planA.id)).conversationId, "conversation-continuation");
+      assert.equal((await boundReloaded.status(planA.id)).conversationContinuity.length, 1);
       assert.equal((await boundReloaded.status(planB.id)).conversationId, "conversation-b");
       await boundReloaded.close();
       await bound.close();

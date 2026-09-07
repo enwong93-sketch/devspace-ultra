@@ -536,10 +536,32 @@ try {
       const idempotent = await bound.bindConversation({ goalId: legacyGoal.id, conversationId: "conversation-legacy" });
       assert.equal(idempotent.conversationId, "conversation-legacy");
 
+      const rebound = await bound.rebindConversation({
+        goalId: legacyGoal.id,
+        oldConversationId: "conversation-legacy",
+        newConversationId: "conversation-continuation",
+      });
+      assert.equal(rebound.conversationId, "conversation-continuation");
+      assert.equal(rebound.conversationContinuity.at(-1).from, "conversation-legacy");
+      assert.equal(rebound.conversationContinuity.at(-1).to, "conversation-continuation");
+      assert.deepEqual((await bound.activeGoals({ conversationId: "conversation-legacy" })).map((goal) => goal.id), []);
+      assert.deepEqual((await bound.activeGoals({ conversationId: "conversation-continuation" })).map((goal) => goal.id), [legacyGoal.id]);
+      await assert.rejects(
+        () => bound.rebindConversation({ goalId: legacyGoal.id, oldConversationId: "conversation-wrong", newConversationId: "conversation-other" }),
+        /not expected source/i,
+      );
+      const reboundIdempotent = await bound.rebindConversation({
+        goalId: legacyGoal.id,
+        oldConversationId: "conversation-legacy",
+        newConversationId: "conversation-continuation",
+      });
+      assert.equal(reboundIdempotent.conversationId, "conversation-continuation");
+
       const boundReloaded = new GoalRuntime({ stateDir: boundRoot, now });
       await boundReloaded.ready;
       assert.equal((await boundReloaded.status(goalA.id)).conversationId, "conversation-a");
-      assert.equal((await boundReloaded.status(legacyGoal.id)).conversationId, "conversation-legacy");
+      assert.equal((await boundReloaded.status(legacyGoal.id)).conversationId, "conversation-continuation");
+      assert.equal((await boundReloaded.status(legacyGoal.id)).conversationContinuity.length, 1);
       await boundReloaded.close();
       await bound.close();
     } finally {

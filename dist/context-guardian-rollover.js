@@ -1,3 +1,4 @@
+import { attachAutoCompactContract, validateAutoCompactContinuation } from "./auto-compact-contract.js";
 import { estimateClassicInputTokens } from "./context-guardian-cdp.js";
 
 const DEFAULT_POLL_MS = 5_000;
@@ -48,7 +49,9 @@ export function buildMainCompactCapsule({ runtimeKey, goal, plan, context, recen
     ...completedSteps.map((step) => `Plan completed: ${step.id} — ${clip(step.text, 1_800)}`),
     ...reportHistory.map((report) => `Goal round ${report.round} reported: ${clip(report.summary, 2_000)}`),
   ];
-  const nextSteps = remainingSteps.map((step) => `${step.status}: ${step.id} — ${clip(step.text, 1_800)}`);
+  const nextSteps = remainingSteps.length
+    ? remainingSteps.map((step) => `${step.status}: ${step.id} — ${clip(step.text, 1_800)}`)
+    : ["Continue the current user task from the preserved Goal/current-state frontier and re-check live volatile state before acting."];
   const currentState = [
     `runtime=${runtimeKey || "unknown"}`,
     goal ? `Goal ${goal.id}: status=${goal.status}; round ${goal.round}; roundState=${goal.roundState}; revision=${goal.revision ?? "unknown"}` : "No active Goal was resolved for this runtime.",
@@ -80,8 +83,9 @@ export function buildMainCompactCapsule({ runtimeKey, goal, plan, context, recen
 function compactPrompt(record, { goal, sameRound = false, continuationPrompt } = {}) {
   const capsule = record?.capsule || record;
   const lines = [
-    "[DEVSPACE_CONTEXT_ROLLOVER]",
-    "This is hidden Context Guardian maintenance, not a new user request. Continue the same task in this fresh ChatGPT Classic Chat conversation without creating a synthetic user message.",
+    "[DEVSPACE_AUTO_COMPACT_CONTINUATION]",
+    "This is hidden Context Guardian maintenance, not a new user request. Continue the same user-facing ChatGPT Classic conversation through a compact backend continuation branch. The backend conversation id may change, but the UI continuity key, Goal/Plan authority and unfinished work must remain continuous.",
+    "Use only the selective capsule below. Do not reconstruct or inherit the full old transcript/tool history, and do not treat this as a zero-context new task.",
   ];
   if (goal && sameRound) {
     lines.push(`Continue the same working Goal round ${goal.round} for ${goal.id}. Do not call devspace_goal_round_begin. Read current Goal and Plan state, continue meaningful unfinished work, and call devspace_goal_turn_report only when this Goal round is actually ready to report.`);
@@ -135,14 +139,20 @@ export class ContextGuardianRolloverCoordinator {
     return first;
   }
 
-  async #resolvePlan() {
-    const plans = await this.planRuntime.activePlans({ limit: 1 });
+  async #resolvePlan(conversationId) {
+    const plans = await this.planRuntime.activePlans({ limit: 12, conversationId });
     return plans[0] || null;
   }
 
-  async #resolveGoal() {
-    const goals = await this.goalRuntime.activeGoals({ limit: 1 });
+  async #resolveGoal(conversationId) {
+    const goals = await this.goalRuntime.activeGoals({ limit: 12, conversationId });
     return goals[0] || null;
+  }
+
+  #uiContinuityKey({ goal, plan, runtimeKey } = {}) {
+    if (goal?.id) return `goal:${goal.id}`;
+    if (plan?.id) return `plan:${plan.id}`;
+    return `runtime:${runtimeKey || "unknown"}`;
   }
 
   async #refresh(runtimeKey) {
@@ -167,35 +177,58 @@ export class ContextGuardianRolloverCoordinator {
     return { snapshot, context };
   }
 
-  async #checkpoint({ runtimeKey, goal, plan, context, recentMessages, force = false }) {
+  async #checkpoint({ runtimeKey, goal, plan, context, recentMessages, mode = "user-turn", force = false }) {
     const used = Number(context?.pressure?.usedTokens ?? 0);
     const prior = this.prepared.get(runtimeKey);
     const now = Date.now();
-    if (!force && prior && prior.conversationId === context?.conversationId && now - prior.preparedAt < PREPARE_REUSE_MS && Math.abs(used - prior.usedTokens) < 4_096) {
+    if (!force && prior && prior.conversationId === context?.conversationId && prior.mode === mode && now - prior.preparedAt < PREPARE_REUSE_MS && Math.abs(used - prior.usedTokens) < 4_096) {
       return prior.record;
     }
-    const capsule = buildMainCompactCapsule({ runtimeKey, goal, plan, context, recentMessages });
+    const sourceDescriptor = await this.contextAdapter.nativeConversationDescriptor(runtimeKey);
+    if (!sourceDescriptor?.conversationId || sourceDescriptor.conversationId !== context?.conversationId || !sourceDescriptor.currentNode) {
+      throw new Error("Auto Compact source descriptor does not match the current Context Guardian conversation.");
+    }
+    const baseCapsule = buildMainCompactCapsule({ runtimeKey, goal, plan, context, recentMessages });
+    const exactUsage = /classic-native-(?:protocol|actual)/i.test(String(context?.pressure?.usageSource || ""))
+      ? Number(context?.pressure?.usedTokens)
+      : undefined;
+    const uiContinuityKey = this.#uiContinuityKey({ goal, plan, runtimeKey });
+    const capsule = attachAutoCompactContract(baseCapsule, {
+      source: {
+        ...sourceDescriptor,
+        exactUsedTokens: Number.isSafeInteger(exactUsage) && exactUsage >= 0 ? exactUsage : undefined,
+      },
+      uiContinuityKey,
+      runtimeKey,
+      goalId: goal?.id || null,
+      planId: plan?.id || null,
+      mode,
+    });
     const record = await this.continuityRuntime.checkpoint({
-      continuityKey: `context-guardian:${runtimeKey}`,
+      continuityKey: `context-guardian:${uiContinuityKey}`,
       ...capsule,
     });
     this.prepared.set(runtimeKey, {
       conversationId: context?.conversationId || null,
       usedTokens: used,
       preparedAt: now,
+      mode,
       record,
+      sourceDescriptor,
+      uiContinuityKey,
     });
     return record;
   }
 
-  async #notifyVerifiedRollover({ goalId, runtimeKey, oldConversationId, rolled } = {}) {
+  async #notifyVerifiedRollover({ goalId, planId, runtimeKey, oldConversationId, rolled } = {}) {
     if (!this.onVerifiedRollover || rolled?.ok !== true) return false;
     const prior = String(oldConversationId ?? "").trim();
     const next = String(rolled?.conversationId ?? "").trim();
-    if (!goalId || !runtimeKey || !prior || !next || prior === next) return false;
+    if (!runtimeKey || !prior || !next || prior === next) return false;
     try {
       await this.onVerifiedRollover({
-        goalId,
+        goalId: goalId || null,
+        planId: planId || null,
         runtimeKey,
         oldConversationId: prior,
         newConversationId: next,
@@ -238,29 +271,67 @@ export class ContextGuardianRolloverCoordinator {
           results.push({ runtimeKey, action: "skipped-generating", stage });
           continue;
         }
+        const conversationId = String(context?.conversationId || snapshot?.conversationId || "").trim();
         const [goal, plan, recentMessages] = await Promise.all([
-          this.#resolveGoal(),
-          this.#resolvePlan(),
+          this.#resolveGoal(conversationId),
+          this.#resolvePlan(conversationId),
           this.contextAdapter.recentVisibleMessages(runtimeKey, { limit: 8 }),
         ]);
-        const record = await this.#checkpoint({ runtimeKey, goal, plan, context, recentMessages, force: stage === "rollover" });
+        const record = await this.#checkpoint({ runtimeKey, goal, plan, context, recentMessages, mode: "user-turn", force: stage === "rollover" });
+        const capsule = record?.capsule || null;
         if (stage === "prepare") {
-          results.push({ runtimeKey, action: "prepared", capsuleId: record.capsuleId || record.id || null });
+          results.push({
+            runtimeKey,
+            action: "prepared-selective-capsule",
+            capsuleId: record.capsuleId || record.id || null,
+            uiContinuityKey: capsule?.continuity?.uiContinuityKey || null,
+            carryEstimatedTokens: capsule?.compression?.carryEstimatedTokens ?? null,
+            sourceBranchMessageCount: capsule?.compression?.sourceBranchMessageCount ?? null,
+          });
           continue;
         }
         if (goal?.roundState === "reported") {
           results.push({ runtimeKey, action: "prepared-reported-goal", capsuleId: record.capsuleId || record.id || null });
           continue;
         }
-        // Fresh-conversation rollover is not Auto Compact. Until a verified native
-        // same-conversation compaction mechanism exists, pressure may checkpoint
-        // durable state but must not navigate, rewrite the user's turn, or create a
-        // fresh Chat. Fail closed and leave the conversation untouched.
+        const armed = await this.contextAdapter.armUserTurnRollover(runtimeKey, {
+          mode: "user-turn",
+          capsulePrompt: compactPrompt(record, { goal, sameRound: goal?.roundState === "working" }),
+          oldConversationId: conversationId,
+          goalId: goal?.id || null,
+          planId: plan?.id || null,
+          sourceMessageId: capsule?.continuity?.sourceBoundaryMessageId,
+          uiContinuityKey: capsule?.continuity?.uiContinuityKey,
+          capsuleFingerprint: capsule?.continuity?.capsuleFingerprint,
+          sourceDescriptor: {
+            conversationId,
+            currentNode: capsule?.continuity?.sourceBoundaryMessageId,
+            payloadBytes: capsule?.compression?.sourcePayloadBytes,
+            branchMessageCount: capsule?.compression?.sourceBranchMessageCount,
+            textChars: capsule?.compression?.sourceTextChars,
+            exactUsedTokens: capsule?.compression?.sourceExactUsedTokens,
+          },
+          compressionContract: capsule,
+          capsuleId: record.capsuleId || record.id || null,
+        });
+        if (armed?.armed !== true) {
+          results.push({
+            runtimeKey,
+            action: "compact-arm-blocked",
+            reason: armed?.reason || "unknown",
+            capsuleId: record.capsuleId || record.id || null,
+          });
+          continue;
+        }
         results.push({
           runtimeKey,
-          action: "true-compact-required",
-          reason: "legacy-fresh-conversation-rollover-disabled",
+          action: "armed-user-turn-auto-compact",
           capsuleId: record.capsuleId || record.id || null,
+          uiContinuityKey: capsule?.continuity?.uiContinuityKey || null,
+          sourceConversationId: conversationId,
+          sourceBranchMessageCount: capsule?.compression?.sourceBranchMessageCount ?? null,
+          carryMessageCount: capsule?.compression?.carryMessageCount ?? null,
+          carryEstimatedTokens: capsule?.compression?.carryEstimatedTokens ?? null,
         });
       } catch (error) {
         results.push({ runtimeKey, action: "error", error: error instanceof Error ? error.message : String(error) });
@@ -275,15 +346,55 @@ export class ContextGuardianRolloverCoordinator {
     const oldConversationId = String(event?.oldConversationId || "").trim();
     const newConversationId = String(event?.newConversationId || event?.conversationId || "").trim();
     const goalId = String(event?.goalId || "").trim() || null;
+    const planId = String(event?.planId || "").trim() || null;
+    const capsuleId = String(event?.capsuleId || "").trim() || null;
     if (!runtimeKey || !oldConversationId || !newConversationId || oldConversationId === newConversationId) return false;
-    if (Number(event?.visibleUsers || 0) < 1 || Number(event?.hiddenMessages || 0) < 1 || Number(event?.visibleAssistants || 0) < 1) return false;
+    const target = event?.targetDescriptor || {};
+    let validation;
+    try {
+      validation = validateAutoCompactContinuation({
+        contract: event?.compressionContract,
+        sourceConversationId: oldConversationId,
+        targetConversationId: newConversationId,
+        targetMappingCount: target?.mappingCount,
+        targetBranchMessageCount: target?.branchMessageCount,
+        targetPayloadBytes: target?.payloadBytes,
+        hiddenMessages: event?.hiddenMessages,
+        visibleUsers: event?.visibleUsers,
+        visibleAssistants: event?.visibleAssistants,
+        uiContinuityVerified: Boolean(
+          event?.uiContinuityKey
+          && target?.devspaceContinuity?.uiContinuityKey === event.uiContinuityKey
+          && target?.devspaceContinuity?.sourceConversationId === oldConversationId
+        ),
+        nativeContinuationSourceId: event?.nativeContinuationSourceId || null,
+      });
+    } catch (error) {
+      if (capsuleId && typeof this.continuityRuntime.updateCapsuleMeta === "function") {
+        await this.continuityRuntime.updateCapsuleMeta(capsuleId, {
+          status: "verification-failed",
+          candidateConversationId: newConversationId,
+          error: error instanceof Error ? error.message : String(error),
+          verifiedAt: new Date().toISOString(),
+        }).catch(() => {});
+      }
+      return false;
+    }
+    const rebound = await this.#notifyVerifiedRollover({
+      goalId,
+      planId,
+      runtimeKey,
+      oldConversationId,
+      rolled: { ...event, ...validation, ok: true, conversationId: newConversationId },
+    });
+    if ((goalId || planId) && rebound !== true) return false;
     this.prepared.delete(runtimeKey);
-    if (goalId) {
-      await this.#notifyVerifiedRollover({
-        goalId,
-        runtimeKey,
-        oldConversationId,
-        rolled: { ...event, ok: true, conversationId: newConversationId },
+    if (capsuleId && typeof this.continuityRuntime.updateCapsuleMeta === "function") {
+      await this.continuityRuntime.updateCapsuleMeta(capsuleId, {
+        status: "verified-continuation",
+        toConversationId: newConversationId,
+        verifiedAt: new Date().toISOString(),
+        validation,
       });
     }
     return true;
@@ -300,28 +411,60 @@ export class ContextGuardianRolloverCoordinator {
     if (!snapshot?.ok || context.supportedChatMode !== true || snapshot.mode === "work" || snapshot.generating || Number(snapshot.composerTextChars || 0) > 0) {
       return { handled: false, reason: "unsafe-boundary", context };
     }
+    const conversationId = String(context?.conversationId || snapshot?.conversationId || "").trim();
     if (context?.pressure?.stage !== "rollover") {
       if (context?.pressure?.stage === "prepare") {
         const [goal, plan, recentMessages] = await Promise.all([
           this.goalRuntime.status(goalId),
-          this.#resolvePlan(),
+          this.#resolvePlan(conversationId),
           this.contextAdapter.recentVisibleMessages(runtimeKey, { limit: 8 }),
         ]);
-        await this.#checkpoint({ runtimeKey, goal, plan, context, recentMessages });
+        await this.#checkpoint({ runtimeKey, goal, plan, context, recentMessages, mode: "hidden-goal-continuation" });
       }
       return { handled: false, reason: "headroom-available", context };
     }
     const [goal, plan, recentMessages] = await Promise.all([
       this.goalRuntime.status(goalId),
-      this.#resolvePlan(),
+      this.#resolvePlan(conversationId),
       this.contextAdapter.recentVisibleMessages(runtimeKey, { limit: 8 }),
     ]);
-    const record = await this.#checkpoint({ runtimeKey, goal, plan, context, recentMessages, force: true });
+    const record = await this.#checkpoint({ runtimeKey, goal, plan, context, recentMessages, mode: "hidden-goal-continuation", force: true });
+    const capsule = record?.capsule || null;
+    const armed = await this.contextAdapter.startHiddenRollover(runtimeKey, {
+      prompt: compactPrompt(record, { goal, sameRound: false, continuationPrompt: prompt }),
+      oldConversationId: conversationId,
+      goalId: goal?.id || goalId,
+      planId: plan?.id || null,
+      sourceMessageId: capsule?.continuity?.sourceBoundaryMessageId,
+      uiContinuityKey: capsule?.continuity?.uiContinuityKey,
+      capsuleFingerprint: capsule?.continuity?.capsuleFingerprint,
+      sourceDescriptor: {
+        conversationId,
+        currentNode: capsule?.continuity?.sourceBoundaryMessageId,
+        payloadBytes: capsule?.compression?.sourcePayloadBytes,
+        branchMessageCount: capsule?.compression?.sourceBranchMessageCount,
+        textChars: capsule?.compression?.sourceTextChars,
+        exactUsedTokens: capsule?.compression?.sourceExactUsedTokens,
+      },
+      compressionContract: capsule,
+      capsuleId: record.capsuleId || record.id || null,
+    });
+    if (armed?.armed !== true) {
+      return {
+        handled: false,
+        blocked: true,
+        reason: `auto-compact-arm-failed:${armed?.reason || "unknown"}`,
+        context,
+        capsuleId: record.capsuleId || record.id || null,
+      };
+    }
     return {
       handled: false,
-      reason: "true-same-conversation-compact-required",
+      armed: true,
+      reason: "hidden-goal-auto-compact-armed",
       context,
       capsuleId: record.capsuleId || record.id || null,
+      uiContinuityKey: capsule?.continuity?.uiContinuityKey || null,
     };
   }
 

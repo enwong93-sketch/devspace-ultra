@@ -1,8 +1,8 @@
 # Automatic Conversation Continuity
 
-Status: **DevSpace Ultra v0.3.1**.
+Status: **Worker continuity v0.3.1; Main selective continuation v0.5**.
 
-DevSpace Ultra can keep a managed ChatGPT Classic worker running across multiple ChatGPT conversations instead of waiting for one conversation to hit its hard context limit.
+DevSpace Ultra can keep a managed ChatGPT Classic worker or a user-facing Main task running across multiple backend conversation IDs instead of waiting for one context window to hit its hard limit. Worker identity continuity and Main UI/Goal/Plan continuity are separate transport paths but share the same bounded capsule store.
 
 ## Policy
 
@@ -40,6 +40,22 @@ A managed capsule can preserve:
 The full prior transcript is not copied into the new prompt. Exact live state should be re-read from files/tools when correctness depends on it.
 
 PowerMem integration is optional and fail-open: when a trusted local `powermem-shared` capability is installed, DevSpace can write a concise durable checkpoint to the shared PowerMem backend. Auto Compact itself does not require PowerMem.
+
+## Main selective continuation
+
+Main-01/Main-02+ never use the Worker ticket path. Context Guardian prepares a capsule from backend-authoritative Goal/Plan state and a sanitized native conversation descriptor, then waits for an authorized transport boundary. The next real user Send can be rewritten with one hidden capsule plus the unchanged visible user message; an already-authorized Goal Host Bridge follow-up can instead be rewritten as one hidden Goal continuation with no visible synthetic user bubble.
+
+Backend conversation ID changes are allowed, but do not by themselves establish continuity. DevSpace requires one logical UI continuity key and a compression contract:
+
+- non-empty Goal objective, constraints and current/next execution frontier;
+- bounded carry size (`30,000` capsule characters and a conservative carry-token ceiling by default);
+- no `mapping`, full transcript, raw messages, raw tool history, hidden reasoning, expired transport state or credentials;
+- every available exact-token, payload-byte, mapping-count and current-branch-message ratio below the configured carry ratio;
+- a target descriptor that independently proves the new mapping, current branch and payload are materially smaller;
+- the hidden capsule fingerprint/source ID/UI continuity markers survive;
+- a hidden capsule and assistant response exist, and a real visible user message exists for user-turn mode.
+
+Only then does a guarded transaction rebind the native MCP conversation authority, Goal, Plan, progress narration and Host Overlay. A failed validation or partial transfer leaves the old authority intact. Trigger pressure may be conservative when exact native token telemetry is absent; `get_context_remaining` and any exact-usage claim remain unavailable rather than substituting the estimate. The built-in `devspace-auto-compact` capability exposes its Skill and a sanitized `auto-compact-status` command tool without returning raw capsule text or state paths.
 
 ## Protected interactive runtimes
 

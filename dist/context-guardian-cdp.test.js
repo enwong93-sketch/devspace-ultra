@@ -5,6 +5,7 @@ import {
   parseNativeClassicModelResponse,
   parseClassicTurnRequest,
   estimateClassicConversationPayloadTokens,
+  summarizeClassicConversationPayload,
   buildClassicHiddenRolloverBody,
   buildClassicUserTurnRolloverBody,
   rewriteHiddenRolloverPausedRequest,
@@ -168,6 +169,46 @@ import { fingerprintClassicSession } from "./classic-conversation-authority.js";
   });
   assert.ok(Number.isInteger(estimated));
   assert.ok(estimated >= 30, "conversation snapshot estimator must remain conservative across CJK/tool content");
+
+  const summarized = summarizeClassicConversationPayload({
+    conversation_id: "conversation-summary",
+    current_node: "node-assistant",
+    title: "Selective continuation",
+    default_model_slug: "gpt-5-6-pro",
+    mapping: {
+      root: { id: "root", parent: null, message: { author: { role: "system" }, content: { parts: [""] } } },
+      "node-user": { id: "node-user", parent: "root", message: { author: { role: "user" }, content: { parts: ["Keep the active Goal and Plan frontier."] } } },
+      "node-hidden": { id: "node-hidden", parent: "node-user", message: {
+        author: { role: "tool" },
+        content: { parts: ["bounded compact capsule"] },
+        metadata: {
+          is_visually_hidden_from_conversation: true,
+          devspace_source_conversation_id: "conversation-source",
+          devspace_source_boundary_message_id: "source-boundary",
+          devspace_ui_continuity_key: "goal:goal-a",
+          devspace_capsule_fingerprint: "a".repeat(64),
+        },
+      } },
+      "node-assistant": { id: "node-assistant", parent: "node-hidden", message: { author: { role: "assistant" }, recipient: "all", content: { parts: ["Continue verified work only."] } } },
+      orphan: { id: "orphan", parent: null, message: { author: { role: "user" }, content: { parts: ["ORPHAN MUST NOT ENTER CURRENT BRANCH"] } } },
+    },
+    context_truncation_continuation: {
+      source_conversation_id: "conversation-source",
+      boundary_message_id: "source-boundary",
+      visible_from_message_id: "node-user",
+    },
+  });
+  assert.equal(summarized.conversationId, "conversation-summary");
+  assert.equal(summarized.branchMessageCount, 4);
+  assert.equal(summarized.mappingCount, 5);
+  assert.equal(summarized.visibleUsers, 1);
+  assert.equal(summarized.visibleAssistants, 1);
+  assert.equal(summarized.hiddenMessages, 1);
+  assert.ok(summarized.estimatedTokens > 0);
+  assert.deepEqual(summarized.recentVisibleMessages.map((item) => item.role), ["user", "assistant"]);
+  assert.equal(JSON.stringify(summarized).includes("ORPHAN MUST NOT ENTER CURRENT BRANCH"), false);
+  assert.equal(summarized.devspaceContinuity.uiContinuityKey, "goal:goal-a");
+  assert.equal(summarized.contextTruncationContinuation.sourceConversationId, "conversation-source");
 
   const hidden = buildClassicHiddenRolloverBody({
     action: "next",

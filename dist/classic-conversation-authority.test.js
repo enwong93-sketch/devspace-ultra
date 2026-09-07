@@ -51,6 +51,23 @@ try {
   const ambiguous = restored.snapshot().sessions[0];
   assert.equal(ambiguous.ambiguous, true);
   assert.deepEqual(ambiguous.conversationIds.sort(), ["6a9c696c-9630-83e8-a70f-4bbe4b59e5d1", "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"].sort());
+
+  const verified = await restored.acceptVerifiedRollover({
+    oldConversationId: "6a9c696c-9630-83e8-a70f-4bbe4b59e5d1",
+    newConversationId: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+    runtimeKey: "Main-02",
+    observedAt: "2026-09-06T03:52:00.000Z",
+  });
+  assert.equal(verified.updatedSessions, 1);
+  assert.equal(restored.resolveFingerprint(fp)?.conversationId, "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb");
+  const migrated = restored.snapshot().sessions[0];
+  assert.equal(migrated.ambiguous, false);
+  assert.equal(migrated.continuity.at(-1).from, "6a9c696c-9630-83e8-a70f-4bbe4b59e5d1");
+  assert.equal(migrated.continuity.at(-1).to, "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb");
+  await assert.rejects(
+    () => restored.acceptVerifiedRollover({ oldConversationId: "missing-source", newConversationId: "new-target", runtimeKey: "Main-02" }),
+    /No Classic MCP session authority/i,
+  );
 } finally {
   await rm(root, { recursive: true, force: true });
 }

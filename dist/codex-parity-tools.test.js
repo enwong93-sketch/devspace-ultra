@@ -113,8 +113,21 @@ try {
         conversationId: "conversation-a",
         currentModelSlug: "gpt-test",
         contextWindowTokens: 1000,
-        hostMeasuredTokens: 400,
+        hostMeasuredTokens: 999,
         hostUsageObservedAt: "2026-09-07T03:04:00.000Z",
+      };
+    },
+  };
+  const exactUsageAuthority = {
+    async status({ conversationId }) {
+      assert.equal(conversationId, "conversation-a");
+      return {
+        available: true,
+        exactUsedTokens: 400,
+        usageKind: "input_tokens",
+        evidencePath: "event_12.usage.input_tokens",
+        observedAt: "2026-09-07T03:04:00.000Z",
+        source: "classic-native-protocol",
       };
     },
   };
@@ -124,6 +137,7 @@ try {
     capabilityRuntime,
     codexMcpBridge,
     contextGuardian,
+    exactUsageAuthority,
     toolCatalog,
     sleep: async (ms) => { slept = ms; },
     now: () => fixedTime,
@@ -149,6 +163,10 @@ try {
   const contextResult = await handlers.get("get_context_remaining").handler({ mainNumber: 1 });
   assert.equal(contextResult.structuredContent.available, true);
   assert.equal(contextResult.structuredContent.remainingTokens, 600);
+  assert.equal(contextResult.structuredContent.usedTokens, 400, "legacy hostMeasuredTokens must not override exact authority");
+  assert.equal(contextResult.structuredContent.source, "classic-native-protocol");
+  assert.equal(contextResult.structuredContent.evidencePath, "event_12.usage.input_tokens");
+  assert.equal(contextResult.structuredContent.estimatorFallbackUsed, false);
 
   const searchResult = await handlers.get("tool_search").handler({ query: "image", limit: 10, includeCapabilities: true });
   assert.equal(searchResult.structuredContent.coreTools.some((entry) => entry.name === "view_image"), true);
@@ -169,7 +187,8 @@ try {
     workspaces,
     capabilityRuntime,
     codexMcpBridge,
-    contextGuardian: { async status() { return { contextWindowTokens: 1000, hostMeasuredTokens: null }; } },
+    contextGuardian: { async status() { return { conversationId: "conversation-a", contextWindowTokens: 1000, hostMeasuredTokens: 999 }; } },
+    exactUsageAuthority: { async status() { return { available: false, reason: "exact-native-token-field-not-exposed", source: "unavailable" }; } },
     toolCatalog: unsupportedCatalog,
   });
   const unsupported = await unsupportedHandlers.get("request_user_input").handler({ questions });
@@ -177,6 +196,9 @@ try {
   const unavailableContext = await unsupportedHandlers.get("get_context_remaining").handler({ mainNumber: 1 });
   assert.equal(unavailableContext.structuredContent.available, false);
   assert.equal(unavailableContext.structuredContent.remainingTokens, null);
+  assert.equal(unavailableContext.structuredContent.usedTokens, null);
+  assert.equal(unavailableContext.structuredContent.reason, "exact-native-token-field-not-exposed");
+  assert.equal(unavailableContext.structuredContent.estimatorFallbackUsed, false);
 
   console.log(JSON.stringify({
     ok: true,

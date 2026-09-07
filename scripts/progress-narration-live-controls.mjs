@@ -64,8 +64,16 @@ const stateExpression = `(() => {
 
 try {
   await client.open();
-  const before = await evaluate(stateExpression);
+  let before = await evaluate(stateExpression);
   assert.equal(before?.uiVersion, "4");
+  if (before?.size !== "compact") {
+    await evaluate(`(() => {
+      document.querySelector('#devspace-progress-narration-root [data-action="compact"]')?.click();
+      return true;
+    })()`);
+    await wait(450);
+    before = await evaluate(stateExpression);
+  }
   assert.equal(before?.size, "compact");
   assert.equal(before?.controls, 4);
   if (Number(before?.goalWidth) > 0) {

@@ -16,8 +16,11 @@ assert.match(server, /registerContextGuardianTools/, "every MCP server must expo
 assert.match(server, /contextGuardian\.close\(\)/, "Context Guardian runtime must close during backend shutdown");
 assert.match(server, /contextMetadataAdapter\.close\(\)/, "Context metadata CDP observer must close during backend shutdown");
 assert.match(runtime, /context_guardian_status/, "Context Guardian must expose one read-only status tool");
-assert.doesNotMatch(cdp, /authorization\s*:/i, "Context Guardian observer must not persist or construct authorization headers");
-assert.doesNotMatch(cdp, /cookie\s*:/i, "Context Guardian observer must not persist or construct cookies");
+assert.match(cdp, /fetch\('\/api\/auth\/session'/, "native descriptor reads must obtain an ephemeral in-page ChatGPT session");
+assert.match(cdp, /authenticatedBackendFetch:Boolean\(accessToken\), rawContentReturned:false, credentialsReturned:false/, "authenticated descriptor reads must return only a sanitized structural summary");
+assert.doesNotMatch(cdp, /from\s+["']node:fs/, "Context Guardian CDP observer must not write authenticated payloads or credentials to disk");
+assert.doesNotMatch(cdp, /cookie\s*:/i, "Context Guardian observer must not construct or persist cookies");
 assert.doesNotMatch(cdp, /conduit_token|resume_conversation_token/i, "Context Guardian observer must not persist transient ChatGPT transport tokens");
+assert.doesNotMatch(cdp, /[,{]\s*accessToken\s*:|credentialsReturned\s*:\s*true|rawContentReturned\s*:\s*true/, "ephemeral access tokens and raw conversation content must never leave the in-page descriptor fetch");
 
-console.log(JSON.stringify({ ok: true, gate: "context-guardian-static", nativeCatalog: true, safeMetadataOnly: true }));
+console.log(JSON.stringify({ ok: true, gate: "context-guardian-static", nativeCatalog: true, sanitizedAuthenticatedDescriptor: true, credentialsPersisted: false, rawContentReturned: false }));

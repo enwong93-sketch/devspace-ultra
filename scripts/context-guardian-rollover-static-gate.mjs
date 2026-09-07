@@ -6,24 +6,31 @@ const rollover = await readFile(new URL("../dist/context-guardian-rollover.js", 
 const server = await readFile(new URL("../dist/server.js", import.meta.url), "utf8");
 const retiredLiveGate = await readFile(new URL("./context-guardian-main-rollover-live-gate.mjs", import.meta.url), "utf8");
 
-// Legacy helper transforms may remain as testable pure functions while migration
-// completes, but the live CDP adapter/control plane must not perform any page
-// navigation/reload or invoke fresh-conversation rollover as Auto Compact.
+// Auto Compact may move to a fresh backend conversation id, but only by
+// rewriting the next real user/hidden Goal continuation request with one
+// selective hidden capsule. The live control plane must never reload/navigate
+// ChatGPT, synthesize a visible user message, or copy the old mapping.
 assert.match(cdp, /captureNativeSnapshot\(\)[\s\S]*reload is forbidden/);
-assert.match(cdp, /armUserTurnRollover\(\)[\s\S]*legacy-fresh-conversation-rollover-disabled/);
-assert.match(cdp, /startHiddenRollover\(\)[\s\S]*Legacy fresh-conversation rollover is disabled/);
+assert.match(cdp, /armUserTurnRollover\(input\)[\s\S]*mode:\s*input\?\.mode \|\| "user-turn"/);
+assert.match(cdp, /startHiddenRollover\(input\)[\s\S]*hidden-goal-continuation/);
+assert.match(cdp, /delete body\.conversation_id/);
+assert.match(cdp, /is_context_truncation_continuation = true/);
+assert.match(cdp, /branching_from_conversation_id/);
+assert.match(cdp, /devspace_ui_continuity_key/);
+assert.match(cdp, /devspace_capsule_fingerprint/);
 assert.doesNotMatch(cdp, /Page\.reload|Page\.navigate|location\.reload/, "Context Guardian CDP live path must contain zero automated page reload/navigation primitives");
 assert.doesNotMatch(cdp, /button\.click\(\)/, "Context Guardian live path must not synthesize hidden Send clicks");
 assert.match(cdp, /composerTextChars/);
 assert.match(cdp, /lastTurnRequestObservedAt/);
 assert.match(cdp, /ClassicTurnIdentityCorrelator/);
 
-assert.match(rollover, /action:\s*"true-compact-required"/);
-assert.match(rollover, /legacy-fresh-conversation-rollover-disabled/);
-assert.match(rollover, /true-same-conversation-compact-required/);
-assert.match(rollover, /Page refresh\/reload is forbidden/);
-assert.doesNotMatch(rollover, /contextAdapter\.armUserTurnRollover/);
-assert.doesNotMatch(rollover, /contextAdapter\.startHiddenRollover/);
+assert.match(rollover, /attachAutoCompactContract/);
+assert.match(rollover, /validateAutoCompactContinuation/);
+assert.match(rollover, /action:\s*"armed-user-turn-auto-compact"/);
+assert.match(rollover, /contextAdapter\.armUserTurnRollover/);
+assert.match(rollover, /contextAdapter\.startHiddenRollover/);
+assert.match(rollover, /uiContinuityKey/);
+assert.match(rollover, /verified-continuation/);
 assert.doesNotMatch(rollover, /nativeSnapshotRefreshEnabled/);
 assert.doesNotMatch(rollover, /captureNativeSnapshot\(/);
 
@@ -40,7 +47,11 @@ console.log(JSON.stringify({
   ok: true,
   gate: "context-guardian-rollover-static",
   checkpointOnlyAtPressure: true,
-  trueSameConversationCompactRequired: true,
-  freshConversationCompaction: false,
+  selectiveContinuationCompaction: true,
+  backendConversationIdMayChange: true,
+  uiContinuityRequired: true,
+  fullHistoryInheritanceRejected: true,
+  zeroContextRejected: true,
   automaticPageActionCount: 0,
+  syntheticVisibleUserMessages: 0,
 }));
