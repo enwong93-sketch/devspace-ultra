@@ -1,10 +1,10 @@
 import { readFile } from "node:fs/promises";
 
-const DEFAULT_POLL_MS = 1_000;
-const DEFAULT_MIN_GAP_MS = 45_000;
-const DEFAULT_MAX_SILENCE_MS = 180_000;
-const DEFAULT_LONG_TOOL_MS = 120_000;
-const DEFAULT_MILESTONE_EVERY = 4;
+const DEFAULT_POLL_MS = 250;
+const DEFAULT_MIN_GAP_MS = 250;
+const DEFAULT_MAX_SILENCE_MS = 15_000;
+const DEFAULT_LONG_TOOL_MS = 10_000;
+const DEFAULT_MILESTONE_EVERY = 1;
 const MAX_SESSIONS = 64;
 const SENSITIVE = /(Bearer\s+\S+|(?:password|passwd|pwd|token|secret|api[_-]?key|access[_-]?key|client[_-]?secret)\s*[=:]\s*\S+)/i;
 
@@ -116,25 +116,37 @@ function stepChangeMessage(plan) {
   return `上一個階段已經收斂；而家轉入${stepPhrase(plan)}。下一步會用針對性測試同真實流程驗收，確認唔係只改咗表面設定。`;
 }
 
+function toolPhrase(row) {
+  const name = clip(row?.lastToolName, 120);
+  return name ? `「${name}」` : categoryLabel(row?.lastToolCategory);
+}
+
+function durationPhrase(row) {
+  const durationMs = number(row?.lastDurationMs);
+  if (durationMs < 1_000) return "";
+  return `，用時約 ${Math.max(1, Math.round(durationMs / 1_000))} 秒`;
+}
+
 function failureMessage(row, plan) {
-  return `啱啱嘅${categoryLabel(row?.lastToolCategory)}未通過，現有成果已保留。我會喺${stepPhrase(plan)}入面先按實際錯誤縮窄原因，再改最少範圍，唔會盲目重做。`;
+  return `第 ${Math.max(1, number(row?.stepCount, 1))} 個已驗證步驟 ${toolPhrase(row)} 未通過${durationPhrase(row)}。現有成果已保留；我會喺${stepPhrase(plan)}入面按實際錯誤縮窄原因，再改最少範圍，唔會盲目重做。`;
 }
 
 function milestoneMessage(row, plan) {
   const category = String(row?.lastToolCategory || "work");
+  const prefix = `第 ${Math.max(1, number(row?.stepCount, 1))} 個已驗證步驟 ${toolPhrase(row)} 已完成${durationPhrase(row)}。`;
   if (category === "inspection") {
-    return `現況同關鍵證據已核對；我會繼續${stepPhrase(plan)}，按結果收窄根因並落實修正，避免靠猜測推進。`;
+    return `${prefix}現況同關鍵證據已核對；我會繼續${stepPhrase(plan)}，按結果收窄根因並落實下一步。`;
   }
   if (category === "change") {
-    return `核心修改已經落盤；下一步會繼續${stepPhrase(plan)}嘅針對性測試同真實流程驗收，確認唔係淨係程式碼存在。`;
+    return `${prefix}核心修改已經落盤；下一步會做針對性測試同真實流程驗收，確認唔係淨係程式碼存在。`;
   }
   if (category === "verification") {
-    return `呢一輪測試／驗證已經回傳結果；我會繼續對照 production 同實際前端狀態，未達真實使用條件前唔會當成完成。`;
+    return `${prefix}測試／命令已經回傳結果；我會繼續對照 production 同實際前端狀態，未達真實使用條件前唔會當成完成。`;
   }
   if (category === "capability") {
-    return `所需本機能力已成功調用；下一步會喺${stepPhrase(plan)}入面驗證實際路由同輸出，避免工具存在但工作仍然用唔到。`;
+    return `${prefix}本機能力已成功回傳；下一步會驗證實際路由同輸出，避免工具存在但工作仍然用唔到。`;
   }
-  return `${categoryLabel(category)}已有新結果；我會繼續完成${stepPhrase(plan)}餘下可做部分，並以實際驗收作準。`;
+  return `${prefix}${categoryLabel(category)}已有新結果；我會繼續完成${stepPhrase(plan)}餘下可做部分，並以實際驗收作準。`;
 }
 
 function silenceMessage(row, plan, nowMs) {
@@ -160,6 +172,20 @@ function existingNarration(messages, goalId, round) {
     .sort((left, right) => Date.parse(right?.at || 0) - Date.parse(left?.at || 0))[0] || null;
 }
 
+function normalizedBoundaries(row) {
+  return (Array.isArray(row?.recentBoundaries) ? row.recentBoundaries : [])
+    .filter((item) => item?.at && Number.isInteger(Number(item?.stepCount)))
+    .map((item) => ({
+      at: String(item.at),
+      stepCount: Math.max(1, Math.floor(Number(item.stepCount))),
+      toolName: clip(item.toolName, 120) || "unknown",
+      toolCategory: clip(item.toolCategory, 80) || "work",
+      success: item.success === true ? true : item.success === false ? false : null,
+      durationMs: Number.isFinite(Number(item.durationMs)) ? Math.max(0, Math.round(Number(item.durationMs))) : null,
+    }))
+    .sort((left, right) => left.stepCount - right.stepCount || Date.parse(left.at) - Date.parse(right.at));
+}
+
 export function decideGoalProgressNarration({ row, plan, session, nowMs, minGapMs, maxSilenceMs, longToolMs, milestoneEvery } = {}) {
   const key = runKey(row);
   if (!key || !row?.conversationId) return null;
@@ -174,16 +200,39 @@ export function decideGoalProgressNarration({ row, plan, session, nowMs, minGapM
   if (stepId && stepId !== session.lastPlanStepId) {
     return { kind: "stage", key: `${key}:stage:${stepId}`, text: stepChangeMessage(plan), force: true };
   }
+  const pendingBoundary = normalizedBoundaries(row)
+    .find((item) => item.stepCount > number(session?.lastNarratedStepCount));
+  if (pendingBoundary && gapMs >= minGapMs) {
+    const boundaryRow = {
+      ...row,
+      stepCount: pendingBoundary.stepCount,
+      lastBoundaryAt: pendingBoundary.at,
+      lastToolName: pendingBoundary.toolName,
+      lastToolCategory: pendingBoundary.toolCategory,
+      lastSuccess: pendingBoundary.success,
+      lastDurationMs: pendingBoundary.durationMs,
+    };
+    return {
+      kind: pendingBoundary.success === false ? "blocker" : "milestone",
+      key: `${key}:boundary:${pendingBoundary.stepCount}:${pendingBoundary.at}`,
+      text: pendingBoundary.success === false ? failureMessage(boundaryRow, plan) : milestoneMessage(boundaryRow, plan),
+      force: true,
+      boundaryAt: pendingBoundary.at,
+      toolStepCount: pendingBoundary.stepCount,
+      toolName: pendingBoundary.toolName,
+      toolCategory: pendingBoundary.toolCategory,
+    };
+  }
   const boundaryChanged = Boolean(lastBoundaryAt && lastBoundaryAt !== session.lastBoundaryAt);
   if (boundaryChanged && row?.lastSuccess === false) {
-    return { kind: "blocker", key: `${key}:failed:${lastBoundaryAt}`, text: failureMessage(row, plan), force: true };
+    return { kind: "blocker", key: `${key}:failed:${lastBoundaryAt}`, text: failureMessage(row, plan), force: true, boundaryAt: lastBoundaryAt, toolStepCount: stepCount, toolName: row?.lastToolName || null, toolCategory: row?.lastToolCategory || null };
   }
   if (boundaryChanged) {
     const categoryChanged = row?.lastToolCategory && row.lastToolCategory !== session.lastNarratedCategory;
     const enoughBoundaries = stepCount - number(session.lastNarratedStepCount) >= milestoneEvery;
     const longTool = number(row?.lastDurationMs) >= longToolMs;
     if (gapMs >= minGapMs && (categoryChanged || enoughBoundaries || longTool)) {
-      return { kind: "milestone", key: `${key}:milestone:${lastBoundaryAt}`, text: milestoneMessage(row, plan), force: false };
+      return { kind: "milestone", key: `${key}:milestone:${lastBoundaryAt}`, text: milestoneMessage(row, plan), force: false, boundaryAt: lastBoundaryAt, toolStepCount: stepCount, toolName: row?.lastToolName || null, toolCategory: row?.lastToolCategory || null };
     }
   }
   if (gapMs >= maxSilenceMs) {
@@ -328,8 +377,8 @@ export class GoalProgressNarrator {
         source: "goal-run-events",
         kind: decision.kind,
         dedupeKey: decision.key,
-        toolCategory: row.lastToolCategory || row.inFlightToolCategory || null,
-        toolStepCount: number(row.stepCount),
+        toolCategory: decision.toolCategory || row.lastToolCategory || row.inFlightToolCategory || null,
+        toolStepCount: decision.toolStepCount ?? number(row.stepCount),
       });
       latestMessageCount = snapshot?.messages?.length || latestMessageCount;
       Object.assign(session, {
@@ -337,9 +386,9 @@ export class GoalProgressNarrator {
         lastMessageAtMs: nowMs,
         lastKey: decision.key,
         lastPlanStepId: plan.stepId || null,
-        lastBoundaryAt: row.lastBoundaryAt || null,
-        lastNarratedCategory: row.lastToolCategory || row.inFlightToolCategory || session.lastNarratedCategory || null,
-        lastNarratedStepCount: number(row.stepCount),
+        lastBoundaryAt: decision.boundaryAt || row.lastBoundaryAt || null,
+        lastNarratedCategory: decision.toolCategory || row.lastToolCategory || row.inFlightToolCategory || session.lastNarratedCategory || null,
+        lastNarratedStepCount: decision.toolStepCount ?? number(row.stepCount),
       });
       published.push({ runKey: key, conversationId: row.conversationId, kind: decision.kind, dedupeKey: decision.key });
     }

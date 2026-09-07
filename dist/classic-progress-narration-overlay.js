@@ -5,9 +5,9 @@ import { activeProgressRows } from "./goal-progress-narrator.js";
 const ROOT_ID = "devspace-progress-narration-root";
 const STYLE_ID = "devspace-progress-narration-style";
 const LEASE_KEY = "__devspaceProgressNarrationLeaseV1";
-const LEASE_MS = 15_000;
-const DEFAULT_POLL_MS = 1_000;
-const DEFAULT_MAX_MESSAGES = 12;
+const LEASE_MS = 60_000;
+const DEFAULT_POLL_MS = 500;
+const DEFAULT_MAX_MESSAGES = 48;
 const DEFAULT_MAX_AGE_MS = 30 * 60_000;
 
 function clean(value, max) {
@@ -110,7 +110,7 @@ export function conversationProgressNarrationMap({
       item.conversationId === conversationId
       && item.goalId === context.goalId
       && item.round === context.round
-    ))).slice(-Math.max(1, Math.min(20, number(maxMessages, DEFAULT_MAX_MESSAGES))));
+    ))).slice(-Math.max(1, Math.min(64, number(maxMessages, DEFAULT_MAX_MESSAGES))));
     if (!messages.length) continue;
     result[conversationId] = {
       conversationId,
@@ -151,29 +151,38 @@ export function buildProgressNarrationScript(map) {
       style.textContent = \`
 #${ROOT_ID}{position:fixed;z-index:44;box-sizing:border-box;pointer-events:auto;overflow:hidden;padding:0;border:1px solid rgba(0,0,0,.10);border-radius:14px;background:rgba(255,255,255,.97);box-shadow:0 8px 26px rgba(0,0,0,.10);font-family:"Söhne",Inter,system-ui,-apple-system,"Segoe UI",sans-serif;color:#0d0d0d;opacity:1;visibility:visible;transform:translateY(0);transition:opacity 160ms ease,transform 160ms ease,width 160ms ease,max-height 160ms ease}
 #${ROOT_ID}[data-visible="false"]{opacity:0;visibility:hidden;pointer-events:none;transform:translateY(4px)}
-#${ROOT_ID} .devspace-progress-header{display:flex;align-items:center;gap:8px;min-height:34px;padding:6px 8px 5px 11px;border-bottom:1px solid rgba(0,0,0,.07);user-select:none}
-#${ROOT_ID} .devspace-progress-label{min-width:0;flex:1;font-size:10px;line-height:1.35;font-weight:650;letter-spacing:.07em;text-transform:uppercase;color:#6e6e6e;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-#${ROOT_ID} .devspace-progress-count{font-size:10px;line-height:1;color:#8b8b8b;white-space:nowrap}
-#${ROOT_ID} .devspace-progress-actions{display:flex;align-items:center;gap:4px}
-#${ROOT_ID} .devspace-progress-button{appearance:none;border:1px solid rgba(0,0,0,.12);border-radius:8px;background:rgba(255,255,255,.74);color:inherit;padding:3px 7px;font:inherit;font-size:11px;line-height:1.2;cursor:pointer;pointer-events:auto}
-#${ROOT_ID} .devspace-progress-button:hover{background:rgba(0,0,0,.055)}
+#${ROOT_ID} .devspace-progress-header{display:flex;align-items:center;gap:7px;min-height:40px;padding:6px 8px 6px 11px;border-bottom:1px solid rgba(0,0,0,.09);user-select:none}
+#${ROOT_ID} .devspace-progress-label{min-width:0;flex:1;font-size:10px;line-height:1.35;font-weight:700;letter-spacing:.07em;text-transform:uppercase;color:#5f5f5f;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#${ROOT_ID} .devspace-progress-count{font-size:10px;line-height:1;color:#777;white-space:nowrap}
+#${ROOT_ID} .devspace-progress-actions{display:flex;align-items:center;gap:5px;flex:0 0 auto}
+#${ROOT_ID} .devspace-progress-button{appearance:none;display:inline-flex;align-items:center;justify-content:center;min-width:30px;min-height:28px;border:1px solid rgba(0,0,0,.24);border-radius:8px;background:#fff;color:#202020;padding:4px 8px;font:inherit;font-size:11px;font-weight:650;line-height:1;cursor:pointer;pointer-events:auto;box-shadow:0 1px 2px rgba(0,0,0,.08)}
+#${ROOT_ID} .devspace-progress-button:hover{background:#f1f1f1;border-color:rgba(0,0,0,.34)}
+#${ROOT_ID} .devspace-progress-button:active{transform:translateY(1px)}
+#${ROOT_ID} .devspace-progress-button:disabled{opacity:.34;cursor:default;transform:none}
 #${ROOT_ID} .devspace-progress-button:focus-visible{outline:2px solid #0d6efd;outline-offset:1px}
-#${ROOT_ID} .devspace-progress-scroll{box-sizing:border-box;overflow-y:auto;overscroll-behavior:contain;scrollbar-gutter:stable;padding:0 11px 10px;scroll-behavior:smooth}
+#${ROOT_ID} .devspace-progress-scroll{box-sizing:border-box;overflow-y:scroll;overscroll-behavior:contain;scrollbar-gutter:stable both-edges;scrollbar-width:auto;scrollbar-color:rgba(80,80,80,.72) rgba(0,0,0,.08);padding:0 8px 10px 11px;scroll-behavior:smooth;touch-action:pan-y}
+#${ROOT_ID} .devspace-progress-scroll::-webkit-scrollbar{width:12px}
+#${ROOT_ID} .devspace-progress-scroll::-webkit-scrollbar-track{background:rgba(0,0,0,.07);border-radius:8px}
+#${ROOT_ID} .devspace-progress-scroll::-webkit-scrollbar-thumb{background:rgba(70,70,70,.62);border:2px solid transparent;background-clip:padding-box;border-radius:8px}
+#${ROOT_ID} .devspace-progress-scroll::-webkit-scrollbar-thumb:hover{background:rgba(40,40,40,.76);border:2px solid transparent;background-clip:padding-box}
 #${ROOT_ID} .devspace-progress-message{margin-top:7px;font-size:13px;line-height:1.48;font-weight:400;color:inherit;white-space:normal;overflow-wrap:anywhere}
 #${ROOT_ID} .devspace-progress-message+ .devspace-progress-message{padding-top:7px;border-top:1px solid rgba(0,0,0,.07)}
 #${ROOT_ID}[data-size="compact"]{border-radius:12px}
-#${ROOT_ID}[data-size="compact"] .devspace-progress-header{border-bottom:0;min-height:31px;padding-top:4px;padding-bottom:2px}
-#${ROOT_ID}[data-size="compact"] .devspace-progress-scroll{max-height:42px;padding-top:0;padding-bottom:7px;overflow:hidden}
+#${ROOT_ID}[data-size="compact"] .devspace-progress-header{border-bottom:0;min-height:38px;padding-top:5px;padding-bottom:4px}
+#${ROOT_ID}[data-size="compact"] .devspace-progress-label{max-width:120px}
+#${ROOT_ID}[data-size="compact"] .devspace-progress-scroll{max-height:38px;padding-top:0;padding-bottom:6px;overflow:hidden;scrollbar-width:none}
+#${ROOT_ID}[data-size="compact"] .devspace-progress-scroll::-webkit-scrollbar{display:none}
 #${ROOT_ID}[data-size="compact"] .devspace-progress-message{margin-top:0;font-size:12px;line-height:1.35;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden}
-#${ROOT_ID}[data-size="normal"] .devspace-progress-scroll{max-height:132px}
-#${ROOT_ID}[data-size="expanded"] .devspace-progress-scroll{max-height:min(52vh,520px);padding-bottom:12px}
+#${ROOT_ID}[data-size="normal"] .devspace-progress-scroll{max-height:150px;min-height:58px}
+#${ROOT_ID}[data-size="expanded"] .devspace-progress-scroll{max-height:min(44vh,440px);min-height:180px;padding-bottom:12px}
 #${ROOT_ID}[data-size="expanded"] .devspace-progress-message{font-size:13px;line-height:1.55}
 html.dark #${ROOT_ID}{color:#f0f0f0;background:rgba(33,33,33,.97);border-color:rgba(255,255,255,.12);box-shadow:0 8px 26px rgba(0,0,0,.28)}
 html.dark #${ROOT_ID} .devspace-progress-header,html.dark #${ROOT_ID} .devspace-progress-message+ .devspace-progress-message{border-color:rgba(255,255,255,.09)}
 html.dark #${ROOT_ID} .devspace-progress-label{color:#b4b4b4}
 html.dark #${ROOT_ID} .devspace-progress-count{color:#969696}
-html.dark #${ROOT_ID} .devspace-progress-button{border-color:rgba(255,255,255,.14);background:rgba(255,255,255,.06)}
-html.dark #${ROOT_ID} .devspace-progress-button:hover{background:rgba(255,255,255,.12)}
+html.dark #${ROOT_ID} .devspace-progress-button{color:#f0f0f0;border-color:rgba(255,255,255,.26);background:rgba(255,255,255,.10);box-shadow:none}
+html.dark #${ROOT_ID} .devspace-progress-button:hover{background:rgba(255,255,255,.18)}
+html.dark #${ROOT_ID} .devspace-progress-scroll{scrollbar-color:rgba(220,220,220,.72) rgba(255,255,255,.08)}
 @media (prefers-color-scheme:dark){html:not(.light) #${ROOT_ID}{color:#f0f0f0;background:rgba(33,33,33,.97);border-color:rgba(255,255,255,.12)}html:not(.light) #${ROOT_ID} .devspace-progress-label{color:#b4b4b4}}
 @media (max-width:760px){#${ROOT_ID}{left:12px!important;right:12px!important;width:auto!important}#${ROOT_ID}[data-size="normal"] .devspace-progress-scroll{max-height:112px}#${ROOT_ID}[data-size="expanded"] .devspace-progress-scroll{max-height:42vh}#${ROOT_ID} .devspace-progress-message{font-size:12px}}
 @media (prefers-reduced-motion:reduce){#${ROOT_ID},#${ROOT_ID} .devspace-progress-scroll{transition:none!important;scroll-behavior:auto!important}}
@@ -199,14 +208,14 @@ html.dark #${ROOT_ID} .devspace-progress-button:hover{background:rgba(255,255,25
     root.dataset.round = String(state?.round || '');
     root.dataset.mode = mode;
     root.dataset.progressKind = state?.progressKind || '';
-    const storageKey = '__devspaceProgressNarrationUiV2:' + (conversationId || 'none');
+    const storageKey = '__devspaceProgressNarrationUiV3:' + (conversationId || 'none');
     const readUiState = () => {
       try {
         const parsed = JSON.parse(localStorage.getItem(storageKey) || '{}');
-        const size = ['compact','normal','expanded'].includes(parsed?.size) ? parsed.size : 'normal';
+        const size = ['compact','normal','expanded'].includes(parsed?.size) ? parsed.size : 'compact';
         const previousSize = ['normal','expanded'].includes(parsed?.previousSize) ? parsed.previousSize : 'normal';
         return { size, previousSize };
-      } catch { return { size:'normal', previousSize:'normal' }; }
+      } catch { return { size:'compact', previousSize:'normal' }; }
     };
     const saveUiState = (value) => {
       try { localStorage.setItem(storageKey, JSON.stringify(value)); } catch {}
@@ -221,7 +230,7 @@ html.dark #${ROOT_ID} .devspace-progress-button:hover{background:rgba(255,255,25
       const formRect = form?.getBoundingClientRect();
       const goalRect = goalStrip?.getBoundingClientRect();
       const size = current.dataset.size || 'normal';
-      const cap = size === 'expanded' ? 720 : size === 'compact' ? 480 : 560;
+      const cap = size === 'expanded' ? 640 : size === 'compact' ? 400 : 500;
       if (formRect?.width > 0) {
         const width = Math.max(260, Math.min(Math.round(formRect.width), cap));
         current.style.left = Math.max(12, Math.round(formRect.right - width)) + 'px';
@@ -229,8 +238,8 @@ html.dark #${ROOT_ID} .devspace-progress-button:hover{background:rgba(255,255,25
         const anchorTop = goalRect?.height > 0 ? goalRect.top : formRect.top;
         current.style.bottom = Math.max(12, Math.round(innerHeight - anchorTop + 8)) + 'px';
       } else {
-        current.style.left = size === 'expanded' ? 'max(12px,calc(50vw - 360px))' : 'max(12px,calc(50vw - 280px))';
-        current.style.width = size === 'expanded' ? 'min(720px,calc(100vw - 24px))' : 'min(560px,calc(100vw - 24px))';
+        current.style.left = size === 'expanded' ? 'max(12px,calc(50vw - 320px))' : size === 'compact' ? 'max(12px,calc(50vw - 200px))' : 'max(12px,calc(50vw - 250px))';
+        current.style.width = size === 'expanded' ? 'min(640px,calc(100vw - 24px))' : size === 'compact' ? 'min(400px,calc(100vw - 24px))' : 'min(500px,calc(100vw - 24px))';
         current.style.bottom = '72px';
       }
     };
@@ -247,6 +256,20 @@ html.dark #${ROOT_ID} .devspace-progress-button:hover{background:rgba(255,255,25
       count.className = 'devspace-progress-count';
       const actions = document.createElement('div');
       actions.className = 'devspace-progress-actions';
+      const older = document.createElement('button');
+      older.type = 'button';
+      older.className = 'devspace-progress-button';
+      older.dataset.action = 'older';
+      older.textContent = '↑';
+      older.title = '向上翻閱較早進度';
+      older.setAttribute('aria-label','向上翻閱較早進度');
+      const newer = document.createElement('button');
+      newer.type = 'button';
+      newer.className = 'devspace-progress-button';
+      newer.dataset.action = 'newer';
+      newer.textContent = '↓';
+      newer.title = '返回最新進度';
+      newer.setAttribute('aria-label','返回最新進度');
       const expand = document.createElement('button');
       expand.type = 'button';
       expand.className = 'devspace-progress-button';
@@ -255,7 +278,7 @@ html.dark #${ROOT_ID} .devspace-progress-button:hover{background:rgba(255,255,25
       compact.type = 'button';
       compact.className = 'devspace-progress-button';
       compact.dataset.action = 'compact';
-      actions.append(expand, compact);
+      actions.append(older, newer, expand, compact);
       header.append(label, count, actions);
       const scroll = document.createElement('div');
       scroll.className = 'devspace-progress-scroll';
@@ -279,10 +302,18 @@ html.dark #${ROOT_ID} .devspace-progress-button:hover{background:rgba(255,255,25
       }
       const count = root.querySelector('.devspace-progress-count');
       if (count) count.textContent = source.length + ' 段';
+      const older = root.querySelector('[data-action="older"]');
+      const newer = root.querySelector('[data-action="newer"]');
       const expand = root.querySelector('[data-action="expand"]');
       const compact = root.querySelector('[data-action="compact"]');
+      const refreshScrollButtons = () => {
+        if (!scroll) return;
+        if (older) older.disabled = root.dataset.size === 'compact' || scroll.scrollTop <= 1;
+        if (newer) newer.disabled = root.dataset.size === 'compact' || scroll.scrollTop + scroll.clientHeight >= scroll.scrollHeight - 1;
+      };
+      if (scroll) scroll.onscroll = refreshScrollButtons;
       if (expand) {
-        expand.textContent = root.dataset.size === 'expanded' ? '收起' : '展開';
+        expand.textContent = root.dataset.size === 'expanded' ? '收起' : root.dataset.size === 'compact' ? '打開' : '展開';
         expand.setAttribute('aria-label', root.dataset.size === 'expanded' ? '收起進度旁白' : '展開更多進度旁白');
       }
       if (compact) {
@@ -293,6 +324,7 @@ html.dark #${ROOT_ID} .devspace-progress-button:hover{background:rgba(255,255,25
         if (!scroll) return;
         if (!preserveScroll || nearBottom || root.dataset.size === 'compact') scroll.scrollTop = scroll.scrollHeight;
         else scroll.scrollTop = Math.min(previousTop, Math.max(0, scroll.scrollHeight - scroll.clientHeight));
+        refreshScrollButtons();
       });
     };
     const applySize = (size, { persist = true, preserveScroll = false } = {}) => {
@@ -310,7 +342,12 @@ html.dark #${ROOT_ID} .devspace-progress-button:hover{background:rgba(255,255,25
       if (!button || !root.contains(button)) return;
       event.preventDefault();
       event.stopPropagation();
-      if (button.dataset.action === 'expand') {
+      const scroll = root.querySelector('.devspace-progress-scroll');
+      if (button.dataset.action === 'older') {
+        if (scroll) scroll.scrollBy({ top:-Math.max(72, Math.round(scroll.clientHeight * .82)), behavior:'smooth' });
+      } else if (button.dataset.action === 'newer') {
+        if (scroll) scroll.scrollTo({ top:scroll.scrollHeight, behavior:'smooth' });
+      } else if (button.dataset.action === 'expand') {
         applySize(root.dataset.size === 'expanded' ? 'normal' : 'expanded');
       } else if (button.dataset.action === 'compact') {
         if (root.dataset.size === 'compact') applySize(uiState.previousSize || 'normal');
@@ -319,6 +356,13 @@ html.dark #${ROOT_ID} .devspace-progress-button:hover{background:rgba(255,255,25
           applySize('compact');
         }
       }
+    };
+    root.onwheel = (event) => {
+      const scroll = root.querySelector('.devspace-progress-scroll');
+      if (!scroll || root.dataset.size === 'compact') return;
+      scroll.scrollTop += event.deltaY;
+      event.preventDefault();
+      event.stopPropagation();
     };
     const renderKey = visible ? JSON.stringify(messages.map((item) => [item.dedupeKey || item.at, item.text])) : 'empty';
     root.__devspaceProgressMessages = messages;

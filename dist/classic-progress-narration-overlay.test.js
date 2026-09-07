@@ -41,9 +41,18 @@ assert.doesNotMatch(script, /if\s*\(isWork\).*visible\s*=\s*false/i, "Work mode 
 assert.match(script, /syntheticUserMessages:0/);
 assert.match(script, /LEASE_MS/);
 assert.match(script, /devspace-progress-scroll/);
+assert.match(script, /data-action = 'older'|dataset\.action = 'older'/);
+assert.match(script, /data-action = 'newer'|dataset\.action = 'newer'/);
 assert.match(script, /data-action = 'expand'|dataset\.action = 'expand'/);
 assert.match(script, /dataset\.action = 'compact'/);
+assert.match(script, /__devspaceProgressNarrationUiV3/);
 assert.match(script, /localStorage\.setItem/);
+assert.match(script, /size:'compact'/);
+assert.match(script, /overflow-y:scroll/);
+assert.match(script, /scrollbar-width:auto/);
+assert.match(script, /scrollBy\(\{ top:-/);
+assert.match(script, /scrollTo\(\{ top:scroll\.scrollHeight/);
+assert.match(script, /root\.onwheel/);
 assert.match(script, /scrollTop = scroll\.scrollHeight/);
 assert.match(script, /\['compact','normal','expanded'\]/);
 assert.match(inspectProgressNarrationExpression(), /devspace-progress-message/);
@@ -94,6 +103,10 @@ try {
     multiConversation: true,
     duplicateTextSuppressed: true,
     scrollHistory: true,
+    alwaysVisibleScrollbar: true,
+    explicitOlderAndLatestControls: true,
+    mouseWheelCaptured: true,
+    defaultCompact: true,
     compactNormalExpanded: true,
     staleMessagesExcluded: true,
     visibleInChatAndWorkModes: true,

@@ -25,6 +25,15 @@ try {
   assert.equal(snap.active.stepCount, 1);
   assert.equal(snap.active.inFlightToolName, null);
   assert.equal(snap.active.lastDurationMs, 25_000);
+  assert.equal(snap.active.recentBoundaries.length, 1);
+  assert.deepEqual(snap.active.recentBoundaries[0], {
+    at: new Date(now).toISOString(),
+    stepCount: 1,
+    toolName: "bash",
+    toolCategory: "verification",
+    success: true,
+    durationMs: 25_000,
+  });
   await supervisor.noteToolStart({ ...identity, operationId: "inspection", toolName: "read" });
   snap = await supervisor.noteToolBoundary({ ...identity, operationId: "inspection", success: true, durationMs: 12 });
   assert.equal(snap.active.stepCount, 2);
@@ -36,6 +45,10 @@ try {
   assert.equal(snap.active.stepCount, 3);
   assert.equal(snap.active.failedSteps, 1);
   assert.equal(snap.active.lastDurationMs, null);
+  assert.equal(snap.active.recentBoundaries.length, 3);
+  assert.equal(snap.active.recentBoundaries[1].toolName, "read");
+  assert.equal(snap.active.recentBoundaries[2].toolName, "edit");
+  assert.equal(snap.active.recentBoundaries[2].success, false);
   assert.match(snap.active.currentText, /未通過/);
   assert.doesNotMatch(await readFile(path, "utf8"), /Bearer|password|secret/i);
 
@@ -110,7 +123,7 @@ try {
     await conversationOnly.close();
   }
 
-  console.log(JSON.stringify({ ok: true, gate: "goal-run-progress-supervisor", automaticToolStart: true, automaticToolBoundary: true, autonomousHeartbeat: true, durable: true, planOnlyWorkAgent: true, ordinaryMainConversation: true, workerBackendOnly: true, evidenceNotInvented: true }));
+  console.log(JSON.stringify({ ok: true, gate: "goal-run-progress-supervisor", automaticToolStart: true, automaticToolBoundary: true, boundedBoundaryQueue: true, autonomousHeartbeat: true, durable: true, planOnlyWorkAgent: true, ordinaryMainConversation: true, workerBackendOnly: true, evidenceNotInvented: true }));
 } finally {
   await supervisor?.close();
   await rm(root, { recursive: true, force: true });

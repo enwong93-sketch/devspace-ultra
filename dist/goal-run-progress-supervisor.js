@@ -6,6 +6,7 @@ const EVIDENCE_VERSION = 2;
 const DEFAULT_HEARTBEAT_MS = 15_000;
 const MAX_RUNS = 32;
 const MAX_IN_FLIGHT = 128;
+const MAX_RECENT_BOUNDARIES = 64;
 
 function clip(value, max) {
   const text = String(value ?? "").replace(/\s+/g, " ").trim();
@@ -56,13 +57,24 @@ export class GoalRunProgressSupervisor {
       if (parsed?.version === VERSION) {
         const saved = Array.isArray(parsed.runs) && parsed.runs.length ? parsed.runs : [parsed.active];
         for (const row of saved.filter((r) => r?.goalId).slice(-MAX_RUNS)) {
-          const restored = { ...row, interrupted: Boolean(row.inFlightToolName || row.inFlightCount || row.interrupted), inFlightToolName: null, inFlightToolCategory: null, inFlightStartedAt: null, inFlightCount: 0 };
+          const recentBoundaries = (Array.isArray(row.recentBoundaries) ? row.recentBoundaries : [])
+            .filter((item) => item?.at && Number.isInteger(Number(item?.stepCount)))
+            .slice(-MAX_RECENT_BOUNDARIES)
+            .map((item) => ({
+              at: clip(item.at, 80),
+              stepCount: Math.max(1, Math.floor(Number(item.stepCount))),
+              toolName: clip(item.toolName, 120) || "unknown",
+              toolCategory: clip(item.toolCategory, 80) || "work",
+              success: item.success === true ? true : item.success === false ? false : null,
+              durationMs: Number.isFinite(Number(item.durationMs)) ? Math.max(0, Math.round(Number(item.durationMs))) : null,
+            }));
+          const restored = { ...row, recentBoundaries, interrupted: Boolean(row.inFlightToolName || row.inFlightCount || row.interrupted), inFlightToolName: null, inFlightToolCategory: null, inFlightStartedAt: null, inFlightCount: 0 };
           if (parsed.evidenceVersion !== EVIDENCE_VERSION) {
             Object.assign(restored, {
               legacyStepCount: Number(row.stepCount || 0), legacyProgressUnverified: true,
               stepCount: 0, successfulSteps: 0, failedSteps: 0,
               lastBoundaryAt: null, lastToolName: null, lastToolCategory: null,
-              lastSuccess: null, lastDurationMs: null,
+              lastSuccess: null, lastDurationMs: null, recentBoundaries: [],
             });
           }
           this.runs.set(key(restored), restored);
@@ -146,7 +158,7 @@ export class GoalRunProgressSupervisor {
         if (!evict) return null;
         this.runs.delete(evict);
       }
-      row = { goalId: goal.id, planId: goal.planId || null, progressKind: goal.progressKind || "goal", round: goal.round, stepCount: 0, successfulSteps: 0, failedSteps: 0, lastBoundaryAt: null, lastToolName: null, lastToolCategory: null, lastSuccess: null, lastDurationMs: null, interrupted: false };
+      row = { goalId: goal.id, planId: goal.planId || null, progressKind: goal.progressKind || "goal", round: goal.round, stepCount: 0, successfulSteps: 0, failedSteps: 0, recentBoundaries: [], lastBoundaryAt: null, lastToolName: null, lastToolCategory: null, lastSuccess: null, lastDurationMs: null, interrupted: false };
       this.runs.set(runKey, row);
     }
     Object.assign(row, { goalRevision: goal.revision, planId: goal.planId || row.planId || null, progressKind: goal.progressKind || row.progressKind || "goal", objective: clip(goal.objective, 260) || "目前任務", conversationId: goal.conversationId || null });
@@ -212,7 +224,19 @@ export class GoalRunProgressSupervisor {
     row.stepCount = Number(row.stepCount || 0) + 1;
     row.successfulSteps = Number(row.successfulSteps || 0) + (success === true ? 1 : 0);
     row.failedSteps = Number(row.failedSteps || 0) + (success === false ? 1 : 0);
-    Object.assign(row, { lastBoundaryAt: new Date(this.now()).toISOString(), lastToolName: op.toolName, lastToolCategory: op.category, lastSuccess: success === true ? true : success === false ? false : null, lastDurationMs: durationMs != null && Number.isFinite(Number(durationMs)) ? Math.max(0, Math.round(Number(durationMs))) : null });
+    const boundaryAt = new Date(this.now()).toISOString();
+    const normalizedDurationMs = durationMs != null && Number.isFinite(Number(durationMs)) ? Math.max(0, Math.round(Number(durationMs))) : null;
+    const recentBoundaries = Array.isArray(row.recentBoundaries) ? row.recentBoundaries : [];
+    recentBoundaries.push({
+      at: boundaryAt,
+      stepCount: row.stepCount,
+      toolName: op.toolName,
+      toolCategory: op.category,
+      success: success === true ? true : success === false ? false : null,
+      durationMs: normalizedDurationMs,
+    });
+    if (recentBoundaries.length > MAX_RECENT_BOUNDARIES) recentBoundaries.splice(0, recentBoundaries.length - MAX_RECENT_BOUNDARIES);
+    Object.assign(row, { recentBoundaries, lastBoundaryAt: boundaryAt, lastToolName: op.toolName, lastToolCategory: op.category, lastSuccess: success === true ? true : success === false ? false : null, lastDurationMs: normalizedDurationMs });
     await this.publish(row);
     return this.snapshot();
   }

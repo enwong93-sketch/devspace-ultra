@@ -82,7 +82,45 @@ const milestone = decideGoalProgressNarration({
   milestoneEvery: 4,
 });
 assert.equal(milestone.kind, "milestone");
+assert.match(milestone.text, /第 4 個已驗證步驟/);
 assert.match(milestone.text, /核心修改已經落盤/);
+
+const queuedRow = {
+  ...row,
+  stepCount: 2,
+  inFlightCount: 0,
+  recentBoundaries: [
+    { at: new Date(base - 2_000).toISOString(), stepCount: 1, toolName: "read", toolCategory: "inspection", success: true, durationMs: 600 },
+    { at: new Date(base - 1_000).toISOString(), stepCount: 2, toolName: "edit", toolCategory: "change", success: true, durationMs: 1_400 },
+  ],
+};
+const queuedFirst = decideGoalProgressNarration({
+  row: queuedRow,
+  plan,
+  session: { initialized: true, lastPlanStepId: "step-a", lastMessageAtMs: base - 500, lastNarratedStepCount: 0 },
+  nowMs: base,
+  minGapMs: 250,
+  maxSilenceMs: 15_000,
+  longToolMs: 10_000,
+  milestoneEvery: 1,
+});
+assert.equal(queuedFirst.kind, "milestone");
+assert.equal(queuedFirst.toolStepCount, 1);
+assert.match(queuedFirst.text, /第 1 個已驗證步驟/);
+assert.match(queuedFirst.text, /「read」/);
+const queuedSecond = decideGoalProgressNarration({
+  row: queuedRow,
+  plan,
+  session: { initialized: true, lastPlanStepId: "step-a", lastMessageAtMs: base - 500, lastNarratedStepCount: 1 },
+  nowMs: base,
+  minGapMs: 250,
+  maxSilenceMs: 15_000,
+  longToolMs: 10_000,
+  milestoneEvery: 1,
+});
+assert.equal(queuedSecond.toolStepCount, 2);
+assert.match(queuedSecond.text, /第 2 個已驗證步驟/);
+assert.match(queuedSecond.text, /「edit」/);
 
 const silence = decideGoalProgressNarration({
   row,
@@ -224,9 +262,10 @@ try {
     gate: "goal-progress-narrator",
     backendEventDriven: true,
     objectiveBeforeWork: true,
-    milestoneThrottle: true,
+    everyVerifiedBoundaryQueued: true,
+    minimumPublishGapMs: 250,
     failureImmediate: true,
-    maxSilenceMs: 180000,
+    maxSilenceMs: 15000,
     dedupeAcrossRestart: true,
     planStepAware: true,
     multiConversation: true,

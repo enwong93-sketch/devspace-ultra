@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { atomicWriteJson } from "./atomic-file.js";
 
-const DEFAULT_LIMIT = 12;
+const DEFAULT_LIMIT = 48;
 const MAX_LEGACY_TEXT = 400;
 const MAX_MESSAGE_TEXT = 1600;
 const MAX_METADATA_TEXT = 200;
@@ -91,7 +91,7 @@ function normalizePersistedMessage(item) {
 export async function createStableGatewayHumanProgress({ statePath, limit = DEFAULT_LIMIT, now = Date.now } = {}) {
   const path = String(statePath || "").trim();
   if (!path) throw new Error("statePath is required.");
-  const maxItems = Math.max(1, Math.min(20, Number(limit) || DEFAULT_LIMIT));
+  const maxItems = Math.max(1, Math.min(64, Number(limit) || DEFAULT_LIMIT));
   const persisted = await readState(path);
   const persistedMessages = (Array.isArray(persisted?.messages) ? persisted.messages : [])
     .map(normalizePersistedMessage)

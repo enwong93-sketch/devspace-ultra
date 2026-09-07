@@ -62,8 +62,27 @@ try {
   await restored.update({ doing: "legacy doing", completed: "legacy completed" });
   assert.equal(restored.snapshot().current.text, "legacy doing");
   assert.equal(restored.snapshot().completed[0].text, "legacy completed");
+
+  const defaultPath = join(root, "default-limit.json");
+  const defaultProgress = await createStableGatewayHumanProgress({ statePath: defaultPath });
+  for (let index = 0; index < 55; index += 1) {
+    await defaultProgress.update({
+      message: `第 ${index + 1} 個已驗證步驟已完成。`,
+      conversationId: "conversation-history",
+      goalId: "goal-history",
+      round: 1,
+      source: "goal-run-events",
+      kind: "milestone",
+      dedupeKey: `history:${index + 1}`,
+      toolStepCount: index + 1,
+    });
+  }
+  const defaultSnapshot = defaultProgress.snapshot();
+  assert.equal(defaultSnapshot.messages.length, 48, "default progress history must retain 48 bounded entries for scrolling");
+  assert.match(defaultSnapshot.messages[0].text, /第 8 個已驗證步驟/);
+  assert.match(defaultSnapshot.messages.at(-1).text, /第 55 個已驗證步驟/);
 } finally {
   await rm(root, { recursive: true, force: true });
 }
 
-console.log(JSON.stringify({ ok: true, gate: "stable-gateway-human-progress", durable: true, naturalLanguageStream: true, legacyCompatible: true }));
+console.log(JSON.stringify({ ok: true, gate: "stable-gateway-human-progress", durable: true, naturalLanguageStream: true, defaultHistoryLimit: 48, hardHistoryLimit: 64, legacyCompatible: true }));
