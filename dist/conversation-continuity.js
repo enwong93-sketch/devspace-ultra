@@ -6,6 +6,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import * as z from "zod/v4";
+import { atomicWriteJson } from "./atomic-file.js";
 
 const execFileAsync = promisify(execFile);
 const moduleDir = dirname(fileURLToPath(import.meta.url));
@@ -126,10 +127,7 @@ async function readJsonIfExists(path) {
 }
 
 async function atomicJson(path, value) {
-  await mkdir(dirname(path), { recursive: true });
-  const temp = `${path}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
-  await writeFile(temp, JSON.stringify(value, null, 2) + "\n", { mode: 0o600 });
-  await rename(temp, path);
+  await atomicWriteJson(path, value);
 }
 
 function cleanString(value, max = 6_000) {

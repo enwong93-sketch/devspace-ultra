@@ -57,7 +57,9 @@ import { ClassicNativeUsageEvidenceStore } from "./classic-native-usage-evidence
 import { ClassicTurnDeliveryEvidenceStore } from "./classic-turn-delivery-evidence.js";
 import { GoalRunProgressSupervisor } from "./goal-run-progress-supervisor.js";
 import { installGoalToolProgress } from "./goal-tool-progress.js";
-import { createMemoryDiagnostics } from "./memory-diagnostics.js";
+import { createMemoryDiagnostics, runPassiveDiagnosticGc } from "./memory-diagnostics.js";
+import { incrementBoundedCounter } from "./bounded-diagnostics.js";
+import { pruneStaleAtomicTempFiles } from "./atomic-file.js";
 import { ToolCatalogRegistry, instrumentToolRegistration } from "./tool-catalog.js";
 import { registerCodexParityTools } from "./codex-parity-tools.js";
 import { registerCodexComputerUseRouter } from "./codex-computer-use-router.js";
@@ -1632,6 +1634,25 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
     return server;
 }
 export function createServer(config = loadConfig(), options = {}) {
+    void pruneStaleAtomicTempFiles(config.stateDir, {
+        olderThanMs: 15 * 60_000,
+        maxRetained: 64,
+        maxDepth: 4,
+        maxVisited: 20_000,
+    }).then((result) => {
+        if (result.removedFiles > 0) {
+            logEvent(config.logging, "info", "atomic_temp_cleanup", {
+                removedFiles: result.removedFiles,
+                removedBytes: result.removedBytes,
+                retainedFiles: result.retainedFiles,
+                visited: result.visited,
+            });
+        }
+    }).catch((error) => {
+        logEvent(config.logging, "debug", "atomic_temp_cleanup_failed", {
+            error: error instanceof Error ? error.message : String(error),
+        });
+    });
     const incomingArtifactAdapters = options.incomingArtifactAdapters
         ?? [createOpenAIIncomingArtifactAdapter()];
     const allowedHosts = config.allowedHosts.includes("*")
@@ -1950,7 +1971,7 @@ export function createServer(config = loadConfig(), options = {}) {
                 });
                 continue;
             }
-            logEvent(config.logging, "info", "mcp_session_closed", {
+            logEvent(config.logging, "debug", "mcp_session_closed", {
                 reason,
                 sessionIdPrefix: sessionIdPrefix(result.sessionId),
             });
@@ -1963,7 +1984,7 @@ export function createServer(config = loadConfig(), options = {}) {
             const overflowResults = await transports.closeExcessInactive(MCP_MAX_INACTIVE_SESSIONS);
             logSessionCloseResults("inactive_cap", overflowResults);
             if (idleResults.length || overflowResults.length) {
-                logEvent(config.logging, "info", "mcp_session_cleanup", {
+                logEvent(config.logging, "debug", "mcp_session_cleanup", {
                     idleClosed: idleResults.length,
                     overflowClosed: overflowResults.length,
                     remainingSessions: transports.size,
@@ -2034,7 +2055,11 @@ export function createServer(config = loadConfig(), options = {}) {
             return;
         }
         res.setHeader("Cache-Control", "no-store");
-        res.json(createMemoryDiagnostics({
+        const diagnosticGc = runPassiveDiagnosticGc({
+            requested: req.query?.gc === "1",
+            passiveCore: config.passiveCore === true,
+        });
+        res.json({ ...createMemoryDiagnostics({
             transports,
             processSessions,
             workspaces,
@@ -2043,7 +2068,7 @@ export function createServer(config = loadConfig(), options = {}) {
             contextMetadataAdapter,
             streamRecoveryAdapter,
             config,
-        }));
+        }), diagnosticGc });
     });
     app.get("/__devspace/stream-recovery/status", (req, res) => {
         const remoteAddress = String(req.socket?.remoteAddress ?? "");
@@ -2456,11 +2481,11 @@ export function createServer(config = loadConfig(), options = {}) {
         const mcpMethod = typeof req.body?.method === "string" ? req.body.method : undefined;
         if (mcpMethod) {
             CHAT_SWARM_UI_DIAGNOSTICS.lastMcpMethod = mcpMethod;
-            CHAT_SWARM_UI_DIAGNOSTICS.mcpMethodCounts[mcpMethod] = (CHAT_SWARM_UI_DIAGNOSTICS.mcpMethodCounts[mcpMethod] ?? 0) + 1;
+            incrementBoundedCounter(CHAT_SWARM_UI_DIAGNOSTICS.mcpMethodCounts, mcpMethod, { limit: 64, maxKeyLength: 160 });
             if (mcpMethod === "resources/read") {
                 const resourceUri = typeof req.body?.params?.uri === "string" ? req.body.params.uri : "<unknown>";
                 CHAT_SWARM_UI_DIAGNOSTICS.lastResourceReadUri = resourceUri;
-                CHAT_SWARM_UI_DIAGNOSTICS.resourceReadUris[resourceUri] = (CHAT_SWARM_UI_DIAGNOSTICS.resourceReadUris[resourceUri] ?? 0) + 1;
+                incrementBoundedCounter(CHAT_SWARM_UI_DIAGNOSTICS.resourceReadUris, resourceUri, { limit: 64, maxKeyLength: 512 });
             }
         }
         await new Promise((resolve, reject) => {
@@ -2514,7 +2539,7 @@ export function createServer(config = loadConfig(), options = {}) {
                             transports.acquire(newSessionId);
                             trackedSessionId = newSessionId;
                         }
-                        logEvent(config.logging, "info", "mcp_session_created", {
+                        logEvent(config.logging, "debug", "mcp_session_created", {
                             requestId,
                             sessionIdPrefix: sessionIdPrefix(newSessionId),
                             ...requestLogFields(req, config),
@@ -2524,7 +2549,7 @@ export function createServer(config = loadConfig(), options = {}) {
                 transport.onclose = () => {
                     const closedSessionId = transport?.sessionId;
                     if (closedSessionId && transports.remove(closedSessionId)) {
-                        logEvent(config.logging, "info", "mcp_session_closed", {
+                        logEvent(config.logging, "debug", "mcp_session_closed", {
                             reason: "transport_close",
                             sessionIdPrefix: sessionIdPrefix(closedSessionId),
                         });

@@ -231,16 +231,18 @@ Windows runtime protection and Session Seed are controller state/policy rather t
 | --- | --- |
 | `DEVSPACE_LOG_LEVEL` | `info` |
 | `DEVSPACE_LOG_FORMAT` | `json` |
-| `DEVSPACE_LOG_REQUESTS` | `1` |
+| `DEVSPACE_LOG_REQUESTS` | `0` |
 | `DEVSPACE_LOG_ASSETS` | `0` |
 | `DEVSPACE_LOG_TOOL_CALLS` | `1` |
 | `DEVSPACE_LOG_SHELL_COMMANDS` | `0` |
+| `DEVSPACE_LOG_MAX_BYTES` | `8388608` (8 MiB per active file) |
+| `DEVSPACE_LOG_BACKUPS` | `2` |
+| `DEVSPACE_LOG_MAX_AGE_DAYS` | `7` |
 | `DEVSPACE_TRUST_PROXY` | `0` |
 
-Set `DEVSPACE_LOG_FORMAT=pretty` for local debugging.
+Core stdout/stderr use a backpressure-aware rotating writer. Each active log is capped by `DEVSPACE_LOG_MAX_BYTES`, only the configured number of generations is retained, and expired generations are removed. The writer does not keep an in-memory history of output. The fixed-backend launcher applies the same policy before each service start.
 
-Set `DEVSPACE_LOG_SHELL_COMMANDS=1` only when you intentionally want command
-previews in logs.
+Full per-request and MCP session lifecycle logs are intentionally not written at normal `info` level. Set `DEVSPACE_LOG_REQUESTS=1` or `DEVSPACE_LOG_LEVEL=debug` only for a bounded diagnostic window. Set `DEVSPACE_LOG_FORMAT=pretty` for local debugging and `DEVSPACE_LOG_SHELL_COMMANDS=1` only when you intentionally want command previews in logs.
 
 ## Env-Only Example
 

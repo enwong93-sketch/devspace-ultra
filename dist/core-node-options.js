@@ -21,13 +21,13 @@ export function nodeArgsForCoreHeapProfile(value = "system") {
   return [...PROFILES[profile]];
 }
 
-export function validateCoreNodeArgs(args = []) {
+export function validateCoreNodeArgs(args = [], { allowDiagnosticGc = false } = {}) {
   if (!Array.isArray(args)) throw new Error("Core Node arguments must be an array.");
   const values = args.map(String);
   for (const argument of values) {
-    if (!ALLOWED_ARGUMENT.test(argument)) {
-      throw new Error(`Unsupported Stable Gateway Core Node argument: ${argument}`);
-    }
+    if (ALLOWED_ARGUMENT.test(argument)) continue;
+    if (allowDiagnosticGc && argument === "--expose-gc") continue;
+    throw new Error(`Unsupported Stable Gateway Core Node argument: ${argument}`);
   }
   return values;
 }

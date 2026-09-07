@@ -5,6 +5,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadDevspaceFiles } from "../dist/user-config.js";
+import { boundedLogOptionsFromEnv, rotateLogFileSetSync } from "../dist/bounded-log-files.js";
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const statusOnly = process.argv.includes("--status");
@@ -71,6 +72,9 @@ async function main() {
 
   mkdirSync(logDir, { recursive: true });
   mkdirSync(fixedStateDir, { recursive: true });
+  const logOptions = boundedLogOptionsFromEnv(process.env);
+  rotateLogFileSetSync(stdoutPath, logOptions);
+  rotateLogFileSetSync(stderrPath, logOptions);
   const stdoutFd = openSync(stdoutPath, "a");
   const stderrFd = openSync(stderrPath, "a");
   const childEnv = {
@@ -129,6 +133,12 @@ async function main() {
     stateDir: fixedStateDir,
     stdoutPath,
     stderrPath,
+    logPolicy: {
+      maxBytes: logOptions.maxBytes,
+      maxBackups: logOptions.maxBackups,
+      maxAgeMs: logOptions.maxAgeMs,
+      inMemoryHistoryRetained: false,
+    },
   });
   if (foreground) {
     return await new Promise((resolvePromise) => {

@@ -1,5 +1,5 @@
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
+import { readFile } from "node:fs/promises";
+import { atomicWriteJson } from "./atomic-file.js";
 
 const DEFAULT_LIMIT = 8;
 const MAX_LEGACY_TEXT = 400;
@@ -25,10 +25,7 @@ async function readState(path) {
 }
 
 async function writeAtomic(path, value) {
-  await mkdir(dirname(path), { recursive: true });
-  const temp = `${path}.${process.pid}.${Date.now()}.tmp`;
-  await writeFile(temp, `${JSON.stringify(value, null, 2)}\n`, "utf8");
-  await rename(temp, path);
+  await atomicWriteJson(path, value);
 }
 
 function isLoopback(value) {

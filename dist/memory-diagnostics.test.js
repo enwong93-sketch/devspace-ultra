@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createMemoryDiagnostics } from "./memory-diagnostics.js";
+import { createMemoryDiagnostics, runPassiveDiagnosticGc } from "./memory-diagnostics.js";
 
 const snapshot = createMemoryDiagnostics({
   transports: {
@@ -101,6 +101,29 @@ assert.equal(empty.registries.mcpSessions, 0);
 assert.equal(empty.capabilities.mcpClients, 0);
 assert.equal(empty.turnTransportCdp.connected, 0);
 assert.deepEqual(empty.features.classicMainDebugPorts, []);
+
+let gcCalls = 0;
+assert.deepEqual(runPassiveDiagnosticGc({ requested: false, passiveCore: true, gc: () => { gcCalls += 1; } }), {
+  requested: false,
+  performed: false,
+  reason: "not-requested",
+});
+assert.deepEqual(runPassiveDiagnosticGc({ requested: true, passiveCore: false, gc: () => { gcCalls += 1; } }), {
+  requested: true,
+  performed: false,
+  reason: "active-core-forbidden",
+});
+assert.deepEqual(runPassiveDiagnosticGc({ requested: true, passiveCore: true, gc: undefined }), {
+  requested: true,
+  performed: false,
+  reason: "gc-unavailable",
+});
+assert.deepEqual(runPassiveDiagnosticGc({ requested: true, passiveCore: true, gc: () => { gcCalls += 1; } }), {
+  requested: true,
+  performed: true,
+  reason: null,
+});
+assert.equal(gcCalls, 2, "passive diagnostic GC should run twice for a stable retained-heap sample");
 
 console.log(JSON.stringify({
   ok: true,

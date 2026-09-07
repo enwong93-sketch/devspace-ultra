@@ -1,5 +1,5 @@
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
+import { readFile } from "node:fs/promises";
+import { atomicWriteJson } from "./atomic-file.js";
 
 const STATE_VERSION = 1;
 const DEFAULT_LIMIT = 32;
@@ -176,10 +176,7 @@ function normalizeEvidence(value) {
 }
 
 async function atomicWrite(path, value) {
-  await mkdir(dirname(path), { recursive: true });
-  const temp = `${path}.${process.pid}.${Date.now()}.tmp`;
-  await writeFile(temp, `${JSON.stringify(value, null, 2)}\n`, "utf8");
-  await rename(temp, path);
+  await atomicWriteJson(path, value);
 }
 
 export class ClassicNativeUsageEvidenceStore {

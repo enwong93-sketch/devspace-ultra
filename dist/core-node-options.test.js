@@ -20,7 +20,12 @@ assert.deepEqual(validateCoreNodeArgs(["--max-old-space-size=464", "--max-semi-s
   "--max-old-space-size=464",
   "--max-semi-space-size=16",
 ]);
-assert.throws(() => validateCoreNodeArgs(["--require=malicious.js"]), /Unsupported Stable Gateway Core Node argument/);
+assert.deepEqual(validateCoreNodeArgs(["--max-old-space-size=464", "--expose-gc"], { allowDiagnosticGc: true }), [
+  "--max-old-space-size=464",
+  "--expose-gc",
+]);
+assert.throws(() => validateCoreNodeArgs(["--expose-gc"]), /Unsupported Stable Gateway Core Node argument/);
+assert.throws(() => validateCoreNodeArgs(["--require=malicious.js"], { allowDiagnosticGc: true }), /Unsupported Stable Gateway Core Node argument/);
 assert.throws(() => validateCoreNodeArgs("--max-old-space-size=464"), /must be an array/);
 
 console.log(JSON.stringify({

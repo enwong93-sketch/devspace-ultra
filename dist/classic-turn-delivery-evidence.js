@@ -1,5 +1,5 @@
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
+import { readFile } from "node:fs/promises";
+import { atomicWriteJson } from "./atomic-file.js";
 
 const VERSION = 1;
 const DEFAULT_LIMIT = 96;
@@ -29,10 +29,7 @@ function normalize(value) {
 }
 
 async function atomicWrite(path, payload) {
-  await mkdir(dirname(path), { recursive: true });
-  const temp = `${path}.${process.pid}.${Date.now()}.tmp`;
-  await writeFile(temp, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
-  await rename(temp, path);
+  await atomicWriteJson(path, payload);
 }
 
 export class ClassicTurnDeliveryEvidenceStore {

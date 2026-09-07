@@ -1,6 +1,5 @@
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
-import { randomUUID } from "node:crypto";
+import { readFile } from "node:fs/promises";
+import { atomicWriteJson } from "./atomic-file.js";
 
 const VERSION = 1;
 const EVIDENCE_VERSION = 2;
@@ -25,10 +24,7 @@ function phrase(value) {
   return { inspection: "資料核對", change: "程式修改", verification: "命令／測試", "goal-control": "任務狀態更新", capability: "本機工具操作" }[value] || "工作";
 }
 async function atomicWrite(path, payload) {
-  await mkdir(dirname(path), { recursive: true });
-  const temp = `${path}.${process.pid}.${randomUUID()}.tmp`;
-  await writeFile(temp, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
-  await rename(temp, path);
+  await atomicWriteJson(path, payload);
 }
 
 /** Observability only: a heartbeat never authorizes recovery or proves model activity. */

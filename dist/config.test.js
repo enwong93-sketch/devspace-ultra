@@ -24,6 +24,8 @@ try {
   assert.equal(loadConfig({ ...baseEnv, DEVSPACE_PASSIVE_CORE: "true" }).passiveCore, true, "canary/candidate Cores must be able to disable Classic background automation explicitly");
   assert.deepEqual(loadConfig(baseEnv).oauth.scopes, ["devspace", "offline_access"], "default OAuth scopes should advertise refresh-token compatibility");
   assert.equal(loadConfig(baseEnv).toolMode, "minimal", "standalone compatibility default remains minimal");
+  assert.equal(loadConfig(baseEnv).logging.requests, false, "high-volume HTTP request logging must be opt-in");
+  assert.equal(loadConfig({ ...baseEnv, DEVSPACE_LOG_REQUESTS: "1" }).logging.requests, true, "operators may explicitly enable request logging for diagnostics");
 
   writeFileSync(join(configDir, "config.json"), `${JSON.stringify({
     toolMode: "ultra",

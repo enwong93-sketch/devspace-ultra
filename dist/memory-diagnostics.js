@@ -21,6 +21,15 @@ function safeDiagnostics(source) {
   }
 }
 
+export function runPassiveDiagnosticGc({ requested = false, passiveCore = false, gc = globalThis.gc } = {}) {
+  if (!requested) return { requested: false, performed: false, reason: "not-requested" };
+  if (!passiveCore) return { requested: true, performed: false, reason: "active-core-forbidden" };
+  if (typeof gc !== "function") return { requested: true, performed: false, reason: "gc-unavailable" };
+  gc();
+  gc();
+  return { requested: true, performed: true, reason: null };
+}
+
 export function createMemoryDiagnostics({
   transports,
   processSessions,

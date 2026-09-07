@@ -1,5 +1,5 @@
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
+import { readFile } from "node:fs/promises";
+import { atomicWriteJson } from "./atomic-file.js";
 
 const VERSION = 1;
 const MAX_DESCRIPTORS = 256;
@@ -33,10 +33,7 @@ export async function loadStableGatewaySessionDescriptors(path) {
 
 export async function saveStableGatewaySessionDescriptors(path, descriptors) {
   const safe = (Array.isArray(descriptors) ? descriptors : []).map(normalize).filter(Boolean).slice(0, MAX_DESCRIPTORS);
-  await mkdir(dirname(path), { recursive: true });
-  const temp = `${path}.${process.pid}.${Date.now()}.tmp`;
   const payload = { version: VERSION, descriptors: safe };
-  await writeFile(temp, `${JSON.stringify(payload, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
-  await rename(temp, path);
+  await atomicWriteJson(path, payload);
   return structuredClone(payload);
 }

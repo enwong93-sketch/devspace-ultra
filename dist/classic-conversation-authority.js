@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
+import { readFile } from "node:fs/promises";
+import { atomicWriteJson } from "./atomic-file.js";
 
 function requireText(value, label) {
   const text = String(value ?? "").trim();
@@ -40,10 +40,7 @@ export function sessionFingerprintFromClassicRequest(request = {}) {
 }
 
 async function atomicWrite(path, value) {
-  await mkdir(dirname(path), { recursive: true });
-  const temp = `${path}.${process.pid}.${Date.now()}.tmp`;
-  await writeFile(temp, `${JSON.stringify(value, null, 2)}\n`, "utf8");
-  await rename(temp, path);
+  await atomicWriteJson(path, value);
 }
 
 function cleanEntry(fingerprint, input = {}) {

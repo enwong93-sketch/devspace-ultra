@@ -1,5 +1,6 @@
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { atomicWriteJson } from "./atomic-file.js";
 import { defaultMainDebugPorts } from "./goal-host-bridge.js";
 import { runtimeKeyForPort } from "./classic-stream-recovery-cdp.js";
 
@@ -60,11 +61,7 @@ export function createClassicHostOverlayOwnerStore({ stateDir } = {}) {
     },
     async save(owner) {
       const normalized = normalizeOverlayOwner(owner);
-      await mkdir(root, { recursive: true });
-      const temporary = `${path}.${process.pid}.${Date.now()}.tmp`;
-      const payload = JSON.stringify({ schemaVersion: OVERLAY_SCHEMA_VERSION, owner: normalized }, null, 2) + "\n";
-      await writeFile(temporary, payload, "utf8");
-      await rename(temporary, path);
+      await atomicWriteJson(path, { schemaVersion: OVERLAY_SCHEMA_VERSION, owner: normalized });
       return normalized;
     },
   };

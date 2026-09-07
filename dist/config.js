@@ -129,7 +129,7 @@ function parseLoggingConfig(env) {
     return {
         level: parseLogLevel(env.DEVSPACE_LOG_LEVEL),
         format: parseLogFormat(env.DEVSPACE_LOG_FORMAT),
-        requests: env.DEVSPACE_LOG_REQUESTS === undefined ? true : parseBoolean(env.DEVSPACE_LOG_REQUESTS),
+        requests: env.DEVSPACE_LOG_REQUESTS === undefined ? false : parseBoolean(env.DEVSPACE_LOG_REQUESTS),
         assets: parseBoolean(env.DEVSPACE_LOG_ASSETS),
         toolCalls: env.DEVSPACE_LOG_TOOL_CALLS === undefined ? true : parseBoolean(env.DEVSPACE_LOG_TOOL_CALLS),
         shellCommands: parseBoolean(env.DEVSPACE_LOG_SHELL_COMMANDS),

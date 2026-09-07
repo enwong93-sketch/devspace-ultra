@@ -33,6 +33,11 @@ const backgroundOverlay = backgroundProfile.has("overlay") || backgroundProfile.
 const backgroundStream = backgroundProfile.has("stream") || backgroundProfile.has("full");
 const backgroundPlugins = backgroundProfile.has("plugins") || backgroundProfile.has("full-product");
 const backgroundSkills = backgroundProfile.has("skills") || backgroundPlugins || backgroundProfile.has("full-product");
+const canaryNodeArgs = String(process.env.DEVSPACE_CANARY_NODE_OPTIONS || (soakMode ? "--max-old-space-size=1024" : ""))
+  .trim()
+  .split(/\s+/)
+  .filter(Boolean);
+const passiveDiagnosticGcRequested = canaryNodeArgs.includes("--expose-gc");
 const packageRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
 
 async function productionPortSnapshot() {
@@ -242,9 +247,6 @@ if (!sourceFiles.auth?.ownerToken) throw new Error("Canonical DevSpace owner aut
 
 const canaryEnv = {
   ...process.env,
-  ...((soakMode || process.env.DEVSPACE_CANARY_NODE_OPTIONS) ? {
-    NODE_OPTIONS: process.env.DEVSPACE_CANARY_NODE_OPTIONS || "--max-old-space-size=1024",
-  } : {}),
   DEVSPACE_CONFIG_DIR: configDir,
   DEVSPACE_STATE_DIR: stateDir,
   DEVSPACE_PUBLIC_BASE_URL: PUBLIC_BASE,
@@ -303,6 +305,8 @@ try {
       ...options,
       baseEnv: canaryEnv,
       runtimeEnvOverrides: canaryRuntimeEnvOverrides,
+      nodeArgs: canaryNodeArgs,
+      allowDiagnosticGc: true,
     }),
     stopCoreSlot,
     probeCandidate,
@@ -617,9 +621,14 @@ try {
         assert.equal(immediateResponse.status, 200);
         toolChurnMemoryImmediate = jsonBody(immediateResponse);
         await new Promise((resolvePromise) => setTimeout(resolvePromise, toolChurnIdleMs));
-        const afterIdleResponse = await httpRequestBuffer(gatewayBaseUrl, "/__devspace/memory/status");
+        const afterIdleResponse = await httpRequestBuffer(gatewayBaseUrl, passiveDiagnosticGcRequested
+          ? "/__devspace/memory/status?gc=1"
+          : "/__devspace/memory/status");
         assert.equal(afterIdleResponse.status, 200);
         toolChurnMemoryAfterIdle = jsonBody(afterIdleResponse);
+        if (passiveDiagnosticGcRequested) {
+          assert.equal(toolChurnMemoryAfterIdle?.diagnosticGc?.performed, true, "passive canary did not perform the requested retained-heap GC sample");
+        }
         toolChurnWaveMemory.push({
           wave,
           immediateHeapUsed: Number(toolChurnMemoryImmediate?.memory?.heapUsed || 0),
@@ -630,6 +639,7 @@ try {
           afterIdleOldestActivityAgeMs: Number(toolChurnMemoryAfterIdle?.registries?.mcpOldestActivityAgeMs || 0),
           afterIdleNewestActivityAgeMs: Number(toolChurnMemoryAfterIdle?.registries?.mcpNewestActivityAgeMs || 0),
           afterIdleWorkspaceContexts: Number(toolChurnMemoryAfterIdle?.registries?.workspaceContexts || 0),
+          passiveDiagnosticGcPerformed: toolChurnMemoryAfterIdle?.diagnosticGc?.performed === true,
         });
         if (!sseChurnMode) {
           assert.equal(Number(toolChurnMemoryAfterIdle?.registries?.mcpSessions || 0) <= 1, true, `Core MCP sessions did not drain after idle cleanup: ${toolChurnMemoryAfterIdle?.registries?.mcpSessions}`);
@@ -699,6 +709,7 @@ try {
       afterIdleNewestActivityAgeMs: Number(toolChurnMemoryAfterIdle?.registries?.mcpNewestActivityAgeMs || 0),
       afterIdleWorkspaceContexts: Number(toolChurnMemoryAfterIdle?.registries?.workspaceContexts || 0),
       waves: toolChurnWaveMemory,
+      passiveDiagnosticGcRequested,
     } : null,
     sseStreamsOpened: sseStreams.length,
     soakReplayBounded: sessionChurnCount > 0 ? Number(soakHandover?.replayedSessions || 0) <= 16 : null,

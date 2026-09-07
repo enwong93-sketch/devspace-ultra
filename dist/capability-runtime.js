@@ -32,6 +32,7 @@ import {
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 import { ErrorCode } from "@modelcontextprotocol/sdk/types.js";
+import { atomicWriteJson } from "./atomic-file.js";
 import { importCodexMcpCatalog } from "./codex-mcp-import.js";
 
 const REGISTRY_VERSION = 1;
@@ -1084,7 +1085,6 @@ export class CapabilityRuntime {
   }
 
   async save() {
-    const temp = `${this.registryPath}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
     const publicState = {
       version: REGISTRY_VERSION,
       plugins: Object.fromEntries(Object.entries(this.state.plugins).map(([id, entry]) => [id, {
@@ -1100,8 +1100,7 @@ export class CapabilityRuntime {
         updatedAt: entry.updatedAt,
       }])),
     };
-    await writeFile(temp, JSON.stringify(publicState, null, 2) + "\n", { mode: 0o600 });
-    await rename(temp, this.registryPath);
+    await atomicWriteJson(this.registryPath, publicState);
   }
 
   registryEntry(id) {

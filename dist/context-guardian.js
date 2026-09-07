@@ -1,7 +1,7 @@
-import { randomBytes } from "node:crypto";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { mkdir, readFile } from "node:fs/promises";
+import { join, resolve } from "node:path";
 import * as z from "zod/v4";
+import { atomicWriteJson } from "./atomic-file.js";
 
 function nowIso() { return new Date().toISOString(); }
 
@@ -15,10 +15,7 @@ async function readJsonIfExists(path) {
 }
 
 async function atomicJson(path, value) {
-  await mkdir(dirname(path), { recursive: true });
-  const temp = `${path}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
-  await writeFile(temp, JSON.stringify(value, null, 2) + "\n", { mode: 0o600 });
-  await rename(temp, path);
+  await atomicWriteJson(path, value);
 }
 
 function cleanModelSlug(value) {

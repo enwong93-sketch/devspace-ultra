@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { closeSync, createReadStream, existsSync, mkdirSync, openSync } from "node:fs";
+import { createReadStream, existsSync, mkdirSync } from "node:fs";
 import { cp, mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
 import { validateCoreNodeArgs } from "../dist/core-node-options.js";
 import { resolveFreshWindowsProcessEnvironment } from "../dist/windows-process-path.js";
+import { boundedLogOptionsFromEnv, createBoundedLogWriter } from "../dist/bounded-log-files.js";
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const DEFAULT_START_TIMEOUT_MS = 15_000;
@@ -201,9 +202,10 @@ export async function startCoreSlot({
   baseEnv = process.env,
   runtimeEnvOverrides = {},
   nodeArgs = [],
+  allowDiagnosticGc = false,
 } = {}) {
   const coreId = String(id ?? "").trim();
-  const safeNodeArgs = validateCoreNodeArgs(nodeArgs);
+  const safeNodeArgs = validateCoreNodeArgs(nodeArgs, { allowDiagnosticGc });
   if (!coreId) throw new Error("Core slot id is required.");
   const corePort = requirePort(port, "Core port");
   const coreConfigDir = requireDirectory(configDir, "configDir");
@@ -214,8 +216,9 @@ export async function startCoreSlot({
   mkdirSync(outputDir, { recursive: true });
   const stdoutPath = join(outputDir, `${coreId}.out.log`);
   const stderrPath = join(outputDir, `${coreId}.err.log`);
-  const stdoutFd = openSync(stdoutPath, "a");
-  const stderrFd = openSync(stderrPath, "a");
+  const logOptions = boundedLogOptionsFromEnv(preparedEnvironment.env);
+  const stdoutLog = createBoundedLogWriter(stdoutPath, logOptions);
+  const stderrLog = createBoundedLogWriter(stderrPath, logOptions);
   const child = spawn(process.execPath, [...safeNodeArgs, join(packageRoot, "dist", "cli.js"), "serve"], {
     cwd: packageRoot,
     env: buildCoreEnvironment({
@@ -229,10 +232,12 @@ export async function startCoreSlot({
     }),
     windowsHide: true,
     shell: false,
-    stdio: ["ignore", stdoutFd, stderrFd],
+    stdio: ["ignore", "pipe", "pipe"],
   });
-  closeSync(stdoutFd);
-  closeSync(stderrFd);
+  child.stdout.pipe(stdoutLog);
+  child.stderr.pipe(stderrLog);
+  stdoutLog.on("error", () => child.stdout?.resume());
+  stderrLog.on("error", () => child.stderr?.resume());
   const baseUrl = `http://127.0.0.1:${corePort}`;
   try {
     await waitForCoreIdentity({ baseUrl, publicBaseUrl: publicBase, child, timeoutMs: Number(startTimeoutMs) });
@@ -253,6 +258,16 @@ export async function startCoreSlot({
     nodeArgs: safeNodeArgs,
     pathSource: preparedEnvironment.pathSource,
     pathRefreshed: preparedEnvironment.refreshed,
+    logPolicy: {
+      maxBytes: logOptions.maxBytes,
+      maxBackups: logOptions.maxBackups,
+      maxAgeMs: logOptions.maxAgeMs,
+      inMemoryHistoryRetained: false,
+    },
+    logDiagnostics: () => ({
+      stdout: stdoutLog.diagnostics(),
+      stderr: stderrLog.diagnostics(),
+    }),
   };
 }
 
