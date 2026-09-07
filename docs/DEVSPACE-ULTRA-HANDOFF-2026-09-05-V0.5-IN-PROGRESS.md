@@ -2913,3 +2913,19 @@ The exact usage live gate and native Auto Compact discovery/live acceptance comp
 - 16/256 MiB diagnostic log limits.
 
 Focused log, memory-retention, exact-usage and Auto Compact gates passed, followed by the full `npm run verify:ultra` and consolidated live acceptance. The round Plan was then completed through the guarded official update path. The overall Goal should be completed only after final handoff/PowerMem synchronization and remote release verification; no stale Round 8 claim is used as evidence.
+
+### v0.5.1 public release closure
+
+The final release boundary is now independently verified:
+
+- package version and lockfile agree on `0.5.1`;
+- the clean `v0.5-convergence` release branch was pushed and read back at the release commit;
+- annotated tag `v0.5.1` was created/pushed only after proving the name was unused, then read back at the same release commit;
+- `devspace-ultra@0.5.1` was published to npm and read back from the registry;
+- a non-draft, non-prerelease GitHub Release for `v0.5.1` was created and read back;
+- the npm tarball was audited for forbidden auth/config/registry/control/handoff/secret files;
+- a clean temporary install verified the packaged CLI, full-access execution policy, Codex Computer Use route, log-retention defaults, memory analysis, exact-usage module and native compact validator;
+- production dependency audit reported no high-severity blocker;
+- the final production live gate still agrees on Stable Gateway/Core health, `danger-full-access` / `never`, a 512 MiB heap ceiling, bounded MCP/SSE registries, full Classic profile, native Goal conversation binding, exact native usage, accepted same-conversation compact evidence and bounded logs.
+
+Round 9 may now complete the Goal after synchronizing this release closure to shared PowerMem. The tag remains the immutable release source; any later documentation-only branch commit must not move or overwrite it.
