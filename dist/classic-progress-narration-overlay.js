@@ -251,7 +251,7 @@ html.dark #${ROOT_ID} .devspace-progress-scroll{scrollbar-color:rgba(220,220,220
     const ensureStructure = () => {
       let header = root.querySelector('.devspace-progress-header');
       const controls = root.querySelectorAll('.devspace-progress-button').length;
-      if (header && root.dataset.uiVersion === UI_VERSION && controls === 4) return;
+      if (header && root.dataset.uiVersion === UI_VERSION && controls === 4) return false;
       root.dataset.uiVersion = UI_VERSION;
       root.replaceChildren();
       header = document.createElement('div');
@@ -292,6 +292,7 @@ html.dark #${ROOT_ID} .devspace-progress-scroll{scrollbar-color:rgba(220,220,220
       scroll.setAttribute('tabindex','0');
       scroll.setAttribute('aria-label','進度旁白記錄；可向上捲動查看較早內容');
       root.append(header, scroll);
+      return true;
     };
     const renderMessages = ({ preserveScroll = false } = {}) => {
       ensureStructure();
@@ -344,6 +345,7 @@ html.dark #${ROOT_ID} .devspace-progress-scroll{scrollbar-color:rgba(220,220,220
       renderMessages({ preserveScroll });
       position();
     };
+    const structureRebuilt = ensureStructure();
     root.onclick = (event) => {
       const button = event.target?.closest?.('.devspace-progress-button');
       if (!button || !root.contains(button)) return;
@@ -373,7 +375,7 @@ html.dark #${ROOT_ID} .devspace-progress-scroll{scrollbar-color:rgba(220,220,220
     };
     const renderKey = visible ? JSON.stringify(messages.map((item) => [item.dedupeKey || item.at, item.text])) : 'empty';
     root.__devspaceProgressMessages = messages;
-    if (root.dataset.renderKey !== renderKey || root.dataset.appliedSize !== uiState.size) {
+    if (structureRebuilt || root.dataset.renderKey !== renderKey || root.dataset.appliedSize !== uiState.size) {
       applySize(uiState.size, { persist:false, preserveScroll:root.dataset.renderKey === renderKey });
       root.dataset.renderKey = renderKey;
     } else {

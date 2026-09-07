@@ -1873,6 +1873,11 @@ export function createServer(config = loadConfig(), options = {}) {
             await nativeUsageEvidence.record(event);
         },
         onTurnRequest: async (event) => {
+            await goalRunProgress.noteConversationTurn({
+                conversationId: event?.conversationId,
+                runtimeKey: event?.runtimeKey,
+                observedAt: event?.observedAt,
+            });
             await contextGuardian.observeTurnRequest(event);
             if (Number.isFinite(event?.estimatedInputTokens) && event.estimatedInputTokens > 0) {
                 await contextGuardian.observeTurnInputEstimate({

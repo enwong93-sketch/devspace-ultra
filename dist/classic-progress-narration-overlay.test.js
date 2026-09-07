@@ -39,6 +39,8 @@ assert.match(script, /aria-live','polite'/);
 assert.match(script, /const UI_VERSION = "3"/);
 assert.match(script, /style\.dataset\.uiVersion === UI_VERSION/);
 assert.match(script, /root\.dataset\.uiVersion === UI_VERSION && controls === 4/);
+assert.match(script, /const structureRebuilt = ensureStructure\(\)/);
+assert.match(script, /structureRebuilt \|\| root\.dataset\.renderKey/);
 assert.match(script, /const mode =/);
 assert.doesNotMatch(script, /if\s*\(isWork\).*visible\s*=\s*false/i, "Work mode must not suppress progress narration");
 assert.match(script, /syntheticUserMessages:0/);
@@ -109,6 +111,7 @@ try {
     alwaysVisibleScrollbar: true,
     explicitOlderAndLatestControls: true,
     noReloadUiMigration: true,
+    hiddenRuntimeUiMigration: true,
     mouseWheelCaptured: true,
     defaultCompact: true,
     compactNormalExpanded: true,

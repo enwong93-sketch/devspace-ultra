@@ -93,7 +93,17 @@ try {
   });
   try {
     await conversationOnly.start();
-    let conversationSnap = await conversationOnly.noteToolStart({
+    let conversationSnap = await conversationOnly.noteConversationTurn({
+      conversationId: "conv-main-01",
+      runtimeKey: "main-01",
+      observedAt: new Date(now).toISOString(),
+    });
+    assert.equal(conversationSnap.active.goalId, "conversation:conv-main-01");
+    assert.equal(conversationSnap.active.progressKind, "conversation");
+    assert.equal(conversationSnap.active.runtimeKey, "main-01");
+    assert.equal(conversationSnap.active.stepCount, 0);
+    assert.match(conversationSnap.active.objective, /等候第一個已驗證工具結果/);
+    conversationSnap = await conversationOnly.noteToolStart({
       conversationId: "conv-main-01",
       runtimeKey: "main-01",
       operationId: "blender-inspect",
@@ -123,7 +133,7 @@ try {
     await conversationOnly.close();
   }
 
-  console.log(JSON.stringify({ ok: true, gate: "goal-run-progress-supervisor", automaticToolStart: true, automaticToolBoundary: true, boundedBoundaryQueue: true, autonomousHeartbeat: true, durable: true, planOnlyWorkAgent: true, ordinaryMainConversation: true, workerBackendOnly: true, evidenceNotInvented: true }));
+  console.log(JSON.stringify({ ok: true, gate: "goal-run-progress-supervisor", nativeTurnCreatesWaitingCard: true, automaticToolStart: true, automaticToolBoundary: true, boundedBoundaryQueue: true, autonomousHeartbeat: true, durable: true, planOnlyWorkAgent: true, ordinaryMainConversation: true, workerBackendOnly: true, evidenceNotInvented: true }));
 } finally {
   await supervisor?.close();
   await rm(root, { recursive: true, force: true });

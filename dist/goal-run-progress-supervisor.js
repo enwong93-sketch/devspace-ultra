@@ -211,6 +211,23 @@ export class GoalRunProgressSupervisor {
     return this.snapshot();
   }
 
+  async noteConversationTurn({ conversationId = null, runtimeKey = null, observedAt = null } = {}) {
+    if (this.closed) return this.snapshot();
+    const goal = await this.resolveGoal({ conversationId, runtimeKey });
+    if (this.closed || !goal) return this.snapshot();
+    const row = this.runFor(goal);
+    if (!row) return this.snapshot();
+    row.interrupted = false;
+    row.runtimeKey = clip(runtimeKey, 80) || row.runtimeKey || null;
+    const parsedObservedAt = Date.parse(observedAt || "");
+    row.turnObservedAt = Number.isFinite(parsedObservedAt) ? new Date(parsedObservedAt).toISOString() : new Date(this.now()).toISOString();
+    if (row.progressKind === "conversation" && Number(row.stepCount || 0) === 0) {
+      row.objective = "處理目前對話要求，等候第一個已驗證工具結果";
+    }
+    await this.publish(row);
+    return this.snapshot();
+  }
+
   async noteToolBoundary({ operationId, success = null, durationMs = null, conversationId = null } = {}) {
     if (this.closed) return this.snapshot();
     const id = clip(operationId, 160);
