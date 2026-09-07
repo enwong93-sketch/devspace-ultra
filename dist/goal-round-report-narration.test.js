@@ -34,7 +34,9 @@ assert.equal(Array.isArray(rows), true, "Round report narration must return mess
 assert.ok(rows.length >= 4, `Expected a multi-paragraph round report, observed ${rows.length}.`);
 assert.equal(rows.every((row) => typeof row?.text === "string" && row.text.trim().length > 0), true);
 assert.equal(rows.every((row) => row.text.length <= 1_600), true, "Each card paragraph must remain bounded.");
-assert.equal(rows.every((row) => row.kind === "round-report"), true);
+assert.equal(rows[0].kind, "round-report-heading");
+assert.equal(rows.at(-1).kind, "round-report-status");
+assert.equal(rows.slice(1, -1).every((row) => row.kind === "round-report"), true);
 assert.equal(rows.every((row) => row.goalId === goal.id), true);
 assert.equal(rows.every((row) => row.conversationId === goal.conversationId), true);
 assert.equal(rows.every((row) => row.round === 4), true);

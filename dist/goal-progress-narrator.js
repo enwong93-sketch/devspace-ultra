@@ -72,26 +72,33 @@ export function goalRoundReportNarration(goal) {
   const summary = splitRoundReportSummary(report?.summary);
   if (!goal?.id || !reportedAt || !summary.length) return [];
   const prefix = `${goal.id}:${round}:round-report:${reportedAt}`;
-  const rows = [{
+  const decorate = (row) => ({
+    ...row,
+    conversationId: goal.conversationId,
+    goalId: goal.id,
+    source: "goal-round-report",
+    dedupeKey: row.key,
+  });
+  const rows = [decorate({
     round,
     kind: "round-report-heading",
     key: `${prefix}:heading`,
     text: `第 ${round} 輪工作匯報已提交。以下係本輪已核實進度，完整內容可喺旁白卡向上捲動查看。`,
-  }];
-  summary.forEach((text, index) => rows.push({
+  })];
+  summary.forEach((text, index) => rows.push(decorate({
     round,
     kind: "round-report",
     key: `${prefix}:part:${index + 1}`,
     text: `本輪進度 ${index + 1}/${summary.length}：${text}`,
-  }));
-  rows.push({
+  })));
+  rows.push(decorate({
     round,
     kind: "round-report-status",
     key: `${prefix}:status`,
     text: report?.meaningfulProgress === false
       ? `第 ${round} 輪暫未形成足夠實質進展；Goal 仍會保留原目標同阻塞證據，唔會因完成匯報而當成完成。`
       : `第 ${round} 輪已有實質進展並已寫入後端；Goal 狀態同下一輪 execution frontier 會繼續沿用，唔會重做已完成工作。`,
-  });
+  }));
   return rows;
 }
 

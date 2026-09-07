@@ -3,12 +3,15 @@ import { ContextGuardianRolloverCoordinator } from "./context-guardian-rollover.
 
 let descriptorCalls = 0;
 let observedTokens = 3_654;
+let structuralSourceObserved = false;
 const observations = [];
 
 const contextGuardian = {
   async observeRuntimeSnapshot(input) {
     observations.push(structuredClone(input));
-    observedTokens = Math.max(observedTokens, Number(input?.observedTokens || 0));
+    const next = Number(input?.observedTokens || 0);
+    observedTokens = Math.max(observedTokens, next);
+    if (next > 3_654) structuralSourceObserved = true;
   },
   async status(runtimeKey) {
     return {
@@ -20,7 +23,7 @@ const contextGuardian = {
       supportedChatMode: true,
       pressure: {
         stage: observedTokens >= 300_000 ? "prepare" : "normal",
-        usageSource: observedTokens > 3_654 ? "classic-conversation-snapshot" : "devspace-ledger",
+        usageSource: structuralSourceObserved ? "classic-conversation-snapshot" : "devspace-ledger",
         usedTokens: observedTokens,
         predictedInputTokens: observedTokens,
         rolloverLimitTokens: 360_000,
@@ -79,7 +82,7 @@ try {
   assert.equal(observations.length, 2, "metadata refresh and structural usage seed are separate observations");
   assert.equal(observations[0].observedTokens, undefined, "metadata refresh must not invent a token value");
   assert.equal(observations[1].observedTokens, 250_000);
-  assert.equal(observations[1].usageSource, "classic-conversation-snapshot");
+  assert.equal(observations[1].usageSource, undefined, "the coordinator supplies a structural token floor; production Context Guardian derives the source label from snapshotTokens instead of trusting caller metadata");
   assert.equal(observedTokens, 250_000);
   assert.equal((await contextGuardian.status("main-02")).pressure.usageSource, "classic-conversation-snapshot");
 

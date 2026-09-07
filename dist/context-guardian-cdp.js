@@ -8,6 +8,9 @@ import { runtimeKeyForPort } from "./classic-stream-recovery-cdp.js";
 const DEFAULT_CONNECTION_POLL_MS = 15_000;
 const DEFAULT_PROBE_TIMEOUT_MS = 700;
 const DEFAULT_ROLLOVER_TIMEOUT_MS = 120_000;
+const NATIVE_DESCRIPTOR_CACHE_TTL_MS = 60_000;
+const NATIVE_DESCRIPTOR_RATE_LIMIT_COOLDOWN_MS = 90_000;
+const NATIVE_DESCRIPTOR_RETRY_DELAYS_MS = [0, 750, 2_000];
 const DEVSPACE_PLUGIN_NAME = "DevSpace Ultra";
 
 function sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
@@ -202,7 +205,7 @@ export function summarizeClassicConversationPayload(payload = {}) {
   };
 }
 
-function nativeConversationDescriptorExpression(conversationId) {
+export function nativeConversationDescriptorExpression(conversationId) {
   return `(${async function collect(id, summarize) {
     let accessToken = null;
     const auth = await fetch('/api/auth/session', { credentials:'include', cache:'no-store' });
@@ -212,14 +215,31 @@ function nativeConversationDescriptorExpression(conversationId) {
         : typeof session?.access_token === 'string' ? session.access_token
           : null;
     }
-    const response = await fetch('/backend-api/conversation/' + encodeURIComponent(id), {
-      credentials:'include',
-      cache:'no-store',
-      headers: accessToken ? { authorization:'Bearer ' + accessToken } : undefined,
-    });
-    if (!response.ok) throw new Error('Native conversation descriptor HTTP ' + response.status);
-    const payload = await response.json();
-    return { ...summarize(payload), authenticatedBackendFetch:Boolean(accessToken), rawContentReturned:false, credentialsReturned:false };
+    const paths = [
+      '/backend-api/conversation/' + encodeURIComponent(id),
+      '/backend-api/conversations/' + encodeURIComponent(id),
+    ];
+    const attempts = [];
+    for (const path of paths) {
+      const response = await fetch(path, {
+        credentials:'include',
+        cache:'no-store',
+        headers: accessToken ? { authorization:'Bearer ' + accessToken } : undefined,
+      });
+      const retryAfter = response.headers?.get?.('retry-after') || null;
+      attempts.push({ path, status: response.status, retryAfter });
+      if (response.ok) {
+        const payload = await response.json();
+        return { ...summarize(payload), authenticatedBackendFetch:Boolean(accessToken), rawContentReturned:false, credentialsReturned:false, descriptorEndpoint:path, descriptorAttempts:attempts };
+      }
+      if (response.status === 429) {
+        return { ok:false, errorCode:'NATIVE_DESCRIPTOR_RATE_LIMIT', status:429, retryAfter, attempts, rawContentReturned:false, credentialsReturned:false };
+      }
+      if (![404, 405].includes(response.status)) {
+        return { ok:false, errorCode:'NATIVE_DESCRIPTOR_HTTP', status:response.status, retryAfter, attempts, rawContentReturned:false, credentialsReturned:false };
+      }
+    }
+    return { ok:false, errorCode:'NATIVE_DESCRIPTOR_NOT_FOUND', status:404, retryAfter:null, attempts, rawContentReturned:false, credentialsReturned:false };
   }.toString()})(${JSON.stringify(conversationId)}, (${summarizeClassicConversationPayload.toString()}))`;
 }
 
@@ -700,6 +720,8 @@ export async function connectClassicContextMetadataPort(port, {
     emit(onConversationIdentity, { runtimeKey, port, ...identity, observedAt: observedAt() });
   };
   let nativeBaseline = null;
+  const nativeDescriptorCache = new Map();
+  const nativeDescriptorCooldowns = new Map();
   let userTurnRolloverArm = null;
   let userTurnPausedHandler = null;
   let userTurnFetchEnabled = false;
@@ -732,6 +754,64 @@ export async function connectClassicContextMetadataPort(port, {
     return snapshot;
   };
 
+  const parseRetryAfterMs = (value) => {
+    const text = String(value ?? "").trim();
+    if (!text) return null;
+    const seconds = Number(text);
+    if (Number.isFinite(seconds) && seconds >= 0) return Math.min(5 * 60_000, Math.ceil(seconds * 1_000));
+    const at = Date.parse(text);
+    return Number.isFinite(at) ? Math.max(0, Math.min(5 * 60_000, at - Date.now())) : null;
+  };
+
+  const loadNativeConversationDescriptor = async (conversationId, { force = false } = {}) => {
+    const id = String(conversationId || "").trim();
+    if (!id) throw new Error("Native conversation descriptor requires a conversation id.");
+    const now = Date.now();
+    const cached = nativeDescriptorCache.get(id);
+    if (!force && cached && now - cached.observedAtMs < NATIVE_DESCRIPTOR_CACHE_TTL_MS) return cached.descriptor;
+    const cooldownUntil = Number(nativeDescriptorCooldowns.get(id) || 0);
+    if (!force && cooldownUntil > now) {
+      if (cached?.descriptor) return cached.descriptor;
+      const error = new Error(`Native conversation descriptor rate limited until ${new Date(cooldownUntil).toISOString()}`);
+      error.code = "NATIVE_DESCRIPTOR_COOLDOWN";
+      error.retryAt = new Date(cooldownUntil).toISOString();
+      throw error;
+    }
+    let lastError = null;
+    for (let index = 0; index < NATIVE_DESCRIPTOR_RETRY_DELAYS_MS.length; index += 1) {
+      const delayMs = NATIVE_DESCRIPTOR_RETRY_DELAYS_MS[index];
+      if (delayMs > 0) await sleep(delayMs);
+      try {
+        const descriptor = await evaluate(client, nativeConversationDescriptorExpression(id));
+        if (descriptor?.ok === false) {
+          const error = new Error(`Native conversation descriptor HTTP ${descriptor.status || "unavailable"}`);
+          error.code = descriptor.errorCode || "NATIVE_DESCRIPTOR_HTTP";
+          error.status = descriptor.status;
+          error.retryAfter = descriptor.retryAfter;
+          throw error;
+        }
+        if (!descriptor || descriptor.conversationId !== id || !descriptor.currentNode) {
+          throw new Error("Native conversation descriptor did not return the requested conversation boundary.");
+        }
+        nativeDescriptorCache.set(id, { descriptor, observedAtMs: Date.now() });
+        nativeDescriptorCooldowns.delete(id);
+        return descriptor;
+      } catch (error) {
+        lastError = error;
+        const message = error instanceof Error ? error.message : String(error);
+        const rateLimited = error?.code === "NATIVE_DESCRIPTOR_RATE_LIMIT" || /Native conversation descriptor HTTP 429/i.test(message);
+        if (!rateLimited) break;
+        const retryAfterMs = parseRetryAfterMs(error?.retryAfter);
+        const fallbackDelay = NATIVE_DESCRIPTOR_RETRY_DELAYS_MS[Math.min(index + 1, NATIVE_DESCRIPTOR_RETRY_DELAYS_MS.length - 1)] || 2_000;
+        const cooldownMs = Math.max(NATIVE_DESCRIPTOR_RATE_LIMIT_COOLDOWN_MS, retryAfterMs ?? fallbackDelay);
+        nativeDescriptorCooldowns.set(id, Date.now() + cooldownMs);
+        if (index + 1 >= NATIVE_DESCRIPTOR_RETRY_DELAYS_MS.length) break;
+      }
+    }
+    if (cached?.descriptor) return cached.descriptor;
+    throw lastError || new Error("Native conversation descriptor unavailable.");
+  };
+
   const clearUserTurnRolloverArm = async ({ disableFetch = true } = {}) => {
     userTurnRolloverArm = null;
     try { userTurnPausedHandler?.(); } catch {}
@@ -757,7 +837,7 @@ export async function connectClassicContextMetadataPort(port, {
           : null;
       }, { timeoutMs: Math.max(30_000, Number(arm?.verifyTimeoutMs) || DEFAULT_ROLLOVER_TIMEOUT_MS), pollMs: 300 });
       if (!stable?.conversationId) throw new Error("Auto Compact continuation did not reach a stable target conversation.");
-      const targetDescriptor = await evaluate(client, nativeConversationDescriptorExpression(stable.conversationId));
+      const targetDescriptor = await loadNativeConversationDescriptor(stable.conversationId, { force: true });
       if (targetDescriptor?.conversationId !== stable.conversationId) {
         throw new Error("Auto Compact target descriptor does not match the stable continuation conversation.");
       }
@@ -1088,14 +1168,11 @@ export async function connectClassicContextMetadataPort(port, {
       if (!text) throw new Error("Context Guardian runtime evaluation requires an expression.");
       return await evaluate(client, text);
     },
-    async nativeConversationDescriptor() {
+    async nativeConversationDescriptor({ force = false } = {}) {
       const current = await evaluate(client, inspectExpression());
       const conversationId = String(current?.conversationId || "").trim();
       if (!conversationId) throw new Error("Native conversation descriptor requires the current ChatGPT conversation id.");
-      const descriptor = await evaluate(client, nativeConversationDescriptorExpression(conversationId));
-      if (!descriptor || descriptor.conversationId !== conversationId || !descriptor.currentNode) {
-        throw new Error("Native conversation descriptor did not return the current conversation boundary.");
-      }
+      const descriptor = await loadNativeConversationDescriptor(conversationId, { force });
       return { runtimeKey, port, ...descriptor, observedAt: observedAt() };
     },
     async refreshSnapshot() {
@@ -1155,6 +1232,8 @@ export async function connectClassicContextMetadataPort(port, {
     get pendingIdentityCorrelations() { return turnIdentityCorrelator.pendingSize; },
     async close() {
       await clearUserTurnRolloverArm();
+      nativeDescriptorCache.clear();
+      nativeDescriptorCooldowns.clear();
       for (const dispose of disposers) dispose();
       client.close();
       await sleep(0);

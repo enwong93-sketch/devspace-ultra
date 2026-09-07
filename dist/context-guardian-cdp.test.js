@@ -6,6 +6,7 @@ import {
   parseClassicTurnRequest,
   estimateClassicConversationPayloadTokens,
   summarizeClassicConversationPayload,
+  nativeConversationDescriptorExpression,
   buildClassicHiddenRolloverBody,
   buildClassicUserTurnRolloverBody,
   rewriteHiddenRolloverPausedRequest,
@@ -157,6 +158,16 @@ import { fingerprintClassicSession } from "./classic-conversation-authority.js";
     { slug: "gpt-5-6-pro", max_tokens: 410000, title: "GPT-5.6 Pro", reasoning_type: "pro", is_work_mode_model: false },
   ]);
   assert.equal(JSON.stringify(models).includes("secret"), false);
+}
+
+{
+  const descriptorExpression = nativeConversationDescriptorExpression("conversation-descriptor");
+  assert.match(descriptorExpression, /backend-api\/conversation\//);
+  assert.match(descriptorExpression, /backend-api\/conversations\//);
+  assert.match(descriptorExpression, /NATIVE_DESCRIPTOR_RATE_LIMIT/);
+  assert.match(descriptorExpression, /retryAfter/);
+  assert.match(descriptorExpression, /rawContentReturned:false/);
+  assert.match(descriptorExpression, /credentialsReturned:false/);
 }
 
 {
