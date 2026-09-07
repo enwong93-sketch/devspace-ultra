@@ -115,9 +115,9 @@ export function computeContextGuardianPressure({
   const usedTokens = measured ?? Math.max(snapshot, ledger);
   const usageSource = measured !== null
     ? "host-measured"
-    : ledger >= snapshot && ledger > 0
-      ? "devspace-ledger"
-      : snapshot > 0 ? "classic-conversation-snapshot" : "unresolved";
+    : snapshot > 0 && snapshot >= ledger
+      ? "classic-conversation-snapshot"
+      : ledger > 0 ? "devspace-ledger" : "unresolved";
   const next = boundedTokens(nextInputTokens);
   const predictedInputTokens = usedTokens + next;
 

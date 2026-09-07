@@ -3,6 +3,7 @@ import { estimateClassicInputTokens } from "./context-guardian-cdp.js";
 
 const DEFAULT_POLL_MS = 5_000;
 const PREPARE_REUSE_MS = 30_000;
+const NATIVE_STRUCTURAL_SEED_TTL_MS = 60_000;
 
 function clip(value, max = 2_400) {
   const text = String(value ?? "").trim();
@@ -128,6 +129,7 @@ export class ContextGuardianRolloverCoordinator {
     this.polling = null;
     this.closed = false;
     this.prepared = new Map();
+    this.nativeSeedCache = new Map();
   }
 
   async start({ schedule = true } = {}) {
@@ -170,11 +172,61 @@ export class ContextGuardianRolloverCoordinator {
     return snapshot;
   }
 
+  async #nativeDescriptor(runtimeKey, conversationId, { force = false } = {}) {
+    if (typeof this.contextAdapter.nativeConversationDescriptor !== "function") return null;
+    const id = String(conversationId || "").trim();
+    if (!id) return null;
+    const now = Date.now();
+    const cached = this.nativeSeedCache.get(runtimeKey);
+    if (!force && cached?.conversationId === id && now - cached.observedAtMs < NATIVE_STRUCTURAL_SEED_TTL_MS) {
+      return cached.descriptor;
+    }
+    const descriptor = await this.contextAdapter.nativeConversationDescriptor(runtimeKey);
+    if (!descriptor?.conversationId || descriptor.conversationId !== id) {
+      throw new Error("Native structural descriptor does not match the current Context Guardian conversation.");
+    }
+    this.nativeSeedCache.set(runtimeKey, {
+      conversationId: id,
+      observedAtMs: now,
+      descriptor,
+    });
+    return descriptor;
+  }
+
   async #ensureNativeSeed(runtimeKey, snapshot, context) {
-    // Page refresh/reload is forbidden. Missing exact native usage/context evidence
-    // stays unresolved until it is passively observed from Classic-native transport.
-    // Never manufacture a seed by reloading the renderer.
-    return { snapshot, context };
+    // Exact host usage may be unavailable after Core restart even though the
+    // existing ChatGPT conversation is already large. Use one sanitized,
+    // authenticated structural descriptor as a conservative snapshot seed.
+    // This affects pressure timing only; it is never relabelled exact usage.
+    if (!snapshot?.ok || snapshot?.mode === "work" || !snapshot?.conversationId) return { snapshot, context };
+    const descriptor = await this.#nativeDescriptor(runtimeKey, snapshot.conversationId);
+    const structuralTokens = Number(descriptor?.estimatedTokens);
+    const existingUsed = Number(context?.pressure?.usedTokens ?? 0);
+    if (!Number.isFinite(structuralTokens) || structuralTokens <= 0 || structuralTokens <= existingUsed) {
+      return { snapshot, context, descriptor };
+    }
+    if (typeof this.contextGuardian.observeRuntimeSnapshot === "function") {
+      await this.contextGuardian.observeRuntimeSnapshot({
+        runtimeKey,
+        modelSlug: descriptor?.defaultModelSlug || snapshot.modelSlug,
+        conversationId: snapshot.conversationId,
+        mode: snapshot.mode,
+        observedTokens: Math.floor(structuralTokens),
+        observedAt: new Date().toISOString(),
+      });
+    }
+    const refreshedContext = await this.contextGuardian.status(runtimeKey);
+    return {
+      snapshot: {
+        ...snapshot,
+        observedTokens: Math.floor(structuralTokens),
+        messageCount: Number(descriptor?.branchMessageCount || snapshot?.messageCount || 0),
+        nativeSnapshot: true,
+        structuralSnapshot: true,
+      },
+      context: refreshedContext,
+      descriptor,
+    };
   }
 
   async #checkpoint({ runtimeKey, goal, plan, context, recentMessages, mode = "user-turn", force = false }) {
@@ -184,7 +236,7 @@ export class ContextGuardianRolloverCoordinator {
     if (!force && prior && prior.conversationId === context?.conversationId && prior.mode === mode && now - prior.preparedAt < PREPARE_REUSE_MS && Math.abs(used - prior.usedTokens) < 4_096) {
       return prior.record;
     }
-    const sourceDescriptor = await this.contextAdapter.nativeConversationDescriptor(runtimeKey);
+    const sourceDescriptor = await this.#nativeDescriptor(runtimeKey, context?.conversationId);
     if (!sourceDescriptor?.conversationId || sourceDescriptor.conversationId !== context?.conversationId || !sourceDescriptor.currentNode) {
       throw new Error("Auto Compact source descriptor does not match the current Context Guardian conversation.");
     }
@@ -389,6 +441,7 @@ export class ContextGuardianRolloverCoordinator {
     });
     if ((goalId || planId) && rebound !== true) return false;
     this.prepared.delete(runtimeKey);
+    this.nativeSeedCache.delete(runtimeKey);
     if (capsuleId && typeof this.continuityRuntime.updateCapsuleMeta === "function") {
       await this.continuityRuntime.updateCapsuleMeta(capsuleId, {
         status: "verified-continuation",
@@ -473,5 +526,6 @@ export class ContextGuardianRolloverCoordinator {
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
     if (this.polling) await this.polling.catch(() => {});
+    this.nativeSeedCache.clear();
   }
 }
