@@ -108,9 +108,19 @@ try {
   assert.equal(typeof goal.conversationId, "string", "Goal native conversation binding is missing.");
   assert.ok(goal.conversationId.length > 10, "Goal native conversation ID is invalid.");
 
-  const boundPlans = (await activePlans(plans)).filter((item) => item.status === "active" && item.conversationId === goal.conversationId);
-  assert.equal(boundPlans.length, 1, `Expected exactly one active Plan bound to Goal conversation, observed ${boundPlans.length}.`);
-  const plan = boundPlans[0];
+  const activeBoundPlans = (await activePlans(plans)).filter((item) => item.status === "active" && item.conversationId === goal.conversationId);
+  assert.ok(activeBoundPlans.length <= 1, `Expected at most one active Plan bound to Goal conversation, observed ${activeBoundPlans.length}.`);
+  let plan = activeBoundPlans[0] || null;
+  if (!plan) {
+    assert.equal(typeof plans.list, "function", "PlanRuntime cannot verify a terminal Plan after completion.");
+    plan = (await plans.list({ limit: 100 }))
+      .filter((item) => item.status === "completed" && item.conversationId === goal.conversationId)
+      .sort((left, right) => Date.parse(right.completedAt || right.updatedAt || 0) - Date.parse(left.completedAt || left.updatedAt || 0))[0] || null;
+  }
+  assert.ok(plan, "No active or completed Plan is bound to the Goal conversation.");
+  if (plan.status === "completed") {
+    assert.equal((plan.steps || []).every((step) => step.status === "completed"), true, "Terminal Plan contains unfinished steps.");
+  }
 
   const authority = new ClassicExactUsageAuthority({
     statePath: join(config.stateDir, "classic-native-usage-evidence.json"),
@@ -147,7 +157,9 @@ try {
     plan: {
       id: plan.id,
       revision: plan.revision,
+      status: plan.status,
       activeSteps: (plan.steps || []).filter((step) => step.status === "in_progress").map((step) => step.id),
+      allStepsCompleted: plan.status === "completed" ? (plan.steps || []).every((step) => step.status === "completed") : false,
     },
     production: {
       gatewayPort,

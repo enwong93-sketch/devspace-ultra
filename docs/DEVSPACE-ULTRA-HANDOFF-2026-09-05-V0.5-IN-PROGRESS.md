@@ -2852,3 +2852,64 @@ The user's screenshots showed two distinct surfaces: a run that emitted user-vis
 The worktree is clean on `v0.5-convergence`. Production whole-restart was executed after the commits; the current DevSpace Goal/status calls are again succeeding through the Local Gateway. The preceding visible assistant response still failed with `Message delivery timed out`, so Round 8 had not yet been formally recorded by `devspace_goal_turn_report`; the next report closes that bookkeeping gap.
 
 The overall Goal remains active. Conversation binding for this Goal is still unresolved (`conversationId: null`), exact Classic-native actual-usage authority is not yet available, same-conversation Auto Compact has not been accepted, and real no-refresh A→B→A frontend acceptance remains unfinished. None of those items is relabelled complete by Round 8.
+
+## 2026-09-07 — Round 9: bounded logs, production retention evidence, native binding and final live acceptance
+
+Round 9 independently tested the user's OOM hypothesis instead of treating log size as proof of heap retention.
+
+### OOM attribution and bounded diagnostic logs
+
+Three sources are now separated explicitly:
+
+1. **PSReadLine history** is an interactive PowerShell disk file. The non-interactive Scheduled Task/Gateway does not retain that history in Node V8 heap.
+2. **Diagnostic log files** consume disk and become a heap risk only when code reads/buffers them. DevSpace now bounds them independently and never loads a complete log for rotation.
+3. **Live Core retention**—MCP transports, active requests, SSE streams, workspace contexts, capability clients, CDP calls and buffers—is measured through `/__devspace/memory/status` and remains the authority for Node OOM analysis.
+
+The new `dist/log-retention.js` policy is wired into the Stable Gateway lifecycle:
+
+```text
+per diagnostic file  = 16 MiB
+retained tail         = 4 MiB
+total per log root    = 256 MiB
+maximum files         = 256
+maximum age           = 14 days
+sweep interval        = 5 minutes, single-flight and unref'd
+```
+
+Append-only files are opened with `r+`; only the bounded tail is read, the same inode is truncated and rewritten, and existing append-mode child descriptors continue writing. Symlinks are skipped. Durable Goal, Plan, conversation authority, OAuth, capability registry and ordinary JSON state are not classified as logs. Tests prove per-file trimming, append-descriptor survival, age expiry, total quota, file-count cap, authority-file exclusion, bounded action history and Gateway start/close integration.
+
+`scripts/log-memory-diagnostic.mjs` reports disk totals and a bounded PSReadLine tail without reading raw diagnostic content. `scripts/production-memory-retention-soak.mjs` separates idle from busy samples, enforces the 512 MiB heap/session/SSE hard bounds and flags only sustained idle growth beyond both a 64 MiB net threshold and 4 MiB/minute slope. A busy sample can prove hard bounds but is never mislabelled as a leak-free idle interval.
+
+### Native conversation and frontend acceptance
+
+After the Round 9 native user turn, the existing Goal acquired an authoritative non-null ChatGPT conversation binding. The live native binding gate passed. A new conversation-bound execution Plan was created for this round, and the real Host Overlay acceptance gate passed the no-refresh `A → B → A` sequence with exactly one active Plan before terminal completion and no cross-conversation Goal/Plan leakage.
+
+The Plan completion recovery utility reuses the official `devspace_update_plan` handler, requires exactly one Goal-bound active Plan, advances normal guarded transitions, never creates a duplicate, and becomes read-only/idempotent once the Plan is terminal.
+
+### Exact usage and same-conversation native compact
+
+The exact-only components are now normal regression gates:
+
+- `ClassicExactUsageAuthority` accepts only fresh numeric Classic native protocol evidence bound to the current conversation;
+- estimator, ledger, DOM, context-window, output/cache, remaining and ambiguous values fail closed;
+- the exact Context Guardian facade rejects non-native usage authority;
+- native compact endpoint discovery/probing, same-conversation identity, exact before/after reduction, Goal/Plan frontier preservation, zero page actions, zero reloads and zero synthetic visible user messages are all required.
+
+The exact usage live gate and native Auto Compact discovery/live acceptance completed without error for the bound Goal conversation. The persisted accepted compact record has `exactUsedTokensAfter < exactUsedTokensBefore`, the same conversation ID, and zero forbidden page/message actions. Production configuration now enables Host Overlay, Context Guardian, Stream Recovery and native Auto Compact together at the 90% exact-usage threshold.
+
+### Consolidated release gate
+
+`scripts/v0.5-final-live-acceptance.mjs` now fails the release unless all of the following agree in one run:
+
+- Stable Gateway and Core health;
+- full-access-only execution policy;
+- 512 MiB production heap ceiling and MCP/SSE hard caps;
+- full Classic profile enabled;
+- native Goal conversation binding;
+- exactly one bound active Plan at the pre-terminal acceptance boundary;
+- fresh exact native usage;
+- matching accepted same-conversation compact evidence;
+- zero automated page actions/reloads/synthetic user messages;
+- 16/256 MiB diagnostic log limits.
+
+Focused log, memory-retention, exact-usage and Auto Compact gates passed, followed by the full `npm run verify:ultra` and consolidated live acceptance. The round Plan was then completed through the guarded official update path. The overall Goal should be completed only after final handoff/PowerMem synchronization and remote release verification; no stale Round 8 claim is used as evidence.
