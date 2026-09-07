@@ -2794,3 +2794,61 @@ One prototype invokes `Page.reload`; it remains superseded by the zero-refresh a
 PowerMem checkpoint **`751892648050032640`** records the same Phase 4 evidence under `user_id=codex-global`, namespace `global`, without creating a second memory store.
 
 **Phase 4 exit gate: PASS.** The next and only active phase is **Phase 5 — controlled full-feature production deployment**. That phase must use an inactive-slot candidate, compare OAuth/tool schema/state, preserve the public Gateway/App session, promote atomically with rollback, and perform no ChatGPT page refresh or re-OAuth. Goal binding, frontend A→B→A acceptance, delivery-timeout recovery and Main Auto Compact remain later isolated phases.
+
+## 2026-09-07 — Round 8: Gateway crash containment, official Computer Use route, and reasoning-mode progress parity
+
+Round 8 recovered from a real production outage and completed three additional boundaries. It does **not** complete the overall v0.5 Goal.
+
+### Stable Gateway no longer disappears on Core startup failure
+
+The observed five-second PowerShell window and external HTTP 502 were traced to the Stable Gateway awaiting `controller.start()` before binding its own listener. Any synchronous/asynchronous Core startup exception therefore terminated the Gateway process itself, leaving Caddy with no listener on `127.0.0.1:7678`.
+
+Commit `8a06c6c` changes startup ordering and failure semantics:
+
+- the Gateway binds the stable loopback listener first;
+- an unavailable Core produces an explicit degraded `503`, not a vanished listener/502;
+- Core startup retries in-process with bounded state and no page reload;
+- the Gateway recovers automatically when Core becomes available;
+- startup exception names/timestamps are retained without logging secret values.
+
+`stable-gateway-degraded-startup-gate.mjs` proves listener survival, degraded status, automatic retry, and recovery without restarting the Gateway. The full Stable Gateway verification suite passes.
+
+### Official Codex Computer Use is reused directly
+
+Commit `4deb0e3` completes the requested plugin-layer route without creating another GUI stack:
+
+- `codex_computer_use` automatically routes visual Windows tasks;
+- the built-in capability contributes routing instructions/skill metadata only;
+- execution reuses the shared persistent Codex `node_repl` and imports OpenAI's bundled `@oai/sky` runtime;
+- only structured allowlisted `sky.*` actions are accepted;
+- screenshots are summarized without serializing data URLs into MCP results;
+- there is no DevSpace Selenium, Playwright, PowerShell UIAutomation, SendInput, mouse/keyboard, or screenshot fallback driver;
+- the local execution policy remains one owner-selected mode: `danger-full-access`, approvals `never`, sandbox disabled, no alternative modes.
+
+A live read-only gate called the real shared runtime and observed `44` applications and `14` targetable windows without clicking, typing, scrolling, moving windows, or changing application state. Computer Use focused/static/live gates and real-Core canary pass.
+
+### 512 MiB isolation and production diagnostics
+
+The six-profile isolation matrix was repeated after the Round 8 changes. All profiles passed. The final full-product profile settled at approximately `316.8 MiB` heap / `427.3 MiB` RSS after returning active requests, SSE streams, process sessions, and CDP pending calls to zero; peak heap was approximately `431.9 MiB` under a verified `512 MiB` total heap limit.
+
+A production diagnostic snapshot during the heavy live session showed roughly `406 MiB` heap with the same `512 MiB` ceiling, `40` retained MCP sessions/SSE streams and `41` active requests. This matches sustained live load at the configured caps and does not by itself prove a leak. The isolated cleanup gate is the evidence that bounded lifecycle state returns to the expected idle shape.
+
+### Thinking/XHi and Pro now receive one progress contract
+
+The user's screenshots showed two distinct surfaces: a run that emitted user-visible operational paragraphs between tool work, and a Pro run that exposed only sparse host/tool status rows. DevSpace does not own the ChatGPT assistant text renderer and cannot expose raw hidden reasoning. Commit `8235525` therefore adds the strongest non-synthetic solution available at the plugin instruction layer:
+
+- Thinking/XHi and Pro receive the same interactive Main progress rule;
+- one concise visible objective must appear before substantive tool use;
+- further concise operational summaries appear after meaningful verified milestones, approach changes, genuine blockers, or roughly five minutes of continued work;
+- updates report observable work and next action, never hidden chain-of-thought;
+- repeated collapsed tool previews and mechanical status boards are not accepted as equivalent reporting;
+- Chat Swarm workers remain backend-only;
+- when the host/model still suppresses intermediate commentary, the existing bounded human-progress transcript remains the no-refresh/no-synthetic-turn fallback.
+
+`interactive-progress-instructions-static-gate.mjs` proves the rule is present in all three server-instruction branches. A complete `npm run verify:ultra` passes after this change.
+
+### Current production/release boundary
+
+The worktree is clean on `v0.5-convergence`. Production whole-restart was executed after the commits; the current DevSpace Goal/status calls are again succeeding through the Local Gateway. The preceding visible assistant response still failed with `Message delivery timed out`, so Round 8 had not yet been formally recorded by `devspace_goal_turn_report`; the next report closes that bookkeeping gap.
+
+The overall Goal remains active. Conversation binding for this Goal is still unresolved (`conversationId: null`), exact Classic-native actual-usage authority is not yet available, same-conversation Auto Compact has not been accepted, and real no-refresh A→B→A frontend acceptance remains unfinished. None of those items is relabelled complete by Round 8.
