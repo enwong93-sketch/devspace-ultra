@@ -76,15 +76,18 @@ try {
   const first = await coordinator.pollOnce();
   assert.equal(first.results[0].action, "normal");
   assert.equal(descriptorCalls, 1);
-  assert.equal(observations.length, 1);
-  assert.equal(observations[0].observedTokens, 250_000);
+  assert.equal(observations.length, 2, "metadata refresh and structural usage seed are separate observations");
+  assert.equal(observations[0].observedTokens, undefined, "metadata refresh must not invent a token value");
+  assert.equal(observations[1].observedTokens, 250_000);
+  assert.equal(observations[1].usageSource, "classic-conversation-snapshot");
   assert.equal(observedTokens, 250_000);
   assert.equal((await contextGuardian.status("main-02")).pressure.usageSource, "classic-conversation-snapshot");
 
   const second = await coordinator.pollOnce();
   assert.equal(second.results[0].action, "normal");
   assert.equal(descriptorCalls, 1, "the 60-second native structural seed cache must prevent repeated full descriptor fetches");
-  assert.equal(observations.length, 1, "a cached descriptor must not re-observe a non-increasing snapshot");
+  assert.equal(observations.length, 3, "the cached structural descriptor must not be fetched again; metadata refresh remains a separate non-token observation");
+  assert.equal(observations[2].observedTokens, undefined);
 
   console.log(JSON.stringify({
     ok: true,
