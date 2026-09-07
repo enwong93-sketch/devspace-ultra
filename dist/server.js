@@ -16,6 +16,7 @@ import * as z from "zod/v4";
 import { applyPatch } from "./apply-patch.js";
 import { isArtifactDownloadSupportedPlatform, registerArtifactTools, } from "./artifact-tools.js";
 import { loadConfig } from "./config.js";
+import { executionPolicySnapshot } from "./execution-policy.js";
 import { toolModeCapabilities } from "./tool-mode.js";
 import { createOpenAIIncomingArtifactAdapter, } from "./incoming-artifacts.js";
 import { logEvent, requestIp, requestPath, commandPreview, sessionIdPrefix, } from "./logger.js";
@@ -2019,7 +2020,7 @@ export function createServer(config = loadConfig(), options = {}) {
         setHeaders: setAssetHeaders,
     }));
     app.get("/healthz", (_req, res) => {
-        res.json({ ok: true, name: "devspace", chatSwarmUi: CHAT_SWARM_UI_DIAGNOSTICS });
+        res.json({ ok: true, name: "devspace", executionPolicy: executionPolicySnapshot(), chatSwarmUi: CHAT_SWARM_UI_DIAGNOSTICS });
     });
     app.get("/__devspace/memory/status", (req, res) => {
         const remoteAddress = String(req.socket?.remoteAddress ?? "");

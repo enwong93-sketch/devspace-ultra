@@ -17,6 +17,7 @@ import { nodeArgsForCoreHeapProfile } from "../dist/core-node-options.js";
 import { createCandidateSnapshot, startCoreSlot, stopCoreSlot } from "./devspace-core-slot.mjs";
 
 const CONTROL_FILE_NAME = "stable-gateway-control.json";
+const DEFAULT_CORE_START_RETRY_MS = 2_000;
 
 function normalizePort(value, { allowZero = false, label = "port" } = {}) {
   const port = Number(value);
@@ -90,6 +91,7 @@ export async function startStableGatewayRuntime({
   activityJournal,
   humanProgress,
   controlToken = randomBytes(32).toString("base64url"),
+  coreStartRetryMs = DEFAULT_CORE_START_RETRY_MS,
 } = {}) {
   const bindHost = String(host ?? "127.0.0.1").trim();
   if (!["127.0.0.1", "::1", "localhost"].includes(bindHost)) throw new Error("Stable Gateway listener must bind to loopback.");
@@ -102,9 +104,54 @@ export async function startStableGatewayRuntime({
   if (!controller || typeof controller.start !== "function" || typeof controller.handover !== "function") throw new Error("Stable Gateway controller is required.");
   const token = String(controlToken);
   if (token.length < 24) throw new Error("Stable Gateway controlToken is too short.");
+  const retryMs = Number(coreStartRetryMs);
+  if (!Number.isFinite(retryMs) || retryMs < 10 || retryMs > 60_000) throw new Error("coreStartRetryMs is invalid.");
 
-  await controller.start();
   let handoverInProgress = false;
+  let closing = false;
+  let startupRetryTimer = null;
+  let startupRetryPromise = null;
+  let startupAttempts = 0;
+  let startupLastErrorName = null;
+  let startupLastErrorAt = null;
+
+  const startupStatus = () => ({
+    attempts: startupAttempts,
+    retrying: Boolean(startupRetryTimer || startupRetryPromise),
+    lastErrorName: startupLastErrorName,
+    lastErrorAt: startupLastErrorAt,
+  });
+
+  const scheduleStartupRetry = () => {
+    if (closing || startupRetryTimer || controller.status().ok) return;
+    startupRetryTimer = setTimeout(() => {
+      startupRetryTimer = null;
+      void ensureControllerStarted();
+    }, retryMs);
+    startupRetryTimer.unref?.();
+  };
+
+  const ensureControllerStarted = async () => {
+    if (closing || controller.status().ok) return controller.status();
+    if (startupRetryPromise) return startupRetryPromise;
+    startupRetryPromise = (async () => {
+      startupAttempts += 1;
+      try {
+        const status = await controller.start();
+        startupLastErrorName = null;
+        startupLastErrorAt = null;
+        return status;
+      } catch (error) {
+        startupLastErrorName = error instanceof Error ? error.name : "Error";
+        startupLastErrorAt = new Date().toISOString();
+        scheduleStartupRetry();
+        return controller.status();
+      } finally {
+        startupRetryPromise = null;
+      }
+    })();
+    return startupRetryPromise;
+  };
   const server = createServer((req, res) => {
     const path = new URL(req.url || "/", `http://${bindHost}`).pathname;
     if (path === "/__devspace/progress") {
@@ -126,7 +173,12 @@ export async function startStableGatewayRuntime({
         return;
       }
       const current = controller.status();
-      sendJson(res, current.ok ? 200 : 503, { ok: current.ok, gateway: "stable", state: current.ok ? "ready" : "degraded" });
+      sendJson(res, current.ok ? 200 : 503, {
+        ok: current.ok,
+        gateway: "stable",
+        state: current.ok ? "ready" : "degraded",
+        ...(current.ok ? {} : { coreStartup: startupStatus() }),
+      });
       return;
     }
     if (path === "/__devspace/gateway/handover" || path === "/__devspace/gateway/status") {
@@ -139,7 +191,7 @@ export async function startStableGatewayRuntime({
         return;
       }
       if (path.endsWith("/status")) {
-        sendJson(res, 200, controller.status());
+        sendJson(res, 200, { ...controller.status(), coreStartup: startupStatus() });
         return;
       }
       if (req.method !== "POST") {
@@ -169,6 +221,7 @@ export async function startStableGatewayRuntime({
   const controlFile = await writeControlFile(resolvedConfigDir, actualPort, token, {
     progressStatePath: humanProgress?.statePath || null,
   });
+  await ensureControllerStarted();
 
   return {
     ok: true,
@@ -177,6 +230,10 @@ export async function startStableGatewayRuntime({
     controller,
     server,
     async close() {
+      closing = true;
+      if (startupRetryTimer) clearTimeout(startupRetryTimer);
+      startupRetryTimer = null;
+      await startupRetryPromise?.catch(() => {});
       if (server.listening) await new Promise((resolvePromise) => server.close(resolvePromise));
       await controller.close();
       await rm(controlFile, { force: true }).catch(() => {});

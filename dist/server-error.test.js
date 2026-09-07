@@ -30,6 +30,18 @@ try {
   });
   const address = httpServer.address();
   assert.ok(address && typeof address === "object");
+  const health = await fetch(`http://127.0.0.1:${address.port}/healthz`);
+  assert.equal(health.status, 200);
+  const healthBody = await health.json();
+  assert.equal(healthBody.ok, true);
+  assert.deepEqual(healthBody.executionPolicy, {
+    mode: "danger-full-access",
+    approvalPolicy: "never",
+    sandboxEnabled: false,
+    alternativeModes: [],
+    ownerSelected: true,
+    scope: "single-user-local-workspace",
+  });
   const response = await fetch(`http://127.0.0.1:${address.port}/mcp`, {
     method: "POST",
     headers: {
@@ -47,7 +59,7 @@ try {
   assert.equal(typeof parsed.requestId, "string");
   assert.ok(parsed.requestId.length >= 8);
 
-  console.log(JSON.stringify({ ok: true, gate: "server-public-error", status: response.status }));
+  console.log(JSON.stringify({ ok: true, gate: "server-public-error", healthStatus: health.status, status: response.status }));
 } finally {
   if (httpServer) {
     await new Promise((resolve) => httpServer.close(resolve));
