@@ -113,7 +113,12 @@ async function createFakeCore(id, { failInitializeAt, unknownSessionOnce = false
       return;
     }
 
-    if (unknownSessionOnce && req.headers["mcp-session-id"] && !unknownSessionTriggered) {
+    if (
+      unknownSessionOnce
+      && req.headers["mcp-session-id"]
+      && body.id !== "devspace-schema-fingerprint"
+      && !unknownSessionTriggered
+    ) {
       unknownSessionTriggered = true;
       res.statusCode = 404;
       res.setHeader("content-type", "application/json");
@@ -198,11 +203,14 @@ async function testInitializeAndStablePublicSession() {
     assert.equal(core.observed[0].sessionId, undefined);
     assert.equal(core.observed[0].authorization, "Bearer replay-secret");
 
+    await waitUntil(() => Boolean(registry.lookup(publicSessionId)?.schemaFingerprint));
     const mapped = registry.lookup(publicSessionId);
     assert.equal(mapped.coreId, "core-a");
     assert.equal(mapped.backendSessionId, "core-a-backend-1");
     assert.deepEqual(mapped.initializeBody, initializeBody);
     assert.equal(mapped.authorization, "Bearer replay-secret");
+    assert.equal(mapped.schemaFingerprint, schemaFingerprint(FAKE_TOOLS));
+    assert.equal(mapped.toolCount, FAKE_TOOLS.length);
   } finally {
     await close(gatewayServer);
     await close(core.server);
@@ -522,7 +530,7 @@ async function testExactUnknownSession404ResurrectsAndRetriesOnce() {
     assert.equal(result.headers["mcp-session-id"], publicSessionId, "404 recovery must preserve the external public session id");
     assert.equal(core.observed.filter((entry) => entry.method === "initialize").length, 2, "404 recovery must perform exactly one replacement initialize");
     assert.equal(core.observed.filter((entry) => entry.method === "tools/list" && entry.id !== "devspace-schema-fingerprint").length, 2, "original request must be retried exactly once after 404 recovery");
-    assert.equal(core.observed.filter((entry) => entry.id === "devspace-schema-fingerprint").length, 1, "resurrection must verify the current Core tool schema exactly once");
+    assert.equal(core.observed.filter((entry) => entry.id === "devspace-schema-fingerprint").length, 2, "original initialize and replacement resurrection must each verify the current Core tool schema exactly once");
     assert.equal(registry.lookup(publicSessionId).backendSessionId, "core-404-backend-2");
   } finally {
     await close(gatewayServer);
@@ -550,7 +558,8 @@ async function testNon404CoreFailureIsNeverResurrected() {
     });
     assert.equal(result.status, 500);
     assert.equal(core.observed.filter((entry) => entry.method === "initialize").length, 1, "5xx must never trigger automatic session resurrection");
-    assert.equal(core.observed.filter((entry) => entry.method === "tools/list").length, 1, "5xx request must never be replayed");
+    assert.equal(core.observed.filter((entry) => entry.method === "tools/list" && entry.id !== "devspace-schema-fingerprint").length, 1, "5xx business request must never be replayed");
+    assert.equal(core.observed.filter((entry) => entry.id === "devspace-schema-fingerprint").length, 1, "initialize must still stamp the schema exactly once before the later 5xx");
   } finally {
     await close(gatewayServer);
     await close(core.server);

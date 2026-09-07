@@ -37,10 +37,22 @@ try {
     }],
   })));
   const legacy = await loadStableGatewaySessionDescriptors(legacyPath);
-  assert.equal(legacy.length, 1);
-  assert.equal(legacy[0].schemaFingerprint, null);
-  assert.equal(legacy[0].toolCount, null);
-  console.log(JSON.stringify({ ok: true, gate: "stable-gateway-session-descriptors", credentialsPersisted: false, restartDurable: true, schemaRevisionPersisted: true, legacyForcesRefresh: true }));
+  assert.equal(legacy.length, 0, "initialized legacy descriptors without a tool fingerprint must be dropped at startup");
+
+  const unknownV2Path = join(root, "unknown-v2-sessions.json");
+  await import("node:fs/promises").then(({ writeFile }) => writeFile(unknownV2Path, JSON.stringify({
+    version: 2,
+    descriptors: [{
+      publicSessionId: "32345678-1234-1234-1234-123456789abc",
+      initializeBody: { jsonrpc: "2.0", id: 1, method: "initialize", params: {} },
+      initialized: true,
+      lastActivityAt: 6789,
+      schemaFingerprint: null,
+      toolCount: null,
+    }],
+  })));
+  assert.equal((await loadStableGatewaySessionDescriptors(unknownV2Path)).length, 0, "version 2 descriptors without a known schema must also be dropped");
+  console.log(JSON.stringify({ ok: true, gate: "stable-gateway-session-descriptors", credentialsPersisted: false, restartDurable: true, schemaRevisionPersisted: true, unknownSchemaDroppedAtStartup: true }));
 } finally {
   await rm(root, { recursive: true, force: true });
 }

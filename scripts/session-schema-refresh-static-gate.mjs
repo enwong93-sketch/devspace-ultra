@@ -12,6 +12,7 @@ assert.match(descriptors, /const VERSION = 2/);
 assert.match(descriptors, /const LEGACY_VERSION = 1/);
 assert.match(descriptors, /schemaFingerprint/);
 assert.match(descriptors, /toolCount/);
+assert.match(descriptors, /item\?\.initialized === true[\s\S]*!fingerprint[\s\S]*return null/);
 assert.doesNotMatch(descriptors, /authorization|backendSessionId/, "Persisted descriptors must never contain replay credentials or private Core session ids.");
 
 assert.match(runtime, /updateSchema\(publicSessionId/);
@@ -27,6 +28,8 @@ assert.match(proxy, /registry\.remove\?\./);
 assert.match(proxy, /statusCode = staleSchema \? 404 : 502/);
 assert.match(proxy, /readBackendToolSchema/);
 assert.match(proxy, /assertSessionSchemaCompatible/);
+assert.match(proxy, /stampInitializedSessionSchema/);
+assert.match(proxy, /initializeRequest[\s\S]*stampInitializedSessionSchema/);
 assert.match(proxy, /schemaOverflow/);
 
 assert.match(server, /registerCodexParityTools/);
@@ -38,8 +41,9 @@ console.log(JSON.stringify({
   ok: true,
   gate: "session-schema-refresh-static",
   descriptorVersion: 2,
-  legacyDescriptorAcceptedForForcedRefresh: true,
+  unknownSchemaDroppedAtStartup: true,
   schemaFingerprintPersisted: true,
+  proactiveInitializeSchemaStamp: true,
   boundedToolsListCapture: true,
   staleSchemaForcesFreshInitialize: true,
   credentialsPersisted: false,

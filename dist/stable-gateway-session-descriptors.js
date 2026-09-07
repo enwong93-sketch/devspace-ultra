@@ -20,13 +20,16 @@ function normalize(item) {
   if (!publicSessionId || !item?.initializeBody || typeof item.initializeBody !== "object") return null;
   const lastActivityAt = Number(item?.lastActivityAt || 0);
   const toolCount = item?.toolCount == null ? Number.NaN : Number(item.toolCount);
+  const fingerprint = cleanFingerprint(item?.schemaFingerprint);
+  const normalizedToolCount = Number.isInteger(toolCount) && toolCount >= 0 ? toolCount : null;
+  if (item?.initialized === true && (!fingerprint || normalizedToolCount == null)) return null;
   return {
     publicSessionId,
     initializeBody: structuredClone(item.initializeBody),
     initialized: item?.initialized === true,
     lastActivityAt: Number.isFinite(lastActivityAt) ? lastActivityAt : 0,
-    schemaFingerprint: cleanFingerprint(item?.schemaFingerprint),
-    toolCount: Number.isInteger(toolCount) && toolCount >= 0 ? toolCount : null,
+    schemaFingerprint: fingerprint,
+    toolCount: normalizedToolCount,
   };
 }
 

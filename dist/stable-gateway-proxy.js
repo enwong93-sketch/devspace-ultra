@@ -189,6 +189,18 @@ export function createStableGatewayProxy({
     }
   };
 
+  const stampInitializedSessionSchema = async (core, publicSessionId, authorization) => {
+    const before = registry.lookup(publicSessionId);
+    if (!before?.backendSessionId || before.coreId !== core.id) return false;
+    const currentSchema = await readBackendToolSchema(core, {
+      authorization,
+      backendSessionId: before.backendSessionId,
+    });
+    const after = registry.lookup(publicSessionId);
+    if (!after || after.coreId !== core.id || after.backendSessionId !== before.backendSessionId) return false;
+    return registry.updateSchema?.(publicSessionId, currentSchema) === true;
+  };
+
   const setActiveCore = (core) => {
     currentCore = requireCore(core);
     return { ...currentCore };
@@ -462,6 +474,9 @@ export function createStableGatewayProxy({
           }
           if (publicSessionId && isInitializedNotification(parsedBody) && res.statusCode < 400) {
             registry.markInitialized(publicSessionId);
+          }
+          if (initializeRequest && responsePublicSessionId && res.statusCode < 400) {
+            void stampInitializedSessionSchema(core, responsePublicSessionId, requestAuthorization).catch(() => {});
           }
           finishActivity({ ok: res.statusCode < 400, statusCode: res.statusCode, error: res.statusCode >= 400 ? `Core HTTP ${res.statusCode}` : null });
           releaseTracked();
