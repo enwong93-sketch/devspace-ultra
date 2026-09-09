@@ -57,6 +57,10 @@ const contextAdapter = {
       modelSlug: "gpt-5-6-thinking",
       generating: false,
       composerTextChars: 0,
+      documentReadyState: "complete",
+      composerReady: true,
+      routeHydrated: true,
+      routeStableForMs: 5_000,
     };
   },
   async recentVisibleMessages() {
@@ -89,6 +93,7 @@ const contextAdapter = {
   },
 };
 const continuityRuntime = {
+  enabled: true,
   async checkpoint(input) {
     checkpoints.push(input);
     return { ok: true, capsuleId: "capsule_overlay_owner", capsule: input };

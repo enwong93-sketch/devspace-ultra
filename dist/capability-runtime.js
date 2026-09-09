@@ -31,25 +31,26 @@ import {
 } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
-import { ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import { atomicWriteJson } from "./atomic-file.js";
 import { importCodexMcpCatalog } from "./codex-mcp-import.js";
+import {
+  ROUTING_CONTRACT_VERSION,
+  capabilityRoutingFingerprint,
+  normalizeRoutingPolicy,
+  rankCapabilityRoutes,
+} from "./capability-routing.js";
+import { CapabilityConnectionManager } from "./capability-connection-manager.js";
 
 const REGISTRY_VERSION = 1;
 const MAX_PLUGIN_FILES = 5000;
 const MAX_PLUGIN_DEPTH = 8;
 const MAX_TEXT_RESOURCE_BYTES = 1024 * 1024;
 const MAX_PROCESS_OUTPUT_BYTES = 4 * 1024 * 1024;
-const DEFAULT_TOOL_TIMEOUT_MS = 60_000;
-const MAX_TOOL_TIMEOUT_MS = 5 * 60_000;
-const MCP_CONNECT_TIMEOUT_MS = 20_000;
-const MCP_CALL_TIMEOUT_MS = 60_000;
-const DEFAULT_INSTANCE_LEASE_MS = 30 * 60_000;
-const MAX_INSTANCE_LEASE_MS = 2 * 60 * 60_000;
 const MAX_MCP_PROBE_SERVERS = 16;
 const MCP_PROBE_CONCURRENCY = 4;
 const MAX_MCP_RESOURCE_SERVERS = 32;
 const MAX_MCP_RESOURCE_ITEMS = 200;
+const INTERNAL_CAPABILITY_OWNER = "__devspace_internal_capability__";
 const MANIFEST_NAMES = [
   "devspace-plugin.json",
   join(".devspace", "plugin.json"),
@@ -115,28 +116,9 @@ function clampInteger(value, fallback, min, max) {
   const parsed = Number(value);
   return Number.isInteger(parsed) ? Math.max(min, Math.min(max, parsed)) : fallback;
 }
-async function withTimeout(promise, timeoutMs, label) {
-  let timer;
-  try {
-    return await Promise.race([
-      promise,
-      new Promise((_, reject) => {
-        timer = setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs} ms.`)), timeoutMs);
-      }),
-    ]);
-  }
-  finally {
-    if (timer) clearTimeout(timer);
-  }
-}
-function mcpRequestOptions(timeoutMs = MCP_CALL_TIMEOUT_MS) {
-  return { timeout: timeoutMs, maxTotalTimeout: timeoutMs };
-}
 function shouldInvalidateMcpClient(error) {
-  const code = Number(error?.code);
-  if (code === Number(ErrorCode.RequestTimeout)) return true;
   const message = error instanceof Error ? error.message : String(error ?? "");
-  return /request timed out|maximum total timeout|connection closed|transport|socket|econn(?:reset|refused)|broken pipe|websocket.*closed/i.test(message);
+  return /connection closed|transport|socket|econn(?:reset|refused)|broken pipe|websocket.*closed/i.test(message);
 }
 function isPathInside(child, parent) {
   const rel = relative(resolve(parent), resolve(child));
@@ -344,6 +326,108 @@ function frontmatterFromSkill(text) {
   }
   catch { return {}; }
 }
+async function readYamlIfExists(filePath) {
+  try {
+    const parsed = YAML.parse(await readFile(filePath, "utf8"));
+    return parsed && typeof parsed === "object" ? parsed : undefined;
+  }
+  catch (error) {
+    if (error?.code === "ENOENT") return undefined;
+    return undefined;
+  }
+}
+function normalizeDefaultPrompts(value) {
+  if (typeof value === "string") return value.trim() ? [value.trim()] : [];
+  return normalizeStringArray(value).map((item) => item.trim()).filter(Boolean).slice(0, 20);
+}
+function routingDependencies(value) {
+  const tools = Array.isArray(value?.tools) ? value.tools : [];
+  return tools.slice(0, 32).map((item) => {
+    if (typeof item === "string") return item;
+    if (!item || typeof item !== "object") return "";
+    return [item.type, item.value, item.description]
+      .map((part) => String(part || "").trim())
+      .filter(Boolean)
+      .join(" ")
+      .slice(0, 800);
+  }).filter(Boolean);
+}
+async function skillRoutingMetadata(root, relativeFiles, file, frontmatter = {}) {
+  const base = dirname(file);
+  const baseRel = relativePortable(root, base);
+  const candidatePaths = [
+    join(base, "agents", "openai.yaml"),
+    join(base, "agents", "openai.yml"),
+    join(base, "agents", "openai.json"),
+    join(base, "SKILL.json"),
+  ];
+  let metadata = {};
+  for (const candidate of candidatePaths) {
+    const relativePath = relativePortable(root, candidate);
+    if (!relativeFiles.has(relativePath)) continue;
+    const parsed = candidate.toLowerCase().endsWith(".json")
+      ? await readJsonIfExists(candidate)
+      : await readYamlIfExists(candidate);
+    if (parsed && typeof parsed === "object") {
+      metadata = { ...metadata, ...parsed };
+      break;
+    }
+  }
+  const interfaceMetadata = metadata.interface && typeof metadata.interface === "object"
+    ? metadata.interface
+    : {};
+  const frontRouting = frontmatter.routing && typeof frontmatter.routing === "object"
+    ? frontmatter.routing
+    : {};
+  const metadataRouting = metadata.routing && typeof metadata.routing === "object"
+    ? metadata.routing
+    : {};
+  const frontPolicy = frontmatter.policy && typeof frontmatter.policy === "object"
+    ? frontmatter.policy
+    : {};
+  const metadataPolicy = metadata.policy && typeof metadata.policy === "object"
+    ? metadata.policy
+    : {};
+  const routing = normalizeRoutingPolicy({
+    ...frontRouting,
+    ...frontPolicy,
+    ...metadataRouting,
+    ...metadataPolicy,
+    aliases: [
+      ...normalizeStringArray(frontmatter.aliases),
+      ...normalizeStringArray(frontmatter.routingAliases),
+      ...normalizeStringArray(frontmatter.routing_aliases),
+      ...normalizeStringArray(frontRouting.aliases),
+      ...normalizeStringArray(metadataRouting.aliases),
+    ],
+    negativeTriggers: [
+      ...normalizeStringArray(frontmatter.negativeTriggers),
+      ...normalizeStringArray(frontmatter.negative_triggers),
+      ...normalizeStringArray(frontRouting.negativeTriggers),
+      ...normalizeStringArray(frontRouting.exclude),
+      ...normalizeStringArray(metadataRouting.negativeTriggers),
+      ...normalizeStringArray(metadataRouting.exclude),
+    ],
+  });
+  return {
+    displayName: String(interfaceMetadata.display_name || interfaceMetadata.displayName || frontmatter.display_name || frontmatter.displayName || "").slice(0, 240),
+    shortDescription: String(interfaceMetadata.short_description || interfaceMetadata.shortDescription || frontmatter.short_description || frontmatter.shortDescription || "").slice(0, 800),
+    defaultPrompts: normalizeDefaultPrompts(
+      interfaceMetadata.default_prompt
+      ?? interfaceMetadata.defaultPrompt
+      ?? interfaceMetadata.default_prompts
+      ?? interfaceMetadata.defaultPrompts
+      ?? frontmatter.default_prompt
+      ?? frontmatter.defaultPrompt,
+    ),
+    dependencies: routingDependencies(metadata.dependencies || frontmatter.dependencies),
+    routing,
+    routingMetadataPath: Object.keys(metadata).length
+      ? relativePortable(root, candidatePaths.find((candidate) => relativeFiles.has(relativePortable(root, candidate))) || join(base, "agents", "openai.yaml"))
+      : null,
+    baseDir: baseRel,
+  };
+}
 async function walkFiles(root, options = {}) {
   const maxFiles = options.maxFiles ?? MAX_PLUGIN_FILES;
   const maxDepth = options.maxDepth ?? MAX_PLUGIN_DEPTH;
@@ -388,7 +472,6 @@ function normalizeCommandTool(raw, index) {
     cwd: String(raw.cwd || "."),
     env: raw.env && typeof raw.env === "object" ? raw.env : {},
     requiredEnv: normalizeStringArray(raw.requiredEnv),
-    timeoutMs: clampInteger(raw.timeoutMs, DEFAULT_TOOL_TIMEOUT_MS, 1000, MAX_TOOL_TIMEOUT_MS),
     input: ["json-stdin", "none"].includes(raw.input) ? raw.input : "json-stdin",
     inputSchema: raw.inputSchema && typeof raw.inputSchema === "object" ? raw.inputSchema : undefined,
   };
@@ -411,12 +494,11 @@ function normalizeMcpDefinition(id, raw, pluginDir, sourcePath) {
       default: item?.default === undefined ? undefined : String(item.default),
       description: String(item?.description || "").slice(0, 500),
     })).filter((item) => item.name) : [],
-    connectTimeoutMs: clampInteger(
-      raw.connectTimeoutMs ?? (Number.isFinite(Number(raw.startup_timeout_sec)) ? Math.round(Number(raw.startup_timeout_sec) * 1000) : undefined),
-      MCP_CONNECT_TIMEOUT_MS,
-      1_000,
-      MAX_TOOL_TIMEOUT_MS,
-    ),
+    stateful: raw.stateful === true,
+    statelessShareable: raw.statelessShareable === true || raw.stateless_shareable === true,
+    connectionMode: String(raw.connectionMode || raw.connection_mode || "conversation-isolated").trim().toLowerCase(),
+    instancePolicy: String(raw.instancePolicy || raw.instance_policy || "automatic-conversation").trim().toLowerCase(),
+    multiInstance: raw.multiInstance === true || raw.multi_instance === true,
   };
   if (command) {
     definition.type = "stdio";
@@ -572,7 +654,7 @@ async function scanPluginDirectory(pluginDir, options = {}) {
   const description = String(rootMetadata.description || packageJson?.description || pyproject?.description || "Installed DevSpace capability package").slice(0, 2000);
   const version = String(rootMetadata.version || packageJson?.version || pyproject?.version || "0.0.0").slice(0, 80);
   const keywords = normalizeStringArray(rootMetadata.keywords).slice(0, 100);
-  const routingAliases = id === "computer-use"
+  const computerUseAliases = id === "computer-use"
     ? [
         "windows desktop application app automation",
         "open launch control click type scroll drag screenshot accessibility",
@@ -581,6 +663,30 @@ async function scanPluginDirectory(pluginDir, options = {}) {
         "blender unreal engine native windows ui",
       ]
     : [];
+  const declaredRouting = rootMetadata.routing && typeof rootMetadata.routing === "object"
+    ? rootMetadata.routing
+    : {};
+  const declaredPolicy = rootMetadata.policy && typeof rootMetadata.policy === "object"
+    ? rootMetadata.policy
+    : {};
+  const routing = normalizeRoutingPolicy({
+    ...declaredRouting,
+    ...declaredPolicy,
+    aliases: [
+      ...keywords,
+      ...normalizeStringArray(rootMetadata.routingAliases),
+      ...normalizeStringArray(rootMetadata.routing_aliases),
+      ...normalizeStringArray(declaredRouting.aliases),
+      ...computerUseAliases,
+    ],
+    negativeTriggers: [
+      ...normalizeStringArray(rootMetadata.negativeTriggers),
+      ...normalizeStringArray(rootMetadata.negative_triggers),
+      ...normalizeStringArray(declaredRouting.negativeTriggers),
+      ...normalizeStringArray(declaredRouting.exclude),
+    ],
+  });
+  const routingAliases = routing.aliases;
 
   const skills = [];
   for (const [rel, file] of relativeFiles) {
@@ -588,11 +694,18 @@ async function scanPluginDirectory(pluginDir, options = {}) {
     let text = "";
     try { text = await readFile(file, "utf8"); } catch {}
     const fm = frontmatterFromSkill(text);
+    const routeMetadata = await skillRoutingMetadata(root, relativeFiles, file, fm);
     skills.push({
       name: String(fm.name || basename(dirname(file))).slice(0, 160),
+      displayName: routeMetadata.displayName,
       description: String(fm.description || "Reusable agent skill").slice(0, 1200),
+      shortDescription: routeMetadata.shortDescription,
+      defaultPrompts: routeMetadata.defaultPrompts,
+      dependencies: routeMetadata.dependencies,
+      routing: routeMetadata.routing,
+      routingMetadataPath: routeMetadata.routingMetadataPath,
       filePath: rel,
-      baseDir: relativePortable(root, dirname(file)),
+      baseDir: routeMetadata.baseDir,
     });
   }
 
@@ -788,6 +901,7 @@ async function scanPluginDirectory(pluginDir, options = {}) {
     version,
     keywords,
     routingAliases,
+    routing,
     root,
     manifestPath,
     source: options.source || rootMetadata.source || sourceFromPackageJson(packageJson),
@@ -840,10 +954,23 @@ async function scanPluginDirectory(pluginDir, options = {}) {
     fileCount: files.length,
     fingerprint: sha256(JSON.stringify({
       id,
+      name,
+      description,
       version,
       keywords,
       routingAliases,
-      skills: skills.map((skill) => skill.filePath),
+      routing,
+      skills: skills.map((skill) => ({
+        name: skill.name,
+        displayName: skill.displayName,
+        description: skill.description,
+        shortDescription: skill.shortDescription,
+        defaultPrompts: skill.defaultPrompts,
+        dependencies: skill.dependencies,
+        routing: skill.routing,
+        filePath: skill.filePath,
+        routingMetadataPath: skill.routingMetadataPath,
+      })),
       instructions: instructions.map((item) => item.path),
       claudeCommands: claudeCommands.map((item) => item.path),
       claudeAgents: claudeAgents.map((item) => item.path),
@@ -852,8 +979,18 @@ async function scanPluginDirectory(pluginDir, options = {}) {
       codexInterfaces: codexInterfaces.map((item) => `${item.pluginRoot}:${item.displayName}:${item.category}`),
       bundledContentVariants: bundledContentVariants.map((item) => `${item.pluginRoot}:${item.value}`),
       codexExecutionRequirements: codexExecutionRequirements.map((item) => `${item.pluginRoot}:${item.requiresLocalExecutor}:${item.declaredValueValid}`),
-      mcp: [...mcpMap.values()].map((item) => ({ id: item.id, type: item.type, sourcePath: item.sourcePath })),
-      tools: tools.map((item) => item.name),
+      mcp: [...mcpMap.values()].map((item) => ({
+        id: item.id,
+        type: item.type,
+        description: item.description,
+        sourcePath: item.sourcePath,
+        connectionMode: item.connectionMode,
+        stateful: item.stateful === true,
+        statelessShareable: item.statelessShareable === true,
+        instancePolicy: item.instancePolicy,
+        multiInstance: item.multiInstance === true,
+      })),
+      tools: tools.map((item) => ({ name: item.name, description: item.description, inputSchema: item.inputSchema })),
     })),
   };
 }
@@ -866,6 +1003,7 @@ function safePluginSummary(discovered, registryEntry, probe) {
     version: discovered.version,
     keywords: discovered.keywords || [],
     routingAliases: discovered.routingAliases || [],
+    routing: discovered.routing || normalizeRoutingPolicy(),
     enabled: Boolean(registryEntry?.enabled),
     trusted: Boolean(registryEntry?.trusted),
     managed: Boolean(registryEntry?.managed),
@@ -890,6 +1028,11 @@ function safePluginSummary(discovered, registryEntry, probe) {
       type: server.type,
       description: server.description,
       sourcePath: server.sourcePath,
+      connectionMode: server.connectionMode,
+      stateful: server.stateful === true,
+      statelessShareable: server.statelessShareable === true,
+      instancePolicy: server.instancePolicy,
+      multiInstance: server.multiInstance === true,
       requiredEnv: capabilityRequiredEnvNames(discovered.id, server),
       package: server.package,
       unsupportedReason: server.unsupportedReason,
@@ -905,7 +1048,6 @@ function safePluginSummary(discovered, registryEntry, probe) {
       name: tool.name,
       description: tool.description,
       requiredEnv: tool.requiredEnv,
-      timeoutMs: tool.timeoutMs,
       inputSchema: tool.inputSchema,
     })),
     fingerprint: discovered.fingerprint,
@@ -936,6 +1078,7 @@ function compactPluginSummary(discovered, registryEntry, probe) {
     version: discovered.version,
     keywords: discovered.keywords || [],
     routingAliases: discovered.routingAliases || [],
+    routing: discovered.routing || normalizeRoutingPolicy(),
     enabled: Boolean(registryEntry?.enabled),
     trusted: Boolean(registryEntry?.trusted),
     managed: Boolean(registryEntry?.managed),
@@ -968,8 +1111,371 @@ function compactPluginSummary(discovered, registryEntry, probe) {
   };
 }
 
+function pluginRoutingInterface(plugin) {
+  const interfaces = Array.isArray(plugin?.codexInterfaces) ? plugin.codexInterfaces : [];
+  const preferred = interfaces.find((item) => item?.pluginRoot === "") || interfaces[0] || {};
+  return {
+    displayName: String(preferred.displayName || plugin?.name || plugin?.id || "").slice(0, 240),
+    shortDescription: String(preferred.shortDescription || "").slice(0, 800),
+    defaultPrompts: normalizeDefaultPrompts(preferred.defaultPrompt),
+    capabilities: normalizeStringArray(preferred.capabilities).slice(0, 50),
+  };
+}
+
+function routeAvailability(entry, { trusted = false } = {}) {
+  if (!entry?.enabled) return { available: false, availabilityReason: "plugin-disabled" };
+  if (trusted && !entry?.trusted) return { available: false, availabilityReason: "plugin-not-trusted" };
+  return { available: true, availabilityReason: null };
+}
+
+function mcpServerRequiresIsolatedRuntime(plugin, server) {
+  return (plugin?.id === "blender-local" && server?.id === "blender")
+    || server?.stateful === true
+    || server?.connectionMode === "isolated"
+    || server?.connectionMode === "runtime-isolated"
+    || server?.instancePolicy === "required"
+    || server?.runtime?.isolated === true
+    || server?.multiInstance === true;
+}
+
+function mcpToolNextAction(plugin, server, tool) {
+  if (plugin?.id === "blender-local" && server?.id === "blender") {
+    return {
+      tool: "blender_mcp",
+      arguments: { action: "call", toolName: tool.name, arguments: {} },
+      runtimeRoute: {
+        kind: "runtime",
+        managerTool: "blender_runtime",
+        owner: "current-conversation",
+        strategy: "reuse-owned-runtime-or-start-isolated",
+        discovery: { tool: "blender_runtime", arguments: { action: "list" } },
+        start: { tool: "blender_runtime", arguments: { action: "start", runtimeId: "<conversation-project-runtime>" } },
+        bindArgument: "runtimeId",
+      },
+      then: "Execute the selected Blender MCP tool against the owned runtimeId and verify through Blender readback.",
+    };
+  }
+  const nextAction = {
+    tool: "capability_call",
+    arguments: { pluginId: plugin.id, kind: "mcp", serverId: server.id, toolName: tool.name, arguments: {} },
+  };
+  if (mcpServerRequiresIsolatedRuntime(plugin, server)) {
+    nextAction.runtimeRoute = {
+      kind: "runtime",
+      managerTool: "capability_connection",
+      owner: "current-conversation",
+      strategy: "claim-conversation-owned-isolated-runtime",
+      discovery: {
+        tool: "capability_connection",
+        arguments: { action: "list", pluginId: plugin.id, serverId: server.id },
+      },
+      start: {
+        tool: "capability_connection",
+        arguments: {
+          action: "claim",
+          pluginId: plugin.id,
+          serverId: server.id,
+          runtimeId: "<conversation-project-runtime>",
+          env: {},
+        },
+      },
+      bindArgument: "instanceToken",
+    };
+    nextAction.then = "Pass the returned private instanceToken to capability_call and verify the result through the same owned runtime.";
+  }
+  return nextAction;
+}
+
+function builtinCapabilityRouteCandidates() {
+  return [
+    {
+      routeId: "workflow:agent-progress-report",
+      kind: "workflow",
+      name: "agent-progress-report",
+      title: "Agent-authored progress narration",
+      description: "Write a useful conversation-bound progress update only after a meaningful medium-sized step, important verification result, material direction change, or genuine blocker. There is no fixed time or tool-count cadence, and program telemetry must not become visible prose.",
+      aliases: [
+        "progress narration",
+        "progress card",
+        "keep me updated",
+        "report current progress",
+        "旁白卡",
+        "進度旁白",
+        "匯報工作內容",
+      ],
+      negativeTriggers: [
+        "report every tool call",
+        "periodic heartbeat",
+        "定期匯報",
+        "每個工具匯報",
+      ],
+      routing: {
+        exposure: "direct",
+        priority: 70,
+        allowImplicitInvocation: true,
+      },
+      requires: ["agent-authored-natural-language", "current-conversation-authority"],
+      nextAction: {
+        tool: "devspace_progress_report",
+        arguments: { message: "<agent-authored useful progress update>", kind: "milestone" },
+        then: "Use only when the Agent judges that the update is useful; do not invoke on a fixed cadence.",
+      },
+    },
+    {
+      routeId: "runtime:blender-isolated",
+      kind: "runtime",
+      name: "blender-runtime",
+      title: "Conversation-owned Blender runtime",
+      description: "Start or attach an isolated Blender application runtime for one conversation and project. Use this before Blender MCP when multiple agents, projects, Blender processes, or loopback ports must run concurrently without crossing files or connection state.",
+      aliases: [
+        "multiple blender runtime",
+        "two blender instances",
+        "two agents blender",
+        "separate blender port",
+        "parallel blender",
+        "雙 blender",
+        "兩個 agent blender",
+        "不同 port",
+        "獨立 blender runtime",
+      ],
+      negativeTriggers: ["conceptual blender advice without live execution"],
+      routing: {
+        exposure: "direct",
+        priority: 105,
+        allowImplicitInvocation: true,
+      },
+      pluginId: "blender-local",
+      serverId: "blender",
+      requires: ["one-runtime-per-concurrent-project", "conversation-owner", "loopback-port"],
+      nextAction: {
+        tool: "blender_runtime",
+        arguments: { action: "list" },
+        then: "Preserve work already in progress: reuse the matching conversation-owned runtime, otherwise adopt the one unclaimed existing Blender runtime without restarting it. Start a new runtime only for a future project, then call blender_mcp through that conversation-isolated runtime.",
+      },
+    },
+    {
+      routeId: "workflow:capability-connection",
+      kind: "workflow",
+      name: "capability-connection",
+      title: "Capability MCP connection management",
+      description: "Inspect or create the conversation-isolated connection binding for a capability MCP. Every conversation receives a separate client/session by default; stateful application services additionally bind by plugin/server/instance/runtime/current conversation. Backend-wide pooling is disabled unless the operator and a manifest both explicitly declare a service stateless and shareable.",
+      aliases: [
+        "mcp connection manager",
+        "plugin connection",
+        "separate mcp port",
+        "stateful mcp instance",
+        "多 agent mcp",
+        "插件連線管理",
+        "mcp 連線管理",
+      ],
+      routing: {
+        exposure: "direct",
+        priority: 74,
+        allowImplicitInvocation: true,
+      },
+      requires: ["current-conversation-owner", "default-conversation-isolation", "runtime-owner-for-stateful-apps"],
+      nextAction: {
+        tool: "capability_connection",
+        arguments: { action: "list" },
+        then: "Reuse only this conversation's connection. For a stateful app endpoint, adopt or claim the conversation-owned runtime before the first mutation.",
+      },
+    },
+  ];
+}
+
+function capabilityRouteCandidates(plugin, entry, probe = {}, { includeProbedTools = true } = {}) {
+  const candidates = [];
+  const pluginPolicy = plugin.routing || normalizeRoutingPolicy({ aliases: plugin.routingAliases || [] });
+  const childToolPolicy = { ...pluginPolicy, aliases: [] };
+  const pluginInterface = pluginRoutingInterface(plugin);
+  const pluginAvailability = routeAvailability(entry);
+  const executableAvailability = routeAvailability(entry, { trusted: true });
+  candidates.push({
+    routeId: `plugin:${plugin.id}`,
+    kind: "plugin",
+    name: plugin.id,
+    title: pluginInterface.displayName || plugin.name,
+    description: plugin.description,
+    shortDescription: pluginInterface.shortDescription,
+    aliases: [...(plugin.routingAliases || []), ...(plugin.keywords || [])],
+    defaultPrompts: pluginInterface.defaultPrompts,
+    dependencies: pluginInterface.capabilities,
+    routing: pluginPolicy,
+    pluginId: plugin.id,
+    ...pluginAvailability,
+    requires: ["inspect-selected-plugin", "load-only-selected-skill-or-tool-schema"],
+    nextAction: {
+      tool: "capability_inspect",
+      arguments: { pluginId: plugin.id, probeMcp: false },
+    },
+  });
+
+  for (const skill of plugin.skills || []) {
+    const skillPolicy = normalizeRoutingPolicy(skill.routing, pluginPolicy);
+    candidates.push({
+      routeId: `skill:${plugin.id}:${skill.name}`,
+      kind: "skill",
+      name: skill.name,
+      title: skill.displayName || skill.name,
+      description: skill.description,
+      shortDescription: skill.shortDescription,
+      aliases: skillPolicy.aliases,
+      negativeTriggers: skillPolicy.negativeTriggers,
+      defaultPrompts: skill.defaultPrompts,
+      dependencies: skill.dependencies,
+      allowImplicitInvocation: skillPolicy.allowImplicitInvocation,
+      exposure: skillPolicy.exposure,
+      priority: skillPolicy.priority,
+      pluginId: plugin.id,
+      path: skill.filePath,
+      ...executableAvailability,
+      requires: ["read-full-skill-before-substantive-work", ...(skill.dependencies?.length ? ["resolve-declared-tool-dependencies"] : [])],
+      nextAction: {
+        tool: "capability_read",
+        arguments: { pluginId: plugin.id, path: skill.filePath },
+        then: "Follow the selected SKILL.md and resolve only its declared tool dependencies.",
+      },
+    });
+  }
+
+  for (const tool of plugin.tools || []) {
+    candidates.push({
+      routeId: `command-tool:${plugin.id}:${tool.name}`,
+      kind: "command-tool",
+      name: tool.name,
+      title: tool.name,
+      description: tool.description,
+      aliases: [],
+      negativeTriggers: childToolPolicy.negativeTriggers,
+      pluginId: plugin.id,
+      toolName: tool.name,
+      routing: childToolPolicy,
+      ...executableAvailability,
+      requires: tool.requiredEnv?.length ? tool.requiredEnv.map((name) => `environment:${name}`) : [],
+      nextAction: {
+        tool: "capability_call",
+        arguments: { pluginId: plugin.id, kind: "tool", toolName: tool.name, arguments: {} },
+      },
+    });
+  }
+
+  for (const server of plugin.mcpServers || []) {
+    const serverProbe = probe?.[server.id] || null;
+    const unsupported = Boolean(server.unsupportedReason || serverProbe?.status === "unsupported");
+    const serverAvailability = unsupported
+      ? { available: false, availabilityReason: server.unsupportedReason || serverProbe?.error || "mcp-server-unsupported" }
+      : executableAvailability;
+    candidates.push({
+      routeId: `mcp-server:${plugin.id}:${server.id}`,
+      kind: "mcp-server",
+      name: server.id,
+      title: server.id,
+      description: server.description,
+      aliases: [],
+      negativeTriggers: childToolPolicy.negativeTriggers,
+      pluginId: plugin.id,
+      serverId: server.id,
+      routing: childToolPolicy,
+      ...serverAvailability,
+      requires: [serverProbe?.status === "online" ? "mcp-schema-ready" : "probe-selected-mcp-server"],
+      nextAction: plugin.id === "blender-local" && server.id === "blender"
+        ? {
+            tool: "blender_mcp",
+            arguments: { action: "list", arguments: {} },
+            then: "Immediately call blender_mcp(action=call) with one returned tool and schema-valid arguments; this is the live Blender execution entry point.",
+          }
+        : {
+            tool: "capability_inspect",
+            arguments: { pluginId: plugin.id, probeMcp: true },
+            then: `Select one discovered tool, prompt, or resource from MCP server ${server.id}.`,
+          },
+    });
+    for (const tool of includeProbedTools ? serverProbe?.tools || [] : []) {
+      candidates.push({
+        routeId: `mcp-tool:${plugin.id}:${server.id}:${tool.name}`,
+        kind: "mcp-tool",
+        name: tool.name,
+        title: tool.title || tool.name,
+        description: tool.description || server.description,
+        aliases: [],
+        negativeTriggers: childToolPolicy.negativeTriggers,
+        pluginId: plugin.id,
+        serverId: server.id,
+        toolName: tool.name,
+        routing: childToolPolicy,
+        ...serverAvailability,
+        requires: ["use-returned-mcp-input-schema", ...(server.requiredEnv?.length ? server.requiredEnv.map((name) => `environment:${name}`) : [])],
+        nextAction: mcpToolNextAction(plugin, server, tool),
+      });
+    }
+    for (const prompt of includeProbedTools ? serverProbe?.prompts || [] : []) {
+      candidates.push({
+        routeId: `mcp-prompt:${plugin.id}:${server.id}:${prompt.name}`,
+        kind: "mcp-prompt",
+        name: prompt.name,
+        title: prompt.title || prompt.name,
+        description: prompt.description || server.description,
+        aliases: [],
+        negativeTriggers: childToolPolicy.negativeTriggers,
+        pluginId: plugin.id,
+        serverId: server.id,
+        promptName: prompt.name,
+        routing: childToolPolicy,
+        ...serverAvailability,
+        requires: ["retrieve-prompt-before-following-it"],
+        nextAction: {
+          tool: "capability_call",
+          arguments: { pluginId: plugin.id, kind: "mcp-prompt", serverId: server.id, promptName: prompt.name, arguments: {} },
+        },
+      });
+    }
+    for (const resource of includeProbedTools ? serverProbe?.resources || [] : []) {
+      candidates.push({
+        routeId: `mcp-resource:${plugin.id}:${server.id}:${resource.uri}`,
+        kind: "mcp-resource",
+        name: resource.name || resource.uri,
+        title: resource.name || resource.uri,
+        description: resource.description || server.description,
+        aliases: [],
+        negativeTriggers: childToolPolicy.negativeTriggers,
+        pluginId: plugin.id,
+        serverId: server.id,
+        resourceUri: resource.uri,
+        routing: { ...childToolPolicy, priority: Number(pluginPolicy.priority || 0) - 10 },
+        ...serverAvailability,
+        requires: ["read-resource-only-when-selected"],
+        nextAction: {
+          tool: "capability_call",
+          arguments: { pluginId: plugin.id, kind: "mcp-resource", serverId: server.id, resourceUri: resource.uri, arguments: {} },
+        },
+      });
+    }
+  }
+
+  for (const app of plugin.codexApps || []) {
+    candidates.push({
+      routeId: `host-app:${plugin.id}:${app.name}`,
+      kind: "host-app",
+      name: app.name,
+      title: app.name,
+      description: `Host-managed connector dependency ${app.id || app.name}.`,
+      aliases: [],
+      pluginId: plugin.id,
+      routing: { ...childToolPolicy, priority: Number(pluginPolicy.priority || 0) - 20 },
+      available: false,
+      availabilityReason: "host-managed-connector-required",
+      requires: ["matching-host-connector"],
+      nextAction: {
+        tool: "capability_inspect",
+        arguments: { pluginId: plugin.id, probeMcp: false },
+        then: "Use the corresponding host connector only when it is actually available.",
+      },
+    });
+  }
+  return candidates;
+}
+
 async function runProcess(command, args, options = {}) {
-  const timeoutMs = clampInteger(options.timeoutMs, DEFAULT_TOOL_TIMEOUT_MS, 1000, MAX_TOOL_TIMEOUT_MS);
   return await new Promise((resolvePromise, rejectPromise) => {
     const child = spawn(command, args, {
       cwd: options.cwd,
@@ -980,41 +1486,39 @@ async function runProcess(command, args, options = {}) {
     });
     let stdout = Buffer.alloc(0);
     let stderr = Buffer.alloc(0);
+    let stdoutTruncated = false;
+    let stderrTruncated = false;
     let settled = false;
     const fail = (error) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
-      try { child.kill("SIGKILL"); } catch {}
       rejectPromise(error);
     };
-    const push = (current, chunk, label) => {
+    const push = (current, chunk, markTruncated) => {
       const next = Buffer.concat([current, Buffer.from(chunk)]);
-      if (next.length > MAX_PROCESS_OUTPUT_BYTES) {
-        fail(new Error(`${label} exceeded ${MAX_PROCESS_OUTPUT_BYTES} bytes.`));
-        return current;
-      }
-      return next;
+      if (next.length <= MAX_PROCESS_OUTPUT_BYTES) return next;
+      markTruncated();
+      return next.subarray(next.length - MAX_PROCESS_OUTPUT_BYTES);
     };
-    child.stdout.on("data", (chunk) => { stdout = push(stdout, chunk, "stdout"); });
-    child.stderr.on("data", (chunk) => { stderr = push(stderr, chunk, "stderr"); });
+    child.stdout.on("data", (chunk) => { stdout = push(stdout, chunk, () => { stdoutTruncated = true; }); });
+    child.stderr.on("data", (chunk) => { stderr = push(stderr, chunk, () => { stderrTruncated = true; }); });
     child.once("error", fail);
     child.once("close", (code, signal) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
       const result = {
         code,
         signal,
         stdout: stdout.toString("utf8"),
         stderr: stderr.toString("utf8"),
+        stdoutTruncated,
+        stderrTruncated,
       };
       if (code !== 0) {
         rejectPromise(new Error(`Process exited ${code ?? signal}: ${result.stderr || result.stdout}`.trim()));
       }
       else resolvePromise(result);
     });
-    const timer = setTimeout(() => fail(new Error(`Process timed out after ${timeoutMs} ms.`)), timeoutMs);
     if (options.stdin !== undefined) child.stdin.end(String(options.stdin));
     else child.stdin.end();
   });
@@ -1022,7 +1526,7 @@ async function runProcess(command, args, options = {}) {
 
 async function git(args, options = {}) {
   const command = process.platform === "win32" ? "git.exe" : "git";
-  return await runProcess(command, args, { ...options, timeoutMs: options.timeoutMs ?? 120_000 });
+  return await runProcess(command, args, options);
 }
 function validateInstallSource(source) {
   const raw = String(source || "").trim();
@@ -1054,14 +1558,23 @@ export class CapabilityRuntime {
     this.registryPath = resolve(options.registryPath);
     this.externalPluginPaths = (options.pluginPaths || []).map((path) => resolve(expandHome(path)));
     this.enabled = options.enabled !== false;
+    // MCP client/session objects are never shared across ChatGPT conversations.
+    // A provider may reuse its own stateless backend process internally, but
+    // DevSpace always creates a conversation-scoped transport boundary.
     this.state = { version: REGISTRY_VERSION, plugins: {} };
     this.discovered = new Map();
     this.probes = new Map();
-    this.mcpClients = new Map();
-    this.mcpConnecting = new Map();
-    this.mcpStartupTails = new Map();
-    this.mcpInstances = new Map();
+    this.connectionManager = options.connectionManager || new CapabilityConnectionManager();
+    // Compatibility aliases retained for existing diagnostics and tests. The
+    // connection manager is the sole lifecycle authority for these maps.
+    this.mcpClients = this.connectionManager.clients;
+    this.mcpConnecting = this.connectionManager.connecting;
+    this.mcpStartupTails = this.connectionManager.startupTails;
+    this.mcpInstances = this.connectionManager.instances;
     this.mutationTail = Promise.resolve();
+    this.routingListeners = new Set();
+    this.routingRevision = 0;
+    this.lastStaticRoutingFingerprint = capabilityRoutingFingerprint([]);
     this.ready = this.initialize();
   }
 
@@ -1073,6 +1586,32 @@ export class CapabilityRuntime {
       this.state = persisted;
     }
     await this.refresh({ probeMcp: false });
+  }
+
+  onRoutingChanged(handler) {
+    if (typeof handler !== "function") return () => {};
+    this.routingListeners.add(handler);
+    return () => this.routingListeners.delete(handler);
+  }
+
+  notifyRoutingChanged(reason = "catalog-refresh") {
+    const fingerprint = this.routingFingerprint({ includeDisabled: true });
+    if (fingerprint === this.lastStaticRoutingFingerprint) return false;
+    this.lastStaticRoutingFingerprint = fingerprint;
+    this.routingRevision += 1;
+    const event = {
+      version: ROUTING_CONTRACT_VERSION,
+      revision: this.routingRevision,
+      fingerprint,
+      reason: String(reason || "catalog-refresh").slice(0, 120),
+      observedAt: nowIso(),
+    };
+    for (const handler of [...this.routingListeners]) {
+      queueMicrotask(() => {
+        try { void Promise.resolve(handler(event)).catch(() => {}); } catch {}
+      });
+    }
+    return true;
   }
 
   async serializeMutation(operation) {
@@ -1189,6 +1728,7 @@ export class CapabilityRuntime {
         await this.probePluginMcp(id).catch(() => {});
       }
     }
+    this.notifyRoutingChanged(pluginId ? `plugin-refresh:${pluginId}` : "catalog-refresh");
     return {
       ok: true,
       enabled: true,
@@ -1219,6 +1759,44 @@ export class CapabilityRuntime {
       }
     }
     return this.currentSummaries(includeDisabled, true);
+  }
+
+  routingCandidates({ includeDisabled = false, includeProbedTools = true } = {}) {
+    const candidates = builtinCapabilityRouteCandidates();
+    for (const [id, plugin] of this.discovered) {
+      const entry = this.registryEntry(id);
+      if (!entry) continue;
+      if (!includeDisabled && !entry.enabled) continue;
+      candidates.push(...capabilityRouteCandidates(plugin, entry, this.probes.get(id), { includeProbedTools }));
+      if (candidates.length >= 1_000) break;
+    }
+    return candidates.slice(0, 1_000);
+  }
+
+  routingFingerprint({ includeDisabled = true } = {}) {
+    // Session compatibility must be stable across restarts and independent of
+    // whether a deferred MCP server happened to be probed in this process.
+    return capabilityRoutingFingerprint(this.routingCandidates({ includeDisabled, includeProbedTools: false }));
+  }
+
+  async route(query, { includeDisabled = false, limit = 8, probeMcp = false } = {}) {
+    await this.ready;
+    if (probeMcp) {
+      const preliminary = rankCapabilityRoutes(query, this.routingCandidates({ includeDisabled: false }), { limit: 12 });
+      const likelyPluginIds = [...new Set(preliminary.candidates.map((candidate) => candidate.pluginId).filter(Boolean))].slice(0, 5);
+      for (const pluginId of likelyPluginIds) {
+        const entry = this.registryEntry(pluginId);
+        if (!entry?.enabled || !entry?.trusted) continue;
+        await this.probePluginMcp(pluginId).catch(() => {});
+      }
+    }
+    const candidates = this.routingCandidates({ includeDisabled });
+    return {
+      ok: true,
+      contract: "devspace-capability-routing",
+      routingFingerprint: capabilityRoutingFingerprint(candidates),
+      ...rankCapabilityRoutes(query, candidates, { limit }),
+    };
   }
 
   async search(query, { includeDisabled = false, limit = 20 } = {}) {
@@ -1287,7 +1865,7 @@ export class CapabilityRuntime {
         const args = ["clone", "--depth", "1"];
         if (ref) args.push("--branch", String(ref));
         args.push(rawSource, staging);
-        await git(args, { cwd: this.pluginsDir, timeoutMs: 180_000 });
+        await git(args, { cwd: this.pluginsDir });
       }
       else {
         sourceType = "local-copy";
@@ -1348,6 +1926,7 @@ export class CapabilityRuntime {
     entry.updatedAt = nowIso();
     if (!entry.enabled) await this.closePluginClients(id);
     await this.save();
+    this.notifyRoutingChanged(`${entry.enabled ? "plugin-enabled" : "plugin-disabled"}:${id}`);
     return { ok: true, plugin: await this.inspect(id) };
   }
 
@@ -1358,12 +1937,12 @@ export class CapabilityRuntime {
     if (entry.sourceType !== "git") throw new Error(`Capability ${id} was not installed from Git; reinstall it to update.`);
     await this.closePluginClients(id);
     if (ref) {
-      await git(["fetch", "--depth", "1", "origin", String(ref)], { cwd: entry.dir, timeoutMs: 180_000 });
-      await git(["checkout", "--detach", "FETCH_HEAD"], { cwd: entry.dir, timeoutMs: 60_000 });
+      await git(["fetch", "--depth", "1", "origin", String(ref)], { cwd: entry.dir });
+      await git(["checkout", "--detach", "FETCH_HEAD"], { cwd: entry.dir });
       entry.ref = String(ref);
     }
     else {
-      await git(["pull", "--ff-only"], { cwd: entry.dir, timeoutMs: 180_000 });
+      await git(["pull", "--ff-only"], { cwd: entry.dir });
     }
     entry.updatedAt = nowIso();
     await this.save();
@@ -1382,6 +1961,7 @@ export class CapabilityRuntime {
     this.discovered.delete(id);
     this.probes.delete(id);
     await this.save();
+    this.notifyRoutingChanged(`plugin-uninstalled:${id}`);
     return { ok: true, id, removed: true };
   }
 
@@ -1417,153 +1997,114 @@ export class CapabilityRuntime {
   }
 
   instanceKey(pluginId, serverId, instanceId) {
-    return `${pluginId}::${serverId}::${instanceId}`;
+    return this.connectionManager.instanceKey(pluginId, serverId, instanceId);
   }
 
   publicInstance(instance) {
-    return {
-      pluginId: instance.pluginId,
-      serverId: instance.serverId,
-      instanceId: instance.instanceId,
-      ownerLabel: instance.ownerLabel,
-      createdAt: instance.createdAt,
-      lastUsedAt: instance.lastUsedAt,
-      expiresAt: instance.expiresAt,
-      envNames: Object.keys(instance.envOverrides || {}).sort(),
-    };
+    return this.connectionManager.publicInstance(instance);
   }
 
   async cleanupExpiredInstances() {
-    const now = Date.now();
-    const expired = [];
-    for (const [key, instance] of this.mcpInstances) {
-      if (Date.parse(instance.expiresAt) > now) continue;
-      expired.push([key, instance]);
-    }
-    for (const [key, instance] of expired) {
-      this.mcpInstances.delete(key);
-      await this.closeClientKey(this.clientKey(instance.pluginId, instance.serverId, instance.instanceId));
-    }
-    return expired.length;
+    return 0;
   }
 
   findInstanceByToken(instanceToken) {
-    const tokenHash = sha256(instanceToken || "");
-    for (const instance of this.mcpInstances.values()) {
-      if (instance.tokenHash === tokenHash) return instance;
-    }
-    throw new Error("Invalid or expired capability instance token.");
+    return this.connectionManager.findInstanceByToken(instanceToken);
   }
 
-  async claimInstance({ pluginId, serverId, instanceId, ownerLabel = "agent", env = {}, leaseSeconds }) {
+  findInstanceByRuntime(runtimeId, options = {}) {
+    return this.connectionManager.findInstanceByRuntime(runtimeId, options);
+  }
+
+  async claimInstance({
+    pluginId,
+    serverId,
+    instanceId,
+    runtimeId = null,
+    ownerLabel = "agent",
+    ownerConversationId = null,
+    env = {},
+  }) {
     await this.ready;
-    await this.cleanupExpiredInstances();
+    const owner = String(ownerConversationId || "").trim();
+    if (!owner) {
+      throw new Error("ownerConversationId is required for a stateful capability runtime.");
+    }
     const { plugin } = this.requirePlugin(pluginId, { enabled: true, trusted: true });
     const definition = plugin.mcpServers.find((server) => server.id === serverId);
     if (!definition) throw new Error(`Unknown MCP server ${serverId} in plugin ${pluginId}.`);
-    if (definition.type !== "stdio") throw new Error("Capability instances currently support stdio MCP servers; remote MCP servers should expose their own independent endpoint URL.");
-    const normalizedInstanceId = normalizeId(instanceId);
-    if (!normalizedInstanceId) throw new Error("instanceId is required.");
-    const key = this.instanceKey(pluginId, serverId, normalizedInstanceId);
-    if (this.mcpInstances.has(key)) throw new Error(`Capability MCP instance ${normalizedInstanceId} is already claimed.`);
-    const leaseMs = clampInteger(leaseSeconds, Math.round(DEFAULT_INSTANCE_LEASE_MS / 1000), 60, Math.round(MAX_INSTANCE_LEASE_MS / 1000)) * 1000;
-    const timestamp = nowIso();
-    const instanceToken = randomBytes(32).toString("base64url");
-    const instance = {
+    if (["metadata-only", "package-metadata"].includes(definition.type)) {
+      throw new Error(definition.unsupportedReason || `MCP server ${serverId} cannot be connected.`);
+    }
+    const result = this.connectionManager.claimInstance({
       pluginId,
       serverId,
-      instanceId: normalizedInstanceId,
-      tokenHash: sha256(instanceToken),
-      ownerLabel: String(ownerLabel || "agent").slice(0, 120),
+      instanceId,
+      runtimeId,
+      ownerLabel,
+      ownerConversationId: owner,
       envOverrides: this.sanitizeInstanceEnv(env),
-      leaseMs,
-      createdAt: timestamp,
-      lastUsedAt: timestamp,
-      expiresAt: new Date(Date.now() + leaseMs).toISOString(),
-    };
-    this.mcpInstances.set(key, instance);
+    });
     return {
-      ok: true,
-      instanceToken,
-      instance: this.publicInstance(instance),
-      instruction: "Keep instanceToken private. Pass it to capability_call for this stateful MCP instance, then release it with capability_instance(action=release).",
+      ...result,
+      instruction: "Keep instanceToken private. Pass it to capability_call, or use runtimeId with a runtime-aware entry point such as blender_mcp. The connection remains active until explicit release or Local Gateway shutdown.",
     };
   }
 
-  async touchInstance(instanceToken, pluginId, serverId) {
+  async touchInstance(instanceToken, pluginId, serverId, ownerConversationId = null) {
     await this.ready;
-    await this.cleanupExpiredInstances();
-    const instance = this.findInstanceByToken(instanceToken);
-    if (pluginId && instance.pluginId !== pluginId) throw new Error("Capability instance token belongs to a different plugin.");
-    if (serverId && instance.serverId !== serverId) throw new Error("Capability instance token belongs to a different MCP server.");
-    const timestamp = nowIso();
-    instance.lastUsedAt = timestamp;
-    instance.expiresAt = new Date(Date.now() + instance.leaseMs).toISOString();
-    return instance;
+    return this.connectionManager.resolveInstance(instanceToken, { pluginId, serverId, ownerConversationId });
   }
 
-  async listInstances({ pluginId, serverId } = {}) {
+  async listInstances({ pluginId, serverId, ownerConversationId } = {}) {
     await this.ready;
-    await this.cleanupExpiredInstances();
-    return [...this.mcpInstances.values()]
-      .filter((item) => (!pluginId || item.pluginId === pluginId) && (!serverId || item.serverId === serverId))
-      .map((item) => this.publicInstance(item))
-      .sort((a, b) => `${a.pluginId}/${a.serverId}/${a.instanceId}`.localeCompare(`${b.pluginId}/${b.serverId}/${b.instanceId}`));
+    return this.connectionManager.listInstances({ pluginId, serverId, ownerConversationId });
   }
 
-  async releaseInstance(instanceToken) {
+  async releaseInstance(instanceToken, ownerConversationId = null) {
     await this.ready;
-    const instance = this.findInstanceByToken(instanceToken);
-    const key = this.instanceKey(instance.pluginId, instance.serverId, instance.instanceId);
-    this.mcpInstances.delete(key);
-    await this.closeClientKey(this.clientKey(instance.pluginId, instance.serverId, instance.instanceId));
-    return { ok: true, released: true, instance: this.publicInstance(instance) };
+    this.connectionManager.resolveInstance(instanceToken, { ownerConversationId });
+    return await this.connectionManager.releaseInstance(instanceToken, {
+      closeHolder: (holder) => this.closeMcpHolder(holder),
+    });
   }
 
-  clientKey(pluginId, serverId, instanceId) {
-    return instanceId ? `${pluginId}::${serverId}::instance:${instanceId}` : `${pluginId}::${serverId}`;
+  clientKey(pluginId, serverId, instanceId, options = {}) {
+    return this.connectionManager.connectionKey(pluginId, serverId, instanceId, options);
+  }
+
+  async closeMcpHolder(holder) {
+    if (!holder) return;
+    try { await holder.client?.close?.(); } catch {}
+    try { await holder.transport?.close?.(); } catch {}
   }
 
   async closeClientKey(key) {
-    const pending = this.mcpConnecting.get(key);
-    if (pending) {
-      try {
-        const holder = await pending;
-        this.mcpClients.delete(key);
-        try { await holder.client.close(); } catch {}
-        try { await holder.transport.close(); } catch {}
+    const state = this.connectionManager.connectionStates.get(key);
+    if (!state) {
+      const pending = this.mcpConnecting.get(key);
+      if (pending) {
+        try { await this.closeMcpHolder(await pending); } catch {}
       }
-      catch {}
-    }
-    const holder = this.mcpClients.get(key);
-    if (holder) {
+      const holder = this.mcpClients.get(key);
       this.mcpClients.delete(key);
-      try { await holder.client.close(); } catch {}
-      try { await holder.transport.close(); } catch {}
+      await this.closeMcpHolder(holder);
+      return;
     }
+    await this.connectionManager.invalidate({
+      pluginId: state.pluginId,
+      serverId: state.serverId,
+      instanceId: state.instanceId,
+      ownerConversationId: state.ownerConversationId,
+      closeHolder: (holder) => this.closeMcpHolder(holder),
+      reason: "runtime-invalidation",
+    });
   }
 
   async closePluginClients(pluginId) {
-    const prefix = `${pluginId}::`;
-    for (const [key, instance] of [...this.mcpInstances.entries()]) {
-      if (instance.pluginId === pluginId) this.mcpInstances.delete(key);
-    }
-    for (const [key, pending] of [...this.mcpConnecting.entries()]) {
-      if (!key.startsWith(prefix)) continue;
-      try {
-        const holder = await pending;
-        this.mcpClients.delete(key);
-        try { await holder.client.close(); } catch {}
-        try { await holder.transport.close(); } catch {}
-      }
-      catch {}
-    }
-    for (const [key, holder] of [...this.mcpClients.entries()]) {
-      if (!key.startsWith(prefix)) continue;
-      this.mcpClients.delete(key);
-      try { await holder.client.close(); } catch {}
-      try { await holder.transport.close(); } catch {}
-    }
+    await this.connectionManager.closePlugin(pluginId, {
+      closeHolder: (holder) => this.closeMcpHolder(holder),
+    });
   }
 
   async createMcpClient(pluginId, definition, instance) {
@@ -1571,7 +2112,8 @@ export class CapabilityRuntime {
     if (["metadata-only", "package-metadata"].includes(definition.type)) {
       throw new Error(definition.unsupportedReason || `MCP server ${definition.id} cannot be launched.`);
     }
-    assertRequiredEnv(definition);
+    const runtimeEnvironment = { ...process.env, ...(instance?.envOverrides || {}) };
+    assertRequiredEnv(definition, runtimeEnvironment);
     const client = new Client({ name: `devspace-ultra-capability-${slugify(pluginId)}`, version: "0.3.1" });
     let transport;
     if (definition.type === "stdio") {
@@ -1579,17 +2121,17 @@ export class CapabilityRuntime {
         ? definition.baseDir
         : plugin.root;
       const templateEnv = {
-        ...process.env,
+        ...runtimeEnvironment,
         CLAUDE_PLUGIN_ROOT: componentRoot,
         DEVSPACE_PLUGIN_ROOT: plugin.root,
       };
       const declaredEnvironment = {};
       for (const name of normalizeStringArray(definition.requiredEnv)) {
-        if (process.env[name] !== undefined) declaredEnvironment[name] = String(process.env[name]);
+        if (runtimeEnvironment[name] !== undefined) declaredEnvironment[name] = String(runtimeEnvironment[name]);
       }
       for (const item of Array.isArray(definition.environmentVariables) ? definition.environmentVariables : []) {
         if (!item?.name) continue;
-        const value = process.env[item.name] ?? item.default;
+        const value = runtimeEnvironment[item.name] ?? item.default;
         if (value !== undefined) declaredEnvironment[item.name] = String(value);
       }
       transport = new StdioClientTransport({
@@ -1608,7 +2150,7 @@ export class CapabilityRuntime {
       });
     }
     else if (definition.type === "sse") {
-      const remote = resolveRemoteConnection(pluginId, definition);
+      const remote = resolveRemoteConnection(pluginId, definition, runtimeEnvironment);
       transport = new SSEClientTransport(new URL(remote.url), {
         eventSourceInit: {
           fetch: (url, init) => fetch(url, {
@@ -1620,7 +2162,7 @@ export class CapabilityRuntime {
       });
     }
     else {
-      const remote = resolveRemoteConnection(pluginId, definition);
+      const remote = resolveRemoteConnection(pluginId, definition, runtimeEnvironment);
       transport = new StreamableHTTPClientTransport(new URL(remote.url), {
         requestInit: { headers: remote.headers },
       });
@@ -1630,7 +2172,7 @@ export class CapabilityRuntime {
       transport.stderr.on("data", (chunk) => { stderrTail = (stderrTail + String(chunk)).slice(-8192); });
     }
     try {
-      await withTimeout(client.connect(transport), definition.connectTimeoutMs || MCP_CONNECT_TIMEOUT_MS, `MCP connect ${pluginId}/${definition.id}${instance ? `/${instance.instanceId}` : ""}`);
+      await client.connect(transport);
     }
     catch (error) {
       try { await transport.close(); } catch {}
@@ -1641,52 +2183,67 @@ export class CapabilityRuntime {
   }
 
   async serializeMcpStartup(pluginId, serverId, operation) {
-    const key = `${pluginId}::${serverId}`;
-    const previous = this.mcpStartupTails.get(key) || Promise.resolve();
-    let release;
-    const tail = new Promise((resolveRelease) => { release = resolveRelease; });
-    this.mcpStartupTails.set(key, tail);
-    await previous.catch(() => {});
-    try { return await operation(); }
-    finally {
-      release();
-      if (this.mcpStartupTails.get(key) === tail) this.mcpStartupTails.delete(key);
-    }
+    return await this.connectionManager.serializeStartup(pluginId, serverId, operation);
   }
 
-  async getMcpClient(pluginId, serverId, instanceToken) {
+  mcpConnectionPolicy(definition, ownerConversationId = null, instance = null) {
+    if (instance) {
+      return {
+        ownerConversationId: instance.ownerConversationId,
+        scope: "runtime-isolated",
+      };
+    }
+    const owner = String(ownerConversationId || "").trim() || INTERNAL_CAPABILITY_OWNER;
+    return {
+      ownerConversationId: owner,
+      scope: owner === INTERNAL_CAPABILITY_OWNER ? "internal-isolated" : "conversation-isolated",
+    };
+  }
+
+  async getMcpClient(pluginId, serverId, instanceToken, ownerConversationId = null) {
     const { plugin } = this.requirePlugin(pluginId, { enabled: true, trusted: true });
     const definition = plugin.mcpServers.find((server) => server.id === serverId);
     if (!definition) throw new Error(`Unknown MCP server ${serverId} in plugin ${pluginId}.`);
-    const instance = instanceToken ? await this.touchInstance(instanceToken, pluginId, serverId) : undefined;
-    const key = this.clientKey(pluginId, serverId, instance?.instanceId);
-    const existing = this.mcpClients.get(key);
-    if (existing) return existing;
-    let pending = this.mcpConnecting.get(key);
-    if (!pending) {
-      pending = this.serializeMcpStartup(pluginId, serverId, () => this.createMcpClient(pluginId, definition, instance))
-        .then((holder) => {
-          this.mcpClients.set(key, holder);
-          return holder;
-        })
-        .finally(() => this.mcpConnecting.delete(key));
-      this.mcpConnecting.set(key, pending);
-    }
-    return await pending;
+    const instance = instanceToken
+      ? await this.touchInstance(instanceToken, pluginId, serverId, ownerConversationId)
+      : undefined;
+    const policy = this.mcpConnectionPolicy(definition, ownerConversationId, instance);
+    return await this.connectionManager.getOrConnect({
+      pluginId,
+      serverId,
+      instance,
+      ownerConversationId: policy.ownerConversationId,
+      connect: () => this.createMcpClient(pluginId, definition, instance),
+    });
   }
 
-  async executeMcpRequest(pluginId, serverId, instanceToken, operation) {
-    const holder = await this.getMcpClient(pluginId, serverId, instanceToken);
-    const instance = instanceToken ? this.findInstanceByToken(instanceToken) : undefined;
-    const key = this.clientKey(pluginId, serverId, instance?.instanceId);
+  async executeMcpRequest(pluginId, serverId, instanceToken, operation, ownerConversationId = null) {
+    const instance = instanceToken
+      ? this.connectionManager.resolveInstance(instanceToken, { pluginId, serverId, ownerConversationId })
+      : undefined;
+    const { plugin } = this.requirePlugin(pluginId, { enabled: true, trusted: true });
+    const definition = plugin.mcpServers.find((server) => server.id === serverId);
+    if (!definition) throw new Error(`Unknown MCP server ${serverId} in plugin ${pluginId}.`);
+    const policy = this.mcpConnectionPolicy(definition, ownerConversationId, instance);
+    const holder = await this.getMcpClient(pluginId, serverId, instanceToken, ownerConversationId);
+    const key = this.clientKey(pluginId, serverId, instance?.instanceId, policy);
     try {
       return {
-        result: await operation(holder.client, mcpRequestOptions()),
+        result: await operation(holder.client),
         instance,
       };
     }
     catch (error) {
-      if (shouldInvalidateMcpClient(error)) await this.closeClientKey(key).catch(() => {});
+      if (shouldInvalidateMcpClient(error)) {
+        await this.connectionManager.invalidate({
+          pluginId,
+          serverId,
+          instanceId: instance?.instanceId,
+          ownerConversationId: policy.ownerConversationId,
+          closeHolder: (value) => this.closeMcpHolder(value),
+          reason: error instanceof Error ? error.message : String(error),
+        }).catch(() => {});
+      }
       throw error;
     }
   }
@@ -1725,7 +2282,7 @@ export class CapabilityRuntime {
     throw new Error(`Unknown or ambiguous MCP server '${requested}'. Available server keys: ${available || "none"}.`);
   }
 
-  async listMcpResources({ server, cursor, limit = MAX_MCP_RESOURCE_ITEMS } = {}) {
+  async listMcpResources({ server, cursor, limit = MAX_MCP_RESOURCE_ITEMS } = {}, ownerConversationId = null) {
     await this.ready;
     const itemLimit = clampInteger(limit, MAX_MCP_RESOURCE_ITEMS, 1, MAX_MCP_RESOURCE_ITEMS);
     if (cursor && !server) throw new Error("cursor requires an explicit server key so pagination cannot cross MCP servers ambiguously.");
@@ -1737,7 +2294,7 @@ export class CapabilityRuntime {
     for (const target of targets) {
       if (total >= itemLimit) break;
       try {
-        const holder = await this.getMcpClient(target.pluginId, target.serverId);
+        const holder = await this.getMcpClient(target.pluginId, target.serverId, undefined, ownerConversationId);
         const capabilities = holder.client.getServerCapabilities() || {};
         if (!capabilities.resources) {
           results.push({ ...target, supported: false, resources: [], nextCursor: null });
@@ -1748,6 +2305,7 @@ export class CapabilityRuntime {
           target.serverId,
           undefined,
           (client, options) => client.listResources(cursor ? { cursor } : undefined, options),
+          ownerConversationId,
         );
         const remaining = itemLimit - total;
         const resources = (result?.resources || []).slice(0, remaining).map(sanitizeListedResource);
@@ -1780,7 +2338,7 @@ export class CapabilityRuntime {
     };
   }
 
-  async listMcpResourceTemplates({ server, cursor, limit = MAX_MCP_RESOURCE_ITEMS } = {}) {
+  async listMcpResourceTemplates({ server, cursor, limit = MAX_MCP_RESOURCE_ITEMS } = {}, ownerConversationId = null) {
     await this.ready;
     const itemLimit = clampInteger(limit, MAX_MCP_RESOURCE_ITEMS, 1, MAX_MCP_RESOURCE_ITEMS);
     if (cursor && !server) throw new Error("cursor requires an explicit server key so pagination cannot cross MCP servers ambiguously.");
@@ -1792,7 +2350,7 @@ export class CapabilityRuntime {
     for (const target of targets) {
       if (total >= itemLimit) break;
       try {
-        const holder = await this.getMcpClient(target.pluginId, target.serverId);
+        const holder = await this.getMcpClient(target.pluginId, target.serverId, undefined, ownerConversationId);
         const capabilities = holder.client.getServerCapabilities() || {};
         if (!capabilities.resources) {
           results.push({ ...target, supported: false, resourceTemplates: [], nextCursor: null });
@@ -1803,6 +2361,7 @@ export class CapabilityRuntime {
           target.serverId,
           undefined,
           (client, options) => client.listResourceTemplates(cursor ? { cursor } : undefined, options),
+          ownerConversationId,
         );
         const remaining = itemLimit - total;
         const resourceTemplates = (result?.resourceTemplates || []).slice(0, remaining).map(sanitizeListedResourceTemplate);
@@ -1835,11 +2394,11 @@ export class CapabilityRuntime {
     };
   }
 
-  async readMcpResourceByServer({ server, uri, instanceToken } = {}) {
+  async readMcpResourceByServer({ server, uri, instanceToken } = {}, ownerConversationId = null) {
     const target = this.resolveMcpServer(server);
     const resourceUri = String(uri ?? "").trim();
     if (!resourceUri) throw new Error("MCP resource uri is required.");
-    return await this.readMcpResource(target.pluginId, target.serverId, resourceUri, instanceToken);
+    return await this.readMcpResource(target.pluginId, target.serverId, resourceUri, instanceToken, ownerConversationId);
   }
 
   async probePluginMcp(pluginId) {
@@ -1949,40 +2508,62 @@ export class CapabilityRuntime {
     return probe;
   }
 
-  async callMcp(pluginId, serverId, toolName, args = {}, instanceToken) {
+  async listMcpTools(pluginId, serverId, instanceToken, ownerConversationId = null) {
+    await this.ready;
+    const { result, instance } = await this.executeMcpRequest(
+      pluginId,
+      serverId,
+      instanceToken,
+      (client) => client.listTools(),
+      ownerConversationId,
+    );
+    return {
+      ok: true,
+      pluginId,
+      serverId,
+      instanceId: instance?.instanceId,
+      runtimeId: instance?.runtimeId ?? null,
+      tools: Array.isArray(result?.tools) ? result.tools : [],
+    };
+  }
+
+  async callMcp(pluginId, serverId, toolName, args = {}, instanceToken, ownerConversationId = null) {
     await this.ready;
     if (!toolName) throw new Error("toolName is required for MCP tool calls.");
     const { result, instance } = await this.executeMcpRequest(
       pluginId,
       serverId,
       instanceToken,
-      (client, options) => client.callTool({ name: toolName, arguments: args || {} }, undefined, options),
+      (client) => client.callTool({ name: toolName, arguments: args || {} }),
+      ownerConversationId,
     );
-    return { ok: true, pluginId, kind: "mcp", serverId, instanceId: instance?.instanceId, toolName, result };
+    return { ok: true, pluginId, kind: "mcp", serverId, instanceId: instance?.instanceId, runtimeId: instance?.runtimeId ?? null, toolName, result };
   }
 
-  async readMcpResource(pluginId, serverId, resourceUri, instanceToken) {
+  async readMcpResource(pluginId, serverId, resourceUri, instanceToken, ownerConversationId = null) {
     await this.ready;
     if (!resourceUri) throw new Error("resourceUri is required for MCP resource reads.");
     const { result, instance } = await this.executeMcpRequest(
       pluginId,
       serverId,
       instanceToken,
-      (client, options) => client.readResource({ uri: resourceUri }, options),
+      (client) => client.readResource({ uri: resourceUri }),
+      ownerConversationId,
     );
-    return { ok: true, pluginId, kind: "mcp-resource", serverId, instanceId: instance?.instanceId, resourceUri, result };
+    return { ok: true, pluginId, kind: "mcp-resource", serverId, instanceId: instance?.instanceId, runtimeId: instance?.runtimeId ?? null, resourceUri, result };
   }
 
-  async getMcpPrompt(pluginId, serverId, promptName, args = {}, instanceToken) {
+  async getMcpPrompt(pluginId, serverId, promptName, args = {}, instanceToken, ownerConversationId = null) {
     await this.ready;
     if (!promptName) throw new Error("promptName is required for MCP prompt retrieval.");
     const { result, instance } = await this.executeMcpRequest(
       pluginId,
       serverId,
       instanceToken,
-      (client, options) => client.getPrompt({ name: promptName, arguments: args || {} }, options),
+      (client) => client.getPrompt({ name: promptName, arguments: args || {} }),
+      ownerConversationId,
     );
-    return { ok: true, pluginId, kind: "mcp-prompt", serverId, instanceId: instance?.instanceId, promptName, result };
+    return { ok: true, pluginId, kind: "mcp-prompt", serverId, instanceId: instance?.instanceId, runtimeId: instance?.runtimeId ?? null, promptName, result };
   }
 
   async callCommandTool(pluginId, toolName, args = {}) {
@@ -2006,7 +2587,6 @@ export class CapabilityRuntime {
         ...requiredEnvironment,
         ...resolveEnvObject(tool.env, templateEnv),
       },
-      timeoutMs: tool.timeoutMs,
       stdin: tool.input === "none" ? undefined : JSON.stringify(args || {}),
     });
     const parsed = parseJsonSafe(processResult.stdout.trim());
@@ -2020,18 +2600,18 @@ export class CapabilityRuntime {
     };
   }
 
-  async call(input) {
+  async call(input, { ownerConversationId = null } = {}) {
     if (["mcp", "mcp-resource", "mcp-prompt"].includes(input.kind) && !input.serverId) {
       throw new Error("serverId is required for MCP capability calls.");
     }
     if (input.kind === "mcp") {
-      return await this.callMcp(input.pluginId, input.serverId, input.toolName, input.arguments, input.instanceToken);
+      return await this.callMcp(input.pluginId, input.serverId, input.toolName, input.arguments, input.instanceToken, ownerConversationId);
     }
     if (input.kind === "mcp-resource") {
-      return await this.readMcpResource(input.pluginId, input.serverId, input.resourceUri, input.instanceToken);
+      return await this.readMcpResource(input.pluginId, input.serverId, input.resourceUri, input.instanceToken, ownerConversationId);
     }
     if (input.kind === "mcp-prompt") {
-      return await this.getMcpPrompt(input.pluginId, input.serverId, input.promptName, input.arguments, input.instanceToken);
+      return await this.getMcpPrompt(input.pluginId, input.serverId, input.promptName, input.arguments, input.instanceToken, ownerConversationId);
     }
     if (input.kind === "tool") {
       return await this.callCommandTool(input.pluginId, input.toolName, input.arguments);
@@ -2039,19 +2619,60 @@ export class CapabilityRuntime {
     throw new Error(`Unsupported capability kind: ${input.kind}`);
   }
 
+  listConnections(input = {}) {
+    return this.connectionManager.listConnections(input);
+  }
+
+  async reconnectConnection({ pluginId, serverId, instanceToken, ownerConversationId = null } = {}) {
+    const { plugin } = this.requirePlugin(pluginId, { enabled: true, trusted: true });
+    const definition = plugin.mcpServers.find((server) => server.id === serverId);
+    if (!definition) throw new Error(`Unknown MCP server ${serverId} in plugin ${pluginId}.`);
+    const instance = instanceToken
+      ? await this.touchInstance(instanceToken, pluginId, serverId, ownerConversationId)
+      : undefined;
+    const policy = this.mcpConnectionPolicy(definition, ownerConversationId, instance);
+    const key = this.clientKey(pluginId, serverId, instance?.instanceId, policy);
+    await this.closeClientKey(key);
+    if (instance) {
+      instance.connectionState = "disconnected";
+      instance.connectedAt = null;
+      instance.lastError = null;
+    }
+    await this.getMcpClient(pluginId, serverId, instanceToken, ownerConversationId);
+    return {
+      ok: true,
+      pluginId,
+      serverId,
+      mode: policy.scope,
+      runtime: instance ? this.publicInstance(instance) : null,
+      connectionState: "online",
+    };
+  }
+
   diagnostics() {
+    const connections = this.connectionManager.diagnostics();
     return {
       enabled: this.enabled === true,
       discoveredPlugins: this.discovered.size,
-      mcpClients: this.mcpClients.size,
-      mcpConnecting: this.mcpConnecting.size,
-      mcpStartupTails: this.mcpStartupTails.size,
-      mcpInstances: this.mcpInstances.size,
+      mcpClients: connections.clients,
+      mcpConnecting: connections.connecting,
+      mcpStartupTails: connections.startupQueues,
+      mcpInstances: connections.instances,
+      sharedConnections: connections.sharedConnections,
+      isolatedConnections: connections.isolatedConnections,
+      conversationIsolatedConnections: connections.conversationIsolatedConnections,
+      runtimeIsolatedConnections: connections.runtimeIsolatedConnections,
+      readyConnections: connections.readyConnections,
+      failedConnections: connections.failedConnections,
+      disconnectedConnections: connections.disconnectedConnections,
     };
   }
 
   async close() {
-    for (const id of [...this.discovered.keys()]) await this.closePluginClients(id);
+    this.routingListeners.clear();
+    await this.connectionManager.closeAll({
+      closeHolder: (holder) => this.closeMcpHolder(holder),
+    });
   }
 }
 
@@ -2102,7 +2723,33 @@ function requireReaddirSync(dir) {
 }
 import { readdirSync as readdirSyncCompat } from "node:fs";
 
-export function registerCapabilityTools(server, runtime) {
+function capabilityRoutingToolMeta(runtime, modelInstructionsFingerprint = null) {
+  const routingFingerprint = typeof runtime?.routingFingerprint === "function"
+    ? runtime.routingFingerprint({ includeDisabled: true })
+    : capabilityRoutingFingerprint([]);
+  return {
+    _meta: {
+      devspace: {
+        routingContractVersion: ROUTING_CONTRACT_VERSION,
+        routingFingerprint,
+        ...(modelInstructionsFingerprint ? { modelInstructionsFingerprint: String(modelInstructionsFingerprint) } : {}),
+      },
+    },
+  };
+}
+
+export function registerCapabilityTools(server, runtime, {
+  modelInstructionsFingerprint = null,
+  resolveConversation = null,
+  blenderRuntimeManager = null,
+  codexMcpBridge = null,
+} = {}) {
+  const routingMeta = capabilityRoutingToolMeta(runtime, modelInstructionsFingerprint);
+  const currentConversation = async (extra) => {
+    if (typeof resolveConversation !== "function") return null;
+    const resolved = await resolveConversation(extra);
+    return String(resolved?.conversationId || "").trim() || null;
+  };
   server.registerTool("capability_list", {
     title: "List Agent Capabilities",
     description: "List installed DevSpace capability plugins and their skills, instruction files, MCP servers, and command tools. This is the progressive-disclosure catalog shared by the main agent and every worker connected to the same DevSpace backend.",
@@ -2113,21 +2760,53 @@ export function registerCapabilityTools(server, runtime) {
     annotations: READ_ONLY,
   }, async (input) => {
     try {
-      const plugins = await runtime.list(input);
-      return textResult({ ok: true, plugins });
+      const probeDeferred = input.probeMcp === true;
+      const plugins = await runtime.list({ ...input, probeMcp: false });
+      return textResult({
+        ok: true,
+        plugins,
+        probeDeferred,
+        connectionPolicy: "conversation-isolated",
+        instruction: probeDeferred
+          ? "Catalogue discovery never opens a shared MCP client. Use the selected runtime-aware entry point or capability_call so the live schema is fetched through the current conversation's isolated connection."
+          : undefined,
+      });
+    }
+    catch (error) { return errorResult(error); }
+  });
+
+  const capabilityRouteRegistration = server.registerTool("capability_route", {
+    title: "Route Task to Skill, Plugin, or Tool",
+    description: "Use this proactively before generic file, shell, browser, or app work whenever the user's requested outcome may match an installed reusable skill, capability plugin, command adapter, or MCP tool. It performs bounded deterministic routing over names, aliases, descriptions, Codex-style interface metadata, default prompts, declared dependencies, negative gates, trust state, and implicit-invocation policy without loading every skill body. Follow primary.nextAction exactly: read a selected SKILL.md before substantive work, inspect only the selected plugin/server when schemas are still deferred, or call the returned exact tool. Explicit-only skills remain blocked unless the user names them.",
+    inputSchema: {
+      query: z.string().min(1).max(2_000),
+      includeDisabled: z.boolean().default(false),
+      probeMcp: z.boolean().default(false),
+      limit: z.number().int().min(1).max(50).default(8),
+    },
+    annotations: READ_ONLY,
+    ...routingMeta,
+  }, async (input) => {
+    try {
+      const result = await runtime.route(input.query, { ...input, probeMcp: false });
+      return textResult({
+        ...result,
+        connectionPolicy: "conversation-isolated",
+      });
     }
     catch (error) { return errorResult(error); }
   });
 
   server.registerTool("capability_search", {
     title: "Search Agent Capabilities",
-    description: "Search the shared capability catalog by plugin name/description, skill name, MCP server/tool, or declared command tool without loading every full schema into context. Inspect the selected plugin for complete details.",
+    description: "Search plugin-level capability summaries by name, description, skill, MCP server/tool, or declared command tool. For task-level routing with an exact skill/plugin/tool next action, prefer capability_route; use capability_search for broad catalog exploration only.",
     inputSchema: {
       query: z.string().min(1).max(500),
       includeDisabled: z.boolean().default(false),
       limit: z.number().int().min(1).max(100).default(20),
     },
     annotations: READ_ONLY,
+    ...routingMeta,
   }, async (input) => {
     try {
       const plugins = await runtime.search(input.query, input);
@@ -2135,6 +2814,24 @@ export function registerCapabilityTools(server, runtime) {
     }
     catch (error) { return errorResult(error); }
   });
+
+  let disposeRoutingChange = () => {};
+  if (typeof runtime?.onRoutingChanged === "function" && typeof capabilityRouteRegistration?.update === "function") {
+    disposeRoutingChange = runtime.onRoutingChanged(() => {
+      const nextMeta = capabilityRoutingToolMeta(runtime, modelInstructionsFingerprint);
+      // MCP SDK RegisteredTool.update emits notifications/tools/list_changed
+      // for connected clients, so active agents refresh the routing surface.
+      capabilityRouteRegistration.update({ _meta: nextMeta._meta });
+    });
+    const protocol = server?.server;
+    if (protocol && "onclose" in protocol) {
+      const previousOnClose = protocol.onclose;
+      protocol.onclose = () => {
+        disposeRoutingChange();
+        try { previousOnClose?.call(protocol); } catch {}
+      };
+    }
+  }
 
   server.registerTool("capability_import_codex", {
     title: "Import Codex MCP Catalog",
@@ -2275,39 +2972,124 @@ export function registerCapabilityTools(server, runtime) {
     catch (error) { return errorResult(error); }
   });
 
-  server.registerTool("capability_instance", {
-    title: "Claim Stateful MCP Instance",
-    description: "Manage isolated instances of one stateful stdio MCP server (for example two Blender projects). action=claim creates an exclusive leased instance with ephemeral environment overrides and returns a private instanceToken; action=list shows active instance identities without environment values; action=release closes that instance process. Shared/stateless MCPs do not need an instance and continue using the backend-wide deduplicated connection.",
+  const capabilityConnectionDefinition = {
+    title: "Manage Plugin and MCP Connections",
+    description: "Single connection authority for DevSpace capability and linked Codex MCP transports. Every ChatGPT conversation receives its own MCP client/session boundary; no transport is shared across conversations. Stateful application services are additionally bound by plugin/server/instance/runtime/current conversation and may carry a private loopback port. Use claim for a stateful runtime, list/status to inspect only the current conversation, reconnect after a real transport failure, and release to close exactly one isolated connection. There is no lease timeout, arbitrary connection-count ceiling, or background reconnect loop; the next real call reconnects on demand.",
     inputSchema: {
-      action: z.enum(["claim", "list", "release"]),
+      action: z.enum(["claim", "list", "status", "reconnect", "release"]).default("list"),
+      source: z.enum(["all", "capability", "codex"]).default("all"),
       pluginId: z.string().min(1).max(180).optional(),
       serverId: z.string().min(1).max(220).optional(),
       instanceId: z.string().min(1).max(180).optional(),
+      runtimeId: z.string().min(1).max(180).optional(),
       instanceToken: z.string().min(16).optional(),
       env: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).default({}),
-      leaseSeconds: z.number().int().min(60).max(7200).default(1800),
       ownerLabel: z.string().min(1).max(120).optional(),
     },
     annotations: MUTATING,
-  }, async (input, extra) => {
+    ...routingMeta,
+  };
+  const capabilityConnectionHandler = async (input, extra) => {
     try {
-      if (input.action === "list") {
-        return textResult({ ok: true, instances: await runtime.listInstances({ pluginId: input.pluginId, serverId: input.serverId }) });
+      const ownerConversationId = await currentConversation(extra);
+      if (input.action === "list" || input.action === "status") {
+        const capabilityConnections = input.source === "codex" ? [] : runtime.listConnections({
+          pluginId: input.pluginId,
+          serverId: input.serverId,
+          ownerConversationId,
+        });
+        const codexConnections = input.source === "capability" || !codexMcpBridge?.listConnections
+          ? []
+          : codexMcpBridge.listConnections({ serverId: input.serverId, ownerConversationId });
+        return textResult({
+          ok: true,
+          ownerConversationId,
+          source: input.source,
+          connections: [...capabilityConnections, ...codexConnections],
+          instances: await runtime.listInstances({
+            pluginId: input.pluginId,
+            serverId: input.serverId,
+            ownerConversationId,
+          }),
+          diagnostics: runtime.diagnostics(),
+        });
       }
       if (input.action === "release") {
+        if (input.source === "codex") throw new Error("Linked Codex MCP connections are automatically conversation-isolated; use action=reconnect to reset the current conversation's transport.");
         if (!input.instanceToken) throw new Error("instanceToken is required for action=release.");
-        return textResult(await runtime.releaseInstance(input.instanceToken));
+        return textResult(await runtime.releaseInstance(input.instanceToken, ownerConversationId));
       }
-      if (!input.pluginId || !input.serverId || !input.instanceId) throw new Error("pluginId, serverId, and instanceId are required for action=claim.");
+      if (input.action === "reconnect") {
+        if (!input.serverId) throw new Error("serverId is required for action=reconnect.");
+        if (input.source === "codex") {
+          if (!codexMcpBridge?.resetConnection) throw new Error("Codex MCP connection manager is unavailable.");
+          return textResult(await codexMcpBridge.resetConnection(input.serverId, ownerConversationId));
+        }
+        if (!input.pluginId) throw new Error("pluginId is required for capability action=reconnect.");
+        return textResult(await runtime.reconnectConnection({
+          pluginId: input.pluginId,
+          serverId: input.serverId,
+          instanceToken: input.instanceToken,
+          ownerConversationId,
+        }));
+      }
+      if (input.source === "codex") throw new Error("Linked Codex MCP transports are automatically isolated by conversation; action=claim is reserved for stateful application runtimes.");
+      if (!input.pluginId || !input.serverId || !input.instanceId) {
+        throw new Error("pluginId, serverId, and instanceId are required for action=claim.");
+      }
       const ownerLabel = input.ownerLabel || (extra?.sessionId ? `mcp:${String(extra.sessionId).slice(0, 12)}` : "agent");
       return textResult(await runtime.claimInstance({
         pluginId: input.pluginId,
         serverId: input.serverId,
         instanceId: input.instanceId,
+        runtimeId: input.runtimeId,
         ownerLabel,
+        ownerConversationId,
         env: input.env,
-        leaseSeconds: input.leaseSeconds,
       }));
+    }
+    catch (error) { return errorResult(error); }
+  };
+  server.registerTool("capability_connection", capabilityConnectionDefinition, capabilityConnectionHandler);
+
+  server.registerTool("capability_instance", {
+    ...capabilityConnectionDefinition,
+    title: "Manage Capability MCP Instance (compatibility alias)",
+    description: `${capabilityConnectionDefinition.description} capability_instance remains as a compatibility alias; new routing should prefer capability_connection.`,
+  }, capabilityConnectionHandler);
+
+  server.registerTool("devspace_connection_isolation_status", {
+    title: "Inspect Conversation Connection Isolation",
+    description: "Verify that the current ChatGPT conversation owns only its isolated Plugin/MCP connections and Blender runtimes. Reports legacy shared entries as retired diagnostics; they are never returned as executable routes. Use this after tool-schema refresh, runtime adoption, reconnect, or Core restart.",
+    inputSchema: {},
+    annotations: READ_ONLY,
+    ...routingMeta,
+  }, async (_input, extra) => {
+    try {
+      const ownerConversationId = await currentConversation(extra);
+      if (!ownerConversationId) throw new Error("A verified ChatGPT conversation identity is required.");
+      const allConnections = runtime.listConnections({ ownerConversationId });
+      const isolatedConnections = allConnections.filter((connection) => connection.scope !== "shared" && connection.mode !== "shared");
+      const legacySharedConnections = allConnections.filter((connection) => connection.scope === "shared" || connection.mode === "shared");
+      const blenderRuntimes = blenderRuntimeManager
+        ? await blenderRuntimeManager.list(ownerConversationId)
+        : [];
+      return textResult({
+        ok: legacySharedConnections.length === 0,
+        policy: "conversation-isolated",
+        ownerConversationId,
+        isolatedConnections,
+        legacySharedConnections: legacySharedConnections.map((connection) => ({
+          pluginId: connection.pluginId,
+          serverId: connection.serverId,
+          state: connection.state,
+          executable: false,
+        })),
+        blenderRuntimes,
+        instruction: legacySharedConnections.length
+          ? "Restart/reconcile the Core to retire pre-policy shared clients; do not route Agent work through them."
+          : "All currently visible Agent connections are conversation-isolated.",
+      });
     }
     catch (error) { return errorResult(error); }
   });
@@ -2321,8 +3103,8 @@ export function registerCapabilityTools(server, runtime) {
       limit: z.number().int().min(1).max(MAX_MCP_RESOURCE_ITEMS).default(MAX_MCP_RESOURCE_ITEMS),
     },
     annotations: READ_ONLY,
-  }, async (input) => {
-    try { return textResult(await runtime.listMcpResources(input)); }
+  }, async (input, extra) => {
+    try { return textResult(await runtime.listMcpResources(input, await currentConversation(extra))); }
     catch (error) { return errorResult(error); }
   });
 
@@ -2335,8 +3117,8 @@ export function registerCapabilityTools(server, runtime) {
       limit: z.number().int().min(1).max(MAX_MCP_RESOURCE_ITEMS).default(MAX_MCP_RESOURCE_ITEMS),
     },
     annotations: READ_ONLY,
-  }, async (input) => {
-    try { return textResult(await runtime.listMcpResourceTemplates(input)); }
+  }, async (input, extra) => {
+    try { return textResult(await runtime.listMcpResourceTemplates(input, await currentConversation(extra))); }
     catch (error) { return errorResult(error); }
   });
 
@@ -2349,9 +3131,9 @@ export function registerCapabilityTools(server, runtime) {
       instanceToken: z.string().min(16).optional(),
     },
     annotations: READ_ONLY,
-  }, async (input) => {
+  }, async (input, extra) => {
     try {
-      const result = await runtime.readMcpResourceByServer(input);
+      const result = await runtime.readMcpResourceByServer(input, await currentConversation(extra));
       const contents = Array.isArray(result?.result?.contents) ? result.result.contents : [];
       const content = contents.map((resource) => ({
         type: "resource",
@@ -2376,9 +3158,112 @@ export function registerCapabilityTools(server, runtime) {
     catch (error) { return errorResult(error); }
   });
 
+  server.registerTool("blender_runtime", {
+    title: "Manage Isolated Blender Runtimes",
+    description: "Start, adopt, attach, inspect, release, or stop a conversation-owned Blender application runtime. Each runtime receives its own runtimeId, loopback MCP port, Blender process binding and isolated blender-local MCP connection, allowing multiple agents to operate different Blender projects concurrently without cross-routing. discover finds running Blender processes and listener ports; start launches a new visible Blender process; adopt/attach binds an already-running addon endpoint without reopening Blender or replacing its current file; release removes only DevSpace's connection while leaving Blender open; stop gracefully closes only a DevSpace-managed Blender process. No lease or wall-clock timeout is applied.",
+    inputSchema: {
+      action: z.enum(["discover", "list", "status", "start", "adopt", "attach", "release", "stop"]).default("list"),
+      runtimeId: z.string().min(1).max(120).optional(),
+      ownerLabel: z.string().min(1).max(120).optional(),
+      executable: z.string().min(1).max(4000).optional(),
+      blendFile: z.string().min(1).max(4000).optional(),
+      port: z.number().int().min(1024).max(65535).optional(),
+      processId: z.number().int().positive().optional(),
+    },
+    annotations: CALLING,
+    ...routingMeta,
+  }, async (input, extra) => {
+    try {
+      if (!blenderRuntimeManager) throw new Error("Blender Runtime Manager is unavailable.");
+      const ownerConversationId = await currentConversation(extra);
+      if (!ownerConversationId) throw new Error("Blender Runtime Manager requires the current ChatGPT conversation identity.");
+      if (input.action === "discover") {
+        return textResult({ ok: true, ownerConversationId, processes: await blenderRuntimeManager.discover(ownerConversationId) });
+      }
+      if (input.action === "list") {
+        return textResult({ ok: true, ownerConversationId, runtimes: await blenderRuntimeManager.list(ownerConversationId) });
+      }
+      if (!input.runtimeId) throw new Error(`runtimeId is required for action=${input.action}.`);
+      if (input.action === "status") return textResult(await blenderRuntimeManager.status(input.runtimeId, ownerConversationId));
+      if (input.action === "attach" || input.action === "adopt") {
+        if (!input.port) throw new Error(`port is required for action=${input.action}.`);
+        const operation = input.action === "adopt"
+          ? blenderRuntimeManager.adoptExisting.bind(blenderRuntimeManager)
+          : blenderRuntimeManager.attach.bind(blenderRuntimeManager);
+        return textResult(await operation({
+          runtimeId: input.runtimeId,
+          ownerConversationId,
+          ownerLabel: input.ownerLabel,
+          port: input.port,
+          processId: input.processId,
+          blendFile: input.blendFile,
+        }));
+      }
+      if (input.action === "start") {
+        return textResult(await blenderRuntimeManager.start({
+          runtimeId: input.runtimeId,
+          ownerConversationId,
+          ownerLabel: input.ownerLabel,
+          executable: input.executable,
+          blendFile: input.blendFile,
+          port: input.port,
+          signal: extra?.signal,
+        }));
+      }
+      return textResult(await blenderRuntimeManager.stop({
+        runtimeId: input.runtimeId,
+        ownerConversationId,
+        terminateProcess: input.action === "stop",
+      }));
+    }
+    catch (error) { return errorResult(error); }
+  });
+
+  server.registerTool("blender_mcp", {
+    title: "Operate Live Blender via MCP",
+    description: "Actual execution entry point for Blender. Omitting runtimeId resolves only the current conversation's unique/default assigned runtime, including an adopted user-opened Blender that is already mid-work; it never falls back to a backend-wide shared Blender connection. When a conversation owns multiple runtimes, pass runtimeId explicitly. Do not stop after capability discovery: action=list reads the selected runtime's live schema and action=call invokes one returned tool. Use execute_blender_code for mutations and screenshot/summary tools for readback.",
+    inputSchema: {
+      action: z.enum(["list", "call"]).default("list"),
+      toolName: z.string().min(1).max(220).optional(),
+      arguments: z.record(z.string(), z.unknown()).default({}),
+      instanceToken: z.string().min(16).optional(),
+      runtimeId: z.string().min(1).max(180).optional(),
+    },
+    annotations: CALLING,
+    ...routingMeta,
+  }, async (input, extra) => {
+    try {
+      const ownerConversationId = await currentConversation(extra);
+      if (input.instanceToken && input.runtimeId) throw new Error("Pass either runtimeId or instanceToken, not both.");
+      if (!ownerConversationId) throw new Error("Blender MCP requires the current ChatGPT conversation identity.");
+      if (!blenderRuntimeManager) throw new Error("Blender Runtime Manager is unavailable.");
+      const instanceToken = input.runtimeId
+        ? await blenderRuntimeManager.instanceToken(input.runtimeId, ownerConversationId)
+        : input.instanceToken || await blenderRuntimeManager.defaultInstanceToken(ownerConversationId);
+      if (input.action === "list") {
+        const listed = await runtime.listMcpTools("blender-local", "blender", instanceToken, ownerConversationId);
+        return textResult({
+          ...listed,
+          executionTool: "blender_mcp",
+          instruction: "Select one returned tool and immediately call blender_mcp with action=call, the same runtimeId when visible in your schema, that toolName, and schema-valid arguments. Cached clients may omit runtimeId only because the backend has already bound this conversation to its unique default runtime.",
+        });
+      }
+      if (!input.toolName) throw new Error("toolName is required when action=call.");
+      return textResult(await runtime.call({
+        pluginId: "blender-local",
+        kind: "mcp",
+        serverId: "blender",
+        toolName: input.toolName,
+        arguments: input.arguments,
+        instanceToken,
+      }, { ownerConversationId }));
+    }
+    catch (error) { return errorResult(error); }
+  });
+
   server.registerTool("capability_call", {
     title: "Call Agent Capability Tool",
-    description: "Invoke a capability through the shared DevSpace backend. kind=mcp calls an MCP tool; mcp-resource reads an MCP resource URI; mcp-prompt retrieves a reusable MCP prompt; kind=tool invokes an explicitly declared command adapter with JSON on stdin. For stateful MCPs controlling a specific app/project, claim capability_instance first and pass its private instanceToken so each project gets an isolated MCP process/endpoint. Use capability_search/inspect first to discover names, URIs, and schemas.",
+    description: "Invoke a capability through the DevSpace backend. Every MCP call/resource/prompt is conversation-isolated by default: when runtimeId or instanceToken is omitted, DevSpace creates or reuses an implicit connection owned only by the current ChatGPT conversation. Stateful application MCPs should still use their dedicated runtime manager so each project also receives its own process/port; Blender must use blender_runtime/blender_mcp. kind=tool invokes an explicitly declared command adapter with JSON on stdin. Use capability_search/inspect first to discover names, URIs, and schemas.",
     inputSchema: {
       pluginId: z.string().min(1).max(180),
       kind: z.enum(["mcp", "mcp-resource", "mcp-prompt", "tool"]),
@@ -2387,11 +3272,35 @@ export function registerCapabilityTools(server, runtime) {
       resourceUri: z.string().min(1).max(16_384).optional(),
       promptName: z.string().min(1).max(220).optional(),
       instanceToken: z.string().min(16).optional(),
+      runtimeId: z.string().min(1).max(180).optional(),
       arguments: z.record(z.string(), z.unknown()).default({}),
     },
     annotations: CALLING,
-  }, async (input) => {
-    try { return textResult(await runtime.call(input)); }
+  }, async (input, extra) => {
+    try {
+      const ownerConversationId = await currentConversation(extra);
+      if (input.instanceToken && input.runtimeId) throw new Error("Pass either runtimeId or instanceToken, not both.");
+      let instanceToken = input.runtimeId
+        ? runtime.connectionManager.tokenForRuntime(input.runtimeId, {
+            pluginId: input.pluginId,
+            serverId: input.serverId,
+            ownerConversationId,
+          })
+        : input.instanceToken;
+      if (!instanceToken && input.kind !== "tool") {
+        if (!input.serverId) throw new Error("serverId is required for MCP connection isolation.");
+        const isolated = await runtime.ensureConversationInstance({
+          pluginId: input.pluginId,
+          serverId: input.serverId,
+          ownerConversationId,
+          ownerLabel: "Capability Agent",
+        });
+        instanceToken = isolated.instanceToken;
+      }
+      return textResult(await runtime.call({ ...input, instanceToken }, { ownerConversationId }));
+    }
     catch (error) { return errorResult(error); }
   });
+
+  return { disposeRoutingChange };
 }

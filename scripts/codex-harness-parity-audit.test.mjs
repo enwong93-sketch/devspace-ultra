@@ -5,7 +5,7 @@ const codexText = [
   "exec_command", "apply_patch", "write_stdin", "view_image", "update_plan",
   "list_mcp_resources", "list_mcp_resource_templates", "read_mcp_resource",
   "mcp_servers", "spawn_agent", "send_input", "wait", "resume_agent", "close_agent",
-  "request_user_input", "web_search", "js_repl", "skills", "SKILL.md",
+  "request_user_input", "web_search", "js_repl", "skills", "SKILL.md", "search_info", "ToolSearchInfo",
   "computer", "screenshot", "browser", "sandbox", "danger-full-access", "memory", "compact", "compaction",
 ].join("\n");
 const devspaceText = [
@@ -13,7 +13,8 @@ const devspaceText = [
   "exec_command", "write_stdin", "view_image", "loadImageForMcp", "image/png", "image/jpeg",
   "devspace_update_plan", "devspace_plan_status", "devspace_plan_start",
   "list_mcp_resources", "list_mcp_resource_templates", "read_mcp_resource",
-  "capability_list", "capability_search", "capability_inspect", "capability_call", "capability_instance",
+  "capability_list", "capability_route", "capability_search", "capability_inspect", "capability_call", "capability_instance",
+  "ROUTING_CONTRACT_VERSION", "allowImplicitInvocation", "routingFingerprint",
   "capability_import_codex", "codex-mcp-stdio-bridge", "expected-fingerprint",
   "toolchain_status", "toolchain_install", "winget.exe",
   "chat_swarm_join", "chat_swarm_next", "chat_swarm_submit", "chat_swarm_elastic_scale",
@@ -27,8 +28,8 @@ const devspaceText = [
 ].join("\n");
 
 const audit = evaluateParity({ codexText, devspaceText });
-assert.equal(audit.summary.p0, 8);
-assert.equal(audit.summary.p0Passed, 8);
+assert.equal(audit.summary.p0, 9);
+assert.equal(audit.summary.p0Passed, 9);
 assert.deepEqual(audit.summary.hardBlockers, []);
 assert.deepEqual(audit.summary.partial, []);
 assert.equal(audit.rows.find((row) => row.id === "browser-and-computer-use").target, "bridged");

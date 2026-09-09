@@ -1,17 +1,16 @@
 import { randomUUID } from "node:crypto";
 
-const DEFAULT_BARRIER_TIMEOUT_MS = 30_000;
-const DEFAULT_DRAIN_TIMEOUT_MS = 30_000;
-const DEFAULT_SESSION_IDLE_RETENTION_MS = 24 * 60 * 60_000;
-const DEFAULT_MAX_RETAINED_SESSIONS = 256;
-const DEFAULT_MAX_REPLAY_SESSIONS = 16;
-
 function cloneInitializeBody(value) {
   if (value === undefined) return undefined;
   return structuredClone(value);
 }
 
 function cleanSchemaFingerprint(value) {
+  const text = String(value ?? "").trim().toLowerCase();
+  return /^[a-f0-9]{64}$/.test(text) ? text : null;
+}
+
+function cleanClientSessionFingerprint(value) {
   const text = String(value ?? "").trim().toLowerCase();
   return /^[a-f0-9]{64}$/.test(text) ? text : null;
 }
@@ -28,62 +27,70 @@ function requireText(value, label) {
   return text;
 }
 
-function timeoutPromise(promise, timeoutMs, message, onTimeout) {
-  const boundedTimeout = Number(timeoutMs);
-  if (!Number.isFinite(boundedTimeout) || boundedTimeout <= 0) {
-    throw new Error("timeoutMs must be a positive number.");
-  }
-
-  let timer;
-  return Promise.race([
-    promise,
-    new Promise((_, reject) => {
-      timer = setTimeout(() => {
-        onTimeout?.();
-        reject(new Error(message));
-      }, boundedTimeout);
-      timer.unref?.();
-    }),
-  ]).finally(() => clearTimeout(timer));
-}
-
 export class StableGatewaySessionRegistry {
-  constructor({
-    now = Date.now,
-    idleRetentionMs = DEFAULT_SESSION_IDLE_RETENTION_MS,
-    maxRetainedSessions = DEFAULT_MAX_RETAINED_SESSIONS,
-    maxReplaySessions = DEFAULT_MAX_REPLAY_SESSIONS,
-  } = {}) {
+  constructor({ now = Date.now } = {}) {
     if (typeof now !== "function") throw new Error("now must be a function.");
     this.now = now;
-    this.idleRetentionMs = Math.max(1_000, Number(idleRetentionMs) || DEFAULT_SESSION_IDLE_RETENTION_MS);
-    this.maxRetainedSessions = Math.max(1, Number(maxRetainedSessions) || DEFAULT_MAX_RETAINED_SESSIONS);
-    this.maxReplaySessions = Math.max(1, Math.min(this.maxRetainedSessions, Number(maxReplaySessions) || DEFAULT_MAX_REPLAY_SESSIONS));
     this.sessions = new Map();
+    this.clientSessions = new Map();
     this.barrier = null;
     this.drainWaiters = new Set();
   }
 
-  registerInitialize({ coreId, backendSessionId, initializeBody, authorization } = {}) {
+  registerInitialize({ coreId, backendSessionId, initializeBody, authorization, clientSessionFingerprint = null } = {}) {
+    const normalizedCoreId = requireText(coreId, "coreId");
+    const normalizedBackendSessionId = requireText(backendSessionId, "backendSessionId");
+    const normalizedAuthorization = requireText(authorization, "authorization");
+    const clientFingerprint = cleanClientSessionFingerprint(clientSessionFingerprint);
+    if (clientFingerprint) {
+      const priorId = this.clientSessions.get(clientFingerprint);
+      const prior = priorId ? this.sessions.get(priorId) : null;
+      if (prior) {
+        prior.coreId = normalizedCoreId;
+        prior.backendSessionId = normalizedBackendSessionId;
+        prior.initializeBody = cloneInitializeBody(initializeBody);
+        prior.authorization = normalizedAuthorization;
+        prior.initialized = false;
+        prior.disconnectObserved = false;
+        prior.schemaFingerprint = null;
+        prior.toolCount = null;
+        prior.lastActivityAt = this.now();
+        return prior.publicSessionId;
+      }
+    }
     const publicSessionId = randomUUID();
+    if (clientFingerprint) this.clientSessions.set(clientFingerprint, publicSessionId);
     this.sessions.set(publicSessionId, {
       publicSessionId,
-      coreId: requireText(coreId, "coreId"),
-      backendSessionId: requireText(backendSessionId, "backendSessionId"),
+      coreId: normalizedCoreId,
+      backendSessionId: normalizedBackendSessionId,
       initializeBody: cloneInitializeBody(initializeBody),
-      authorization: requireText(authorization, "authorization"),
+      authorization: normalizedAuthorization,
       initialized: false,
       activeRequests: 0,
+      eventStreams: 0,
+      disconnectObserved: false,
+      clientSessionFingerprint: clientFingerprint,
       schemaFingerprint: null,
       toolCount: null,
       lastActivityAt: this.now(),
     });
-    this.#pruneInactive();
     return publicSessionId;
   }
 
-  lookup(publicSessionId) {
-    const entry = this.sessions.get(String(publicSessionId ?? ""));
+  resolvePublicSessionId(publicSessionId, clientSessionFingerprint = null) {
+    const requested = String(publicSessionId ?? "").trim();
+    if (requested && this.sessions.has(requested)) return requested;
+    const clientFingerprint = cleanClientSessionFingerprint(clientSessionFingerprint);
+    if (!clientFingerprint) return null;
+    const current = this.clientSessions.get(clientFingerprint);
+    return current && this.sessions.has(current) ? current : null;
+  }
+
+  lookup(publicSessionId, clientSessionFingerprint = null) {
+    const resolved = this.resolvePublicSessionId(publicSessionId, clientSessionFingerprint);
+    if (!resolved) return undefined;
+    const entry = this.sessions.get(resolved);
     if (!entry) return undefined;
     return this.#internalSnapshot(entry);
   }
@@ -93,7 +100,8 @@ export class StableGatewaySessionRegistry {
     for (const descriptor of descriptors) {
       const publicSessionId = requireText(descriptor?.publicSessionId, "publicSessionId");
       const lastActivityAt = Number(descriptor?.lastActivityAt || this.now());
-      this.sessions.set(publicSessionId, {
+      const clientSessionFingerprint = cleanClientSessionFingerprint(descriptor?.clientSessionFingerprint);
+      const restoredEntry = {
         publicSessionId,
         coreId: "restored-unmapped",
         backendSessionId: "restored-unmapped",
@@ -101,22 +109,32 @@ export class StableGatewaySessionRegistry {
         authorization: "",
         initialized: descriptor?.initialized === true,
         activeRequests: 0,
+        eventStreams: 0,
+        disconnectObserved: false,
+        clientSessionFingerprint,
         schemaFingerprint: cleanSchemaFingerprint(descriptor?.schemaFingerprint),
         toolCount: cleanToolCount(descriptor?.toolCount),
         lastActivityAt: Number.isFinite(lastActivityAt) ? lastActivityAt : this.now(),
-      });
+      };
+      if (clientSessionFingerprint) {
+        const previousId = this.clientSessions.get(clientSessionFingerprint);
+        const previous = previousId ? this.sessions.get(previousId) : null;
+        if (previous && Number(previous.lastActivityAt || 0) > Number(restoredEntry.lastActivityAt || 0)) continue;
+        if (previousId) this.sessions.delete(previousId);
+        this.clientSessions.set(clientSessionFingerprint, publicSessionId);
+      }
+      this.sessions.set(publicSessionId, restoredEntry);
     }
-    this.#pruneInactive();
     return this.snapshotDescriptors();
   }
 
   snapshotDescriptors() {
-    this.#pruneInactive();
     return [...this.sessions.values()].map((entry) => ({
       publicSessionId: entry.publicSessionId,
       initializeBody: cloneInitializeBody(entry.initializeBody),
       initialized: entry.initialized === true,
       lastActivityAt: Number(entry.lastActivityAt || 0),
+      clientSessionFingerprint: cleanClientSessionFingerprint(entry.clientSessionFingerprint),
       schemaFingerprint: cleanSchemaFingerprint(entry.schemaFingerprint),
       toolCount: cleanToolCount(entry.toolCount),
     }));
@@ -158,14 +176,15 @@ export class StableGatewaySessionRegistry {
     return true;
   }
 
-  async waitForAdmission(timeoutMs = DEFAULT_BARRIER_TIMEOUT_MS) {
-    await this.#waitForAdmission(timeoutMs);
+  async waitForAdmission() {
+    const barrier = this.barrier;
+    if (barrier) await barrier.promise;
   }
 
-  async acquire(publicSessionId, { timeoutMs = DEFAULT_BARRIER_TIMEOUT_MS } = {}) {
+  async acquire(publicSessionId) {
     const id = String(publicSessionId ?? "");
     if (!this.sessions.has(id)) return undefined;
-    await this.#waitForAdmission(timeoutMs);
+    await this.waitForAdmission();
     const entry = this.sessions.get(id);
     if (!entry) return undefined;
     entry.activeRequests += 1;
@@ -179,7 +198,31 @@ export class StableGatewaySessionRegistry {
     entry.activeRequests = Math.max(0, entry.activeRequests - 1);
     entry.lastActivityAt = this.now();
     this.#notifyDrainIfReady();
-    this.#pruneInactive();
+    return true;
+  }
+
+  markEventStreamOpen(publicSessionId) {
+    const entry = this.sessions.get(String(publicSessionId ?? ""));
+    if (!entry) return false;
+    entry.eventStreams += 1;
+    entry.disconnectObserved = false;
+    entry.lastActivityAt = this.now();
+    return true;
+  }
+
+  markEventStreamClosed(publicSessionId, { disconnected = false } = {}) {
+    const entry = this.sessions.get(String(publicSessionId ?? ""));
+    if (!entry) return false;
+    entry.eventStreams = Math.max(0, entry.eventStreams - 1);
+    if (disconnected && entry.eventStreams === 0) {
+      // A ChatGPT SSE close is a reconnect boundary, not revocation. Drop only
+      // the Core-side mapping so the next real call lazily recreates the
+      // backend MCP transport under the same public session/conversation.
+      entry.disconnectObserved = true;
+      entry.coreId = "unmapped";
+      entry.backendSessionId = "unmapped";
+    }
+    entry.lastActivityAt = this.now();
     return true;
   }
 
@@ -193,21 +236,11 @@ export class StableGatewaySessionRegistry {
     return true;
   }
 
-  async waitForDrain(timeoutMs = DEFAULT_DRAIN_TIMEOUT_MS) {
+  async waitForDrain() {
     if (this.#totalActiveRequests() === 0) return;
-
-    let waiter;
-    const promise = new Promise((resolve) => {
-      waiter = { resolve };
-      this.drainWaiters.add(waiter);
+    await new Promise((resolve) => {
+      this.drainWaiters.add({ resolve });
     });
-
-    return timeoutPromise(
-      promise,
-      timeoutMs,
-      `Timed out waiting for Stable Gateway requests to drain after ${timeoutMs}ms.`,
-      () => this.drainWaiters.delete(waiter),
-    );
   }
 
   commitMappings(mappings) {
@@ -220,7 +253,7 @@ export class StableGatewaySessionRegistry {
       if (seen.has(publicSessionId)) throw new Error(`Duplicate public MCP session ${publicSessionId}.`);
       seen.add(publicSessionId);
       const entry = this.sessions.get(publicSessionId);
-      if (!entry) throw new Error(`Unknown public MCP session ${publicSessionId}.`);
+      if (!entry) continue;
       validated.push({
         entry,
         coreId: requireText(mapping?.coreId, "coreId"),
@@ -231,6 +264,7 @@ export class StableGatewaySessionRegistry {
     for (const mapping of validated) {
       mapping.entry.coreId = mapping.coreId;
       mapping.entry.backendSessionId = mapping.backendSessionId;
+      mapping.entry.disconnectObserved = false;
       mapping.entry.lastActivityAt = this.now();
     }
   }
@@ -244,21 +278,25 @@ export class StableGatewaySessionRegistry {
   }
 
   remove(publicSessionId) {
-    return this.sessions.delete(String(publicSessionId ?? ""));
+    const id = String(publicSessionId ?? "").trim();
+    const entry = this.sessions.get(id);
+    if (!entry) return false;
+    this.sessions.delete(id);
+    if (entry.clientSessionFingerprint && this.clientSessions.get(entry.clientSessionFingerprint) === id) {
+      this.clientSessions.delete(entry.clientSessionFingerprint);
+    }
+    return true;
   }
 
   entriesForReplay() {
-    this.#pruneInactive();
-    const ordered = [...this.sessions.values()]
-      .sort((a, b) => Number(b.lastActivityAt || 0) - Number(a.lastActivityAt || 0));
-    const replayed = ordered
+    return [...this.sessions.values()]
       .filter((entry) => String(entry.authorization || "").trim())
-      .slice(0, this.maxReplaySessions);
-    return replayed.map((entry) => this.#internalSnapshot(entry));
+      .filter((entry) => !entry.disconnectObserved || entry.activeRequests > 0 || entry.eventStreams > 0)
+      .sort((a, b) => Number(b.lastActivityAt || 0) - Number(a.lastActivityAt || 0))
+      .map((entry) => this.#internalSnapshot(entry));
   }
 
   snapshotPublic() {
-    this.#pruneInactive();
     return {
       barrierActive: Boolean(this.barrier),
       totalActiveRequests: this.#totalActiveRequests(),
@@ -267,6 +305,8 @@ export class StableGatewaySessionRegistry {
         coreId: entry.coreId,
         initialized: entry.initialized,
         activeRequests: entry.activeRequests,
+        eventStreams: entry.eventStreams,
+        disconnectObserved: entry.disconnectObserved,
         schemaFingerprint: cleanSchemaFingerprint(entry.schemaFingerprint),
         toolCount: cleanToolCount(entry.toolCount),
       })),
@@ -282,44 +322,19 @@ export class StableGatewaySessionRegistry {
       authorization: entry.authorization,
       initialized: entry.initialized,
       activeRequests: entry.activeRequests,
+      eventStreams: entry.eventStreams,
+      disconnectObserved: entry.disconnectObserved,
+      clientSessionFingerprint: cleanClientSessionFingerprint(entry.clientSessionFingerprint),
       lastActivityAt: Number(entry.lastActivityAt || 0),
       schemaFingerprint: cleanSchemaFingerprint(entry.schemaFingerprint),
       toolCount: cleanToolCount(entry.toolCount),
     };
   }
 
-  async #waitForAdmission(timeoutMs) {
-    const barrier = this.barrier;
-    if (!barrier) return;
-    await timeoutPromise(
-      barrier.promise,
-      timeoutMs,
-      `Timed out waiting for Stable Gateway admission after ${timeoutMs}ms.`,
-    );
-  }
-
   #totalActiveRequests() {
     let total = 0;
     for (const entry of this.sessions.values()) total += entry.activeRequests;
     return total;
-  }
-
-  #pruneInactive() {
-    const now = this.now();
-    const cutoff = now - this.idleRetentionMs;
-    for (const [id, entry] of this.sessions) {
-      if (Number(entry.activeRequests || 0) === 0 && Number(entry.lastActivityAt || 0) < cutoff) {
-        this.sessions.delete(id);
-      }
-    }
-    if (this.sessions.size <= this.maxRetainedSessions) return;
-    const inactive = [...this.sessions.values()]
-      .filter((entry) => Number(entry.activeRequests || 0) === 0)
-      .sort((a, b) => Number(a.lastActivityAt || 0) - Number(b.lastActivityAt || 0));
-    for (const entry of inactive) {
-      if (this.sessions.size <= this.maxRetainedSessions) break;
-      this.sessions.delete(entry.publicSessionId);
-    }
   }
 
   #notifyDrainIfReady() {

@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import {
   ClassicContextMetadataCdpAdapter,
   ClassicTurnIdentityCorrelator,
+  NativeConversationDescriptorCoordinator,
+  parseNativeDescriptorRetryAfterMs,
   parseNativeClassicModelResponse,
   parseClassicTurnRequest,
   estimateClassicConversationPayloadTokens,
@@ -171,6 +173,60 @@ import { fingerprintClassicSession } from "./classic-conversation-authority.js";
 }
 
 {
+  assert.equal(parseNativeDescriptorRetryAfterMs("2", 1_000), 2_000);
+  let now = 1_000;
+  let limitedCalls = 0;
+  let otherCalls = 0;
+  const coordinator = new NativeConversationDescriptorCoordinator({
+    now: () => now,
+    sleepImpl: async () => {},
+    retryDelaysMs: [0],
+    rateLimitCooldownMs: 90_000,
+  });
+  await assert.rejects(
+    () => coordinator.load("conversation-limited", {
+      fetchDescriptor: async () => {
+        limitedCalls += 1;
+        const error = new Error("Native conversation descriptor HTTP 429");
+        error.code = "NATIVE_DESCRIPTOR_RATE_LIMIT";
+        error.status = 429;
+        error.retryAfter = "2";
+        throw error;
+      },
+    }),
+    /429/,
+  );
+  const unrelated = await coordinator.load("conversation-other", {
+    fetchDescriptor: async () => {
+      otherCalls += 1;
+      return { conversationId: "conversation-other", currentNode: "node-other" };
+    },
+  });
+  assert.equal(unrelated.conversationId, "conversation-other", "one conversation's 429 must not freeze descriptor reads for every open Main");
+  assert.equal(otherCalls, 1);
+  await assert.rejects(
+    () => coordinator.load("conversation-limited", {
+      fetchDescriptor: async () => {
+        limitedCalls += 1;
+        return { conversationId: "conversation-limited", currentNode: "node-limited" };
+      },
+    }),
+    /rate limited until/i,
+  );
+  assert.equal(limitedCalls, 1, "cooldown must prevent a retry storm for the same conversation");
+  now += 90_001;
+  const recovered = await coordinator.load("conversation-limited", {
+    fetchDescriptor: async () => {
+      limitedCalls += 1;
+      return { conversationId: "conversation-limited", currentNode: "node-limited" };
+    },
+  });
+  assert.equal(recovered.currentNode, "node-limited");
+  assert.equal(limitedCalls, 2);
+  assert.equal(coordinator.status().rateLimitedConversations, 0);
+}
+
+{
   const estimated = estimateClassicConversationPayloadTokens({
     messages: [
       { author: { role: "user" }, content: { content_type: "text", parts: ["你好世界，呢段係中文 context。"] } },
@@ -292,8 +348,10 @@ import { fingerprintClassicSession } from "./classic-conversation-authority.js";
   assert.equal(failed.handled, true);
   assert.equal(failed.modified, false);
   assert.match(failed.error, /JSON|Unexpected|position|property/i);
-  assert.ok(calls.some((call) => call.method === "Fetch.failRequest" && call.params.requestId === "request-bad"));
-  assert.equal(calls.some((call) => call.method === "Fetch.continueRequest" && call.params.requestId === "request-bad"), false, "hidden transform failure must never continue the visible original request");
+  assert.equal(failed.originalRequestContinued, true);
+  assert.equal(failed.sourceConversationPreserved, true);
+  assert.equal(calls.some((call) => call.method === "Fetch.failRequest" && call.params.requestId === "request-bad"), false, "compact rewrite failure must not abort the source request");
+  assert.ok(calls.some((call) => call.method === "Fetch.continueRequest" && call.params.requestId === "request-bad"), "compact rewrite failure must continue the untouched source request");
 
   calls.length = 0;
   const rewritten = await rewriteHiddenRolloverPausedRequest(client, {

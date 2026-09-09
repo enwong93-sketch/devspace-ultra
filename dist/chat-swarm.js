@@ -209,8 +209,11 @@ function peerInfo(extra, server) {
         identitySource = "mcp-session-id";
         identityValue = extra.sessionId;
     }
-    const capabilities = server.server.getClientCapabilities?.() ?? {};
     const requestClientCapabilities = asObject(meta["io.modelcontextprotocol/clientCapabilities"]);
+    // Tool handlers are shared across transport-local MCP protocol servers. Client
+    // capabilities therefore come from this request's native metadata instead of
+    // a captured template server that is intentionally never connected.
+    const capabilities = requestClientCapabilities;
     const requestClientExtensions = asObject(requestClientCapabilities.extensions);
     const uiCapability = asObject(capabilities?.extensions?.["io.modelcontextprotocol/ui"]);
     const requestUiCapability = asObject(requestClientExtensions["io.modelcontextprotocol/ui"]);

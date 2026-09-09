@@ -99,8 +99,10 @@ try {
     "devspace_goal_turn_report",
   ]);
   assert.deepEqual(tools.get("devspace_goal_continuation")._meta.ui.visibility, ["app"]);
-  assert.equal(tools.get("devspace_goal_start")._meta.ui.resourceUri, GOAL_DOCK_URI);
-  assert.equal(tools.get("devspace_goal_mount")._meta.ui.resourceUri, GOAL_DOCK_URI);
+  assert.equal(tools.get("devspace_goal_start")._meta.ui.resourceUri, undefined);
+  assert.equal(tools.get("devspace_goal_mount")._meta.ui.resourceUri, undefined);
+  assert.match(tools.get("devspace_goal_start").description, /floating Goal strip.*progress narration card/i);
+  assert.match(tools.get("devspace_goal_mount").description, /does not render.*inline Goal Dock/i);
   assert.equal(tools.get("devspace_goal_turn_report")._meta.ui.resourceUri, GOAL_RELAY_URI);
 
   const resource = await first.client.readResource({ uri: GOAL_DOCK_URI });

@@ -3,8 +3,6 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
-const VERSION_TIMEOUT_MS = 8_000;
-const INSTALL_TIMEOUT_MS = 45 * 60 * 1_000;
 const VSWHERE = join(
   process.env["ProgramFiles(x86)"] || "C:\\Program Files (x86)",
   "Microsoft Visual Studio",
@@ -61,14 +59,12 @@ function firstLine(value) {
 
 export async function probeExecutable(tool, {
   run = execFileAsync,
-  timeoutMs = VERSION_TIMEOUT_MS,
 } = {}) {
   const failures = [];
   for (const [command, args] of tool.candidates) {
     try {
       const result = await run(command, args, {
         windowsHide: true,
-        timeout: timeoutMs,
         maxBuffer: 1024 * 1024,
       });
       const version = firstLine(result?.stdout) || firstLine(result?.stderr) || "available";
@@ -170,7 +166,6 @@ export async function installToolchain({
       ];
       const result = await run("winget.exe", installArgs, {
         windowsHide: true,
-        timeout: INSTALL_TIMEOUT_MS,
         maxBuffer: 4 * 1024 * 1024,
       });
       results.push({

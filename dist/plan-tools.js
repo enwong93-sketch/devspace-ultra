@@ -81,7 +81,7 @@ export function registerPlanTools(server, planRuntime, { resourceUri, resolveCon
 
   registerAppTool(server, "devspace_plan_start", {
     title: "Start DevSpace Plan",
-    description: "Start a fresh user-visible execution plan for the current physical turn or fresh Goal round when the work is genuinely multi-step. If an active plan already exists from an interrupted turn, resume that active plan with devspace_update_plan instead of creating a duplicate. A completed plan belongs to its finished turn and must not be reused in the next turn.",
+    description: "Start a fresh conversation-bound execution plan for the current physical turn or fresh Goal round when the work is genuinely multi-step. The floating Plan HUD and progress narration card are projected automatically; do not create a legacy inline Plan card. If an active plan already exists from an interrupted turn, resume that active plan with devspace_update_plan instead of creating a duplicate. A completed plan belongs to its finished turn and must not be reused in the next turn.",
     inputSchema: {
       title: z.string().min(1).max(240),
       steps: z.array(z.object({
@@ -91,7 +91,7 @@ export function registerPlanTools(server, planRuntime, { resourceUri, resolveCon
     },
     outputSchema: planOutputSchema,
     annotations: MUTATING,
-    _meta: renderMeta(resourceUri),
+    _meta: modelOnlyMeta(),
   }, async ({ title, steps }, extra) => {
     try {
       const conversationId = await resolveConversationId(extra);
@@ -145,14 +145,14 @@ export function registerPlanTools(server, planRuntime, { resourceUri, resolveCon
   });
 
   registerAppTool(server, "devspace_plan_mount", {
-    title: "Mount DevSpace Plan Card",
-    description: "Use this only when the current active turn plan card is missing after renderer reload or an interrupt. It mounts the latest state of that existing active plan without creating or changing the plan; completed plans from prior turns should not be remounted.",
+    title: "Rebind DevSpace Plan HUD",
+    description: "Use this only when the current active turn floating Plan HUD is missing after renderer reload or an interrupt. It rebinds the latest state of that existing active plan without creating or changing the plan and without rendering the retired inline Plan card; completed plans from prior turns should not be remounted.",
     inputSchema: {
       planId: z.string().min(1),
     },
     outputSchema: planOutputSchema,
     annotations: READ_ONLY,
-    _meta: renderMeta(resourceUri),
+    _meta: modelOnlyMeta(),
   }, async ({ planId }) => {
     try {
       const plan = await planRuntime.status(planId);

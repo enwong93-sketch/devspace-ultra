@@ -72,9 +72,10 @@ function dependenciesFrom(value) {
     return {
       codexMcpBridge: value.codexMcpBridge || null,
       capabilityRuntime: value.capabilityRuntime || null,
+      ownerConversationId: String(value.ownerConversationId || "").trim() || "__devspace_internal_js_repl__",
     };
   }
-  return { codexMcpBridge: null, capabilityRuntime: value || null };
+  return { codexMcpBridge: null, capabilityRuntime: value || null, ownerConversationId: "__devspace_internal_js_repl__" };
 }
 
 function callArguments(selected, code, timeoutMs) {
@@ -84,13 +85,13 @@ function callArguments(selected, code, timeoutMs) {
 }
 
 export async function callJsReplCompatibility(dependencies, { code, timeoutMs = 30_000 } = {}) {
-  const { codexMcpBridge, capabilityRuntime } = dependenciesFrom(dependencies);
+  const { codexMcpBridge, capabilityRuntime, ownerConversationId } = dependenciesFrom(dependencies);
   if (!codexMcpBridge && !capabilityRuntime) throw new Error("A linked Codex MCP bridge or Capability runtime is required.");
 
   if (codexMcpBridge) {
     let selected = null;
     try {
-      const linkedServer = await codexMcpBridge.probe("node_repl");
+      const linkedServer = await codexMcpBridge.probe("node_repl", ownerConversationId);
       if (linkedServer?.status !== "online") throw new Error("The linked Codex node_repl server is not online.");
       selected = selectTool({ mcpServers: [linkedServer] });
     } catch (error) {
@@ -101,7 +102,7 @@ export async function callJsReplCompatibility(dependencies, { code, timeoutMs = 
         serverId: "node_repl",
         toolName: selected.toolName,
         arguments: callArguments(selected, code, timeoutMs),
-      });
+      }, ownerConversationId);
       if (response?.approvalRequired) {
         throw new Error("The linked Codex node_repl unexpectedly requested local bridge approval.");
       }
@@ -124,6 +125,8 @@ export async function callJsReplCompatibility(dependencies, { code, timeoutMs = 
     selected.serverId,
     selected.toolName,
     callArguments(selected, code, timeoutMs),
+    undefined,
+    ownerConversationId,
   );
   return {
     ok: true,
@@ -149,8 +152,15 @@ export function registerJsReplCompatibilityTool(server, dependencies) {
       idempotentHint: false,
       openWorldHint: true,
     },
-  }, async (input) => {
-    try { return textResult(await callJsReplCompatibility(dependencies, input)); }
+  }, async (input, extra) => {
+    try {
+      const resolved = typeof dependencies?.resolveConversation === "function"
+        ? await dependencies.resolveConversation(extra)
+        : null;
+      const ownerConversationId = String(resolved?.conversationId || "").trim();
+      if (!ownerConversationId) throw new Error("JavaScript REPL requires the current ChatGPT conversation identity.");
+      return textResult(await callJsReplCompatibility({ ...dependencies, ownerConversationId }, input));
+    }
     catch (error) { return errorResult(error); }
   });
 }

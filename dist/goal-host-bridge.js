@@ -282,6 +282,30 @@ export async function inspectVisibleReportCommit(candidate, options = {}) {
         const latestAssistantText = assistants.at(-1) || '';
         const match = location.pathname.match(/\\/c\\/([^/?#]+)/);
         const conversationId = match?.[1] || null;
+        const lifecycleNow = Date.now();
+        const documentLifecycleKey = '__devspaceClassicDocumentLifecycleV1';
+        const routeLifecycleKey = '__devspaceClassicConversationLifecycleV1';
+        const documentLifecycle = globalThis[documentLifecycleKey] || (globalThis[documentLifecycleKey] = {
+          id: globalThis.crypto?.randomUUID?.() || ('document-' + lifecycleNow + '-' + Math.random().toString(36).slice(2)),
+          createdAtMs: lifecycleNow,
+        });
+        const priorRoute = globalThis[routeLifecycleKey];
+        let routeLifecycle = priorRoute;
+        if (!routeLifecycle || routeLifecycle.documentId !== documentLifecycle.id || routeLifecycle.conversationId !== conversationId) {
+          routeLifecycle = globalThis[routeLifecycleKey] = {
+            documentId: documentLifecycle.id,
+            conversationId,
+            routeEpoch: Math.max(1, Number(priorRoute?.routeEpoch || 0) + 1),
+            enteredAtMs: lifecycleNow,
+            hydratedSinceMs: null,
+            lastSeenAtMs: lifecycleNow,
+          };
+        }
+        const composerReady = Boolean(document.querySelector('#prompt-textarea'));
+        const visibleMessageCount = document.querySelectorAll('[data-message-author-role="user"],[data-message-author-role="assistant"]').length;
+        const routeHydrated = Boolean(conversationId && document.readyState === 'complete' && composerReady && visibleMessageCount > 0);
+        routeLifecycle.hydratedSinceMs = routeHydrated ? (routeLifecycle.hydratedSinceMs || lifecycleNow) : null;
+        routeLifecycle.lastSeenAtMs = lifecycleNow;
         let streamStatus = null;
         if (conversationId) {
           try {
@@ -304,8 +328,18 @@ export async function inspectVisibleReportCommit(candidate, options = {}) {
           safetyCheckVisible,
           latestAssistantText,
           assistantCount: assistants.length,
+          visibleMessageCount,
           conversationId,
           streamStatus,
+          pageVisibilityState: document.visibilityState || null,
+          documentReadyState: document.readyState || null,
+          composerReady,
+          documentId: documentLifecycle.id,
+          routeEpoch: routeLifecycle.routeEpoch,
+          routeEnteredAt: new Date(routeLifecycle.enteredAtMs).toISOString(),
+          routeHydratedAt: routeLifecycle.hydratedSinceMs ? new Date(routeLifecycle.hydratedSinceMs).toISOString() : null,
+          routeStableForMs: routeLifecycle.hydratedSinceMs ? Math.max(0, lifecycleNow - routeLifecycle.hydratedSinceMs) : 0,
+          routeHydrated,
         };
       })()`,
       awaitPromise: true,
@@ -315,7 +349,12 @@ export async function inspectVisibleReportCommit(candidate, options = {}) {
     if (result.exceptionDetails) {
       throw new Error(result.exceptionDetails.text || "Goal visible-report inspection failed.");
     }
-    return result.result?.value || null;
+    const value = result.result?.value || null;
+    return value ? {
+      ...value,
+      pageTargetId: candidate.pageTargetId || null,
+      relayTargetId: candidate.targetId || null,
+    } : null;
   } finally {
     client.close();
   }
@@ -490,15 +529,23 @@ export class ClassicGoalHostBridge {
     }));
   }
 
-  async findMatchingCandidate(goalId) {
-    for (const port of this.ports) {
+  async findMatchingCandidate(goalId, { conversationId = null, runtimePort = null } = {}) {
+    const expectedConversationId = String(conversationId || "").trim() || null;
+    const orderedPorts = Number.isInteger(runtimePort)
+      ? [runtimePort, ...this.ports.filter((port) => port !== runtimePort)]
+      : this.ports;
+    for (const port of orderedPorts) {
       let candidates = [];
       try {
         candidates = await this.probePort(port);
       } catch {
         continue;
       }
-      const matching = (candidates || []).find((candidate) => candidate?.chatMode === true && candidate?.goalId === goalId) || null;
+      const matching = (candidates || []).find((candidate) => (
+        candidate?.chatMode === true
+        && candidate?.goalId === goalId
+        && (!expectedConversationId || candidate?.conversationId === expectedConversationId)
+      )) || null;
       if (matching) return matching;
     }
     return null;
@@ -527,9 +574,12 @@ export class ClassicGoalHostBridge {
   }
 
   async resolveRecoveryCandidate({ goalId, conversationId = null, runtimePort = null } = {}) {
-    const exactGoal = await this.findMatchingCandidate(goalId);
+    const conversation = String(conversationId || "").trim() || null;
+    const exactGoal = await this.findMatchingCandidate(goalId, {
+      conversationId: conversation,
+      runtimePort,
+    });
     if (exactGoal) return { candidate: exactGoal, relayFallback: false };
-    const conversation = String(conversationId || "").trim();
     if (!conversation) return { candidate: null, relayFallback: false };
     const relay = await this.findConversationRelay(conversation, { runtimePort });
     return { candidate: relay, relayFallback: Boolean(relay) };

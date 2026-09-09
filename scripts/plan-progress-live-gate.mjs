@@ -59,7 +59,10 @@ try {
     "devspace_plan_status",
     "devspace_update_plan",
   ]);
-  assert.equal(tools.get("devspace_plan_start")._meta.ui.resourceUri, PLAN_CARD_URI);
+  assert.equal(tools.get("devspace_plan_start")._meta.ui.resourceUri, undefined);
+  assert.equal(tools.get("devspace_plan_mount")._meta.ui.resourceUri, undefined);
+  assert.match(tools.get("devspace_plan_start").description, /floating Plan HUD.*progress narration card/i);
+  assert.match(tools.get("devspace_plan_mount").description, /without rendering.*inline Plan card/i);
   assert.equal(tools.get("devspace_update_plan")._meta.ui.resourceUri, undefined);
   assert.equal(tools.get("devspace_plan_status")._meta.ui.resourceUri, undefined);
 

@@ -123,6 +123,7 @@ await assert.rejects(
   }, {
     async inspect() { return plugin({ toolName: "js_repl", codeField: "code", timeoutField: "timeoutMs" }); },
     async callMcp() { return { result: "persistent-ok" }; },
+    async resolveConversation() { return { conversationId: "conversation-js-repl" }; },
   });
   assert.equal(registrations.length, 1);
   assert.equal(registrations[0].name, "js_repl");

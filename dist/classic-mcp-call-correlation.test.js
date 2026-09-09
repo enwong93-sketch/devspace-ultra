@@ -25,6 +25,7 @@ assert.equal(isNativeCallMcpRequest({ url: "https://chatgpt.com/backend-api/ecos
 const parsed = parseNativeCallMcpRequest({
   url: "https://chatgpt.com/backend-api/ecosystem/call_mcp",
   method: "POST",
+  headers: { "oai-session-id": "native-session-a" },
   postData: JSON.stringify({
     app_uri: "https://example.invalid/mcp",
     method: "tools/call",
@@ -34,9 +35,11 @@ const parsed = parseNativeCallMcpRequest({
   }),
 });
 assert.equal(parsed.conversationId, "conversation-native-a");
+assert.match(parsed.sessionFingerprint, /^[a-f0-9]{64}$/);
 assert.equal(parsed.toolName, "devspace_goal_status");
 assert.equal(parsed.messageIdPresent, true);
 assert.equal(JSON.stringify(parsed).includes("goal-a"), false, "raw tool arguments must not leave the parser");
+assert.equal(JSON.stringify(parsed).includes("native-session-a"), false, "raw native session ids must never leave the parser");
 assert.equal(parseNativeCallMcpRequest({ url: "https://chatgpt.com/backend-api/f/conversation", method: "POST", postData: "{}" }), null);
 
 let now = 1_000;
@@ -83,17 +86,33 @@ now += 10;
 correlator.noteNative({ callFingerprint: future, conversationId: "conversation-native-b", runtimeKey: "main-01", toolName: "read", observedAtMs: now });
 assert.equal((await waiting).conversationId, "conversation-native-b");
 
-const ambiguous = new ClassicMcpCallCorrelator({ now: () => now, maxSkewMs: 5_000 });
-ambiguous.noteNative({ callFingerprint: first, conversationId: "conversation-one", runtimeKey: "main-01", observedAtMs: now });
-ambiguous.noteNative({ callFingerprint: first, conversationId: "conversation-two", runtimeKey: "main-02", observedAtMs: now + 1 });
-const rejected = ambiguous.noteGateway({ callFingerprint: first, sessionFingerprint: "c".repeat(64), observedAtMs: now + 2 });
-assert.equal(rejected, null, "concurrent identical calls must fail closed rather than choose a conversation");
-assert.equal(ambiguous.diagnostics().ambiguousMatches > 0, true);
+const concurrent = new ClassicMcpCallCorrelator({ now: () => now, maxSkewMs: 5_000 });
+concurrent.noteNative({ callFingerprint: first, conversationId: "conversation-one", runtimeKey: "main-01", observedAtMs: now });
+concurrent.noteNative({ callFingerprint: first, conversationId: "conversation-two", runtimeKey: "main-02", observedAtMs: now + 1_000 });
+const nearest = concurrent.noteGateway({ callFingerprint: first, sessionFingerprint: "c".repeat(64), observedAtMs: now + 1_050 });
+assert.equal(nearest?.conversationId, "conversation-two", "concurrent identical calls must use a unique mutual-nearest temporal match instead of rejecting every candidate");
+
+const trulyAmbiguous = new ClassicMcpCallCorrelator({ now: () => now, maxSkewMs: 5_000 });
+trulyAmbiguous.noteNative({ callFingerprint: first, conversationId: "conversation-left", runtimeKey: "main-01", observedAtMs: now });
+trulyAmbiguous.noteNative({ callFingerprint: first, conversationId: "conversation-right", runtimeKey: "main-02", observedAtMs: now + 2_000 });
+const rejected = trulyAmbiguous.noteGateway({ callFingerprint: first, sessionFingerprint: "d".repeat(64), observedAtMs: now + 1_000 });
+assert.equal(rejected, null, "a true equal-distance tie must still fail closed");
+assert.equal(trulyAmbiguous.diagnostics().ambiguousMatches > 0, true);
+
+const boundedWaiters = new ClassicMcpCallCorrelator({ now: () => now, ttlMs: 1_000, maxPending: 4 });
+const repeatedWaitA = boundedWaiters.waitForIdentity({ callFingerprint: future, sessionFingerprint: "e".repeat(64) });
+const repeatedWaitB = boundedWaiters.waitForIdentity({ callFingerprint: future, sessionFingerprint: "e".repeat(64) });
+assert.equal(repeatedWaitA, repeatedWaitB, "identical session/call correlation waiters must share one promise");
+assert.equal(boundedWaiters.diagnostics().waiters, 1);
+now += 2_000;
+boundedWaiters.prune();
+assert.equal(await repeatedWaitA, null, "passive correlation cache expiry may release stale observers without terminating user work");
+assert.equal(boundedWaiters.diagnostics().waiters, 0);
 
 now += 60_000;
-ambiguous.prune();
-assert.equal(ambiguous.diagnostics().nativePending, 0);
-assert.equal(ambiguous.diagnostics().gatewayPending, 0);
+concurrent.prune();
+assert.equal(concurrent.diagnostics().nativePending, 0);
+assert.equal(concurrent.diagnostics().gatewayPending, 0);
 
 console.log(JSON.stringify({
   ok: true,
@@ -102,6 +121,8 @@ console.log(JSON.stringify({
   canonicalArgumentHash: true,
   rawArgumentsPersisted: false,
   rawSessionPersisted: false,
-  concurrentAmbiguityFailsClosed: true,
+  mutualNearestConcurrentMatch: true,
+  trueTieFailsClosed: true,
+  sharedBoundedWaiters: true,
   boundedTemporalJoin: true,
 }));

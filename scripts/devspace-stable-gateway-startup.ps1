@@ -49,9 +49,7 @@ function Stop-VerifiedDedicatedListener {
 }
 
 function Wait-GatewayReady {
-    param([ValidateRange(5,60)][int]$TimeoutSeconds = 30)
-    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
-    do {
+    while ($true) {
         Start-Sleep -Milliseconds 400
         try {
             $gateway = Invoke-GatewayHelper -Status
@@ -60,8 +58,13 @@ function Wait-GatewayReady {
             }
         }
         catch {}
-    } while ((Get-Date) -lt $deadline)
-    throw "Stable Gateway did not become healthy within $TimeoutSeconds seconds."
+        $task = Get-GatewayTask
+        $taskInfo = Get-ScheduledTaskInfo -TaskName $taskName -ErrorAction SilentlyContinue
+        $listener = Get-DedicatedListenerProcess -Port 7678
+        if (-not $listener -and $task -and $task.State -ne "Running" -and $taskInfo -and $taskInfo.LastTaskResult -notin @(0,267009)) {
+            throw "Stable Gateway task exited before readiness (LastTaskResult=$($taskInfo.LastTaskResult))."
+        }
+    }
 }
 
 if ($Action -eq "restart" -and $DeferredSeconds -gt 0) {
@@ -100,9 +103,8 @@ switch ($Action) {
             -Settings $settings `
             -Principal $principal | Out-Null
         Start-ScheduledTask -TaskName $taskName
-        Start-Sleep -Seconds 2
+        $gateway = Wait-GatewayReady
         $task = Get-GatewayTask
-        $gateway = Invoke-GatewayHelper -Status
         [ordered]@{
             Ok = ($gateway.ok -eq $true)
             State = "installed"
@@ -118,9 +120,8 @@ switch ($Action) {
         if (-not $task) { throw "Scheduled Task $taskName is not installed." }
         if ($task.State -ne "Running") {
             Start-ScheduledTask -TaskName $taskName
-            Start-Sleep -Seconds 2
         }
-        $gateway = Invoke-GatewayHelper -Status
+        $gateway = Wait-GatewayReady
         [ordered]@{
             Ok = ($gateway.ok -eq $true)
             State = "started"
@@ -154,7 +155,7 @@ switch ($Action) {
         }
 
         Start-ScheduledTask -TaskName $taskName
-        $gateway = Wait-GatewayReady -TimeoutSeconds 30
+        $gateway = Wait-GatewayReady
         $taskAfter = Get-GatewayTask
         [ordered]@{
             Ok = ($gateway.ok -eq $true)

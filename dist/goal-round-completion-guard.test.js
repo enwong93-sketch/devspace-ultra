@@ -17,9 +17,36 @@ const baseGoal = {
   roundState: "working",
   roundBeganAt: "2026-09-05T03:00:00.000Z",
   lastConsumedContinuationId: "continuation_aaaaaaaaaaaaaaaa",
+  conversationId: "conversation_1",
+};
+const eligibleRoute = {
+  recoverySessionEligible: true,
+  conversationId: "conversation_1",
+};
+const stablePageRoute = {
+  runtimePort: 9732,
+  pageTargetId: "page-main-02",
+  documentId: "document-main-02",
+  routeEpoch: 1,
+  conversationId: "conversation_1",
+  routeEnteredAt: "2026-09-05T02:58:00.000Z",
+  routeHydratedAt: "2026-09-05T02:58:01.000Z",
+  routeStableForMs: 120_000,
+  routeHydrated: true,
+  documentReadyState: "complete",
+  composerReady: true,
 };
 
 assert.equal(moduleUnderTest.shouldRecoverWorkingRound(baseGoal, {
+  ...eligibleRoute,
+  chatMode: true,
+  generating: false,
+  streamStatus: "COMPLETE",
+  recoverySessionEligible: false,
+}, { nowMs: Date.parse("2026-09-05T03:00:05.000Z") }), false, "a reopened/unobserved route must never recover merely because the old stream is COMPLETE");
+
+assert.equal(moduleUnderTest.shouldRecoverWorkingRound(baseGoal, {
+  ...eligibleRoute,
   chatMode: true,
   generating: false,
   streamStatus: "COMPLETE",
@@ -114,12 +141,29 @@ const runtime = {
     return { goal: baseGoal };
   },
 };
+let guardNow = Date.parse("2026-09-05T03:00:03.000Z");
+let guardInspection = 0;
 const guard = new moduleUnderTest.ClassicGoalRoundCompletionGuard({
   goalRuntime: runtime,
-  now: () => Date.parse("2026-09-05T03:00:05.000Z"),
+  now: () => guardNow,
   inspect: async (goal) => {
     calls.inspect.push(goal.id);
-    return { chatMode: true, generating: false, streamStatus: "COMPLETE", conversationId: "conversation_1" };
+    guardInspection += 1;
+    return guardInspection === 1
+      ? {
+          ...stablePageRoute,
+          chatMode: true,
+          generating: true,
+          streamStatus: "IN_PROGRESS",
+          turnRequestObservedAt: "2026-09-05T02:59:59.000Z",
+        }
+      : {
+          ...stablePageRoute,
+          chatMode: true,
+          generating: false,
+          streamStatus: "COMPLETE",
+          turnRequestObservedAt: "2026-09-05T02:59:59.000Z",
+        };
   },
   dispatch: async (claim) => {
     calls.dispatch.push(claim);
@@ -127,9 +171,12 @@ const guard = new moduleUnderTest.ClassicGoalRoundCompletionGuard({
   },
   pollMs: 0,
 });
+const active = await guard.pollOnce();
+assert.equal(active.recovered, 0, "an observed active turn must never be re-driven before it reaches a terminal state");
+guardNow = Date.parse("2026-09-05T03:00:05.000Z");
 const result = await guard.pollOnce();
 assert.equal(result.recovered, 1);
-assert.deepEqual(calls.inspect, [baseGoal.id]);
+assert.deepEqual(calls.inspect, [baseGoal.id, baseGoal.id]);
 assert.deepEqual(calls.claims, [baseGoal.id]);
 assert.equal(calls.dispatch.length, 1);
 assert.equal(calls.dispatch[0].round, 2);
@@ -147,7 +194,13 @@ const failedGuard = new moduleUnderTest.ClassicGoalRoundCompletionGuard({
     async roundRecovery({ action }) { if (action === "release") failedRuntimeCalls.release += 1; },
   },
   now: () => Date.parse("2026-09-05T03:00:05.000Z"),
-  inspect: async () => ({ chatMode: true, generating: false, streamStatus: "COMPLETE" }),
+  inspect: async () => ({
+    ...stablePageRoute,
+    chatMode: true,
+    generating: false,
+    streamStatus: "COMPLETE",
+    turnRequestObservedAt: "2026-09-05T02:59:59.000Z",
+  }),
   dispatch: async () => ({ ok: false, error: "transport failed" }),
   pollMs: 0,
 });
@@ -155,8 +208,36 @@ const failed = await failedGuard.pollOnce();
 assert.equal(failed.recovered, 0);
 assert.equal(failedRuntimeCalls.release, 1, "failed hidden dispatch must release the recovery claim");
 
+let reentryClaims = 0;
+const reentryGuard = new moduleUnderTest.ClassicGoalRoundCompletionGuard({
+  goalRuntime: {
+    async recoverableWorkingRounds() { return [baseGoal]; },
+    async claimRoundRecovery() { reentryClaims += 1; return { claimed: false, reason: "must-not-claim" }; },
+    async roundRecovery() {},
+  },
+  now: () => Date.parse("2026-09-05T03:00:12.000Z"),
+  inspect: async () => ({
+    ...stablePageRoute,
+    routeEpoch: 2,
+    routeEnteredAt: "2026-09-05T03:00:06.000Z",
+    routeHydratedAt: "2026-09-05T03:00:07.000Z",
+    routeStableForMs: 5_000,
+    chatMode: true,
+    generating: false,
+    streamStatus: "COMPLETE",
+    turnRequestObservedAt: "2026-09-05T03:00:01.000Z",
+  }),
+  dispatch: async () => { throw new Error("re-entry must not dispatch"); },
+  pollMs: 0,
+});
+const reentry = await reentryGuard.pollOnce();
+assert.equal(reentry.recovered, 0);
+assert.equal(reentryClaims, 0, "a route entered after the old turn request must not inject a recovery prompt");
+assert.equal(reentry.results[0].reason, "reentry-or-unobserved-turn");
+
 await guard.close();
 await failedGuard.close();
+await reentryGuard.close();
 
 console.log(JSON.stringify({
   ok: true,

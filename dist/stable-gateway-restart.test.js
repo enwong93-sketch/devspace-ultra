@@ -63,7 +63,7 @@ assert.throws(() => validateDevspaceListeners({
   packageRoot: "C:\\DevSpace",
   gatewayPort: 7678,
   corePorts: [7688, 7689],
-}), /exactly one Stable Gateway listener|Multiple listener PIDs/);
+}), /at most one Stable Gateway listener|Multiple listener PIDs/);
 
 const script = buildRestartPowerShell({
   taskName: "DevSpace-Stable-Gateway",
@@ -73,30 +73,32 @@ const script = buildRestartPowerShell({
   resultPath: "C:\\State\\restart-result.json",
   helperTaskName: "DevSpace-Stable-Gateway-Restart-test",
   delaySeconds: 5,
-  timeoutSeconds: 90,
 });
 assert.match(script, /Stop-ScheduledTask/);
 assert.match(script, /Stop-Process -Id \$pidValue -Force/);
 assert.match(script, /Start-ScheduledTask/);
 assert.match(script, /__devspace\/gateway\/healthz/);
+assert.match(script, /while \(-not \$ok\)/, "restart health verification must wait for actual readiness rather than a wall-clock deadline");
+assert.doesNotMatch(script, /deadline|health-timeout|TimeoutSec/, "restart must not fail or kill work merely because startup is slow");
 assert.match(script, /\$oldPids=@\(100,200\)/);
 assert.match(script, /secretValuesLogged=\$false/);
 assert.match(script, /Unregister-ScheduledTask -TaskName \$helperTaskName/);
 assert.equal(/token|authorization|password/i.test(script), false);
-assert.throws(() => buildRestartPowerShell({
+const coldStartScript = buildRestartPowerShell({
   taskName: "x",
   gatewayPort: 7678,
   gatewayPid: 0,
   corePids: [],
   resultPath: "x",
-}), /valid Gateway PID/);
+});
+assert.match(coldStartScript, /\$oldPids=@\(\)/, "zero-listener recovery must be a supported cold-start path");
 
 {
   const rows = await queryListenerProcesses([100, 200], {
     run: async (command, args, options) => {
       assert.equal(command, "powershell.exe");
       assert.equal(args.includes("-NonInteractive"), true);
-      assert.equal(options.timeout, 15_000);
+      assert.equal(options.timeout, undefined, "listener ownership lookup must not have a wall-clock kill timeout");
       return { stdout: '[{"processId":100,"name":"node.exe","commandLine":"gateway"},{"processId":200,"name":"node.exe","commandLine":"core"}]' };
     },
   });
@@ -110,7 +112,8 @@ console.log(JSON.stringify({
   gate: "stable-gateway-whole-restart",
   exactListenerOwnership: true,
   legacyRelativeChildrenRequireOwnedParent: true,
-  delayedResponseSafeRestart: true,
+  zeroListenerColdStart: true,
+  noStartupDeadline: true,
   healthVerification: true,
   secretValuesLogged: false,
 }));

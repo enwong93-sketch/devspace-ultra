@@ -11,7 +11,8 @@ import { loadStableGatewaySessionDescriptors, saveStableGatewaySessionDescriptor
 import { createStableGatewayActivityJournal } from "../dist/stable-gateway-activity.js";
 import { handleStableGatewayLiveRequest } from "../dist/stable-gateway-live-ui.js";
 import { createStableGatewayHumanProgress, handleStableGatewayHumanProgressRequest } from "../dist/stable-gateway-human-progress.js";
-import { GoalProgressNarrator } from "../dist/goal-progress-narrator.js";
+import { migrateAgentAuthoredProgressState } from "../dist/agent-authored-progress-state.js";
+import { GoalProgressNarrator } from "../dist/agent-authored-progress-journal.js";
 import { createLogRetentionSupervisor } from "../dist/log-retention.js";
 import { probeCandidate, readCoreSchemaFingerprint } from "../dist/stable-gateway-candidate.js";
 import { loadDevspaceFiles } from "../dist/user-config.js";
@@ -269,7 +270,7 @@ export function stableGatewayOptionsFromEnvironment(env = process.env) {
       },
       dependencies: {
         createCandidateSnapshot,
-        startCoreSlot: (options) => startCoreSlot({ ...options, nodeArgs: coreNodeArgs }),
+        startCoreSlot: (options) => startCoreSlot({ ...options, nodeArgs: coreNodeArgs, allowDiagnosticGc: true }),
         stopCoreSlot,
         probeCandidate,
         readCoreSchemaFingerprint,
@@ -286,6 +287,8 @@ async function isMainModule() {
 if (await isMainModule()) {
   const options = stableGatewayOptionsFromEnvironment();
   const activityJournal = createStableGatewayActivityJournal();
+  const humanProgressStatePath = join(options.controllerOptions.stateDir, "devspace-live-progress.json");
+  const progressMigration = await migrateAgentAuthoredProgressState(humanProgressStatePath);
   const humanProgress = await createStableGatewayHumanProgress({
     statePath: join(options.controllerOptions.stateDir, "devspace-live-progress.json"),
   });

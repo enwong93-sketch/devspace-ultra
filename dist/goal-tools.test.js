@@ -58,10 +58,14 @@ try {
   const continuation = registered.get("devspace_goal_continuation");
   const mount = registered.get("devspace_goal_mount");
 
-  assert.equal(start.config._meta.ui.resourceUri, "ui://devspace/goal-dock.html");
+  assert.equal(start.config._meta.ui.resourceUri, undefined);
   assert.deepEqual(start.config._meta.ui.visibility, ["model"]);
-  assert.equal(mount.config._meta.ui.resourceUri, "ui://devspace/goal-dock.html");
+  assert.equal(mount.config._meta.ui.resourceUri, undefined);
   assert.deepEqual(mount.config._meta.ui.visibility, ["model"]);
+  assert.match(start.config.description, /floating Goal strip.*progress narration card/i);
+  assert.match(start.config.description, /retired inline Goal Dock/i);
+  assert.match(mount.config.description, /floating Goal strip/i);
+  assert.match(mount.config.description, /does not render.*inline Goal Dock/i);
 
   assert.deepEqual(status.config._meta.ui.visibility, ["model", "app"]);
   assert.deepEqual(control.config._meta.ui.visibility, ["model", "app"]);
@@ -257,7 +261,8 @@ try {
     gate: "goal-tools",
     tools: registered.size,
     continuationAppOnly: true,
-    renderTools: 3,
+    legacyInlineDockTools: 0,
+    relayRenderTools: 1,
     conversationBound: true,
   }));
 } finally {

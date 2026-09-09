@@ -32,10 +32,14 @@ try {
   const status = registered.get("devspace_plan_status");
   const mount = registered.get("devspace_plan_mount");
 
-  assert.equal(start.config._meta.ui.resourceUri, "ui://devspace/plan-card.html");
+  assert.equal(start.config._meta.ui.resourceUri, undefined);
   assert.deepEqual(start.config._meta.ui.visibility, ["model"]);
-  assert.equal(mount.config._meta.ui.resourceUri, "ui://devspace/plan-card.html");
+  assert.equal(mount.config._meta.ui.resourceUri, undefined);
   assert.deepEqual(mount.config._meta.ui.visibility, ["model"]);
+  assert.match(start.config.description, /floating Plan HUD.*progress narration card/i);
+  assert.match(start.config.description, /legacy inline Plan card/i);
+  assert.match(mount.config.description, /floating Plan HUD/i);
+  assert.match(mount.config.description, /without rendering.*inline Plan card/i);
   assert.equal(update.config._meta?.ui?.resourceUri, undefined);
   assert.deepEqual(update.config._meta.ui.visibility, ["model"]);
   assert.equal(status.config._meta?.ui?.resourceUri, undefined);
@@ -136,8 +140,8 @@ try {
     ok: true,
     gate: "plan-tools",
     tools: registered.size,
-    renderTools: 2,
-    dataTools: 2,
+    legacyInlineCardTools: 0,
+    dataTools: 4,
     conversationBound: true,
   }));
 } finally {

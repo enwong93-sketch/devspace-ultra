@@ -1,0 +1,21 @@
+interface:
+  display_name: DevSpace Ultra Setup
+  short_description: Guided DuckDNS-first installation, repair, and verification for DevSpace Ultra.
+  default_prompt: >-
+    Use the DevSpace Ultra Setup Skill to inspect the current machine, preserve existing state,
+    prefer DuckDNS/DDNS plus Caddy, fall back to a stable Cloudflare named tunnel only when
+    direct inbound access is unavailable, execute every safe local step, guide the user through
+    account/router actions one at a time, and verify the complete OAuth-protected MCP path.
+policy:
+  allow_implicit_invocation: true
+  network_secrets_in_chat: false
+routing:
+  keywords:
+    - DevSpace Ultra setup
+    - Local Gateway install
+    - DuckDNS
+    - DDNS
+    - Caddy
+    - Cloudflare tunnel
+    - MCP public URL
+    - backend recovery

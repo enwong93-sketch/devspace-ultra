@@ -19,7 +19,15 @@ try {
   runtime.mcpInstances.set("instance-1", { pluginId: "fixture" });
   runtime.discovered.set("fixture", { id: "fixture" });
 
-  assert.deepEqual(runtime.diagnostics(), {
+  const activeDiagnostics = runtime.diagnostics();
+  assert.deepEqual({
+    enabled: activeDiagnostics.enabled,
+    discoveredPlugins: activeDiagnostics.discoveredPlugins,
+    mcpClients: activeDiagnostics.mcpClients,
+    mcpConnecting: activeDiagnostics.mcpConnecting,
+    mcpStartupTails: activeDiagnostics.mcpStartupTails,
+    mcpInstances: activeDiagnostics.mcpInstances,
+  }, {
     enabled: true,
     discoveredPlugins: 1,
     mcpClients: 1,
@@ -27,6 +35,9 @@ try {
     mcpStartupTails: 1,
     mcpInstances: 1,
   });
+  assert.equal(activeDiagnostics.sharedConnections, 0);
+  assert.equal(activeDiagnostics.conversationIsolatedConnections, 0);
+  assert.equal(activeDiagnostics.runtimeIsolatedConnections, 0);
 
   runtime.mcpClients.clear();
   runtime.mcpConnecting.clear();
@@ -34,7 +45,15 @@ try {
   runtime.mcpInstances.clear();
   runtime.discovered.clear();
   await runtime.close();
-  assert.deepEqual(runtime.diagnostics(), {
+  const closedDiagnostics = runtime.diagnostics();
+  assert.deepEqual({
+    enabled: closedDiagnostics.enabled,
+    discoveredPlugins: closedDiagnostics.discoveredPlugins,
+    mcpClients: closedDiagnostics.mcpClients,
+    mcpConnecting: closedDiagnostics.mcpConnecting,
+    mcpStartupTails: closedDiagnostics.mcpStartupTails,
+    mcpInstances: closedDiagnostics.mcpInstances,
+  }, {
     enabled: true,
     discoveredPlugins: 0,
     mcpClients: 0,
@@ -42,6 +61,8 @@ try {
     mcpStartupTails: 0,
     mcpInstances: 0,
   });
+  assert.equal(closedDiagnostics.sharedConnections, 0);
+  assert.equal(closedDiagnostics.isolatedConnections, 0);
 
   console.log(JSON.stringify({
     ok: true,

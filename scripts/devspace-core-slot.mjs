@@ -10,8 +10,6 @@ import { resolveFreshWindowsProcessEnvironment } from "../dist/windows-process-p
 import { boundedLogOptionsFromEnv, createBoundedLogWriter } from "../dist/bounded-log-files.js";
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const DEFAULT_START_TIMEOUT_MS = 15_000;
-const DEFAULT_STOP_TIMEOUT_MS = 8_000;
 const CORE_RUNTIME_ENV_KEYS = new Set([
   "DEVSPACE_TOOL_MODE",
   "DEVSPACE_MINIMAL_TOOLS",
@@ -159,35 +157,51 @@ export function buildCoreEnvironment({
   return environment;
 }
 
-async function waitForCoreIdentity({ baseUrl, publicBaseUrl, child, timeoutMs }) {
-  const deadline = Date.now() + timeoutMs;
+async function fetchWhileCoreLives(url, options, child) {
+  let onExit;
+  const exited = new Promise((_, rejectPromise) => {
+    onExit = (code, signal) => rejectPromise(new Error(`Core process exited before readiness${code != null ? ` (code ${code})` : signal ? ` (${signal})` : ""}.`));
+    if (child.exitCode !== null)
+      onExit(child.exitCode, child.signalCode);
+    else
+      child.once("exit", onExit);
+  });
+  try {
+    return await Promise.race([
+      fetch(url, options),
+      exited,
+    ]);
+  }
+  finally {
+    if (onExit)
+      child.removeListener("exit", onExit);
+  }
+}
+
+async function waitForCoreIdentity({ baseUrl, publicBaseUrl, child }) {
   const expectedResource = `${publicBaseUrl}/mcp`;
-  let lastReason = "core-not-ready";
-  while (Date.now() < deadline) {
+  while (true) {
     if (child.exitCode !== null) throw new Error(`Core process exited before readiness (code ${child.exitCode}).`);
     try {
-      const health = await fetch(`${baseUrl}/healthz`, { signal: AbortSignal.timeout(1_000), cache: "no-store" });
+      const health = await fetchWhileCoreLives(`${baseUrl}/healthz`, { cache: "no-store" }, child);
       if (!health.ok) {
-        lastReason = `health-${health.status}`;
         await sleep(100);
         continue;
       }
       const healthBody = await health.json().catch(() => null);
       if (healthBody?.ok !== true) {
-        lastReason = "health-body";
         await sleep(100);
         continue;
       }
-      const prm = await fetch(`${baseUrl}/.well-known/oauth-protected-resource/mcp`, { signal: AbortSignal.timeout(1_000), cache: "no-store" });
+      const prm = await fetchWhileCoreLives(`${baseUrl}/.well-known/oauth-protected-resource/mcp`, { cache: "no-store" }, child);
       const prmBody = await prm.json().catch(() => null);
       if (prm.ok && prmBody?.resource === expectedResource) return;
-      lastReason = `resource-${prm.status}`;
     } catch (error) {
-      lastReason = error instanceof Error ? error.name : "probe-error";
+      if (child.exitCode !== null || /Core process exited before readiness/.test(error instanceof Error ? error.message : String(error)))
+        throw error;
     }
     await sleep(100);
   }
-  throw new Error(`Core readiness timed out (${lastReason}).`);
 }
 
 export async function startCoreSlot({
@@ -198,7 +212,6 @@ export async function startCoreSlot({
   publicBaseUrl,
   candidate = false,
   logDir,
-  startTimeoutMs = DEFAULT_START_TIMEOUT_MS,
   baseEnv = process.env,
   runtimeEnvOverrides = {},
   nodeArgs = [],
@@ -239,12 +252,7 @@ export async function startCoreSlot({
   stdoutLog.on("error", () => child.stdout?.resume());
   stderrLog.on("error", () => child.stderr?.resume());
   const baseUrl = `http://127.0.0.1:${corePort}`;
-  try {
-    await waitForCoreIdentity({ baseUrl, publicBaseUrl: publicBase, child, timeoutMs: Number(startTimeoutMs) });
-  } catch (error) {
-    try { child.kill("SIGTERM"); } catch {}
-    throw error;
-  }
+  await waitForCoreIdentity({ baseUrl, publicBaseUrl: publicBase, child });
   return {
     id: coreId,
     port: corePort,
@@ -271,22 +279,21 @@ export async function startCoreSlot({
   };
 }
 
-export async function stopCoreSlot(handle, { timeoutMs = DEFAULT_STOP_TIMEOUT_MS } = {}) {
+export async function stopCoreSlot(handle) {
   if (!handle?.child) return { stopped: false, reason: "missing-handle" };
   const child = handle.child;
   if (child.exitCode !== null) return { stopped: true, exitCode: child.exitCode };
-  const exit = new Promise((resolvePromise) => child.once("exit", (code) => resolvePromise(code)));
+  const exit = new Promise((resolvePromise) => {
+    if (child.exitCode !== null)
+      resolvePromise(child.exitCode);
+    else
+      child.once("exit", (code) => resolvePromise(code));
+  });
   try { child.kill("SIGTERM"); } catch {}
-  const timer = sleep(Number(timeoutMs)).then(() => "timeout");
-  const result = await Promise.race([exit, timer]);
-  if (result !== "timeout") return { stopped: true, exitCode: result };
-  try { child.kill("SIGKILL"); } catch {}
-  const forced = await Promise.race([exit, sleep(2_000).then(() => "timeout")]);
-  return { stopped: true, forced: true, exitCode: forced === "timeout" ? null : forced };
+  const exitCode = await exit;
+  return { stopped: true, forced: false, exitCode };
 }
 
 export const coreSlotDefaults = Object.freeze({
   packageRoot,
-  startTimeoutMs: DEFAULT_START_TIMEOUT_MS,
-  stopTimeoutMs: DEFAULT_STOP_TIMEOUT_MS,
 });

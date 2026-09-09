@@ -12,6 +12,19 @@ const CHANGED_TOOLS = [
   ...FAKE_TOOLS,
   { name: "inspect_attached_image", inputSchema: { type: "object", properties: { file: { type: "object" } } }, annotations: { readOnlyHint: true } },
 ];
+const ROUTING_CHANGED_TOOLS = FAKE_TOOLS.map((tool, index) => index === 0 ? {
+  ...tool,
+  title: "Read Routed Workspace File",
+  description: "Read the selected workspace file after capability routing chooses direct file inspection.",
+  outputSchema: { type: "object", properties: { result: { type: "string" } } },
+  _meta: {
+    devspace: {
+      routingContractVersion: "1",
+      routingFingerprint: "a".repeat(64),
+      modelInstructionsFingerprint: "b".repeat(64),
+    },
+  },
+} : tool);
 
 async function listen(server) {
   await new Promise((resolve, reject) => {
@@ -83,6 +96,7 @@ async function createFakeCore(id, { failInitializeAt, unknownSessionOnce = false
       method: body.method,
       authorization: req.headers.authorization,
       sessionId: req.headers["mcp-session-id"],
+      clientSessionFingerprint: req.headers["x-devspace-client-session-fingerprint"],
     });
 
     if (req.method === "GET" && req.url === "/mcp") {
@@ -91,10 +105,13 @@ async function createFakeCore(id, { failInitializeAt, unknownSessionOnce = false
       res.setHeader("content-type", "text/event-stream");
       res.setHeader("mcp-session-id", req.headers["mcp-session-id"] ?? "");
       res.write("event: ping\ndata: {}\n\n");
-      await new Promise((resolve) => { state.releaseSse = resolve; });
+      await new Promise((resolve) => {
+        state.releaseSse = resolve;
+        res.once("close", resolve);
+      });
       state.sseActive = false;
       state.releaseSse = null;
-      res.end();
+      if (!res.writableEnded) res.end();
       return;
     }
 
@@ -217,6 +234,37 @@ async function testInitializeAndStablePublicSession() {
   }
 }
 
+async function testGatewayForwardsOnlyDerivedClientSessionFingerprint() {
+  const core = await createFakeCore("core-client-fingerprint");
+  const registry = new StableGatewaySessionRegistry();
+  const gateway = createStableGatewayProxy({
+    activeCore: { id: core.id, baseUrl: core.baseUrl },
+    publicBaseUrl: "https://devspace-gateway.example.test",
+    registry,
+  });
+  const gatewayServer = createServer(gateway.handler);
+  const gatewayBaseUrl = await listen(gatewayServer);
+  try {
+    await postJson(gatewayBaseUrl, {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { protocolVersion: "2025-11-25" },
+    }, {
+      authorization: "Bearer client-fingerprint-secret",
+      "oai-session-id": "raw-openai-client-session",
+      "x-devspace-client-session-fingerprint": "f".repeat(64),
+    });
+    const initialize = core.observed.find((entry) => entry.method === "initialize");
+    assert.match(initialize.clientSessionFingerprint, /^[a-f0-9]{64}$/);
+    assert.notEqual(initialize.clientSessionFingerprint, "f".repeat(64), "the Gateway must overwrite an externally supplied internal lifecycle header");
+    assert.equal(JSON.stringify(core.observed).includes("raw-openai-client-session"), false, "the raw client session must not be copied into diagnostic observations");
+  } finally {
+    await close(gatewayServer);
+    await close(core.server);
+  }
+}
+
 async function testSessionBoundRequestTranslation() {
   const core = await createFakeCore("core-a");
   const registry = new StableGatewaySessionRegistry();
@@ -295,6 +343,61 @@ async function testLongLivedMcpGetDoesNotBlockDrainAccounting() {
   }
 }
 
+async function testDownstreamSseDisconnectDestroysUpstream() {
+  const core = await createFakeCore("core-sse-disconnect");
+  const registry = new StableGatewaySessionRegistry();
+  const gateway = createStableGatewayProxy({ activeCore: { id: core.id, baseUrl: core.baseUrl }, publicBaseUrl: "https://devspace-gateway.example.test", registry });
+  const gatewayServer = createServer(gateway.handler);
+  const gatewayBaseUrl = await listen(gatewayServer);
+
+  try {
+    const initialize = await postJson(gatewayBaseUrl, { jsonrpc: "2.0", id: 1, method: "initialize", params: {} }, { authorization: "Bearer disconnect-secret" });
+    const publicSessionId = initialize.headers["mcp-session-id"];
+    const target = new URL("/mcp", gatewayBaseUrl);
+    let firstChunkResolve;
+    const firstChunk = new Promise((resolve) => { firstChunkResolve = resolve; });
+    const clientClosed = new Promise((resolve) => {
+      const request = httpRequest({
+        hostname: target.hostname,
+        port: target.port,
+        path: target.pathname,
+        method: "GET",
+        headers: {
+          accept: "text/event-stream",
+          authorization: "Bearer disconnect-secret",
+          "mcp-session-id": publicSessionId,
+        },
+      }, (response) => {
+        response.once("data", () => {
+          firstChunkResolve();
+          response.destroy();
+        });
+        response.once("close", resolve);
+        response.once("error", resolve);
+      });
+      request.once("error", resolve);
+      request.end();
+    });
+    await firstChunk;
+    await waitUntil(() => core.state.sseActive === false, 1_500);
+    await clientClosed;
+    assert.equal(core.state.sseActive, false, "closing the downstream response must destroy the orphan-prone upstream Core SSE request");
+    const retainedDescriptor = registry.lookup(publicSessionId);
+    assert.ok(retainedDescriptor, "an SSE reconnect boundary must retain the public descriptor");
+    assert.equal(retainedDescriptor.coreId, "unmapped");
+    assert.equal(retainedDescriptor.backendSessionId, "unmapped");
+    const recovered = await postJson(gatewayBaseUrl, { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }, {
+      "mcp-session-id": publicSessionId,
+    });
+    assert.equal(recovered.status, 200, "the next call must lazily recreate the Core mapping under the same public session id even when the reconnect request omits Authorization");
+    assert.equal(registry.lookup(publicSessionId).coreId, core.id);
+  } finally {
+    core.state.releaseSse?.();
+    await close(gatewayServer);
+    await close(core.server);
+  }
+}
+
 async function testStreamingResponseIsNotBuffered() {
   const core = await createFakeCore("core-a");
   const registry = new StableGatewaySessionRegistry();
@@ -326,6 +429,7 @@ async function testStreamingResponseIsNotBuffered() {
 }
 
 await testInitializeAndStablePublicSession();
+await testGatewayForwardsOnlyDerivedClientSessionFingerprint();
 await testSessionBoundRequestTranslation();
 async function waitUntil(predicate, timeoutMs = 500) {
   const startedAt = Date.now();
@@ -508,6 +612,40 @@ async function testPromotionDropsOnlyFailedReplaySession() {
   }
 }
 
+async function testIdleAgeAloneNeverReplacesHealthyBackendSession() {
+  const core = await createFakeCore("core-idle-stable");
+  const registry = new StableGatewaySessionRegistry();
+  const gateway = createStableGatewayProxy({
+    activeCore: { id: core.id, baseUrl: core.baseUrl },
+    publicBaseUrl: "https://devspace-gateway.example.test",
+    registry,
+    // Kept deliberately as an ignored legacy option so this regression fails
+    // against the former proactive idle-resurrection implementation.
+    backendSessionReinitIdleMs: 1_000,
+  });
+  const gatewayServer = createServer(gateway.handler);
+  const gatewayBaseUrl = await listen(gatewayServer);
+  const originalDateNow = Date.now;
+  let fakeNow = originalDateNow();
+  Date.now = () => fakeNow;
+  try {
+    const initialized = await postJson(gatewayBaseUrl, { jsonrpc: "2.0", id: 1, method: "initialize", params: {} }, { authorization: "Bearer idle-stable-secret" });
+    const publicSessionId = initialized.headers["mcp-session-id"];
+    fakeNow += 60_000;
+    const response = await postJson(gatewayBaseUrl, { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }, {
+      authorization: "Bearer idle-stable-secret",
+      "mcp-session-id": publicSessionId,
+    });
+    assert.equal(response.status, 200);
+    assert.equal(core.observed.filter((entry) => entry.method === "initialize").length, 1, "wall-clock idle age alone must never duplicate a healthy backend MCP session");
+    assert.equal(registry.lookup(publicSessionId).backendSessionId, "core-idle-stable-backend-1");
+  } finally {
+    Date.now = originalDateNow;
+    await close(gatewayServer);
+    await close(core.server);
+  }
+}
+
 async function testExactUnknownSession404ResurrectsAndRetriesOnce() {
   const core = await createFakeCore("core-404", { unknownSessionOnce: true });
   const registry = new StableGatewaySessionRegistry();
@@ -636,6 +774,38 @@ async function testReplayDropsSessionWhenToolSchemaChanges() {
   }
 }
 
+async function testReplayDropsSessionWhenRoutingDescriptionChanges() {
+  const coreA = await createFakeCore("core-routing-a", { tools: FAKE_TOOLS });
+  const coreB = await createFakeCore("core-routing-b", { tools: ROUTING_CHANGED_TOOLS });
+  const registry = new StableGatewaySessionRegistry();
+  const gateway = createStableGatewayProxy({ activeCore: { id: coreA.id, baseUrl: coreA.baseUrl }, publicBaseUrl: "https://devspace-gateway.example.test", registry });
+  const gatewayServer = createServer(gateway.handler);
+  const gatewayBaseUrl = await listen(gatewayServer);
+  try {
+    const initialized = await postJson(gatewayBaseUrl, { jsonrpc: "2.0", id: 1, method: "initialize", params: {} }, { authorization: "Bearer routing-schema-secret" });
+    const publicSessionId = initialized.headers["mcp-session-id"];
+    await postJson(gatewayBaseUrl, { jsonrpc: "2.0", method: "notifications/initialized", params: {} }, {
+      authorization: "Bearer routing-schema-secret",
+      "mcp-session-id": publicSessionId,
+    });
+    await postJson(gatewayBaseUrl, { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }, {
+      authorization: "Bearer routing-schema-secret",
+      "mcp-session-id": publicSessionId,
+    });
+    assert.equal(registry.lookup(publicSessionId).schemaFingerprint, schemaFingerprint(FAKE_TOOLS));
+    assert.notEqual(schemaFingerprint(FAKE_TOOLS), schemaFingerprint(ROUTING_CHANGED_TOOLS));
+
+    const replayed = await gateway.replaySessionsToCore({ id: coreB.id, baseUrl: coreB.baseUrl });
+    assert.deepEqual(replayed.mappings, []);
+    assert.deepEqual(replayed.droppedPublicSessionIds, [publicSessionId]);
+    assert.equal(registry.lookup(publicSessionId), undefined, "description/output/routing metadata drift must force a fresh host initialize");
+  } finally {
+    await close(gatewayServer);
+    await close(coreA.server);
+    await close(coreB.server);
+  }
+}
+
 async function testLegacyDescriptorWithoutSchemaRequiresFreshInitialize() {
   const core = await createFakeCore("core-legacy", { tools: FAKE_TOOLS });
   const registry = new StableGatewaySessionRegistry();
@@ -670,16 +840,19 @@ async function testLegacyDescriptorWithoutSchemaRequiresFreshInitialize() {
 await testInitializeAndStablePublicSession();
 await testSessionBoundRequestTranslation();
 await testLongLivedMcpGetDoesNotBlockDrainAccounting();
+await testDownstreamSseDisconnectDestroysUpstream();
 await testStreamingResponseIsNotBuffered();
 await testBarrierAlsoQueuesNewInitialize();
 await testReplayPreservesPublicSessionAndInitializedNotification();
 await testReplayDropsOnlyTheStaleSession();
 await testPromotionWaitsForDrainThenSwitchesAtomically();
 await testPromotionDropsOnlyFailedReplaySession();
+await testIdleAgeAloneNeverReplacesHealthyBackendSession();
 await testExactUnknownSession404ResurrectsAndRetriesOnce();
 await testNon404CoreFailureIsNeverResurrected();
 await testRestoredPublicSessionLazyResurrectionIsSingleFlight();
 await testReplayDropsSessionWhenToolSchemaChanges();
+await testReplayDropsSessionWhenRoutingDescriptionChanges();
 await testLegacyDescriptorWithoutSchemaRequiresFreshInitialize();
 
-console.log(JSON.stringify({ ok: true, gate: "stable-gateway-proxy", lazyResurrection: true, resurrectionSingleFlight: true, exact404RetryOnce: true, no5xxReplay: true, schemaFingerprintCaptured: true, staleSchemaForcesFreshInitialize: true }));
+console.log(JSON.stringify({ ok: true, gate: "stable-gateway-proxy", lazyResurrection: true, idleAgeNeverDuplicatesHealthySession: true, downstreamSseDisconnectClosesUpstream: true, resurrectionSingleFlight: true, exact404RetryOnce: true, no5xxReplay: true, schemaFingerprintCaptured: true, routingDescriptionDriftForcesFreshInitialize: true, staleSchemaForcesFreshInitialize: true }));

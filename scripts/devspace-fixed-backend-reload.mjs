@@ -72,14 +72,12 @@ try {
   const gatewayStatus = async () => {
     const response = await fetch(`http://127.0.0.1:${control.gatewayPort}/__devspace/gateway/status`, {
       headers: { "x-devspace-gateway-control": control.controlToken },
-      signal: AbortSignal.timeout(5_000),
     });
     if (!response.ok) throw new Error(`Stable Gateway status probe returned HTTP ${response.status}.`);
     return await response.json();
   };
   const quiet = await waitForStableGatewayQuiet({
     statusProbe: gatewayStatus,
-    timeoutMs: 60_000,
     pollMs: 250,
     consecutiveQuietSamples: 2,
   });
@@ -87,14 +85,9 @@ try {
     await writeLastResult(files.dir, {
       observedAt: new Date().toISOString(),
       handoverId,
-      state: "quiet-timeout",
+      state: quiet.state,
       httpStatus: null,
-      result: {
-        ok: false,
-        state: quiet.state,
-        lastAdmissionActive: quiet.lastAdmissionActive,
-        lastSessionActive: quiet.lastSessionActive,
-      },
+      result: quiet,
       secretValuesLogged: false,
     });
     process.exit(1);
@@ -106,7 +99,6 @@ try {
       "x-devspace-gateway-control": control.controlToken,
     },
     body: "{}",
-    signal: AbortSignal.timeout(90_000),
   });
   const result = await response.json().catch(() => ({ ok: false, state: "invalid-response" }));
   await writeLastResult(files.dir, {

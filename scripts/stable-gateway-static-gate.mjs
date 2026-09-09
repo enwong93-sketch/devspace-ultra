@@ -50,12 +50,17 @@ assert.match(gatewayController, /commitMappings/, "Gateway must atomically commi
 assert.match(gatewayController, /rollback/i, "handover must contain an explicit rollback path");
 assert.match(gatewayController, /abortBarrier/, "Gateway must reopen admission after success or rollback");
 assert.match(gatewayRuntime, /updateAuthorization\(/, "Gateway registry must rotate in-memory replay credentials after OAuth access-token refresh");
-assert.match(gatewayRuntime, /DEFAULT_MAX_RETAINED_SESSIONS[\s\S]*DEFAULT_MAX_REPLAY_SESSIONS/, "Gateway public MCP sessions must have bounded retention and bounded Core replay");
-assert.match(gatewayRuntime, /#pruneInactive\(\)/, "Gateway registry must evict stale inactive public sessions instead of retaining replay credentials forever");
+assert.match(gatewayRuntime, /markEventStreamOpen[\s\S]*markEventStreamClosed[\s\S]*entry\.coreId = "unmapped"[\s\S]*entry\.backendSessionId = "unmapped"/, "Gateway SSE disconnects must invalidate only the Core mapping while retaining the public conversation descriptor for lazy resurrection");
+assert.doesNotMatch(gatewayRuntime, /#removeDisconnectedIfIdle|this\.sessions\.delete\(entry\.publicSessionId\)/, "A normal ChatGPT SSE reconnect boundary must never revoke the public MCP session descriptor");
+assert.doesNotMatch(gatewayRuntime, /MAX_RETAINED|MAX_REPLAY|idleRetention|timeoutPromise|setTimeout/, "Gateway public-session continuity must not impose artificial retention caps or wall-clock termination");
 assert.match(gatewayProxy, /registry\.updateAuthorization\(publicSessionId, currentAuthorization\)/, "every authenticated session request must refresh the replay/schema-probe credential before later handover");
 assert.match(gatewayProxy, /droppedPublicSessionIds[\s\S]*registry\.invalidateMapping\?\.\(session\.publicSessionId\)/, "one stale replay mapping must be isolated without deleting the lightweight public session descriptor");
 assert.match(gatewayProxy, /resurrectionLocks[\s\S]*resurrectSession[\s\S]*registry\.commitMappings/, "Gateway must lazily resurrect an unmapped public MCP session exactly once while preserving public identity");
 assert.match(gatewayProxy, /upstreamRes\.statusCode === 404[\s\S]*resurrectSession/, "only an exact downstream unknown-session response may trigger transparent lazy resurrection");
+assert.match(gatewayProxy, /markEventStreamOpen[\s\S]*markEventStreamClosed/, "Gateway proxy must release public descriptors on actual downstream SSE disconnect");
+assert.doesNotMatch(gatewayProxy, /setTimeout|setTimeout\(|requestTimeoutMs|Core request timed out/, "Gateway proxy must not terminate long Core or tool requests by wall clock");
+assert.doesNotMatch(gatewayController, /drainTimeoutMs|requestTimeoutMs|waitForDrain\([^)]*\d|waitForOpen\([^)]*timeout/, "Core recovery and handover must wait for real request completion rather than a deadline");
+assert.doesNotMatch(coreSlot, /Core readiness timed out|SIGKILL|max-old-space-size|max-semi-space-size/, "Core lifecycle must not cap heap, kill a slow startup, or force-kill long shutdown work");
 assert.match(gatewayController, /droppedSessions/, "Core recovery and handover results must surface partial replay drops without marking a healthy replacement Core fatal");
 assert.doesNotMatch(gatewayRuntime, /writeFile|persist.*authorization|authorization.*JSON\.stringify/i, "rotated replay credentials must remain memory-only");
 assert.doesNotMatch(stableGateway, /console\.log\([^\n]*(controlToken|authorization|bearer)/i, "Gateway must never log control/replay credentials");
@@ -65,6 +70,7 @@ assert.match(backendReload, /waitForStableGatewayQuiet/, "reload worker must wai
 assert.match(backendReload, /__devspace\/gateway\/status/, "quiet-boundary probe must use the authenticated loopback Gateway status endpoint");
 assert.match(gatewayQuiet, /admission[\s\S]*activeRequests[\s\S]*sessions[\s\S]*totalActiveRequests/, "quiet-boundary helper must consume both Gateway HTTP and MCP-session request counters");
 assert.doesNotMatch(backendReload, /await delay\(2_000\)/, "reload worker must not rely on a fixed two-second delay before handover");
+assert.doesNotMatch(backendReload, /AbortSignal\.timeout|quiet-timeout|timeoutMs/, "reload and handover must not fail because a quiet boundary or Core operation takes longer than a clock deadline");
 assert.match(backendReload, /--worker/, "reload helper must detach before replacing the Core that served the triggering command");
 assert.match(backendReload, /--status/, "reload helper must expose authoritative last-handover status instead of treating scheduled=true as completion");
 assert.match(backendReload, /handoverId/, "scheduled and terminal handover records must share a unique correlation id");

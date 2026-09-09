@@ -1,10 +1,18 @@
+import { createHash } from "node:crypto";
 import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { schemaFingerprint } from "./stable-gateway-candidate.js";
 
-const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 const MAX_TOOL_LIST_CAPTURE_BYTES = 4 * 1024 * 1024;
-const DEFAULT_BACKEND_SESSION_REINIT_IDLE_MS = 25_000;
+function clientSessionFingerprint(headers = {}) {
+  for (const name of ["x-openai-session", "oai-session-id", "openai-session-id"]) {
+    const raw = Array.isArray(headers?.[name]) ? headers[name][0] : headers?.[name];
+    const value = String(raw ?? "").trim();
+    if (value) return createHash("sha256").update(value).digest("hex");
+  }
+  return null;
+}
+
 const HOP_BY_HOP_HEADERS = new Set([
   "connection",
   "keep-alive",
@@ -105,7 +113,7 @@ function setResponseHeaders(res, headers, publicSessionId) {
   if (publicSessionId) res.setHeader("mcp-session-id", publicSessionId);
 }
 
-function requestCoreJson(core, body, { authorization, backendSessionId, timeoutMs }) {
+function requestCoreJson(core, body, { authorization, backendSessionId } = {}) {
   const target = new URL("/mcp", `${core.baseUrl}/`);
   const payload = Buffer.from(JSON.stringify(body));
   const requestFn = target.protocol === "https:" ? httpsRequest : httpRequest;
@@ -136,7 +144,6 @@ function requestCoreJson(core, body, { authorization, backendSessionId, timeoutM
       }));
       res.once("error", reject);
     });
-    req.setTimeout(timeoutMs, () => req.destroy(new Error(`Core replay timed out after ${timeoutMs}ms.`)));
     req.once("error", reject);
     req.end(payload);
   });
@@ -147,17 +154,16 @@ export function createStableGatewayProxy({
   publicBaseUrl,
   registry,
   activityJournal = null,
-  requestTimeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
-  backendSessionReinitIdleMs = DEFAULT_BACKEND_SESSION_REINIT_IDLE_MS,
 } = {}) {
   if (!registry || typeof registry.registerInitialize !== "function" || typeof registry.acquire !== "function") {
     throw new Error("Stable Gateway registry is required.");
   }
+  // Raw proxy/tool telemetry is never a source of user-visible narration. The
+  // floating progress card accepts only explicit agent-authored updates through
+  // devspace_progress_report. Keep the structured activity journal for diagnostics
+  // and liveness evidence, but never project those records as card prose.
   const externalBaseUrl = new URL(String(publicBaseUrl ?? ""));
   let currentCore = requireCore(activeCore);
-  const timeoutMs = Number(requestTimeoutMs);
-  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new Error("requestTimeoutMs must be positive.");
-  const reinitIdleMs = Math.max(1_000, Number(backendSessionReinitIdleMs) || DEFAULT_BACKEND_SESSION_REINIT_IDLE_MS);
   const resurrectionLocks = new Map();
 
   const readBackendToolSchema = async (core, { authorization, backendSessionId } = {}) => {
@@ -169,7 +175,6 @@ export function createStableGatewayProxy({
     }, {
       authorization,
       backendSessionId,
-      timeoutMs,
     });
     const payload = parseMcpPayload(listed.body);
     const tools = payload?.result?.tools;
@@ -216,7 +221,6 @@ export function createStableGatewayProxy({
       try {
         const initialized = await requestCoreJson(nextCore, session.initializeBody, {
           authorization: session.authorization,
-          timeoutMs,
         });
         const backendSessionId = String(initialized.headers["mcp-session-id"] ?? "").trim();
         if (initialized.status < 200 || initialized.status >= 300 || !backendSessionId) {
@@ -231,7 +235,6 @@ export function createStableGatewayProxy({
           const notificationResult = await requestCoreJson(nextCore, initializedNotification, {
             authorization: session.authorization,
             backendSessionId,
-            timeoutMs,
           });
           if (notificationResult.status < 200 || notificationResult.status >= 300) {
             throw new Error("initialized-notification-replay-failed");
@@ -267,15 +270,15 @@ export function createStableGatewayProxy({
   const resurrectSession = async (publicSessionId, authorization) => {
     const id = String(publicSessionId || "").trim();
     if (!id) throw new Error("MCP session resurrection requires a public session id.");
-    const currentAuthorization = String(authorization || "").trim();
-    if (!currentAuthorization) throw new Error("MCP session resurrection requires the current request authorization.");
+    const requestAuthorization = String(authorization || "").trim();
     if (resurrectionLocks.has(id)) return await resurrectionLocks.get(id);
     const promise = (async () => {
       const descriptor = registry.lookup(id);
       if (!descriptor?.initializeBody) throw new Error("MCP session descriptor is unavailable for resurrection.");
+      const currentAuthorization = requestAuthorization || String(descriptor.authorization || "").trim();
+      if (!currentAuthorization) throw new Error("MCP session resurrection requires request or retained authorization.");
       const initialized = await requestCoreJson(currentCore, descriptor.initializeBody, {
         authorization: currentAuthorization,
-        timeoutMs,
       });
       const backendSessionId = String(initialized.headers["mcp-session-id"] ?? "").trim();
       if (initialized.status < 200 || initialized.status >= 300 || !backendSessionId) {
@@ -289,7 +292,6 @@ export function createStableGatewayProxy({
         }, {
           authorization: currentAuthorization,
           backendSessionId,
-          timeoutMs,
         });
         if (ready.status < 200 || ready.status >= 300) {
           throw new Error(`Core session resurrection initialized notification failed with HTTP ${ready.status}.`);
@@ -314,11 +316,11 @@ export function createStableGatewayProxy({
     return await promise;
   };
 
-  const promoteCore = async (coreInput, { drainTimeoutMs = timeoutMs } = {}) => {
+  const promoteCore = async (coreInput) => {
     const nextCore = requireCore(coreInput);
     registry.beginBarrier();
     try {
-      await registry.waitForDrain(drainTimeoutMs);
+      await registry.waitForDrain();
       const replayed = await replaySessionsToCore(nextCore);
       registry.commitMappings(replayed.mappings);
       currentCore = nextCore;
@@ -351,20 +353,24 @@ export function createStableGatewayProxy({
       activityFinished = true;
       try { activityJournal.finishToolCall(activity.id, { ok, statusCode, error }); } catch {}
     };
-    const publicSessionId = String(req.headers["mcp-session-id"] ?? "").trim() || undefined;
+    let publicSessionId = String(req.headers["mcp-session-id"] ?? "").trim() || undefined;
+    const requestClientSessionFingerprint = clientSessionFingerprint(req.headers);
     const requestAuthorization = String(req.headers.authorization ?? "").trim();
     const requestPath = new URL(req.url || "/", `${externalBaseUrl}/`).pathname;
     const initializeRequest = req.method === "POST" && isInitialize(parsedBody);
     const replayableMcpStream = req.method === "GET" && requestPath === "/mcp";
     let trackedSessionId;
+    let publicEventStreamOpened = false;
     let mapping;
 
     if (!publicSessionId && requestPath === "/mcp") {
-      await registry.waitForAdmission(timeoutMs);
+      await registry.waitForAdmission();
     }
 
     if (publicSessionId) {
-      await registry.waitForAdmission(timeoutMs);
+      await registry.waitForAdmission();
+      const resolvedPublicSessionId = registry.resolvePublicSessionId?.(publicSessionId, requestClientSessionFingerprint) || publicSessionId;
+      publicSessionId = resolvedPublicSessionId;
       let descriptor = registry.lookup(publicSessionId);
       if (!descriptor) {
         finishActivity({ ok: false, statusCode: 404, error: "Unknown public MCP session" });
@@ -372,8 +378,16 @@ export function createStableGatewayProxy({
         return;
       }
       const currentAuthorization = requestAuthorization;
-      const mappingIdleAge = Math.max(0, Date.now() - Number(descriptor.lastActivityAt || Date.now()));
-      const mappingNeedsResurrection = descriptor.coreId !== core.id || mappingIdleAge >= reinitIdleMs;
+      // Never replace a healthy backend mapping merely because a public MCP
+      // session has been quiet. ChatGPT keeps GET /mcp event streams open for
+      // long periods and the Gateway deliberately excludes those streams from
+      // handover drain accounting. The former wall-clock idle heuristic therefore
+      // created a second backend session while the original SSE transport was
+      // still alive, then repeated until Core hit its session and heap limits.
+      // Exact downstream 404 handling below already performs one safe,
+      // single-flight resurrection when the Core has genuinely forgotten the
+      // backend session.
+      const mappingNeedsResurrection = descriptor.coreId !== core.id;
       if (mappingNeedsResurrection) {
         try {
           descriptor = await resurrectSession(publicSessionId, currentAuthorization);
@@ -389,7 +403,7 @@ export function createStableGatewayProxy({
       if (replayableMcpStream) {
         mapping = registry.lookup(publicSessionId);
       } else {
-        mapping = await registry.acquire(publicSessionId, { timeoutMs });
+        mapping = await registry.acquire(publicSessionId);
         trackedSessionId = mapping ? publicSessionId : undefined;
       }
       if (!mapping) {
@@ -400,6 +414,9 @@ export function createStableGatewayProxy({
       if (currentAuthorization && currentAuthorization !== mapping.authorization) {
         registry.updateAuthorization(publicSessionId, currentAuthorization);
         mapping.authorization = currentAuthorization;
+      }
+      if (replayableMcpStream) {
+        publicEventStreamOpened = registry.markEventStreamOpen?.(publicSessionId) === true;
       }
     }
 
@@ -414,6 +431,16 @@ export function createStableGatewayProxy({
     const buildUpstreamHeaders = () => {
       const headers = copyHeaders(req.headers, { omitSession: initializeRequest });
       headers.host = target.host;
+      // Carry only the Gateway-derived hash into the loopback Core so repeated
+      // ChatGPT initialize requests can retire the prior transport even when the
+      // host does not forward the original OpenAI session header consistently.
+      // Always overwrite/remove a caller-supplied value; this is internal
+      // lifecycle metadata, never an external authority credential.
+      if (requestClientSessionFingerprint) {
+        headers["x-devspace-client-session-fingerprint"] = requestClientSessionFingerprint;
+      } else {
+        delete headers["x-devspace-client-session-fingerprint"];
+      }
       if (publicSessionId && mapping) headers["mcp-session-id"] = mapping.backendSessionId;
       else if (initializeRequest) delete headers["mcp-session-id"];
       return headers;
@@ -422,24 +449,40 @@ export function createStableGatewayProxy({
     await new Promise((resolve) => {
       let activeUpstream = null;
       let completed = false;
-      const complete = () => {
+      const complete = ({ downstreamDisconnected = false } = {}) => {
         if (completed) return;
         completed = true;
         try { req.removeListener?.("aborted", onAborted); } catch {}
+        try { res.removeListener?.("close", onResponseClosed); } catch {}
+        if (publicEventStreamOpened && publicSessionId) {
+          publicEventStreamOpened = false;
+          registry.markEventStreamClosed?.(publicSessionId, { disconnected: downstreamDisconnected });
+        }
         resolve();
       };
       const failFinal = (statusCode, message, error) => {
+        if (completed) return;
         finishActivity({ ok: false, statusCode, error: message });
         releaseTracked();
-        if (!res.headersSent) sendGatewayError(res, statusCode, message);
-        else if (!res.writableEnded) res.destroy(error instanceof Error ? error : new Error(message));
         complete();
+        if (!res.headersSent) sendGatewayError(res, statusCode, message);
+        else if (!res.writableEnded && !res.destroyed) res.destroy(error instanceof Error ? error : new Error(message));
       };
-      const onAborted = () => {
-        try { activeUpstream?.destroy(new Error("Client request aborted.")); } catch {}
-        failFinal(499, "Client request aborted");
+      const cancelUpstream = (message) => {
+        if (completed) return;
+        const error = new Error(message);
+        finishActivity({ ok: false, statusCode: 499, error: message });
+        releaseTracked();
+        complete({ downstreamDisconnected: true });
+        try { activeUpstream?.destroy(error); } catch {}
+      };
+      const onAborted = () => cancelUpstream("Client request aborted.");
+      const onResponseClosed = () => {
+        if (res.writableEnded) return;
+        cancelUpstream("Client response closed.");
       };
       req.once("aborted", onAborted);
+      res.once("close", onResponseClosed);
 
       const pipeFinalResponse = (upstreamRes, responsePublicSessionId) => {
         res.statusCode = upstreamRes.statusCode ?? 502;
@@ -478,6 +521,9 @@ export function createStableGatewayProxy({
           if (initializeRequest && responsePublicSessionId && res.statusCode < 400) {
             void stampInitializedSessionSchema(core, responsePublicSessionId, requestAuthorization).catch(() => {});
           }
+          if (publicSessionId && req.method === "DELETE" && res.statusCode < 400) {
+            registry.remove?.(publicSessionId);
+          }
           finishActivity({ ok: res.statusCode < 400, statusCode: res.statusCode, error: res.statusCode >= 400 ? `Core HTTP ${res.statusCode}` : null });
           releaseTracked();
           if (!res.writableEnded) res.end();
@@ -489,6 +535,7 @@ export function createStableGatewayProxy({
       };
 
       const sendAttempt = ({ allowUnknownSessionRecovery }) => {
+        if (completed) return;
         const upstreamHeaders = buildUpstreamHeaders();
         const upstream = requestFn({
           protocol: target.protocol,
@@ -510,6 +557,7 @@ export function createStableGatewayProxy({
             upstreamRes.once("end", () => {
               void resurrectSession(publicSessionId, requestAuthorization)
                 .then((nextMapping) => {
+                  if (completed) return;
                   mapping = nextMapping;
                   sendAttempt({ allowUnknownSessionRecovery: false });
                 })
@@ -534,6 +582,7 @@ export function createStableGatewayProxy({
                 backendSessionId,
                 initializeBody: parsedBody,
                 authorization: requestAuthorization,
+                clientSessionFingerprint: requestClientSessionFingerprint,
               });
             } catch (error) {
               upstreamRes.resume();
@@ -544,9 +593,6 @@ export function createStableGatewayProxy({
           pipeFinalResponse(upstreamRes, responsePublicSessionId);
         });
         activeUpstream = upstream;
-        upstream.setTimeout(timeoutMs, () => {
-          upstream.destroy(new Error(`Core request timed out after ${timeoutMs}ms.`));
-        });
         upstream.once("error", (error) => {
           if (completed) return;
           failFinal(502, error instanceof Error ? error.message : "Core request failed", error);

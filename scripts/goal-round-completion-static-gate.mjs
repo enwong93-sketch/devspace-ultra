@@ -7,7 +7,7 @@ const bridge = await readFile(new URL("../dist/goal-host-bridge.js", import.meta
 const guard = await readFile(new URL("../dist/goal-round-completion-guard.js", import.meta.url), "utf8");
 
 assert.match(server, /ClassicGoalRoundCompletionGuard/);
-assert.match(server, /goalRoundCompletionGuard\.start\(\)/);
+assert.match(server, /if\s*\(config\.goalRoundRecoveryEnabled\)[\s\S]*goalRoundCompletionGuard\.start\(\)/, "automatic same-round recovery must support an explicit operator hold");
 assert.match(server, /goalRoundCompletionGuard\.close\(\)/);
 assert.match(server, /goalHostBridge\.inspectWorkingRound/);
 assert.match(server, /goalHostBridge\.dispatchRoundRecovery/);

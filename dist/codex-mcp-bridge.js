@@ -9,13 +9,10 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport, getDefaultEnvironment } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
-import { ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 
-const DEFAULT_CONNECT_TIMEOUT_MS = 20_000;
-const DEFAULT_TOOL_TIMEOUT_MS = 60_000;
-const MAX_TIMEOUT_MS = 10 * 60_000;
 const MAX_SERVERS = 128;
 const MAX_TOOLS = 500;
+const INTERNAL_CODEX_OWNER = "__devspace_internal_codex_catalog__";
 const HIGH_RISK_SERVER_PATTERN = /(?:^|[-_.])(elevated|administrator|admin|root)(?:$|[-_.])/i;
 const RECURSIVE_OR_DUPLICATE_IDS = new Set(["devspace", "powermem", "powermem-shared"]);
 const READ_ONLY = {
@@ -54,6 +51,16 @@ function sha256(value) {
   return createHash("sha256").update(String(value)).digest("hex");
 }
 
+function normalizeOwner(value) {
+  const text = String(value ?? "").trim();
+  if (!text) throw new Error("A ChatGPT conversation identity is required for a Codex MCP connection.");
+  return text.slice(0, 300);
+}
+
+function connectionKey(serverId, ownerConversationId) {
+  return `${String(serverId)}::conversation:${sha256(normalizeOwner(ownerConversationId)).slice(0, 32)}`;
+}
+
 function boundedText(value, max = 2000) {
   return String(value ?? "").replace(/\s+/g, " ").trim().slice(0, max);
 }
@@ -65,12 +72,6 @@ function boundedArray(value, max = MAX_TOOLS) {
 
 function safeObject(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : {};
-}
-
-function clampSeconds(value, fallbackSeconds) {
-  const seconds = Number(value);
-  if (!Number.isFinite(seconds) || seconds <= 0) return fallbackSeconds * 1000;
-  return Math.max(1_000, Math.min(MAX_TIMEOUT_MS, Math.round(seconds * 1000)));
 }
 
 function expandHome(value) {
@@ -155,14 +156,8 @@ function sanitizeResourceTemplate(resource) {
 }
 
 function shouldInvalidateClient(error) {
-  const code = Number(error?.code);
-  if (code === Number(ErrorCode.RequestTimeout)) return true;
   const message = error instanceof Error ? error.message : String(error ?? "");
-  return /request timed out|maximum total timeout|connection closed|transport|socket|econn(?:reset|refused)|broken pipe|websocket.*closed/i.test(message);
-}
-
-function requestOptions(timeoutMs) {
-  return { timeout: timeoutMs, maxTotalTimeout: timeoutMs };
+  return /connection closed|transport|socket|econn(?:reset|refused)|broken pipe|websocket.*closed/i.test(message);
 }
 
 function configPathFromOptions(options = {}) {
@@ -203,8 +198,6 @@ function normalizeServer(id, raw, configPath) {
     envHttpHeaders,
     bearerTokenEnvVar,
     inlineBearerTokenPresent: source.bearer_token != null,
-    connectTimeoutMs: clampSeconds(source.startup_timeout_sec, DEFAULT_CONNECT_TIMEOUT_MS / 1000),
-    toolTimeoutMs: clampSeconds(source.tool_timeout_sec, DEFAULT_TOOL_TIMEOUT_MS / 1000),
     enabledTools,
     disabledTools,
     defaultApprovalMode: normalizeApprovalMode(source.default_tools_approval_mode),
@@ -295,8 +288,8 @@ export class CodexMcpBridge {
     this.ready = this.refresh({ failOpen: true });
   }
 
-  async refresh({ failOpen = false } = {}) {
-    await this.closeClients();
+  async refresh({ failOpen = false, ownerConversationId = null } = {}) {
+    await this.closeClients(ownerConversationId);
     this.servers.clear();
     this.probes.clear();
     try {
@@ -414,10 +407,7 @@ export class CodexMcpBridge {
       }
     }
     try {
-      await Promise.race([
-        client.connect(transport),
-        new Promise((_, reject) => setTimeout(() => reject(new Error(`MCP connect timed out after ${server.connectTimeoutMs} ms.`)), server.connectTimeoutMs)),
-      ]);
+      await client.connect(transport);
     } catch (error) {
       try { await transport.close(); } catch {}
       throw new Error(`Codex MCP server ${server.id} failed to connect: ${error instanceof Error ? error.message : String(error)}`);
@@ -425,57 +415,76 @@ export class CodexMcpBridge {
     return { client, transport };
   }
 
-  async getClient(serverId) {
+  async getClient(serverId, ownerConversationId = INTERNAL_CODEX_OWNER) {
     await this.ensureReady();
     const server = this.requireServer(serverId);
-    const existing = this.clients.get(server.id);
+    const owner = normalizeOwner(ownerConversationId);
+    const key = connectionKey(server.id, owner);
+    const existing = this.clients.get(key);
     if (existing) return { server, holder: existing };
-    let pending = this.connecting.get(server.id);
+    let pending = this.connecting.get(key);
     if (!pending) {
       pending = this.createClient(server)
         .then((holder) => {
-          this.clients.set(server.id, holder);
-          return holder;
+          const scoped = { ...holder, server, serverId: server.id, ownerConversationId: owner, connectionKey: key };
+          this.clients.set(key, scoped);
+          return scoped;
         })
-        .finally(() => this.connecting.delete(server.id));
-      this.connecting.set(server.id, pending);
+        .finally(() => this.connecting.delete(key));
+      this.connecting.set(key, pending);
     }
     return { server, holder: await pending };
   }
 
-  async closeClient(serverId) {
-    const pending = this.connecting.get(serverId);
-    if (pending) {
-      try {
-        const holder = await pending;
+  async closeClient(serverId, ownerConversationId = null) {
+    const requested = String(serverId || "").trim();
+    const owner = ownerConversationId == null ? null : normalizeOwner(ownerConversationId);
+    const keys = new Set([
+      ...[...this.clients.entries()]
+        .filter(([, holder]) => holder?.serverId === requested && (!owner || holder?.ownerConversationId === owner))
+        .map(([key]) => key),
+      ...[...this.connecting.keys()]
+        .filter((key) => String(key).startsWith(`${requested}::conversation:`)
+          && (!owner || key === connectionKey(requested, owner))),
+    ]);
+    for (const key of keys) {
+      const pending = this.connecting.get(key);
+      if (pending) {
+        try {
+          const holder = await pending;
+          try { await holder.client.close(); } catch {}
+          try { await holder.transport.close(); } catch {}
+        } catch {}
+        this.connecting.delete(key);
+      }
+      const holder = this.clients.get(key);
+      if (holder) {
+        this.clients.delete(key);
         try { await holder.client.close(); } catch {}
         try { await holder.transport.close(); } catch {}
-      } catch {}
-      this.connecting.delete(serverId);
-    }
-    const holder = this.clients.get(serverId);
-    if (holder) {
-      this.clients.delete(serverId);
-      try { await holder.client.close(); } catch {}
-      try { await holder.transport.close(); } catch {}
+      }
     }
   }
 
-  async closeClients() {
-    for (const id of new Set([...this.clients.keys(), ...this.connecting.keys()])) await this.closeClient(id);
+  async closeClients(ownerConversationId = null) {
+    const serverIds = new Set([
+      ...[...this.clients.values()].map((holder) => holder?.serverId).filter(Boolean),
+      ...[...this.connecting.keys()].map((key) => String(key).split("::conversation:")[0]).filter(Boolean),
+    ]);
+    for (const id of serverIds) await this.closeClient(id, ownerConversationId);
   }
 
-  async execute(serverId, operation) {
-    const { server, holder } = await this.getClient(serverId);
+  async execute(serverId, operation, ownerConversationId = INTERNAL_CODEX_OWNER) {
+    const { server, holder } = await this.getClient(serverId, ownerConversationId);
     try {
-      return { server, holder, result: await operation(holder.client, requestOptions(server.toolTimeoutMs)) };
+      return { server, holder, result: await operation(holder.client) };
     } catch (error) {
-      if (shouldInvalidateClient(error)) await this.closeClient(server.id).catch(() => {});
+      if (shouldInvalidateClient(error)) await this.closeClient(server.id, ownerConversationId).catch(() => {});
       throw error;
     }
   }
 
-  async probe(serverId) {
+  async probe(serverId, ownerConversationId = INTERNAL_CODEX_OWNER) {
     await this.ensureReady();
     const server = this.requireServer(serverId);
     const probe = {
@@ -488,7 +497,7 @@ export class CodexMcpBridge {
       probeErrors: {},
     };
     try {
-      const { holder } = await this.getClient(server.id);
+      const { holder } = await this.getClient(server.id, ownerConversationId);
       const capabilities = holder.client.getServerCapabilities() || {};
       probe.serverInfo = holder.client.getServerVersion?.() || undefined;
       probe.capabilities = {
@@ -498,13 +507,13 @@ export class CodexMcpBridge {
       };
       if (capabilities.tools) {
         try {
-          const { result } = await this.execute(server.id, (client, options) => client.listTools(undefined, options));
+          const { result } = await this.execute(server.id, (client, options) => client.listTools(undefined, options), ownerConversationId);
           probe.tools = (result?.tools || []).filter((tool) => toolAllowed(server, tool.name)).slice(0, MAX_TOOLS).map((tool) => sanitizeTool(tool, server.id));
         } catch (error) { probe.probeErrors.tools = error instanceof Error ? error.message : String(error); }
       }
       if (capabilities.prompts) {
         try {
-          const { result } = await this.execute(server.id, (client, options) => client.listPrompts(undefined, options));
+          const { result } = await this.execute(server.id, (client, options) => client.listPrompts(undefined, options), ownerConversationId);
           probe.prompts = (result?.prompts || []).slice(0, MAX_TOOLS).map((prompt) => ({
             name: boundedText(prompt?.name, 220),
             description: prompt?.description == null ? undefined : boundedText(prompt.description, 2000),
@@ -514,11 +523,11 @@ export class CodexMcpBridge {
       }
       if (capabilities.resources) {
         try {
-          const { result } = await this.execute(server.id, (client, options) => client.listResources(undefined, options));
+          const { result } = await this.execute(server.id, (client, options) => client.listResources(undefined, options), ownerConversationId);
           probe.resources = (result?.resources || []).slice(0, MAX_TOOLS).map(sanitizeResource);
         } catch (error) { probe.probeErrors.resources = error instanceof Error ? error.message : String(error); }
         try {
-          const { result } = await this.execute(server.id, (client, options) => client.listResourceTemplates(undefined, options));
+          const { result } = await this.execute(server.id, (client, options) => client.listResourceTemplates(undefined, options), ownerConversationId);
           probe.resourceTemplates = (result?.resourceTemplates || []).slice(0, MAX_TOOLS).map(sanitizeResourceTemplate);
         } catch (error) { probe.probeErrors.resourceTemplates = error instanceof Error ? error.message : String(error); }
       }
@@ -530,9 +539,9 @@ export class CodexMcpBridge {
     return publicServer(server, probe);
   }
 
-  async listResources(serverId, cursor) {
+  async listResources(serverId, cursor, ownerConversationId = INTERNAL_CODEX_OWNER) {
     const server = this.requireServer(serverId);
-    const { result } = await this.execute(server.id, (client, options) => client.listResources(cursor ? { cursor } : undefined, options));
+    const { result } = await this.execute(server.id, (client, options) => client.listResources(cursor ? { cursor } : undefined, options), ownerConversationId);
     return {
       ok: true,
       server: server.id,
@@ -541,9 +550,9 @@ export class CodexMcpBridge {
     };
   }
 
-  async listResourceTemplates(serverId, cursor) {
+  async listResourceTemplates(serverId, cursor, ownerConversationId = INTERNAL_CODEX_OWNER) {
     const server = this.requireServer(serverId);
-    const { result } = await this.execute(server.id, (client, options) => client.listResourceTemplates(cursor ? { cursor } : undefined, options));
+    const { result } = await this.execute(server.id, (client, options) => client.listResourceTemplates(cursor ? { cursor } : undefined, options), ownerConversationId);
     return {
       ok: true,
       server: server.id,
@@ -552,29 +561,29 @@ export class CodexMcpBridge {
     };
   }
 
-  async readResource(serverId, uri) {
+  async readResource(serverId, uri, ownerConversationId = INTERNAL_CODEX_OWNER) {
     const server = this.requireServer(serverId);
     const resourceUri = String(uri ?? "").trim();
     if (!resourceUri) throw new Error("Resource URI is required.");
-    const { result } = await this.execute(server.id, (client, options) => client.readResource({ uri: resourceUri }, options));
+    const { result } = await this.execute(server.id, (client, options) => client.readResource({ uri: resourceUri }, options), ownerConversationId);
     return { ok: true, server: server.id, uri: resourceUri, result };
   }
 
-  async callTool({ serverId, toolName, arguments: args = {} } = {}) {
+  async callTool({ serverId, toolName, arguments: args = {} } = {}, ownerConversationId = INTERNAL_CODEX_OWNER) {
     const server = this.requireServer(serverId);
     const selected = String(toolName ?? "").trim();
     if (!selected) throw new Error("toolName is required.");
     if (!toolAllowed(server, selected)) throw new Error(`Codex MCP tool ${server.id}/${selected} is disabled by enabled_tools or disabled_tools.`);
     let probe = this.probes.get(server.id);
     if (!probe?.tools?.length) {
-      await this.probe(server.id);
+      await this.probe(server.id, ownerConversationId);
       probe = this.probes.get(server.id);
     }
     const tool = probe?.tools?.find((candidate) => candidate.name === selected);
     if (!tool) throw new Error(`Unknown or unavailable Codex MCP tool ${server.id}/${selected}. Inspect the server first.`);
     const approval = approvalDecision(server, tool, this.executionPolicy);
     const requestKey = sha256(JSON.stringify({ serverId: server.id, toolName: selected, arguments: args || {} })).slice(0, 24);
-    const { result } = await this.execute(server.id, (client, options) => client.callTool({ name: selected, arguments: args || {} }, undefined, options));
+    const { result } = await this.execute(server.id, (client, options) => client.callTool({ name: selected, arguments: args || {} }, undefined, options), ownerConversationId);
     return {
       ok: true,
       approvalRequired: false,
@@ -600,12 +609,79 @@ export class CodexMcpBridge {
     };
   }
 
+  listConnections({ serverId = null, ownerConversationId = null } = {}) {
+    const requested = String(serverId || "").trim() || null;
+    const owner = ownerConversationId == null ? null : normalizeOwner(ownerConversationId);
+    const rows = [];
+    for (const [key, holder] of this.clients.entries()) {
+      const id = String(holder?.serverId || holder?.server?.id || "");
+      if (requested && id !== requested) continue;
+      if (owner && holder?.ownerConversationId !== owner) continue;
+      rows.push({
+        source: "codex",
+        mode: "conversation-isolated",
+        key: String(key),
+        serverId: id,
+        ownerConversationId: holder?.ownerConversationId || null,
+        connectionState: "online",
+        connected: true,
+        connecting: false,
+        transport: holder?.server?.transport || holder?.definition?.transport || null,
+      });
+    }
+    for (const [key] of this.connecting.entries()) {
+      if (rows.some((row) => row.key === String(key))) continue;
+      const [id] = String(key).split("::conversation:");
+      if (requested && id !== requested) continue;
+      if (owner && String(key) !== connectionKey(id, owner)) continue;
+      rows.push({
+        source: "codex",
+        mode: "conversation-isolated",
+        key: String(key),
+        serverId: id,
+        ownerConversationId: owner,
+        connectionState: "connecting",
+        connected: false,
+        connecting: true,
+        transport: null,
+      });
+    }
+    return rows.sort((a, b) => a.serverId.localeCompare(b.serverId) || a.key.localeCompare(b.key));
+  }
+
+  async resetConnection(serverId, ownerConversationId) {
+    const requested = String(serverId || "").trim();
+    if (!requested) throw new Error("serverId is required.");
+    const owner = normalizeOwner(ownerConversationId);
+    const key = connectionKey(requested, owner);
+    const existed = this.clients.has(key) || this.connecting.has(key);
+    await this.closeClient(requested, owner);
+    return {
+      ok: true,
+      source: "codex",
+      serverId: requested,
+      ownerConversationId: owner,
+      closedConnections: existed ? 1 : 0,
+      connectionState: "disconnected",
+      reconnectOnNextUse: true,
+    };
+  }
+
   async close() {
     await this.closeClients();
   }
 }
 
-export function registerCodexMcpBridgeTools(server, bridge) {
+export function registerCodexMcpBridgeTools(server, bridge, { resolveConversation = null } = {}) {
+  const currentConversation = async (extra) => {
+    if (typeof resolveConversation !== "function") {
+      throw new Error("Codex MCP tools require a conversation authority resolver.");
+    }
+    const resolved = await resolveConversation(extra);
+    const conversationId = String(resolved?.conversationId || "").trim();
+    if (!conversationId) throw new Error("Codex MCP tools require the current ChatGPT conversation identity.");
+    return conversationId;
+  };
   server.registerTool("codex_mcp_catalog", {
     title: "List linked Codex MCP servers",
     description: "List the user's existing Codex MCP server configuration through a secret-free linked view. Values of environment variables, literal headers, command arguments, and URL query strings are never returned. This does not copy or rewrite config.toml.",
@@ -623,8 +699,8 @@ export function registerCodexMcpBridgeTools(server, bridge) {
     description: "Re-read the existing Codex config.toml and close stale linked MCP connections. The config file is never rewritten and secret values are never persisted by DevSpace.",
     inputSchema: {},
     annotations: MUTATING,
-  }, async () => {
-    try { return textResult(await bridge.refresh()); }
+  }, async (_, extra) => {
+    try { return textResult(await bridge.refresh({ ownerConversationId: await currentConversation(extra) })); }
     catch (error) { return errorResult(error); }
   });
 
@@ -635,8 +711,8 @@ export function registerCodexMcpBridgeTools(server, bridge) {
       serverId: z.string().min(1).max(220),
     },
     annotations: READ_ONLY,
-  }, async ({ serverId }) => {
-    try { return textResult({ ok: true, server: await bridge.probe(serverId) }); }
+  }, async ({ serverId }, extra) => {
+    try { return textResult({ ok: true, server: await bridge.probe(serverId, await currentConversation(extra)) }); }
     catch (error) { return errorResult(error); }
   });
 
@@ -650,8 +726,8 @@ export function registerCodexMcpBridgeTools(server, bridge) {
       userApproved: z.boolean().optional().describe("Deprecated compatibility field; full-access is the only local execution policy."),
     },
     annotations: CALLING,
-  }, async (input) => {
-    try { return textResult(await bridge.callTool(input)); }
+  }, async (input, extra) => {
+    try { return textResult(await bridge.callTool(input, await currentConversation(extra))); }
     catch (error) { return errorResult(error); }
   });
 
@@ -663,8 +739,8 @@ export function registerCodexMcpBridgeTools(server, bridge) {
       cursor: z.string().min(1).max(4096).optional(),
     },
     annotations: READ_ONLY,
-  }, async ({ serverId, cursor }) => {
-    try { return textResult(await bridge.listResources(serverId, cursor)); }
+  }, async ({ serverId, cursor }, extra) => {
+    try { return textResult(await bridge.listResources(serverId, cursor, await currentConversation(extra))); }
     catch (error) { return errorResult(error); }
   });
 
@@ -676,8 +752,8 @@ export function registerCodexMcpBridgeTools(server, bridge) {
       cursor: z.string().min(1).max(4096).optional(),
     },
     annotations: READ_ONLY,
-  }, async ({ serverId, cursor }) => {
-    try { return textResult(await bridge.listResourceTemplates(serverId, cursor)); }
+  }, async ({ serverId, cursor }, extra) => {
+    try { return textResult(await bridge.listResourceTemplates(serverId, cursor, await currentConversation(extra))); }
     catch (error) { return errorResult(error); }
   });
 
@@ -689,9 +765,9 @@ export function registerCodexMcpBridgeTools(server, bridge) {
       uri: z.string().min(1).max(16_384),
     },
     annotations: READ_ONLY,
-  }, async ({ serverId, uri }) => {
+  }, async ({ serverId, uri }, extra) => {
     try {
-      const read = await bridge.readResource(serverId, uri);
+      const read = await bridge.readResource(serverId, uri, await currentConversation(extra));
       const contents = Array.isArray(read?.result?.contents) ? read.result.contents : [];
       const content = contents.map((resource) => ({
         type: "resource",

@@ -6,40 +6,34 @@ import { createManagedWorktree } from "./git-worktrees.js";
 import { assertAllowedPath, isPathInsideRoot, resolveAllowedPath } from "./roots.js";
 import { loadWorkspaceSkills, markSkillActivated, resolveSkillReadPath, } from "./skills.js";
 import { loadLocalAgentProfiles, } from "./local-agent-profiles.js";
-const DEFAULT_MAX_IN_MEMORY_WORKSPACES = 32;
 export class WorkspaceRegistry {
     config;
     store;
     workspaces = new Map();
-    maxInMemoryWorkspaces;
-    constructor(config, store, options = {}) {
+    workspaceIdentities = new Map();
+    constructor(config, store, _options = {}) {
         this.config = config;
         this.store = store;
-        this.maxInMemoryWorkspaces = Math.max(1, Math.min(512, Number(options.maxInMemoryWorkspaces) || DEFAULT_MAX_IN_MEMORY_WORKSPACES));
     }
     get inMemorySize() {
         return this.workspaces.size;
     }
+    workspaceIdentity(root, mode = "checkout", sourceRoot) {
+        const normalize = (value) => {
+            const resolved = resolve(String(value ?? ""));
+            return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+        };
+        return `${mode}:${normalize(root)}:${sourceRoot ? normalize(sourceRoot) : ""}`;
+    }
     rememberWorkspace(workspace) {
         if (!workspace?.id)
             throw new Error("Workspace context requires id.");
-        this.workspaces.delete(workspace.id);
         this.workspaces.set(workspace.id, workspace);
-        while (this.workspaces.size > this.maxInMemoryWorkspaces) {
-            const oldest = this.workspaces.keys().next().value;
-            if (!oldest)
-                break;
-            this.workspaces.delete(oldest);
-        }
+        this.workspaceIdentities.set(this.workspaceIdentity(workspace.root, workspace.mode, workspace.sourceRoot), workspace);
         return workspace;
     }
     touchWorkspaceMemory(workspaceId) {
-        const workspace = this.workspaces.get(workspaceId);
-        if (!workspace)
-            return undefined;
-        this.workspaces.delete(workspaceId);
-        this.workspaces.set(workspaceId, workspace);
-        return workspace;
+        return this.workspaces.get(workspaceId);
     }
     async openWorkspace(input) {
         const options = typeof input === "string" ? { path: input } : input;
@@ -60,6 +54,13 @@ export class WorkspaceRegistry {
             throw new Error(`Unknown workspaceId: ${workspaceId}. Call open_workspace first.`);
         }
         const root = this.assertWorkspaceRootAllowed(session.root, session.mode, session.sourceRoot);
+        const identity = this.workspaceIdentity(root, session.mode, session.sourceRoot);
+        const sharedWorkspace = this.workspaceIdentities.get(identity);
+        if (sharedWorkspace) {
+            this.workspaces.set(workspaceId, sharedWorkspace);
+            this.store?.touchSession(workspaceId);
+            return sharedWorkspace;
+        }
         const restoredWorkspace = {
             id: session.id,
             root,
@@ -123,6 +124,11 @@ export class WorkspaceRegistry {
         if (!rootStats.isDirectory()) {
             throw new Error(`Workspace root must be a directory: ${path}`);
         }
+        const existing = this.workspaceIdentities.get(this.workspaceIdentity(root, "checkout"));
+        if (existing) {
+            this.store?.touchSession(existing.id);
+            return this.describeWorkspace(existing);
+        }
         return this.createWorkspaceContext({ root, mode: "checkout" });
     }
     async openWorktreeWorkspace(path, baseRef) {
@@ -159,6 +165,9 @@ export class WorkspaceRegistry {
             managed: workspace.worktree?.managed,
         });
         this.rememberWorkspace(workspace);
+        return this.describeWorkspace(workspace);
+    }
+    async describeWorkspace(workspace) {
         const agentsFiles = await this.loadInitialAgentsFiles(workspace.root);
         const availableAgentsFiles = await this.findAvailableAgentsFiles(workspace.root, agentsFiles);
         return { workspace, agentsFiles, availableAgentsFiles };

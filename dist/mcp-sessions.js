@@ -1,20 +1,27 @@
+let maintenanceGcScheduled = false;
+function cleanClientSessionFingerprint(value) {
+    const text = String(value ?? "").trim().toLowerCase();
+    return /^[a-f0-9]{64}$/.test(text) ? text : null;
+}
+function scheduleMaintenanceGc() {
+    if (maintenanceGcScheduled || typeof globalThis.gc !== "function")
+        return;
+    maintenanceGcScheduled = true;
+    setImmediate(() => {
+        maintenanceGcScheduled = false;
+        try {
+            globalThis.gc();
+        }
+        catch { }
+    });
+}
+
 export class McpSessionRegistry {
     sessions = new Map();
+    clientSessions = new Map();
     now;
-    maxInactiveSessions;
-    maxEventStreams;
-    maxSessions;
     constructor(options = {}) {
         this.now = options.now ?? Date.now;
-        this.maxInactiveSessions = options.maxInactiveSessions == null
-            ? Number.POSITIVE_INFINITY
-            : Math.max(0, Number(options.maxInactiveSessions) || 0);
-        this.maxEventStreams = options.maxEventStreams == null
-            ? Number.POSITIVE_INFINITY
-            : Math.max(1, Number(options.maxEventStreams) || 1);
-        this.maxSessions = options.maxSessions == null
-            ? Number.POSITIVE_INFINITY
-            : Math.max(1, Number(options.maxSessions) || 1);
     }
     get size() {
         return this.sessions.size;
@@ -25,30 +32,46 @@ export class McpSessionRegistry {
         const ages = entries.map((entry) => Math.max(0, now - Number(entry.lastActivityAt || now)));
         return {
             sessions: entries.length,
+            clientSessions: this.clientSessions.size,
+            identifiedSessions: entries.filter((entry) => Boolean(entry.clientSessionFingerprint)).length,
+            unidentifiedSessions: entries.filter((entry) => !entry.clientSessionFingerprint).length,
+            supersededSessions: entries.filter((entry) => entry.superseded === true).length,
             activeRequests: entries.reduce((sum, entry) => sum + Number(entry.activeRequests || 0), 0),
             oldestActivityAgeMs: ages.length ? Math.max(...ages) : 0,
             newestActivityAgeMs: ages.length ? Math.min(...ages) : 0,
             eventStreams: entries.reduce((sum, entry) => sum + Number(entry.eventStreamRequests || 0), 0),
-            eventStreamsClosing: entries.reduce((sum, entry) => sum + (entry.eventStreamClosing ? 1 : 0), 0),
-            maxEventStreams: Number.isFinite(this.maxEventStreams) ? this.maxEventStreams : null,
-            maxSessions: Number.isFinite(this.maxSessions) ? this.maxSessions : null,
+            eventStreamsClosing: 0,
+            maxEventStreams: null,
+            maxSessions: null,
         };
     }
-    register(sessionId, transport) {
+    register(sessionId, transport, { clientSessionFingerprint = null } = {}) {
         if (this.sessions.has(sessionId)) {
             void closeSessions([{ sessionId, transport }]);
             return false;
         }
-        this.sessions.set(sessionId, {
+        const fingerprint = cleanClientSessionFingerprint(clientSessionFingerprint);
+        const entry = {
             transport,
             lastActivityAt: this.now(),
             activeRequests: 0,
             eventStreamRequests: 0,
-            eventStreamStartedAt: null,
-            eventStreamClosing: false,
-        });
-        this.#enforceInactiveCap(sessionId);
-        return this.#enforceSessionCap(sessionId);
+            everHadEventStream: false,
+            disconnectObserved: false,
+            superseded: false,
+            clientSessionFingerprint: fingerprint,
+        };
+        this.sessions.set(sessionId, entry);
+        if (fingerprint) {
+            const priorId = this.clientSessions.get(fingerprint);
+            const prior = priorId && priorId !== sessionId ? this.sessions.get(priorId) : null;
+            this.clientSessions.set(fingerprint, sessionId);
+            if (prior) {
+                prior.superseded = true;
+                this.#closeRetiredIfIdle(priorId, prior);
+            }
+        }
+        return true;
     }
     get(sessionId) {
         const entry = this.sessions.get(sessionId);
@@ -70,11 +93,9 @@ export class McpSessionRegistry {
         if (!entry)
             return false;
         entry.eventStreamRequests = Math.max(0, Number(entry.eventStreamRequests || 0)) + 1;
-        if (!entry.eventStreamStartedAt)
-            entry.eventStreamStartedAt = this.now();
-        entry.eventStreamClosing = false;
+        entry.everHadEventStream = true;
+        entry.disconnectObserved = false;
         entry.lastActivityAt = this.now();
-        this.#enforceEventStreamCap();
         return true;
     }
     release(sessionId, { eventStream = false } = {}) {
@@ -84,41 +105,23 @@ export class McpSessionRegistry {
         entry.activeRequests = Math.max(0, Number(entry.activeRequests || 0) - 1);
         if (eventStream) {
             entry.eventStreamRequests = Math.max(0, Number(entry.eventStreamRequests || 0) - 1);
-            if (entry.eventStreamRequests === 0) {
-                entry.eventStreamStartedAt = null;
-                entry.eventStreamClosing = false;
+            if (entry.everHadEventStream && entry.eventStreamRequests === 0) {
+                entry.disconnectObserved = true;
             }
         }
         entry.lastActivityAt = this.now();
+        this.#closeRetiredIfIdle(sessionId, entry);
         return true;
     }
     remove(sessionId) {
-        return this.sessions.delete(sessionId);
-    }
-    async closeIdle(idleTimeoutMs) {
-        const cutoff = this.now() - idleTimeoutMs;
-        const idleSessions = [];
-        for (const [sessionId, entry] of this.sessions) {
-            if (entry.activeRequests > 0 || entry.lastActivityAt > cutoff)
-                continue;
-            this.sessions.delete(sessionId);
-            idleSessions.push({ sessionId, transport: entry.transport });
+        const entry = this.sessions.get(sessionId);
+        if (!entry)
+            return false;
+        this.sessions.delete(sessionId);
+        if (entry.clientSessionFingerprint && this.clientSessions.get(entry.clientSessionFingerprint) === sessionId) {
+            this.clientSessions.delete(entry.clientSessionFingerprint);
         }
-        return closeSessions(idleSessions);
-    }
-    async closeExcessInactive(maxInactiveSessions) {
-        const maxInactive = Math.max(0, Number(maxInactiveSessions) || 0);
-        const inactive = Array.from(this.sessions, ([sessionId, entry]) => ({ sessionId, entry }))
-            .filter(({ entry }) => Number(entry.activeRequests || 0) === 0)
-            .sort((a, b) => Number(a.entry.lastActivityAt || 0) - Number(b.entry.lastActivityAt || 0));
-        const excess = inactive.slice(0, Math.max(0, inactive.length - maxInactive));
-        const sessions = [];
-        for (const { sessionId, entry } of excess) {
-            if (!this.sessions.delete(sessionId))
-                continue;
-            sessions.push({ sessionId, transport: entry.transport });
-        }
-        return closeSessions(sessions);
+        return true;
     }
     async closeAll() {
         const sessions = Array.from(this.sessions, ([sessionId, entry]) => ({
@@ -126,96 +129,25 @@ export class McpSessionRegistry {
             transport: entry.transport,
         }));
         this.sessions.clear();
+        this.clientSessions.clear();
         return closeSessions(sessions);
     }
-    #enforceEventStreamCap() {
-        if (!Number.isFinite(this.maxEventStreams))
-            return;
-        let activeStreams = [...this.sessions.values()].reduce((sum, entry) => (
-            sum + (entry.eventStreamClosing ? 0 : Number(entry.eventStreamRequests || 0))
-        ), 0);
-        if (activeStreams <= this.maxEventStreams)
-            return;
-        const oldest = Array.from(this.sessions, ([sessionId, entry]) => ({ sessionId, entry }))
-            .filter(({ entry }) => Number(entry.eventStreamRequests || 0) > 0 && entry.eventStreamClosing !== true)
-            .sort((a, b) => Number(a.entry.eventStreamStartedAt || 0) - Number(b.entry.eventStreamStartedAt || 0));
-        for (const { entry } of oldest) {
-            if (activeStreams <= this.maxEventStreams)
-                break;
-            if (typeof entry.transport?.closeStandaloneSSEStream !== "function")
-                continue;
-            entry.eventStreamClosing = true;
-            try {
-                entry.transport.closeStandaloneSSEStream();
-                activeStreams -= Math.max(1, Number(entry.eventStreamRequests || 1));
-            }
-            catch {
-                entry.eventStreamClosing = false;
-            }
-        }
-    }
-    #enforceSessionCap(newSessionId) {
-        if (!Number.isFinite(this.maxSessions) || this.sessions.size <= this.maxSessions)
-            return true;
-        const evicted = [];
-        const evictOldest = (candidates) => {
-            for (const { sessionId, entry } of candidates) {
-                if (this.sessions.size <= this.maxSessions)
-                    break;
-                if (!this.sessions.delete(sessionId))
-                    continue;
-                evicted.push({ sessionId, transport: entry.transport });
-            }
-        };
-        const existing = Array.from(this.sessions, ([sessionId, entry]) => ({ sessionId, entry }))
-            .filter(({ sessionId }) => sessionId !== newSessionId);
-        evictOldest(existing
-            .filter(({ entry }) => Number(entry.activeRequests || 0) === 0)
-            .sort((a, b) => Number(a.entry.lastActivityAt || 0) - Number(b.entry.lastActivityAt || 0)));
-        if (this.sessions.size > this.maxSessions) {
-            evictOldest(existing
-                .filter(({ entry }) => {
-                const activeRequests = Number(entry.activeRequests || 0);
-                const eventStreamRequests = Number(entry.eventStreamRequests || 0);
-                return activeRequests > 0 && eventStreamRequests >= activeRequests;
-            })
-                .sort((a, b) => Number(a.entry.eventStreamStartedAt || a.entry.lastActivityAt || 0)
-                - Number(b.entry.eventStreamStartedAt || b.entry.lastActivityAt || 0)));
-        }
-        if (this.sessions.size > this.maxSessions) {
-            const entry = this.sessions.get(newSessionId);
-            if (entry && this.sessions.delete(newSessionId)) {
-                evicted.push({ sessionId: newSessionId, transport: entry.transport });
-            }
-            void closeSessions(evicted);
+    #closeRetiredIfIdle(sessionId, entry) {
+        if (entry.activeRequests > 0)
             return false;
-        }
-        void closeSessions(evicted);
+        // A superseded transport's standalone SSE is not substantive tool work.
+        // Closing the transport is what terminates that obsolete stream; waiting
+        // for the stream to close first creates a circular retention leak.
+        if (!entry.superseded && (!entry.disconnectObserved || entry.eventStreamRequests > 0))
+            return false;
+        if (!this.remove(sessionId))
+            return false;
+        void closeSessions([{ sessionId, transport: entry.transport }]);
         return true;
-    }
-    #enforceInactiveCap(protectedSessionId = null) {
-        if (!Number.isFinite(this.maxInactiveSessions))
-            return;
-        const allInactive = Array.from(this.sessions, ([sessionId, entry]) => ({ sessionId, entry }))
-            .filter(({ entry }) => Number(entry.activeRequests || 0) === 0)
-            .sort((a, b) => Number(a.entry.lastActivityAt || 0) - Number(b.entry.lastActivityAt || 0));
-        const excessCount = Math.max(0, allInactive.length - this.maxInactiveSessions);
-        const excess = allInactive
-            .filter(({ sessionId }) => sessionId !== protectedSessionId)
-            .slice(0, excessCount);
-        if (!excess.length)
-            return;
-        const sessions = [];
-        for (const { sessionId, entry } of excess) {
-            if (!this.sessions.delete(sessionId))
-                continue;
-            sessions.push({ sessionId, transport: entry.transport });
-        }
-        void closeSessions(sessions);
     }
 }
 async function closeSessions(sessions) {
-    return Promise.all(sessions.map(async ({ sessionId, transport }) => {
+    const results = await Promise.all(sessions.map(async ({ sessionId, transport }) => {
         try {
             await transport.close();
             return { sessionId };
@@ -224,4 +156,7 @@ async function closeSessions(sessions) {
             return { sessionId, error };
         }
     }));
+    if (sessions.length)
+        scheduleMaintenanceGc();
+    return results;
 }

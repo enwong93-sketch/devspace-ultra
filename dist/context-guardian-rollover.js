@@ -2,6 +2,7 @@ import { attachAutoCompactContract, validateAutoCompactContinuation } from "./au
 import { estimateClassicInputTokens } from "./context-guardian-cdp.js";
 
 const DEFAULT_POLL_MS = 5_000;
+const DEFAULT_ROUTE_SETTLE_MS = 3_000;
 const PREPARE_REUSE_MS = 30_000;
 const NATIVE_STRUCTURAL_SEED_TTL_MS = 60_000;
 
@@ -12,6 +13,18 @@ function clip(value, max = 2_400) {
 
 function currentStep(plan) {
   return plan?.steps?.find((step) => step.status === "in_progress") || null;
+}
+
+function stableHydratedConversationRoute(snapshot, settleMs = DEFAULT_ROUTE_SETTLE_MS) {
+  return Boolean(
+    snapshot?.ok
+    && snapshot?.mode !== "work"
+    && snapshot?.conversationId
+    && snapshot?.documentReadyState === "complete"
+    && snapshot?.composerReady === true
+    && snapshot?.routeHydrated === true
+    && Number(snapshot?.routeStableForMs || 0) >= Math.max(0, Number(settleMs) || 0)
+  );
 }
 
 function pressureSummary(context) {
@@ -113,6 +126,7 @@ export class ContextGuardianRolloverCoordinator {
     resolveGoalRuntimeKey,
     onVerifiedRollover,
     pollMs = DEFAULT_POLL_MS,
+    routeSettleMs = DEFAULT_ROUTE_SETTLE_MS,
   } = {}) {
     if (!contextGuardian || !contextAdapter || !continuityRuntime || !goalRuntime || !planRuntime) {
       throw new Error("ContextGuardianRolloverCoordinator requires Context Guardian, CDP adapter, continuity, Goal, and Plan runtimes.");
@@ -125,6 +139,7 @@ export class ContextGuardianRolloverCoordinator {
     this.resolveGoalRuntimeKey = typeof resolveGoalRuntimeKey === "function" ? resolveGoalRuntimeKey : null;
     this.onVerifiedRollover = typeof onVerifiedRollover === "function" ? onVerifiedRollover : null;
     this.pollMs = Math.max(0, Number(pollMs) || 0);
+    this.routeSettleMs = Math.max(0, Number(routeSettleMs) || 0);
     this.timer = null;
     this.polling = null;
     this.closed = false;
@@ -134,6 +149,7 @@ export class ContextGuardianRolloverCoordinator {
 
   async start({ schedule = true } = {}) {
     const first = await this.pollOnce();
+    if (this.continuityRuntime.enabled !== true) return first;
     if (schedule && !this.closed && this.pollMs > 0 && !this.timer) {
       this.timer = setInterval(() => { void this.pollOnce().catch(() => {}); }, this.pollMs);
       this.timer.unref?.();
@@ -296,6 +312,9 @@ export class ContextGuardianRolloverCoordinator {
 
   async pollOnce() {
     if (this.closed) return { ok: true, closed: true, results: [] };
+    if (this.continuityRuntime.enabled !== true) {
+      return { ok: true, enabled: false, action: "auto-compact-disabled", results: [] };
+    }
     if (this.polling) return await this.polling;
     this.polling = this.#pollOnceImpl().finally(() => { this.polling = null; });
     return await this.polling;
@@ -309,11 +328,15 @@ export class ContextGuardianRolloverCoordinator {
       try {
         let snapshot = await this.#refresh(runtimeKey);
         let context = await this.contextGuardian.status(runtimeKey);
-        ({ snapshot, context } = await this.#ensureNativeSeed(runtimeKey, snapshot, context));
         if (!snapshot?.ok || context.supportedChatMode !== true || snapshot.mode === "work") {
           results.push({ runtimeKey, action: "skipped-unsupported" });
           continue;
         }
+        if (!stableHydratedConversationRoute(snapshot, this.routeSettleMs)) {
+          results.push({ runtimeKey, action: "skipped-route-hydration" });
+          continue;
+        }
+        ({ snapshot, context } = await this.#ensureNativeSeed(runtimeKey, snapshot, context));
         const stage = context?.pressure?.stage;
         if (stage !== "prepare" && stage !== "rollover") {
           results.push({ runtimeKey, action: "normal", stage });
@@ -456,8 +479,12 @@ export class ContextGuardianRolloverCoordinator {
   async beforeGoalContinuation({ runtimeKey, goalId, continuationPrompt } = {}) {
     const prompt = String(continuationPrompt ?? "").trim();
     if (!runtimeKey || !goalId || !prompt) return { handled: false, reason: "missing-input" };
+    if (this.continuityRuntime.enabled !== true) return { handled: false, reason: "auto-compact-disabled" };
     let snapshot = await this.#refresh(runtimeKey);
     let baseContext = await this.contextGuardian.status(runtimeKey);
+    if (!stableHydratedConversationRoute(snapshot, this.routeSettleMs)) {
+      return { handled: false, blocked: true, reason: "route-not-stable", context: baseContext };
+    }
     ({ snapshot, context: baseContext } = await this.#ensureNativeSeed(runtimeKey, snapshot, baseContext));
     const nextInputTokens = estimateClassicInputTokens(prompt) + 128;
     const context = await this.contextGuardian.status(runtimeKey, { nextInputTokens });

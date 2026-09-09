@@ -1,11 +1,27 @@
 # Changelog
 
+## 0.5.2 — 2026-09-09
+
+- Stabilized the Local Gateway/Core lifecycle with system-managed heap sizing, zero-listener cold start, degraded-listener recovery, bounded client-session descriptors, lazy transport resurrection, no arbitrary work/startup deadlines, retryable Windows atomic writes, and bounded runtime logs.
+- Replaced implicit backend-wide MCP connection sharing with per-conversation MCP client/session isolation. Stateful application connections are additionally bound to instance, runtime, process, and port; reconnect/reset/release operations cannot close another conversation's connection.
+- Added `blender_runtime` and the real `blender_mcp` execution boundary, including safe adoption of an already-open Blender project without restarting it, plus future dual-runtime/dual-port isolation.
+- Added request-scoped conversation authority for Capability, linked Codex MCP, JavaScript REPL, Computer Use, Goal/Plan, and Agent-authored progress operations.
+- Added a conversation-scoped floating progress narration card driven only by `devspace_progress_report`. Timers, heartbeat rows, fixed tool counts, raw handler boundaries, and automatic program prose no longer write visible narration.
+- Added proactive `notifications/tools/list_changed` and model-surface fingerprints so existing ChatGPT sessions can discard obsolete tool schemas after Core changes.
+- Added a one-command Windows installer and the separately installable `devspace-ultra-setup` Agent Skill. DuckDNS/DDNS + Caddy is the recommended route; a stable Cloudflare named tunnel is the quota-governed fallback.
+- Added DPAPI-protected DuckDNS/Cloudflare secret storage, public-path and package-content release gates, tagged release assets, and removal of machine-specific handoff data from the public tree.
+- Kept automatic Main Goal Recovery and Auto Compact disabled by default pending their final production re-entry/transaction live gates.
+
 ## 0.5.1 — 2026-09-07
 
 - Added Codex Computer Use routing/skill delegation with automatic visual-task routing through the shared persistent Codex `node_repl` and OpenAI bundled `@oai/sky` runtime, with no DevSpace fallback GUI driver.
 - Replaced the optional Codex sandbox/permission-grant surface with one owner-selected `danger-full-access` / `never` approval policy.
 - Added support for Codex `requires_local_executor` plugin metadata and 77/77 live manifest compatibility.
-- Added a model-independent interactive progress contract for Thinking/XHi and Pro, with concise in-conversation milestone updates and the existing bounded human-progress transcript as a no-refresh fallback.
+- Added a model-independent interactive progress contract for Thinking/XHi and Pro. Every observed Main conversation now receives one exact-conversation floating narration card with an idle placeholder before its first tracked event; verified successes are batched at roughly ten tool boundaries, while blockers and material approach changes remain immediate.
+- Retired the old inline black Goal Dock and inline Plan Card as user-facing progress surfaces. Goal/Plan start and rebind tools no longer request those transcript apps, while existing legacy iframe shells and their `Failed to fetch template` placeholders are hidden in place without a reload, navigation, or synthetic turn.
+- Added connector-level and root `AGENTS.md` routing that requires a conversation-bound Plan before non-trivial multi-tool work and Goal Mode plus a fresh turn Plan for autonomous multi-turn outcomes, ensuring every Main agent actually feeds the floating progress card instead of merely displaying an unused shell.
+- Added a Codex-inspired plugin-layer Capability Routing Contract. `capability_route` performs bounded progressive-disclosure routing across plugin Skills, plugins, command adapters, and deferred MCP surfaces; `tool_search(workspaceId=...)` additionally routes project/user Agent Skills together with direct tools. Structured aliases, exclusions, `allow_implicit_invocation`, Skill `agents/openai.yaml` interface/default-prompt/dependency metadata, exact `nextAction`, ambiguity handling, and CJK matching are supported without loading every Skill body or MCP schema.
+- Made routing updates live for existing MCP sessions through `notifications/tools/list_changed`. Stable Gateway model-surface fingerprints are versioned and now include tool titles/descriptions, input/output schemas, annotations, UI/routing metadata, the capability routing index, and model instructions; obsolete sessions are rejected for fresh initialize instead of retaining stale routing behavior.
 - Added bounded append-only diagnostic log retention: per-file tail trimming without whole-file heap reads, total root quota, file-count cap, age expiry, and Gateway lifecycle integration; durable JSON authority/state files remain excluded.
 - Productized Main selective Auto Compact as the built-in `devspace-auto-compact` capability. ChatGPT may assign a new backend conversation ID, but acceptance now requires a non-empty bounded capsule, all available source/carry ratios, a materially smaller target mapping/current branch/payload, continuity markers, and a guarded atomic rebind of native authority, Goal, Plan, progress narration, and Host Overlay. Full mapping inheritance and zero-context continuation fail closed.
 - Added authenticated in-page structural conversation descriptors whose access token and raw mapping never leave the ChatGPT renderer; target continuation verification no longer races a previously completed network response.

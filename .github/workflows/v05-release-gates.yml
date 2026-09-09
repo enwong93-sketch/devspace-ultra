@@ -1,0 +1,24 @@
+name: V0.5 release gates
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: Public release safety gate
+        run: npm run verify:public-release
+      - name: Stable Gateway gates
+        run: npm run verify:stable-gateway
+      - name: Capability, connection and routing gates
+        run: npm run verify:capabilities

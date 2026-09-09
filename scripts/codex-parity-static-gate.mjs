@@ -13,12 +13,12 @@ assert.match(server, /ToolCatalogRegistry, instrumentToolRegistration/);
 assert.match(server, /registerCodexParityTools/);
 assert.match(server, /CodexMcpBridge, registerCodexMcpBridgeTools/);
 assert.match(server, /new CodexMcpBridge\(\{ codexHome: config\.agentDir, executionPolicy: \"full-access\" \}\)/);
-assert.match(server, /registerCodexMcpBridgeTools\(server, codexMcpBridge\)/);
+assert.match(server, /registerCodexMcpBridgeTools\(server, codexMcpBridge,\s*\{\s*resolveConversation: resolveConversationAuthority\s*\}\)/s);
 assert.match(server, /await codexMcpBridge\.close\(\)/);
 const instrumentIndex = server.indexOf("instrumentToolRegistration(server, toolCatalog)");
-const firstGoalProgressIndex = server.indexOf("installGoalToolProgress(server");
+const firstToolRegistrationIndex = server.indexOf("registerIncomingImageTools(server");
 const parityRegistrationIndex = server.indexOf("registerCodexParityTools(server");
-assert.ok(instrumentIndex >= 0 && instrumentIndex < firstGoalProgressIndex, "tool catalogue must observe every subsequent Core tool registration");
+assert.ok(instrumentIndex >= 0 && firstToolRegistrationIndex > instrumentIndex, "tool catalogue must observe every subsequent Core tool registration");
 assert.ok(parityRegistrationIndex > instrumentIndex, "Codex parity tools must be registered through the instrumented catalogue");
 
 for (const name of [

@@ -22,6 +22,33 @@ function integer(value, fallback, min, max) {
   return parsed;
 }
 
+const RETRYABLE_ATOMIC_RENAME_CODES =
+  new Set(["EPERM", "EACCES", "EBUSY"]);
+
+async function renameWithRetry(sourcePath, destinationPath) {
+  let delayMs = 8;
+
+  while (true) {
+    try {
+      await rename(sourcePath, destinationPath);
+      return;
+    }
+    catch (error) {
+      if (!RETRYABLE_ATOMIC_RENAME_CODES.has(error?.code)) {
+        throw error;
+      }
+
+      await new Promise((resolvePromise) =>
+        setTimeout(resolvePromise, delayMs)
+      );
+
+      delayMs = Math.min(
+        250,
+        Math.ceil(delayMs * 1.5)
+      );
+    }
+  }
+}
 export async function atomicWriteFile(path, data, {
   encoding = "utf8",
   mode = 0o600,
@@ -37,7 +64,7 @@ export async function atomicWriteFile(path, data, {
     const attempts = integer(retries, 6, 0, 20) + 1;
     for (let attempt = 0; attempt < attempts; attempt += 1) {
       try {
-        await rename(temp, destination);
+        await renameWithRetry(temp, destination);
         committed = true;
         return { ok: true, path: destination, attempts: attempt + 1 };
       } catch (error) {

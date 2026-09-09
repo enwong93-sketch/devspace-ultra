@@ -28,9 +28,9 @@ const emit = (payload) => console.log(JSON.stringify({ ...payload, secretValuesL
 
 async function localIdentity() {
   try {
-    const health = await fetch(`http://127.0.0.1:${fixedPort}/healthz`, { signal: AbortSignal.timeout(2_500) });
+    const health = await fetch(`http://127.0.0.1:${fixedPort}/healthz`);
     if (!health.ok) return { state: "occupied-unhealthy", status: health.status };
-    const prmResponse = await fetch(`http://127.0.0.1:${fixedPort}/.well-known/oauth-protected-resource/mcp`, { signal: AbortSignal.timeout(2_500) });
+    const prmResponse = await fetch(`http://127.0.0.1:${fixedPort}/.well-known/oauth-protected-resource/mcp`);
     const prm = prmResponse.ok ? await prmResponse.json() : null;
     if (prmResponse.ok && prm?.resource === `${fixedBase}/mcp`) {
       return { state: "ready", resource: prm.resource };
@@ -103,8 +103,12 @@ async function main() {
   }
 
   let after = null;
-  for (let attempt = 0; attempt < 30; attempt += 1) {
+  let childExit = null;
+  child.once("error", (error) => { childExit = { error: error instanceof Error ? error.message : String(error) }; });
+  child.once("exit", (code, signal) => { childExit = { code, signal }; });
+  while (true) {
     await sleep(300);
+    if (childExit) break;
     after = await localIdentity();
     if (after.state === "ready") break;
     if (after.state !== "down") break;
@@ -117,6 +121,7 @@ async function main() {
       port: fixedPort,
       pid: child.pid,
       observed: after,
+      childExit,
       stdoutPath,
       stderrPath,
     });

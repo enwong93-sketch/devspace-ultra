@@ -163,14 +163,14 @@ export function registerGoalTools(server, goalRuntime, { resourceUri, relayResou
 
   registerAppTool(server, "devspace_goal_start", {
     title: "Start DevSpace Goal",
-    description: "Start persistent Goal Mode for a genuine multi-turn objective. Store the full final objective and explicit success criteria once; ordinary steering may change the execution approach but not silently rewrite this Goal.",
+    description: "Start persistent Goal Mode for a genuine multi-turn objective. Store the full final objective and explicit success criteria once; ordinary steering may change the execution approach but not silently rewrite this Goal. The floating Goal strip and progress narration card are projected automatically; do not create the retired inline Goal Dock.",
     inputSchema: {
       objective: z.string().min(1).max(4_000),
       successCriteria: z.array(z.string().min(1).max(1_000)).min(1).max(12),
     },
     outputSchema: goalOutputSchema,
     annotations: MUTATING,
-    _meta: renderMeta(resourceUri),
+    _meta: modelOnlyMeta(),
   }, async ({ objective, successCriteria }, extra) => {
     try {
       const conversationId = await requireNewConversationId(extra);
@@ -374,12 +374,12 @@ export function registerGoalTools(server, goalRuntime, { resourceUri, relayResou
   });
 
   registerAppTool(server, "devspace_goal_mount", {
-    title: "Mount DevSpace Goal Dock",
-    description: "Re-mount the latest Goal Dock for an existing Goal after renderer reload, later-turn loss, deleted-owner recovery, or another missing-card condition. This is read-only for Goal state; when Host Overlay is enabled, the explicit mount may briefly arm exact runtime+conversation owner recovery for the newly committed Dock.",
+    title: "Rebind DevSpace Goal Overlay",
+    description: "Rebind the latest floating Goal strip for an existing Goal after renderer reload, later-turn loss, deleted-owner recovery, or another missing-overlay condition. This is read-only for Goal state and does not render the retired inline Goal Dock; when Host Overlay is enabled, the explicit mount may briefly arm exact runtime+conversation owner recovery.",
     inputSchema: { goalId: z.string().min(1) },
     outputSchema: goalOutputSchema,
     annotations: READ_ONLY,
-    _meta: renderMeta(resourceUri),
+    _meta: modelOnlyMeta(),
   }, async ({ goalId }, extra) => {
     try {
       const goal = await bindOrVerifyActiveGoal(goalId, extra);

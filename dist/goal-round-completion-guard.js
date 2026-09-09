@@ -1,9 +1,33 @@
 const DEFAULT_POLL_MS = 2_000;
 const DEFAULT_ROUND_SETTLE_MS = 2_000;
 const DEFAULT_NATIVE_COMPLETE_GRACE_MS = 5_000;
+const DEFAULT_ROUTE_SETTLE_MS = 3_000;
+const DEFAULT_REQUEST_PRE_ROUND_SLOP_MS = 30_000;
+const ACTIVE_STREAM_STATES = new Set(["IN_PROGRESS", "IS_STREAMING", "STREAMING", "RUNNING"]);
 
 function upper(value) {
   return String(value ?? "").trim().toUpperCase();
+}
+
+function timestamp(value) {
+  const parsed = Date.parse(String(value || ""));
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function recoveryRunKey(goal) {
+  return goal?.id && Number.isInteger(goal?.round) ? `${goal.id}:${goal.round}` : null;
+}
+
+function recoveryPageIdentity(snapshot) {
+  const runtime = Number.isInteger(snapshot?.runtimePort)
+    ? `port:${snapshot.runtimePort}`
+    : String(snapshot?.runtimeKey || "").trim();
+  const pageTargetId = String(snapshot?.pageTargetId || "").trim();
+  const documentId = String(snapshot?.documentId || "").trim();
+  const routeEpoch = Number(snapshot?.routeEpoch);
+  const conversationId = String(snapshot?.conversationId || "").trim();
+  if (!runtime || !pageTargetId || !documentId || !Number.isInteger(routeEpoch) || routeEpoch < 1 || !conversationId) return null;
+  return `${runtime}:${pageTargetId}:${documentId}:${routeEpoch}:${conversationId}`;
 }
 
 export function shouldRecoverWorkingRound(goal, snapshot, {
@@ -15,7 +39,8 @@ export function shouldRecoverWorkingRound(goal, snapshot, {
   if (!goal.lastConsumedContinuationId || !goal.roundBeganAt) return false;
   const beganAt = Date.parse(String(goal.roundBeganAt));
   if (!Number.isFinite(beganAt) || nowMs - beganAt < minimumRoundSettleMs) return false;
-  if (snapshot?.chatMode !== true) return false;
+  if (snapshot?.chatMode !== true || snapshot?.recoverySessionEligible === false) return false;
+  if (goal?.conversationId && snapshot?.conversationId && snapshot.conversationId !== goal.conversationId) return false;
   const nativeCompleteStableMs = Math.max(0, Number(snapshot?.nativeCompleteStableMs || 0));
   const nativeComplete = (
     upper(snapshot?.streamStatus) === "COMPLETE"
@@ -50,6 +75,8 @@ export class ClassicGoalRoundCompletionGuard {
     dispatch,
     pollMs = DEFAULT_POLL_MS,
     minimumRoundSettleMs = DEFAULT_ROUND_SETTLE_MS,
+    routeSettleMs = DEFAULT_ROUTE_SETTLE_MS,
+    requestPreRoundSlopMs = DEFAULT_REQUEST_PRE_ROUND_SLOP_MS,
     now = () => Date.now(),
   } = {}) {
     if (!goalRuntime || typeof goalRuntime.recoverableWorkingRounds !== "function") {
@@ -63,11 +90,77 @@ export class ClassicGoalRoundCompletionGuard {
     this.dispatch = dispatch;
     this.pollMs = Math.max(0, Number(pollMs) || 0);
     this.minimumRoundSettleMs = Math.max(0, Number(minimumRoundSettleMs) || 0);
+    this.routeSettleMs = Math.max(0, Number(routeSettleMs) || 0);
+    this.requestPreRoundSlopMs = Math.max(0, Number(requestPreRoundSlopMs) || 0);
     this.now = now;
     this.nativeCompleteSince = new Map();
+    this.recoverySessions = new Map();
     this.timer = null;
     this.polling = null;
     this.closed = false;
+  }
+
+  observeRecoverySession(goal, snapshot) {
+    const runKey = recoveryRunKey(goal);
+    const pageIdentity = recoveryPageIdentity(snapshot);
+    if (!runKey || !pageIdentity) {
+      if (runKey) this.recoverySessions.delete(runKey);
+      return { eligible: false, reason: "page-session-unresolved", reset: true };
+    }
+    let session = this.recoverySessions.get(runKey);
+    const reset = !session || session.pageIdentity !== pageIdentity;
+    if (reset) {
+      session = {
+        pageIdentity,
+        firstObservedAtMs: this.now(),
+        lastObservedAtMs: this.now(),
+        sawActiveTurn: false,
+        sawCurrentRouteRequest: false,
+      };
+      this.recoverySessions.set(runKey, session);
+    }
+
+    const streamStatus = upper(snapshot?.streamStatus);
+    if (snapshot?.generating === true && streamStatus !== "COMPLETE") session.sawActiveTurn = true;
+    if (ACTIVE_STREAM_STATES.has(streamStatus)) session.sawActiveTurn = true;
+
+    const routeEnteredAtMs = timestamp(snapshot?.routeEnteredAt);
+    const roundBeganAtMs = timestamp(goal?.roundBeganAt);
+    const requestObservedAtMs = timestamp(snapshot?.turnRequestObservedAt);
+    if (routeEnteredAtMs != null && requestObservedAtMs != null) {
+      const roundLowerBound = roundBeganAtMs == null
+        ? routeEnteredAtMs
+        : roundBeganAtMs - this.requestPreRoundSlopMs;
+      const lowerBound = Math.max(routeEnteredAtMs, roundLowerBound);
+      if (requestObservedAtMs >= lowerBound && requestObservedAtMs <= this.now() + 60_000) {
+        session.sawCurrentRouteRequest = true;
+      }
+    }
+
+    session.lastObservedAtMs = this.now();
+    const routeStableForMs = Math.max(0, Number(snapshot?.routeStableForMs || 0));
+    const stableOpenRoute = (
+      snapshot?.chatMode === true
+      && (!goal?.conversationId || snapshot?.conversationId === goal.conversationId)
+      && snapshot?.documentReadyState === "complete"
+      && snapshot?.composerReady === true
+      && snapshot?.routeHydrated === true
+      && routeStableForMs >= this.routeSettleMs
+    );
+    const eligible = stableOpenRoute && (session.sawActiveTurn || session.sawCurrentRouteRequest);
+    return {
+      eligible,
+      reset,
+      pageIdentity,
+      stableOpenRoute,
+      sawActiveTurn: session.sawActiveTurn,
+      sawCurrentRouteRequest: session.sawCurrentRouteRequest,
+      reason: eligible
+        ? "same-route-active-turn-observed"
+        : !stableOpenRoute
+          ? "route-not-stable"
+          : "reentry-or-unobserved-turn",
+    };
   }
 
   async start({ schedule = true } = {}) {
@@ -88,6 +181,13 @@ export class ClassicGoalRoundCompletionGuard {
 
   async #pollOnceImpl() {
     const goals = await this.goalRuntime.recoverableWorkingRounds();
+    const activeRunKeys = new Set(goals.map(recoveryRunKey).filter(Boolean));
+    for (const key of this.recoverySessions.keys()) {
+      if (!activeRunKeys.has(key)) this.recoverySessions.delete(key);
+    }
+    for (const key of this.nativeCompleteSince.keys()) {
+      if (!activeRunKeys.has(key)) this.nativeCompleteSince.delete(key);
+    }
     const results = [];
     let recovered = 0;
     for (const goal of goals) {
@@ -95,6 +195,13 @@ export class ClassicGoalRoundCompletionGuard {
       try {
         snapshot = await this.inspect(goal);
         const key = `${goal.id}:${goal.round}`;
+        const recoverySession = this.observeRecoverySession(goal, snapshot);
+        if (recoverySession.reset) this.nativeCompleteSince.delete(key);
+        snapshot = {
+          ...snapshot,
+          recoverySessionEligible: recoverySession.eligible,
+          recoverySession,
+        };
         if (upper(snapshot?.streamStatus) === "COMPLETE") {
           const since = this.nativeCompleteSince.get(key) ?? this.now();
           this.nativeCompleteSince.set(key, since);
@@ -110,7 +217,12 @@ export class ClassicGoalRoundCompletionGuard {
         nowMs: this.now(),
         minimumRoundSettleMs: this.minimumRoundSettleMs,
       })) {
-        results.push({ goalId: goal.id, round: goal.round, recovered: false, reason: "round-still-active-or-not-safe" });
+        results.push({
+          goalId: goal.id,
+          round: goal.round,
+          recovered: false,
+          reason: snapshot?.recoverySession?.reason || "round-still-active-or-not-safe",
+        });
         continue;
       }
 
@@ -133,6 +245,7 @@ export class ClassicGoalRoundCompletionGuard {
           recoveryId: recovery.claim.recoveryId,
         });
         this.nativeCompleteSince.delete(`${goal.id}:${goal.round}`);
+        this.recoverySessions.delete(`${goal.id}:${goal.round}`);
         recovered += 1;
         results.push({ goalId: goal.id, round: goal.round, recovered: true, attempt: recovery.claim.attempt, transport: sent.transport || null });
       } else {
@@ -152,6 +265,7 @@ export class ClassicGoalRoundCompletionGuard {
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
     this.nativeCompleteSince.clear();
+    this.recoverySessions.clear();
     if (this.polling) await this.polling.catch(() => {});
   }
 }

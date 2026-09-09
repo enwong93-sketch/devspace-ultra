@@ -5,7 +5,11 @@ import { activeProgressRows } from "./goal-progress-narrator.js";
 const ROOT_ID = "devspace-progress-narration-root";
 const STYLE_ID = "devspace-progress-narration-style";
 const LEASE_KEY = "__devspaceProgressNarrationLeaseV1";
-const UI_VERSION = "4";
+const UI_VERSION = "5";
+const LEGACY_INLINE_RESOURCE_TITLES = [
+  "ui://devspace/goal-dock.html",
+  "ui://devspace/plan-card.html",
+];
 const LEASE_MS = 60_000;
 const DEFAULT_POLL_MS = 500;
 const DEFAULT_MAX_MESSAGES = 48;
@@ -32,17 +36,18 @@ async function readJson(path) {
 function normalizeMessage(item) {
   const text = clean(item?.text, 1_600);
   const conversationId = clean(item?.conversationId, 200);
-  const goalId = clean(item?.goalId, 200);
   const at = clean(item?.at, 80);
-  if (!text || !conversationId || !goalId || !at || !Number.isFinite(Date.parse(at))) return null;
+  const source = clean(item?.source, 80) || "unknown";
+  if (!text || !conversationId || !at || !Number.isFinite(Date.parse(at))) return null;
+  if (!["agent-progress-tool", "goal-round-report"].includes(source)) return null;
   return {
     text,
     at,
     conversationId,
-    goalId,
+    goalId: clean(item?.goalId, 200),
     round: Math.max(1, Math.floor(number(item?.round, 1))),
     kind: clean(item?.kind, 80) || "progress",
-    source: clean(item?.source, 80) || "unknown",
+    source,
     dedupeKey: clean(item?.dedupeKey, 500),
   };
 }
@@ -86,16 +91,13 @@ export function conversationProgressNarrationMap({
     nowMs,
     maxConversationAgeMs: maxAgeMs,
   });
-  const activeKey = `${goalProgress?.active?.goalId || ""}:${Math.max(1, Math.floor(number(goalProgress?.active?.round, 1)))}`;
-  const fallbackActivity = Date.parse(goalProgress?.updatedAt || "") || 0;
   const selectedByConversation = new Map();
   for (const row of rows) {
     const conversationId = clean(row?.conversationId, 200);
     const goalId = clean(row?.goalId, 200);
     const round = Math.max(1, Math.floor(number(row?.round, 1)));
-    if (!conversationId || !goalId) continue;
-    const key = `${goalId}:${round}`;
-    const priority = key === activeKey ? Number.MAX_SAFE_INTEGER : contextActivity(row, fallbackActivity);
+    if (!conversationId) continue;
+    const priority = contextActivity(row, 0);
     const previous = selectedByConversation.get(conversationId);
     if (!previous || priority >= previous.priority) selectedByConversation.set(conversationId, { row, goalId, round, priority });
   }
@@ -103,26 +105,21 @@ export function conversationProgressNarrationMap({
   const normalized = (Array.isArray(humanProgress?.messages) ? humanProgress.messages : [])
     .map(normalizeMessage)
     .filter(Boolean)
-    .filter((item) => nowMs - Date.parse(item.at) >= -60_000 && nowMs - Date.parse(item.at) <= maxAgeMs)
     .sort((left, right) => Date.parse(left.at) - Date.parse(right.at));
   const result = {};
-  for (const [conversationId, context] of selectedByConversation) {
-    const goalScoped = !String(context.goalId || "").startsWith("plan:") && !String(context.goalId || "").startsWith("conversation:");
-    const minimumRound = Math.max(1, context.round - 7);
-    const messages = uniqueMessages(normalized.filter((item) => (
-      item.goalId === context.goalId
-      && (goalScoped
-        ? item.round >= minimumRound && item.round <= context.round
-        : item.conversationId === conversationId && item.round === context.round)
-    ))).slice(-Math.max(1, Math.min(64, number(maxMessages, DEFAULT_MAX_MESSAGES))));
-    if (!messages.length) continue;
+  const conversationIds = new Set(normalized.map((item) => item.conversationId));
+  for (const conversationId of conversationIds) {
+    const context = selectedByConversation.get(conversationId) || null;
+    const messages = uniqueMessages(normalized.filter((item) => item.conversationId === conversationId))
+      .slice(-Math.max(1, Math.min(64, number(maxMessages, DEFAULT_MAX_MESSAGES))));
+    const latest = messages.at(-1);
     result[conversationId] = {
       conversationId,
-      goalId: context.goalId,
-      round: context.round,
-      progressKind: clean(context.row?.progressKind, 80) || "goal",
+      goalId: latest?.goalId || context?.goalId || `conversation:${conversationId}`,
+      round: latest?.round || context?.round || 1,
+      progressKind: clean(context?.row?.progressKind, 80) || "conversation",
       messages,
-      updatedAt: messages.at(-1).at,
+      updatedAt: latest?.at || null,
     };
   }
   return result;
@@ -142,9 +139,97 @@ export function buildProgressNarrationScript(map) {
     const STYLE_ID = ${JSON.stringify(STYLE_ID)};
     const LEASE_KEY = ${JSON.stringify(LEASE_KEY)};
     const UI_VERSION = ${JSON.stringify(UI_VERSION)};
+    const LEGACY_INLINE_RESOURCE_TITLES = ${serializeInline(LEGACY_INLINE_RESOURCE_TITLES)};
     const LEASE_MS = ${LEASE_MS};
     const conversationId = location.pathname.match(/\\/c\\/([^/?#]+)/)?.[1] || null;
-    const state = (${serialized})[conversationId] || null;
+    const lifecycleNow = Date.now();
+    const documentLifecycleKey = '__devspaceClassicDocumentLifecycleV1';
+    const routeLifecycleKey = '__devspaceClassicConversationLifecycleV1';
+    const documentLifecycle = globalThis[documentLifecycleKey] || (globalThis[documentLifecycleKey] = {
+      id: globalThis.crypto?.randomUUID?.() || ('document-' + lifecycleNow + '-' + Math.random().toString(36).slice(2)),
+      createdAtMs: lifecycleNow,
+    });
+    const priorRoute = globalThis[routeLifecycleKey];
+    let routeLifecycle = priorRoute;
+    if (!routeLifecycle || routeLifecycle.documentId !== documentLifecycle.id || routeLifecycle.conversationId !== conversationId) {
+      routeLifecycle = globalThis[routeLifecycleKey] = {
+        documentId: documentLifecycle.id,
+        conversationId,
+        routeEpoch: Math.max(1, Number(priorRoute?.routeEpoch || 0) + 1),
+        enteredAtMs: lifecycleNow,
+        hydratedSinceMs: null,
+        lastSeenAtMs: lifecycleNow,
+      };
+    }
+    const lifecycleComposerReady = Boolean(document.querySelector('#prompt-textarea'));
+    const lifecycleVisibleMessages = document.querySelectorAll('[data-message-author-role="user"],[data-message-author-role="assistant"]').length;
+    const lifecycleHydrated = Boolean(conversationId && document.readyState === 'complete' && lifecycleComposerReady && lifecycleVisibleMessages > 0);
+    routeLifecycle.hydratedSinceMs = lifecycleHydrated ? (routeLifecycle.hydratedSinceMs || lifecycleNow) : null;
+    routeLifecycle.lastSeenAtMs = lifecycleNow;
+    const mappedState = (${serialized})[conversationId] || null;
+    const state = mappedState?.messages?.length
+      ? mappedState
+      : conversationId
+        ? {
+            conversationId,
+            goalId:'conversation:' + conversationId,
+            round:1,
+            progressKind:'conversation',
+            messages:[],
+          }
+        : null;
+    const retireNode = (node, marker) => {
+      if (!node) return false;
+      node.dataset[marker] = 'true';
+      node.setAttribute('aria-hidden','true');
+      node.style.setProperty('display','none','important');
+      node.style.setProperty('height','0','important');
+      node.style.setProperty('min-height','0','important');
+      node.style.setProperty('margin','0','important');
+      node.style.setProperty('padding','0','important');
+      return true;
+    };
+    const retireLegacyInlineApps = () => {
+      let retiredApps = 0;
+      let retiredErrors = 0;
+      const legacyFrames = [...document.querySelectorAll('iframe')]
+        .filter((frame) => LEGACY_INLINE_RESOURCE_TITLES.includes(frame.getAttribute('title') || ''));
+      for (const frame of legacyFrames) {
+        let shell = null;
+        let node = frame.parentElement;
+        for (let depth = 0; depth < 5 && node; depth += 1, node = node.parentElement) {
+          const className = String(node.className || '');
+          if (node.tagName === 'DIV' && /(?:^|\\s)no-scrollbar(?:\\s|$)/.test(className)) {
+            shell = node;
+            break;
+          }
+        }
+        shell ||= frame.parentElement?.parentElement || frame;
+        if (retireNode(shell, 'devspaceLegacyInlineRetired')) retiredApps += 1;
+        frame.setAttribute('tabindex','-1');
+      }
+      if (legacyFrames.length) {
+        for (const errorCard of [...document.querySelectorAll('aside')]) {
+          const errorText = (errorCard.innerText || errorCard.textContent || '').replace(/\\s+/g,' ').trim();
+          if (!/Failed to fetch template|載入應用程式時發生錯誤/i.test(errorText)) continue;
+          let belongsToLegacyDevSpaceTurn = false;
+          let ancestor = errorCard.parentElement;
+          for (let depth = 0; depth < 8 && ancestor; depth += 1, ancestor = ancestor.parentElement) {
+            if (legacyFrames.some((frame) => ancestor.contains(frame))) {
+              belongsToLegacyDevSpaceTurn = true;
+              break;
+            }
+          }
+          if (!belongsToLegacyDevSpaceTurn) continue;
+          const wrapper = errorCard.parentElement?.classList?.contains('mt-2') ? errorCard.parentElement : errorCard;
+          if (retireNode(wrapper, 'devspaceLegacyInlineErrorRetired')) retiredErrors += 1;
+        }
+      }
+      return { apps: retiredApps, errors: retiredErrors };
+    };
+    const retiredLegacyInline = retireLegacyInlineApps();
+    const retiredLegacyInlineApps = retiredLegacyInline.apps;
+    const retiredLegacyInlineErrors = retiredLegacyInline.errors;
     const radios = [...document.querySelectorAll('[role="radio"]')];
     const work = radios.find((el) => /^(工作|Work)$/i.test((el.innerText || el.textContent || '').trim()));
     const mode = work?.getAttribute('aria-checked') === 'true' || /[?&]surface=work(?:&|$)/i.test(location.search) ? 'work' : 'chat';
@@ -209,8 +294,10 @@ html.dark #${ROOT_ID} .devspace-progress-scroll{scrollbar-color:rgba(220,220,220
       document.body.appendChild(root);
     }
     const messages = Array.isArray(state?.messages) ? state.messages : [];
-    const visible = Boolean(conversationId && messages.length);
+    const visible = Boolean(conversationId);
     root.dataset.visible = visible ? 'true' : 'false';
+    root.dataset.retiredLegacyInlineApps = String(retiredLegacyInlineApps);
+    root.dataset.retiredLegacyInlineErrors = String(retiredLegacyInlineErrors);
     root.dataset.conversationId = conversationId || '';
     root.dataset.goalId = state?.goalId || '';
     root.dataset.round = String(state?.round || '');
@@ -418,6 +505,8 @@ html.dark #${ROOT_ID} .devspace-progress-scroll{scrollbar-color:rgba(220,220,220
       text:(root.innerText || root.textContent || '').trim(),
       rootCount:document.querySelectorAll('#' + ROOT_ID).length,
       pageMutationCount:visible ? 1 : 0,
+      retiredLegacyInlineApps,
+      retiredLegacyInlineErrors,
       syntheticUserMessages:0,
     };
   })()`;
@@ -442,6 +531,15 @@ export function inspectProgressNarrationExpression() {
       renderedMessageCount:root?.querySelectorAll('.devspace-progress-message').length || 0,
       controls:root?.querySelectorAll('.devspace-progress-button').length || 0,
       scrollable:Boolean(root?.querySelector('.devspace-progress-scroll')),
+      retiredLegacyInlineApps:Number(root?.dataset.retiredLegacyInlineApps || 0),
+      retiredLegacyInlineErrors:Number(root?.dataset.retiredLegacyInlineErrors || 0),
+      legacyInlineGoalDockFrames:document.querySelectorAll('iframe[title="ui://devspace/goal-dock.html"]').length,
+      legacyInlinePlanCardFrames:document.querySelectorAll('iframe[title="ui://devspace/plan-card.html"]').length,
+      visibleLegacyInlineFrames:[...document.querySelectorAll('iframe[title="ui://devspace/goal-dock.html"],iframe[title="ui://devspace/plan-card.html"]')]
+        .filter((frame)=>{const shell=frame.closest('[data-devspace-legacy-inline-retired="true"]') || frame.parentElement?.parentElement || frame;return getComputedStyle(shell).display !== 'none'}).length,
+      visibleLegacyInlineErrors:[...document.querySelectorAll('aside')]
+        .filter((node)=>/Failed to fetch template|載入應用程式時發生錯誤/i.test((node.innerText||node.textContent||'').replace(/\\s+/g,' ').trim()))
+        .filter((node)=>{const shell=node.closest('[data-devspace-legacy-inline-error-retired="true"]') || node.parentElement || node;return getComputedStyle(shell).display !== 'none'}).length,
       scrollTop:root?.querySelector('.devspace-progress-scroll')?.scrollTop || 0,
       scrollHeight:root?.querySelector('.devspace-progress-scroll')?.scrollHeight || 0,
       clientHeight:root?.querySelector('.devspace-progress-scroll')?.clientHeight || 0,
@@ -464,8 +562,32 @@ export class ClassicProgressNarrationOverlay {
     if (!contextAdapter || typeof contextAdapter.status !== "function" || typeof contextAdapter.evaluateRuntime !== "function") {
       throw new Error("ClassicProgressNarrationOverlay requires the shared Context Guardian CDP adapter.");
     }
-    if (!humanProgressStatePath || !goalProgressStatePath) throw new Error("ClassicProgressNarrationOverlay requires both progress state paths.");
     this.contextAdapter = contextAdapter;
+    if (!humanProgressStatePath || !goalProgressStatePath) {
+      this.disabled = true;
+      this.disabledReason = "progress-state-paths-unavailable";
+      this.humanProgressStatePath = humanProgressStatePath || null;
+      this.goalProgressStatePath = goalProgressStatePath || null;
+      this.planStatePath = planStatePath || null;
+      this.goalStatePath = goalStatePath || null;
+      this.pollMs = Math.max(250, number(pollMs, DEFAULT_POLL_MS));
+      this.now = now;
+      this.timer = null;
+      this.syncing = null;
+      this.closed = false;
+      this.last = {
+        ok: true,
+        disabled: true,
+        reason: this.disabledReason,
+        conversations: 0,
+        connected: 0,
+        synced: 0,
+        results: [],
+      };
+      return;
+    }
+    this.disabled = false;
+    this.disabledReason = null;
     this.humanProgressStatePath = humanProgressStatePath;
     this.goalProgressStatePath = goalProgressStatePath;
     this.planStatePath = planStatePath || null;
@@ -479,6 +601,7 @@ export class ClassicProgressNarrationOverlay {
   }
 
   async start({ schedule = true } = {}) {
+    if (this.disabled) return this.last;
     const result = await this.syncOnce();
     if (schedule && !this.closed && !this.timer) {
       this.timer = setInterval(() => { void this.syncOnce(); }, this.pollMs);
@@ -488,6 +611,7 @@ export class ClassicProgressNarrationOverlay {
   }
 
   async syncOnce() {
+    if (this.disabled) return this.last;
     if (this.closed) return this.last;
     if (this.syncing) return this.syncing;
     this.syncing = (async () => {
@@ -531,6 +655,8 @@ export class ClassicProgressNarrationOverlay {
 
   status() {
     return {
+      disabled: Boolean(this.disabled),
+      disabledReason: this.disabledReason || null,
       running: Boolean(this.timer),
       pollInProgress: Boolean(this.syncing),
       pollMs: this.pollMs,

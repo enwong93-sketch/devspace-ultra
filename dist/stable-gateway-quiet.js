@@ -15,20 +15,27 @@ function activeCounts(status) {
 
 export async function waitForStableGatewayQuiet({
   statusProbe,
-  timeoutMs = 60_000,
   pollMs = 250,
   consecutiveQuietSamples = 2,
+  signal,
 } = {}) {
   if (typeof statusProbe !== "function") throw new Error("statusProbe is required.");
-  const timeout = boundedPositive(timeoutMs, 60_000, "timeoutMs");
   const poll = boundedPositive(pollMs, 250, "pollMs");
   const requiredQuiet = Math.max(1, Math.floor(boundedPositive(consecutiveQuietSamples, 2, "consecutiveQuietSamples")));
-  const deadline = Date.now() + timeout;
   let quietSamples = 0;
   let lastAdmissionActive = null;
   let lastSessionActive = null;
 
-  while (Date.now() < deadline) {
+  while (true) {
+    if (signal?.aborted) {
+      return {
+        ok: false,
+        state: "cancelled",
+        quietSamples,
+        lastAdmissionActive,
+        lastSessionActive,
+      };
+    }
     try {
       const status = await statusProbe();
       const counts = activeCounts(status);
@@ -53,12 +60,4 @@ export async function waitForStableGatewayQuiet({
     }
     await sleep(poll);
   }
-
-  return {
-    ok: false,
-    state: "quiet-timeout",
-    quietSamples,
-    lastAdmissionActive,
-    lastSessionActive,
-  };
 }

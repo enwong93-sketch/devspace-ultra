@@ -1,7 +1,17 @@
-import { readFile, realpath, stat } from "node:fs/promises";
+import { open as openFile, readFile, realpath, stat } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import * as YAML from "yaml";
 import { isPathInsideRoot } from "./roots.js";
 import * as z from "zod/v4";
+import { ElicitResultSchema } from "@modelcontextprotocol/sdk/types.js";
 import { codexComputerUseRoute } from "./codex-computer-use-router.js";
+import {
+  ROUTING_CONTRACT_VERSION,
+  capabilityRoutingFingerprint,
+  normalizeRoutingPolicy,
+  rankCapabilityRoutes,
+} from "./capability-routing.js";
+import { buildUnifiedRoutePlan, ROUTING_HARNESS_VERSION } from "./routing-harness.js";
 
 const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
 const MAX_SLEEP_SECONDS = 300;
@@ -29,6 +39,146 @@ function errorResult(error) {
     content: [{ type: "text", text: message }],
     structuredContent: { ok: false, error: message },
   };
+}
+
+function routeStringArray(value, max = 64) {
+  const source = Array.isArray(value) ? value : value == null ? [] : [value];
+  return [...new Set(source.map((item) => String(item ?? "").trim()).filter(Boolean))].slice(0, max);
+}
+
+async function readTextPrefix(path, maxBytes = 64 * 1024) {
+  const file = await openFile(path, "r");
+  try {
+    const buffer = Buffer.alloc(maxBytes);
+    const { bytesRead } = await file.read(buffer, 0, maxBytes, 0);
+    return buffer.subarray(0, bytesRead).toString("utf8");
+  } finally {
+    await file.close().catch(() => {});
+  }
+}
+
+function workspaceSkillFrontmatter(text) {
+  if (!String(text || "").startsWith("---")) return {};
+  const end = String(text).indexOf("\n---", 3);
+  if (end < 0) return {};
+  try {
+    const parsed = YAML.parse(String(text).slice(3, end));
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+async function workspaceSkillMetadata(skill) {
+  const skillPath = String(skill?.filePath || "").trim();
+  let frontmatter = {};
+  try { frontmatter = workspaceSkillFrontmatter(await readTextPrefix(skillPath)); } catch {}
+  let metadata = {};
+  let routingMetadataPath = null;
+  for (const candidate of [
+    join(dirname(skillPath), "agents", "openai.yaml"),
+    join(dirname(skillPath), "agents", "openai.yml"),
+    join(dirname(skillPath), "agents", "openai.json"),
+  ]) {
+    try {
+      const text = await readTextPrefix(candidate);
+      const parsed = candidate.toLowerCase().endsWith(".json") ? JSON.parse(text) : YAML.parse(text);
+      if (parsed && typeof parsed === "object") {
+        metadata = parsed;
+        routingMetadataPath = candidate;
+        break;
+      }
+    } catch {}
+  }
+  const interfaceMetadata = metadata.interface && typeof metadata.interface === "object" ? metadata.interface : {};
+  const frontRouting = frontmatter.routing && typeof frontmatter.routing === "object" ? frontmatter.routing : {};
+  const metadataRouting = metadata.routing && typeof metadata.routing === "object" ? metadata.routing : {};
+  const frontPolicy = frontmatter.policy && typeof frontmatter.policy === "object" ? frontmatter.policy : {};
+  const metadataPolicy = metadata.policy && typeof metadata.policy === "object" ? metadata.policy : {};
+  const routing = normalizeRoutingPolicy({
+    ...frontRouting,
+    ...frontPolicy,
+    ...metadataRouting,
+    ...metadataPolicy,
+    allowImplicitInvocation: skill?.disableModelInvocation === true
+      ? false
+      : metadataPolicy.allow_implicit_invocation
+        ?? metadataPolicy.allowImplicitInvocation
+        ?? frontPolicy.allow_implicit_invocation
+        ?? frontPolicy.allowImplicitInvocation,
+    aliases: [
+      ...routeStringArray(frontmatter.aliases),
+      ...routeStringArray(frontmatter.routingAliases),
+      ...routeStringArray(frontmatter.routing_aliases),
+      ...routeStringArray(frontRouting.aliases),
+      ...routeStringArray(metadataRouting.aliases),
+    ],
+    negativeTriggers: [
+      ...routeStringArray(frontmatter.negativeTriggers),
+      ...routeStringArray(frontmatter.negative_triggers),
+      ...routeStringArray(frontRouting.negativeTriggers),
+      ...routeStringArray(frontRouting.exclude),
+      ...routeStringArray(metadataRouting.negativeTriggers),
+      ...routeStringArray(metadataRouting.exclude),
+    ],
+  });
+  const dependencies = (Array.isArray(metadata?.dependencies?.tools) ? metadata.dependencies.tools : [])
+    .slice(0, 32)
+    .map((item) => typeof item === "string"
+      ? item
+      : [item?.type, item?.value, item?.description].map((value) => String(value || "").trim()).filter(Boolean).join(" "))
+    .filter(Boolean);
+  return {
+    displayName: String(interfaceMetadata.display_name || interfaceMetadata.displayName || frontmatter.display_name || frontmatter.displayName || "").slice(0, 240),
+    shortDescription: String(interfaceMetadata.short_description || interfaceMetadata.shortDescription || frontmatter.short_description || frontmatter.shortDescription || "").slice(0, 800),
+    defaultPrompts: routeStringArray(
+      interfaceMetadata.default_prompts
+      ?? interfaceMetadata.defaultPrompts
+      ?? interfaceMetadata.default_prompt
+      ?? interfaceMetadata.defaultPrompt
+      ?? frontmatter.default_prompt
+      ?? frontmatter.defaultPrompt,
+      20,
+    ),
+    dependencies,
+    routing,
+    routingMetadataPath,
+  };
+}
+
+async function workspaceSkillRouteCandidates(workspaces, workspaceId) {
+  const id = String(workspaceId || "").trim();
+  if (!id) return [];
+  const workspace = workspaces?.getWorkspace?.(id);
+  if (!workspace) throw new Error(`Unknown workspaceId: ${id}. Call open_workspace first.`);
+  const skills = Array.isArray(workspace.skills) ? workspace.skills.slice(0, 256) : [];
+  return await Promise.all(skills.map(async (skill) => {
+    const metadata = await workspaceSkillMetadata(skill);
+    return {
+      routeId: `workspace-skill:${id}:${skill.name}`,
+      kind: "skill",
+      name: String(skill.name || "skill"),
+      title: metadata.displayName || String(skill.name || "skill"),
+      description: String(skill.description || "Reusable workspace skill"),
+      shortDescription: metadata.shortDescription,
+      aliases: metadata.routing.aliases,
+      negativeTriggers: metadata.routing.negativeTriggers,
+      defaultPrompts: metadata.defaultPrompts,
+      dependencies: metadata.dependencies,
+      allowImplicitInvocation: metadata.routing.allowImplicitInvocation,
+      exposure: metadata.routing.exposure,
+      priority: metadata.routing.priority + 12,
+      path: String(skill.filePath || ""),
+      available: true,
+      requires: ["read-full-skill-before-substantive-work", ...(metadata.dependencies.length ? ["resolve-declared-tool-dependencies"] : [])],
+      nextAction: {
+        tool: "read",
+        arguments: { workspaceId: id, path: String(skill.filePath || "") },
+        then: "Follow the selected workspace Skill and resolve only its declared dependencies.",
+      },
+      routingMetadataPath: metadata.routingMetadataPath,
+    };
+  }));
 }
 
 function imagePrefix(bytes, start, text) {
@@ -186,9 +336,66 @@ export function registerCodexParityTools(server, {
   contextGuardian,
   exactUsageAuthority,
   toolCatalog,
+  modelInstructionsFingerprint = null,
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   now = () => new Date(),
 } = {}) {
+  const routingFingerprint = typeof capabilityRuntime?.routingFingerprint === "function"
+    ? capabilityRuntime.routingFingerprint({ includeDisabled: true })
+    : capabilityRoutingFingerprint([]);
+  const routingMeta = {
+    _meta: {
+      devspace: {
+        routingContractVersion: ROUTING_CONTRACT_VERSION,
+        routingFingerprint,
+        ...(modelInstructionsFingerprint ? { modelInstructionsFingerprint: String(modelInstructionsFingerprint) } : {}),
+      },
+    },
+  };
+  const registerParityTool = server.registerTool.bind(server);
+  server.registerTool = (name, definition, handler) => {
+    if (name !== "tool_search") return registerParityTool(name, definition, handler);
+    const enhancedDefinition = {
+      ...definition,
+      description: `${definition.description || "Search the DevSpace route catalog."} This is the single model-facing routing entry point across direct tools, workspace skills, plugin skills, plugins, MCP servers, MCP tools, workflows, and application runtimes. Follow routingHarness.routeChain in order; discovery or inspection alone is never completion.`,
+      inputSchema: {
+        ...(definition.inputSchema || {}),
+        stage: z.enum(["start", "continue", "verify", "recover"]).optional(),
+        multiStep: z.boolean().optional(),
+        autonomousContinuation: z.boolean().optional(),
+      },
+      _meta: {
+        ...(definition._meta || {}),
+        devspace: {
+          ...(definition._meta?.devspace || {}),
+          routingHarnessVersion: String(ROUTING_HARNESS_VERSION),
+          routeKinds: ["tool", "skill", "plugin", "mcp-server", "mcp-tool", "workflow", "runtime"],
+        },
+      },
+    };
+    return registerParityTool(name, enhancedDefinition, async (input, extra) => {
+      const result = await handler(input, extra);
+      if (result?.isError || !result?.structuredContent) return result;
+      const query = String(input?.query || "").trim();
+      const inferredMultiStep = input?.multiStep === true || /continue|complete|implement|build|repair|finish|multi[- ]?step|workflow|runtime|agent|繼續|完成|實作|修復|多步|工作流|建模/i.test(query);
+      const inferredAutonomous = input?.autonomousContinuation === true || /autonomous|across turns|goal mode|自動接續|跨回合|目標模式/i.test(query);
+      const routingHarness = buildUnifiedRoutePlan({
+        query,
+        coreTools: result.structuredContent.coreTools,
+        capabilityRouting: result.structuredContent.capabilityRouting,
+        workspaceSkillRouting: result.structuredContent.workspaceSkillRouting,
+        codexMcp: result.structuredContent.codexMcp || result.structuredContent.codexMcpServers,
+        multiStep: inferredMultiStep,
+        autonomousContinuation: inferredAutonomous,
+        explicitQuery: input?.explicit === true,
+      });
+      result.structuredContent.routingHarness = routingHarness;
+      result.structuredContent.routeChain = routingHarness.routeChain;
+      result.structuredContent.routingHarnessFingerprint = routingHarness.fingerprint;
+      return result;
+    });
+  };
+
   server.registerTool("view_image", {
     title: "View image",
     description: "Load a PNG, JPEG, GIF, or WebP file from an open workspace into model context. Paths are workspace-confined and validated by file signature. Use detail=original only when full source resolution is genuinely needed.",
@@ -236,11 +443,16 @@ export function registerCodexParityTools(server, {
       })).min(1).max(3),
     },
     annotations: WAITING,
-  }, async ({ questions }) => {
+  }, async ({ questions }, extra) => {
     try {
       const request = buildElicitationRequest(questions);
       try {
-        const response = await server.server.elicitInput(request, { timeout: 10 * 60_000, maxTotalTimeout: 10 * 60_000 });
+        const response = typeof extra?.sendRequest === "function"
+          ? await extra.sendRequest({
+              method: "elicitation/create",
+              params: request.mode === "form" ? request : { ...request, mode: "form" },
+            }, ElicitResultSchema)
+          : await server.server.elicitInput(request);
         const normalized = normalizeElicitationAnswers(questions, response);
         return textResult({ ok: true, supported: true, ...normalized });
       } catch (error) {
@@ -342,36 +554,111 @@ export function registerCodexParityTools(server, {
   });
 
   server.registerTool("tool_search", {
-    title: "Search tools",
-    description: "Search the complete DevSpace tool catalogue plus installed capability plugins without loading every schema into context. Use the returned exact core tool name directly, or capability_inspect/capability_call for a selected plugin tool.",
+    title: "Route and Search Tools",
+    description: "Use this before guessing a tool or falling back to generic shell/browser work. It searches direct DevSpace tools, workspace/user Agent Skills, deferred installed skills/plugins/MCP tools, and linked Codex MCPs, then returns one exact recommendedRoute when the evidence is clear. Pass workspaceId after open_workspace so project, user, and trusted plugin Skills compete in the same bounded router. Routing uses names, aliases, descriptions, default prompts, dependencies, negative gates, trust/availability, and explicit-only policy; read the selected SKILL.md or inspect only the selected deferred plugin before acting.",
     inputSchema: {
-      query: z.string().min(1).max(500),
+      query: z.string().min(1).max(2_000),
+      workspaceId: z.string().min(1).optional(),
       limit: z.number().int().min(1).max(100).default(20),
       includeCapabilities: z.boolean().default(true),
     },
     annotations: READ_ONLY,
-  }, async ({ query, limit = 20, includeCapabilities = true }) => {
+    ...routingMeta,
+  }, async ({ query, workspaceId, limit = 20, includeCapabilities = true }) => {
     try {
       const coreTools = toolCatalog.search(query, { limit });
       const remaining = Math.max(0, limit - coreTools.length);
       const capabilities = includeCapabilities && remaining > 0
         ? await capabilityRuntime.search(query, { includeDisabled: false, limit: remaining })
         : [];
+      const capabilityRouting = includeCapabilities && typeof capabilityRuntime?.route === "function"
+        ? await capabilityRuntime.route(query, { includeDisabled: false, probeMcp: false, limit: Math.min(12, limit) })
+        : null;
+      const workspaceSkillCandidates = workspaceId
+        ? await workspaceSkillRouteCandidates(workspaces, workspaceId)
+        : [];
+      const installedRouteCandidates = includeCapabilities
+        ? typeof capabilityRuntime?.routingCandidates === "function"
+          ? capabilityRuntime.routingCandidates({ includeDisabled: false })
+          : [capabilityRouting?.primary, ...(capabilityRouting?.candidates || [])].filter(Boolean)
+        : [];
+      const deferredCandidateMap = new Map();
+      for (const candidate of [...workspaceSkillCandidates, ...installedRouteCandidates]) {
+        const routeId = String(candidate?.routeId || "").trim();
+        if (routeId && !deferredCandidateMap.has(routeId)) deferredCandidateMap.set(routeId, candidate);
+      }
+      const deferredCandidates = [...deferredCandidateMap.values()];
+      const deferredRouting = rankCapabilityRoutes(query, deferredCandidates, { limit: Math.min(50, limit) });
+      const workspaceSkillRouting = rankCapabilityRoutes(query, workspaceSkillCandidates, { limit: Math.min(50, limit) });
+      const dynamicRoutingFingerprint = deferredCandidates.length
+        ? capabilityRoutingFingerprint(deferredCandidates)
+        : capabilityRouting?.routingFingerprint || routingFingerprint;
       const linkedRemaining = Math.max(0, limit - coreTools.length - capabilities.length);
       const linkedCodexMcp = includeCapabilities && linkedRemaining > 0 && codexMcpBridge
         ? await codexMcpBridge.search(query, { limit: linkedRemaining })
         : [];
+      const normalizedQuery = String(query || "").toLowerCase().replace(/[^a-z0-9_:-]+/g, " ").trim();
+      const exactCore = coreTools.find((tool) => {
+        const name = String(tool?.name || "").toLowerCase();
+        const title = String(tool?.title || "").toLowerCase();
+        return normalizedQuery === name || normalizedQuery === title || normalizedQuery.includes(`tool ${name}`);
+      }) || null;
+      const selectedDeferred = deferredRouting.primary;
       const computerRoute = codexComputerUseRoute(query);
+      const recommendedRoute = exactCore
+        ? {
+            source: "core-tool",
+            routeId: `core-tool:${exactCore.name}`,
+            kind: "core-tool",
+            name: exactCore.name,
+            score: exactCore.score,
+            nextAction: { tool: exactCore.name, arguments: {} },
+          }
+        : selectedDeferred
+          ? {
+              source: selectedDeferred.routeId.startsWith("workspace-skill:") ? "workspace-skill-routing" : "capability-routing",
+              routeId: selectedDeferred.routeId,
+              kind: selectedDeferred.kind,
+              name: selectedDeferred.name,
+              pluginId: selectedDeferred.pluginId,
+              score: selectedDeferred.score,
+              ambiguous: deferredRouting.ambiguous,
+              nextAction: selectedDeferred.nextAction,
+            }
+          : computerRoute.useComputer
+            ? { source: "computer-use-fallback", tool: "codex_computer_use", reason: computerRoute.reason, score: computerRoute.score }
+            : linkedCodexMcp[0]
+              ? {
+                  source: "linked-codex-mcp",
+                  routeId: `linked-codex-mcp:${linkedCodexMcp[0].id}`,
+                  kind: "linked-codex-mcp",
+                  name: linkedCodexMcp[0].id,
+                  nextAction: { tool: "codex_mcp_inspect", arguments: { serverId: linkedCodexMcp[0].id } },
+                }
+              : coreTools[0]
+                ? {
+                    source: "core-tool-search",
+                    routeId: `core-tool:${coreTools[0].name}`,
+                    kind: "core-tool",
+                    name: coreTools[0].name,
+                    score: coreTools[0].score,
+                    nextAction: { tool: coreTools[0].name, arguments: {} },
+                  }
+                : null;
       return textResult({
         ok: true,
+        routingContractVersion: ROUTING_CONTRACT_VERSION,
+        routingFingerprint: dynamicRoutingFingerprint,
         query,
+        workspaceId: workspaceId || null,
         coreTools,
         capabilities,
+        capabilityRouting,
+        workspaceSkillRouting,
+        deferredRouting,
         linkedCodexMcp,
-        recommendedRoute: computerRoute.useComputer
-          ? { tool: "codex_computer_use", reason: computerRoute.reason, score: computerRoute.score }
-          : null,
-        resultCount: coreTools.length + capabilities.length + linkedCodexMcp.length,
+        recommendedRoute,
+        resultCount: coreTools.length + capabilities.length + linkedCodexMcp.length + deferredRouting.candidateCount,
       });
     } catch (error) {
       return errorResult(error);

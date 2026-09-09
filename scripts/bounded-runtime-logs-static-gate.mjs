@@ -24,7 +24,8 @@ assert.match(fixedBackend, /inMemoryHistoryRetained:\s*false/);
 assert.match(config, /requests:\s*env\.DEVSPACE_LOG_REQUESTS === undefined \? false/);
 assert.match(server, /logEvent\(config\.logging, "debug", "mcp_session_created"/);
 assert.match(server, /logEvent\(config\.logging, "debug", "mcp_session_closed"/);
-assert.match(server, /logEvent\(config\.logging, "debug", "mcp_session_cleanup"/);
+assert.doesNotMatch(server, /logEvent\(config\.logging, "debug", "mcp_session_cleanup"/,
+  "production must not emit periodic idle-cleanup churn after switching to actual disconnect lifecycle");
 
 assert.match(boundedLogs, /DEFAULT_LOG_MAX_BYTES/);
 assert.match(boundedLogs, /DEFAULT_LOG_BACKUPS/);
@@ -44,6 +45,7 @@ console.log(JSON.stringify({
   fixedBackendStartupRotation: true,
   requestLoggingOptIn: true,
   sessionLifecycleDebugOnly: true,
+  periodicCleanupChurnRemoved: true,
   outputHistoryRetainedInHeap: false,
   diagnosticKeyCardinalityBounded: true,
   orphanAtomicTempsPruned: true,

@@ -27,8 +27,7 @@ function psQuote(value) {
 
 const configDir = resolve(argument("config-dir", join(homedir(), ".devspace-tailscale-bootstrap")));
 const taskName = argument("task-name", "DevSpace-Stable-Gateway").trim();
-const delaySeconds = Math.max(3, Math.min(30, Number(argument("delay-seconds", "6"))));
-const timeoutSeconds = Math.max(30, Math.min(300, Number(argument("timeout-seconds", "120"))));
+const delaySeconds = Math.max(0, Number(argument("delay-seconds", "6")) || 0);
 if (!taskName) throw new Error("Scheduled Task name is required.");
 
 const files = loadDevspaceFiles({ ...process.env, DEVSPACE_CONFIG_DIR: configDir });
@@ -47,11 +46,16 @@ await execFileAsync("powershell.exe", [
   "-NonInteractive",
   "-Command",
   `$task=Get-ScheduledTask -TaskName '${taskName.replaceAll("'", "''")}' -ErrorAction Stop; if (-not $task) { exit 2 }`,
-], { windowsHide: true, timeout: 15_000, maxBuffer: 1024 * 1024 });
+], { windowsHide: true, maxBuffer: 1024 * 1024 });
+
+const logDir = join(configDir, "logs");
+const resultPath = join(logDir, "stable-gateway-whole-restart-result.json");
+const scriptPath = join(logDir, "stable-gateway-whole-restart-pending.ps1");
+await mkdir(logDir, { recursive: true });
+await rm(resultPath, { force: true });
 
 const netstat = await execFileAsync("netstat.exe", ["-ano", "-p", "tcp"], {
   windowsHide: true,
-  timeout: 15_000,
   maxBuffer: 4 * 1024 * 1024,
 });
 const listeners = parseNetstatListeners(netstat.stdout, [gatewayPort, ...corePorts]);
@@ -66,25 +70,18 @@ const owned = validateDevspaceListeners({
   gatewayPort,
   corePorts,
 });
-const gateway = owned.find((entry) => entry.role === "gateway");
-if (!gateway) throw new Error("Stable Gateway listener was not found after ownership validation.");
+const gateway = owned.find((entry) => entry.role === "gateway") ?? null;
 const corePids = owned.filter((entry) => entry.role === "core").map((entry) => entry.pid);
 
-const logDir = join(configDir, "logs");
-const resultPath = join(logDir, "stable-gateway-whole-restart-result.json");
-const scriptPath = join(logDir, "stable-gateway-whole-restart-pending.ps1");
-await mkdir(logDir, { recursive: true });
-await rm(resultPath, { force: true });
 const helperTaskName = `${taskName}-Restart-${Date.now().toString(36)}`.slice(0, 220);
 const script = buildRestartPowerShell({
   taskName,
   gatewayPort,
-  gatewayPid: gateway.pid,
+  gatewayPid: gateway?.pid ?? null,
   corePids,
   resultPath,
   helperTaskName,
   delaySeconds,
-  timeoutSeconds,
 });
 await writeFile(scriptPath, `${script}\r\n`, { encoding: "utf8", mode: 0o600 });
 
@@ -96,7 +93,7 @@ const helperCommand = [
   `$arguments='-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "'+$scriptPath+'"'`,
   "$action=New-ScheduledTaskAction -Execute $execute -Argument $arguments",
   "$trigger=New-ScheduledTaskTrigger -Once -At ((Get-Date).AddHours(1))",
-  "$settings=New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 10)",
+  "$settings=New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero)",
   "$principal=New-ScheduledTaskPrincipal -UserId ([Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel Limited",
   "$definition=New-ScheduledTask -Action $action -Trigger $trigger -Settings $settings -Principal $principal",
   "Register-ScheduledTask -TaskName $helperTaskName -InputObject $definition -Force | Out-Null",
@@ -104,7 +101,6 @@ const helperCommand = [
 ].join("; ");
 await execFileAsync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", helperCommand], {
   windowsHide: true,
-  timeout: 30_000,
   maxBuffer: 2 * 1024 * 1024,
 });
 
@@ -114,11 +110,10 @@ console.log(JSON.stringify({
   taskName,
   gatewayPort,
   corePorts,
-  oldGatewayPid: gateway.pid,
+  oldGatewayPid: gateway?.pid ?? null,
   oldCorePids: corePids,
   helperTaskName,
   delaySeconds,
-  timeoutSeconds,
   resultPath,
   scriptPath,
   secretValuesLogged: false,

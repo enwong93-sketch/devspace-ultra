@@ -178,7 +178,9 @@ try {
   assert.equal(bridge.diagnostics().executionPolicy, "full-access");
 
   const registered = fakeServer();
-  registerCodexMcpBridgeTools(registered, bridge);
+  registerCodexMcpBridgeTools(registered, bridge, {
+    resolveConversation: async () => ({ conversationId: "conversation-codex-test" }),
+  });
   for (const name of [
     "codex_mcp_catalog",
     "codex_mcp_refresh",

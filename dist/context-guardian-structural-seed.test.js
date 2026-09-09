@@ -45,6 +45,10 @@ const contextAdapter = {
       modelSlug: "gpt-5-6-pro",
       generating: false,
       composerTextChars: 0,
+      documentReadyState: "complete",
+      composerReady: true,
+      routeHydrated: true,
+      routeStableForMs: 5_000,
     };
   },
   async nativeConversationDescriptor(runtimeKey) {
@@ -69,7 +73,7 @@ const contextAdapter = {
 const coordinator = new ContextGuardianRolloverCoordinator({
   contextGuardian,
   contextAdapter,
-  continuityRuntime: { async checkpoint() { throw new Error("normal pressure must not checkpoint"); } },
+  continuityRuntime: { enabled: true, async checkpoint() { throw new Error("normal pressure must not checkpoint"); } },
   goalRuntime: { async activeGoals() { throw new Error("normal pressure must not resolve Goal"); } },
   planRuntime: { async activePlans() { throw new Error("normal pressure must not resolve Plan"); } },
   pollMs: 0,

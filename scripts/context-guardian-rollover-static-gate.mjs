@@ -23,6 +23,8 @@ assert.doesNotMatch(cdp, /button\.click\(\)/, "Context Guardian live path must n
 assert.match(cdp, /composerTextChars/);
 assert.match(cdp, /lastTurnRequestObservedAt/);
 assert.match(cdp, /ClassicTurnIdentityCorrelator/);
+assert.match(cdp, /DEV Space Local Gateway/);
+assert.doesNotMatch(cdp, /@DevSpace Ultra/, "Runtime connector selection must use the authoritative DEV Space Local Gateway name, not the GitHub product name");
 
 assert.match(rollover, /attachAutoCompactContract/);
 assert.match(rollover, /validateAutoCompactContinuation/);
@@ -31,12 +33,17 @@ assert.match(rollover, /contextAdapter\.armUserTurnRollover/);
 assert.match(rollover, /contextAdapter\.startHiddenRollover/);
 assert.match(rollover, /uiContinuityKey/);
 assert.match(rollover, /verified-continuation/);
+assert.match(rollover, /continuityRuntime\.enabled !== true/);
+assert.match(rollover, /action:\s*"auto-compact-disabled"/);
+assert.match(rollover, /action:\s*"skipped-route-hydration"/);
+assert.match(rollover, /routeHydrated === true/);
 assert.doesNotMatch(rollover, /nativeSnapshotRefreshEnabled/);
 assert.doesNotMatch(rollover, /captureNativeSnapshot\(/);
 
 assert.match(server, /new ContextGuardianRolloverCoordinator/);
 assert.match(server, /contextRollover\.beforeGoalContinuation/);
-assert.match(server, /contextRollover\.start/);
+assert.match(server, /!config\.contextGuardianEnabled \|\| !config\.autoCompactEnabled/);
+assert.match(server, /if \(config\.contextGuardianEnabled && config\.autoCompactEnabled\)[\s\S]*contextRollover\.start/);
 assert.match(server, /contextRollover\.close/);
 
 assert.match(retiredLiveGate, /RETIRED_FRESH_CONVERSATION_ROLLOVER_GATE/);

@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtemp, mkdir, rm, stat, writeFile } from "node:fs/promises";
-import net from "node:net";
-import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import { CapabilityRuntime } from "../dist/capability-runtime.js";
+import { BlenderRuntimeManager } from "../dist/blender-runtime-manager.js";
 
 const OFFICIAL_SOURCE = "git+https://projects.blender.org/lab/blender_mcp.git@v1.0.0#subdirectory=mcp";
 const EXPECTED_TOOLS = [
@@ -36,70 +36,47 @@ const EXPECTED_TOOLS = [
   "search_manual_docs",
 ];
 
-function sleep(ms) {
-  return new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
+async function isFile(path) {
+  try { return (await stat(path)).isFile(); } catch { return false; }
 }
 
-async function assertFile(path) {
-  const info = await stat(path);
-  if (!info.isFile()) throw new Error(`Expected file: ${path}`);
+async function findExecutable({ explicit = [], windowsName, posixName }) {
+  for (const candidate of explicit.map((value) => String(value || "").trim()).filter(Boolean)) {
+    const absolute = resolve(candidate);
+    if (await isFile(absolute)) return absolute;
+  }
+  const command = process.platform === "win32" ? "where.exe" : "which";
+  const name = process.platform === "win32" ? windowsName : posixName;
+  const output = await new Promise((resolvePromise) => {
+    const child = spawn(command, [name], { windowsHide: true, stdio: ["ignore", "pipe", "ignore"] });
+    let stdout = "";
+    child.stdout?.on("data", (chunk) => { stdout = (stdout + String(chunk)).slice(-65_536); });
+    child.once("error", () => resolvePromise(""));
+    child.once("close", (code) => resolvePromise(code === 0 ? stdout : ""));
+  });
+  for (const line of String(output).split(/\r?\n/).map((item) => item.trim()).filter(Boolean)) {
+    if (await isFile(line)) return resolve(line);
+  }
+  throw new Error(`Unable to find ${name}. Set an explicit environment variable before running the live gate.`);
 }
 
-function waitForPort(port, timeoutMs = 60_000) {
-  const deadline = Date.now() + timeoutMs;
-  return new Promise((resolveWait, rejectWait) => {
-    const attempt = () => {
-      const socket = net.createConnection({ host: "127.0.0.1", port });
-      let settled = false;
-      const retry = () => {
-        if (settled) return;
-        settled = true;
-        socket.destroy();
-        if (Date.now() >= deadline) {
-          rejectWait(new Error(`Timed out waiting for Blender bridge port ${port}.`));
-          return;
-        }
-        setTimeout(attempt, 250);
+async function installedBlenderLocalHints() {
+  const candidates = [
+    join(homedir(), ".devspace-tailscale-bootstrap", "plugins", "packages", "blender-local", "devspace-plugin.json"),
+    join(homedir(), ".codex", "devspace-local-capabilities", "blender-local", "devspace-plugin.json"),
+  ];
+  for (const path of candidates) {
+    try {
+      const manifest = JSON.parse((await readFile(path, "utf8")).replace(/^\uFEFF/, ""));
+      const server = manifest?.mcpServers?.blender;
+      if (!server) continue;
+      return {
+        blenderPath: server?.env?.BLENDER_PATH || null,
+        uvPath: server?.command || null,
       };
-      socket.setTimeout(750, retry);
-      socket.once("error", retry);
-      socket.once("connect", () => {
-        if (settled) return;
-        settled = true;
-        socket.end();
-        resolveWait();
-      });
-    };
-    attempt();
-  });
-}
-
-function launchBlender(blenderPath, port) {
-  return spawn(blenderPath, [
-    "--background",
-    "--online-mode",
-    "--command", "blender_mcp",
-    "--host", "127.0.0.1",
-    "--port", String(port),
-  ], {
-    stdio: ["ignore", "pipe", "pipe"],
-    windowsHide: true,
-  });
-}
-
-async function stopProcess(child) {
-  if (!child || child.exitCode !== null) return;
-  if (process.platform === "win32" && child.pid) {
-    await new Promise((resolveStop) => {
-      const killer = spawn("taskkill.exe", ["/PID", String(child.pid), "/T", "/F"], { stdio: "ignore", windowsHide: true });
-      killer.once("close", () => resolveStop());
-      killer.once("error", () => resolveStop());
-    });
+    } catch {}
   }
-  else {
-    try { child.kill("SIGTERM"); } catch {}
-  }
-  await Promise.race([new Promise((resolveClose) => child.once("close", resolveClose)), sleep(3000)]).catch(() => {});
+  return { blenderPath: null, uvPath: null };
 }
 
 function mcpStructured(callResult) {
@@ -110,8 +87,7 @@ function mcpStructured(callResult) {
     try {
       const parsed = JSON.parse(item.text);
       if (parsed && typeof parsed === "object") return parsed;
-    }
-    catch {}
+    } catch {}
   }
   return undefined;
 }
@@ -127,40 +103,57 @@ function portable(path) {
   return path.replace(/\\/g, "/");
 }
 
-async function main() {
-  const blenderPath = resolve(process.env.DEVSPACE_BLENDER_PATH || process.env.BLENDER_PATH || "E:\\3D\\blender.exe");
-  const uvPath = resolve(process.env.DEVSPACE_UV_PATH || "C:\\Users\\enwong\\AppData\\Local\\Programs\\Python\\Python311\\Scripts\\uv.exe");
-  await assertFile(blenderPath);
-  await assertFile(uvPath);
+function stage(name, detail = null) {
+  console.error(`[blender-dual-live] ${name}${detail ? ` ${JSON.stringify(detail)}` : ""}`);
+}
 
-  const portA = Number(process.env.DEVSPACE_BLENDER_TEST_PORT_A || 19876);
-  const portB = Number(process.env.DEVSPACE_BLENDER_TEST_PORT_B || 19877);
-  assert.notEqual(portA, portB);
+async function main() {
+  stage("discover-executables");
+  const installedHints = await installedBlenderLocalHints();
+  const blenderPath = await findExecutable({
+    explicit: [process.env.DEVSPACE_BLENDER_PATH, process.env.BLENDER_PATH, installedHints.blenderPath],
+    windowsName: "blender.exe",
+    posixName: "blender",
+  });
+  const uvPath = await findExecutable({
+    explicit: [process.env.DEVSPACE_UV_PATH, process.env.UV_PATH, installedHints.uvPath],
+    windowsName: "uv.exe",
+    posixName: "uv",
+  });
+  stage("executables-ready", { blenderPath, uvPath });
 
   const root = await mkdtemp(join(tmpdir(), "devspace-blender-dual-live-"));
   const pluginSource = join(root, "blender-capability");
   const pluginsDir = join(root, "plugins");
   const registryPath = join(pluginsDir, "registry.json");
+  const stateDir = join(root, "state");
   const blendA = join(root, "DevSpace-Blender-A.blend");
   const blendB = join(root, "DevSpace-Blender-B.blend");
   await mkdir(pluginSource, { recursive: true });
 
   await writeFile(join(pluginSource, "devspace-plugin.json"), JSON.stringify({
-    id: "blender-lab-v1",
-    name: "Blender Lab MCP v1.0.0",
+    id: "blender-local",
+    name: "Local Blender MCP (dual-runtime live gate)",
     version: "1.0.0",
-    description: "Official Blender Lab MCP v1.0.0 used for DevSpace stateful-instance verification.",
+    description: "Official Blender Lab MCP used for two-runtime connection isolation verification.",
+    routing: {
+      aliases: ["Blender runtime", "parallel Blender", "two Blender ports"],
+      priority: 120,
+      allow_implicit_invocation: true,
+      exposure: "deferred",
+    },
     mcpServers: {
       blender: {
         command: uvPath,
         args: [
           "tool", "run",
-          "--with", "mcp[cli]<2",
+          "--with", "mcp<2",
           "--from", OFFICIAL_SOURCE,
           "blender-mcp",
         ],
-        connectTimeoutMs: 180000,
         env: {
+          BLENDER_HOST: "127.0.0.1",
+          BLENDER_PORT: "9876",
           BLENDER_PATH: blenderPath,
           BLENDER_MCP_DISABLE_TELEMETRY: "true",
           ...(process.env.UV_CACHE_DIR ? { UV_CACHE_DIR: process.env.UV_CACHE_DIR } : {}),
@@ -170,67 +163,72 @@ async function main() {
     },
   }, null, 2));
 
-  const blenderA = launchBlender(blenderPath, portA);
-  const blenderB = launchBlender(blenderPath, portB);
-  let stderrA = "";
-  let stderrB = "";
-  blenderA.stderr?.on("data", (chunk) => { stderrA = (stderrA + String(chunk)).slice(-12000); });
-  blenderB.stderr?.on("data", (chunk) => { stderrB = (stderrB + String(chunk)).slice(-12000); });
-
-  const runtime = new CapabilityRuntime({
+  const capabilityRuntime = new CapabilityRuntime({
     enabled: true,
     pluginsDir,
     registryPath,
     pluginPaths: [],
   });
-  let claimA;
-  let claimB;
+  const runtimeManager = new BlenderRuntimeManager({ stateDir, capabilityRuntime });
+  const ownerA = "dual-live-conversation-a";
+  const ownerB = "dual-live-conversation-b";
+  let startedA = false;
+  let startedB = false;
   try {
-    await Promise.all([waitForPort(portA), waitForPort(portB)]);
-    await runtime.ready;
-    const installed = await runtime.install({ source: pluginSource, enable: true, trust: true });
-    assert.equal(installed.plugin.id, "blender-lab-v1");
+    stage("install-plugin");
+    await capabilityRuntime.ready;
+    await runtimeManager.ready;
+    const installed = await capabilityRuntime.install({ source: pluginSource, enable: true, trust: true });
+    assert.equal(installed.plugin.id, "blender-local");
 
-    claimA = await runtime.claimInstance({
-      pluginId: "blender-lab-v1",
-      serverId: "blender",
-      instanceId: "project-a",
-      ownerLabel: "Blender-Agent-A",
-      env: { BLENDER_MCP_HOST: "127.0.0.1", BLENDER_MCP_PORT: String(portA) },
-      leaseSeconds: 900,
-    });
-    claimB = await runtime.claimInstance({
-      pluginId: "blender-lab-v1",
-      serverId: "blender",
-      instanceId: "project-b",
-      ownerLabel: "Blender-Agent-B",
-      env: { BLENDER_MCP_HOST: "127.0.0.1", BLENDER_MCP_PORT: String(portB) },
-      leaseSeconds: 900,
-    });
-
-    await assert.rejects(() => runtime.claimInstance({
-      pluginId: "blender-lab-v1",
-      serverId: "blender",
-      instanceId: "project-a",
-      ownerLabel: "Competing-Agent",
-      env: { BLENDER_MCP_PORT: String(portA) },
-    }), /already claimed/);
-
-    const [holderA, holderB] = await Promise.all([
-      runtime.getMcpClient("blender-lab-v1", "blender", claimA.instanceToken),
-      runtime.getMcpClient("blender-lab-v1", "blender", claimB.instanceToken),
+    stage("start-runtimes");
+    const [launchA, launchB] = await Promise.all([
+      runtimeManager.start({
+        runtimeId: "dual-agent-a",
+        ownerConversationId: ownerA,
+        ownerLabel: "Blender Agent A",
+        blenderPath,
+        background: true,
+        visible: false,
+      }),
+      runtimeManager.start({
+        runtimeId: "dual-agent-b",
+        ownerConversationId: ownerB,
+        ownerLabel: "Blender Agent B",
+        blenderPath,
+        background: true,
+        visible: false,
+      }),
     ]);
-    assert.notEqual(holderA, holderB);
+    startedA = true;
+    startedB = true;
+    stage("runtimes-ready", {
+      runtimeA: { pid: launchA.runtime.pid, port: launchA.runtime.port },
+      runtimeB: { pid: launchB.runtime.pid, port: launchB.runtime.port },
+    });
+    assert.notEqual(launchA.runtime.port, launchB.runtime.port);
+    assert.notEqual(launchA.runtime.pid, launchB.runtime.pid);
+    assert.equal(launchA.runtime.ownerConversationId, ownerA);
+    assert.equal(launchB.runtime.ownerConversationId, ownerB);
+    await assert.rejects(
+      () => runtimeManager.status("dual-agent-a", { ownerConversationId: ownerB }),
+      /another conversation/,
+    );
 
+    stage("resolve-runtime-connections");
+    const tokenA = await runtimeManager.instanceToken("dual-agent-a", ownerA);
+    const tokenB = await runtimeManager.instanceToken("dual-agent-b", ownerB);
+    assert.notEqual(tokenA, tokenB);
     const [listedA, listedB] = await Promise.all([
-      holderA.client.listTools(undefined, { timeout: 180000 }),
-      holderB.client.listTools(undefined, { timeout: 180000 }),
+      capabilityRuntime.listMcpTools("blender-local", "blender", tokenA, ownerA),
+      capabilityRuntime.listMcpTools("blender-local", "blender", tokenB, ownerB),
     ]);
     const toolsA = listedA.tools.map((tool) => tool.name);
     const toolsB = listedB.tools.map((tool) => tool.name);
     assert.deepEqual(toolsA, EXPECTED_TOOLS);
     assert.deepEqual(toolsB, EXPECTED_TOOLS);
     assert.deepEqual(listedA.tools, listedB.tools);
+    stage("tool-catalogs-ready", { tools: toolsA.length });
 
     const initCode = (label, marker, otherMarker, outputPath) => [
       "import bpy",
@@ -244,32 +242,33 @@ async function main() {
       `result={'instance':bpy.context.scene.get('devspace_instance'),'file':bpy.data.filepath,'own':bpy.data.objects.get(${JSON.stringify(marker)}) is not None,'other':bpy.data.objects.get(${JSON.stringify(otherMarker)}) is not None}`,
     ].join("\n");
 
+    stage("write-isolated-scenes");
     const [writeA, writeB] = await Promise.all([
-      runtime.call({
-        pluginId: "blender-lab-v1", kind: "mcp", serverId: "blender", instanceToken: claimA.instanceToken,
-        toolName: "execute_blender_code", arguments: { code: initCode("A", "DEVSPACE_A_ONLY", "DEVSPACE_B_ONLY", blendA) },
-      }),
-      runtime.call({
-        pluginId: "blender-lab-v1", kind: "mcp", serverId: "blender", instanceToken: claimB.instanceToken,
-        toolName: "execute_blender_code", arguments: { code: initCode("B", "DEVSPACE_B_ONLY", "DEVSPACE_A_ONLY", blendB) },
-      }),
+      capabilityRuntime.callMcp("blender-local", "blender", "execute_blender_code", {
+        code: initCode("A", "DEVSPACE_A_ONLY", "DEVSPACE_B_ONLY", blendA),
+      }, tokenA, ownerA),
+      capabilityRuntime.callMcp("blender-local", "blender", "execute_blender_code", {
+        code: initCode("B", "DEVSPACE_B_ONLY", "DEVSPACE_A_ONLY", blendB),
+      }, tokenB, ownerB),
     ]);
     const writeValueA = blenderValue(writeA);
     const writeValueB = blenderValue(writeB);
     assert.deepEqual({ instance: writeValueA.instance, own: writeValueA.own, other: writeValueA.other }, { instance: "A", own: true, other: false });
     assert.deepEqual({ instance: writeValueB.instance, own: writeValueB.own, other: writeValueB.other }, { instance: "B", own: true, other: false });
+    stage("isolated-scenes-written", { blendA, blendB });
 
     const verifyCode = [
       "import bpy",
       "result={'instance':bpy.context.scene.get('devspace_instance'),'file':bpy.data.filepath,'A':bpy.data.objects.get('DEVSPACE_A_ONLY') is not None,'B':bpy.data.objects.get('DEVSPACE_B_ONLY') is not None,'objects':[o.name for o in bpy.context.scene.objects]}",
     ].join("\n");
+    stage("verify-isolation");
     const [verifyA, verifyB, summaryA, summaryB, datablocksA, datablocksB] = await Promise.all([
-      runtime.call({ pluginId: "blender-lab-v1", kind: "mcp", serverId: "blender", instanceToken: claimA.instanceToken, toolName: "execute_blender_code", arguments: { code: verifyCode } }),
-      runtime.call({ pluginId: "blender-lab-v1", kind: "mcp", serverId: "blender", instanceToken: claimB.instanceToken, toolName: "execute_blender_code", arguments: { code: verifyCode } }),
-      runtime.call({ pluginId: "blender-lab-v1", kind: "mcp", serverId: "blender", instanceToken: claimA.instanceToken, toolName: "get_objects_summary", arguments: {} }),
-      runtime.call({ pluginId: "blender-lab-v1", kind: "mcp", serverId: "blender", instanceToken: claimB.instanceToken, toolName: "get_objects_summary", arguments: {} }),
-      runtime.call({ pluginId: "blender-lab-v1", kind: "mcp", serverId: "blender", instanceToken: claimA.instanceToken, toolName: "get_blendfile_summary_datablocks", arguments: {} }),
-      runtime.call({ pluginId: "blender-lab-v1", kind: "mcp", serverId: "blender", instanceToken: claimB.instanceToken, toolName: "get_blendfile_summary_datablocks", arguments: {} }),
+      capabilityRuntime.callMcp("blender-local", "blender", "execute_blender_code", { code: verifyCode }, tokenA, ownerA),
+      capabilityRuntime.callMcp("blender-local", "blender", "execute_blender_code", { code: verifyCode }, tokenB, ownerB),
+      capabilityRuntime.callMcp("blender-local", "blender", "get_objects_summary", {}, tokenA, ownerA),
+      capabilityRuntime.callMcp("blender-local", "blender", "get_objects_summary", {}, tokenB, ownerB),
+      capabilityRuntime.callMcp("blender-local", "blender", "get_blendfile_summary_datablocks", {}, tokenA, ownerA),
+      capabilityRuntime.callMcp("blender-local", "blender", "get_blendfile_summary_datablocks", {}, tokenB, ownerB),
     ]);
 
     const valueA = blenderValue(verifyA);
@@ -291,44 +290,62 @@ async function main() {
     assert.doesNotMatch(summaryTextB, /DEVSPACE_A_ONLY/);
     assert.ok(blenderValue(datablocksA));
     assert.ok(blenderValue(datablocksB));
+    assert.equal((await stat(blendA)).isFile(), true);
+    assert.equal((await stat(blendB)).isFile(), true);
 
-    await Promise.all([assertFile(blendA), assertFile(blendB)]);
-    const active = await runtime.listInstances({ pluginId: "blender-lab-v1", serverId: "blender" });
-    assert.deepEqual(active.map((item) => item.instanceId), ["project-a", "project-b"]);
-    assert.deepEqual(active.map((item) => item.envNames), [["BLENDER_MCP_HOST", "BLENDER_MCP_PORT"], ["BLENDER_MCP_HOST", "BLENDER_MCP_PORT"]]);
+    const connections = capabilityRuntime.listConnections({ pluginId: "blender-local", serverId: "blender" });
+    assert.equal(connections.filter((row) => row.scope === "isolated" && row.state === "ready").length, 2);
+    assert.deepEqual(new Set(connections.map((row) => row.runtimeId)), new Set(["dual-agent-a", "dual-agent-b"]));
+    stage("verification-complete");
 
     console.log(JSON.stringify({
       ok: true,
+      gate: "blender-mcp-dual-live",
       source: OFFICIAL_SOURCE,
-      dependencyCompatibilityPin: "mcp[cli]<2",
-      blenderPath,
-      blenderVersionGate: "Blender 5.1 installed extension",
-      instanceA: { port: portA, pid: blenderA.pid, blendFile: blendA, marker: "DEVSPACE_A_ONLY" },
-      instanceB: { port: portB, pid: blenderB.pid, blendFile: blendB, marker: "DEVSPACE_B_ONLY" },
+      blenderExecutable: basenameSafe(blenderPath),
+      uvExecutable: basenameSafe(uvPath),
+      runtimeA: { runtimeId: launchA.runtime.runtimeId, port: launchA.runtime.port, pid: launchA.runtime.pid, blendFile: blendA },
+      runtimeB: { runtimeId: launchB.runtime.runtimeId, port: launchB.runtime.port, pid: launchB.runtime.pid, blendFile: blendB },
       fullToolCatalog: `${toolsA.length}/${EXPECTED_TOOLS.length} PASS`,
-      sameToolCatalog: JSON.stringify(toolsA) === JSON.stringify(toolsB) ? "PASS" : "FAIL",
-      fullToolSchemaParity: "PASS",
-      isolatedMcpProcesses: holderA !== holderB ? "PASS" : "FAIL",
-      exclusiveSameInstanceClaim: "PASS",
-      projectIsolation: "PASS",
-      highLevelObjectsSummary: "PASS",
-      highLevelDatablocksSummary: "PASS",
-      toolNames: toolsA,
+      sameToolSchema: true,
+      separateProcesses: true,
+      separatePorts: true,
+      conversationOwnership: true,
+      projectIsolation: true,
+      persistentOutputs: true,
+      forceKillUsed: false,
+      workTimeoutUsed: false,
     }));
-  }
-  catch (error) {
-    if (stderrA) console.error(`Blender A stderr:\n${stderrA}`);
-    if (stderrB) console.error(`Blender B stderr:\n${stderrB}`);
+  } catch (error) {
+    stage("main-error", {
+      message: error instanceof Error ? error.message : String(error),
+      stack: error instanceof Error ? error.stack : null,
+    });
     throw error;
-  }
-  finally {
-    if (claimA?.instanceToken) await runtime.releaseInstance(claimA.instanceToken).catch(() => {});
-    if (claimB?.instanceToken) await runtime.releaseInstance(claimB.instanceToken).catch(() => {});
-    await runtime.close().catch(() => {});
-    await stopProcess(blenderA);
-    await stopProcess(blenderB);
+  } finally {
+    stage("cleanup-begin", { startedA, startedB });
+    if (startedA) {
+      stage("cleanup-runtime-a");
+      await runtimeManager.stop("dual-agent-a", { ownerConversationId: ownerA }).catch((error) => stage("cleanup-runtime-a-error", { error: String(error) }));
+      stage("cleanup-runtime-a-done");
+    }
+    if (startedB) {
+      stage("cleanup-runtime-b");
+      await runtimeManager.stop("dual-agent-b", { ownerConversationId: ownerB }).catch((error) => stage("cleanup-runtime-b-error", { error: String(error) }));
+      stage("cleanup-runtime-b-done");
+    }
+    stage("cleanup-runtime-manager");
+    await runtimeManager.close().catch(() => {});
+    stage("cleanup-capability-runtime");
+    await capabilityRuntime.close().catch(() => {});
+    stage("cleanup-temp");
     await rm(root, { recursive: true, force: true }).catch(() => {});
+    stage("cleanup-complete");
   }
+}
+
+function basenameSafe(path) {
+  return path ? path.split(/[\\/]/).at(-1) : null;
 }
 
 await main();

@@ -297,6 +297,70 @@ assert.equal(relayFallbackCalls.length, 1);
 assert.equal(relayFallbackCalls[0].candidate.targetId, "generic-devspace-relay");
 assert.equal(relayFallbackCalls[0].payload.goalId, "goal_bound_recovery");
 
+const staleWidgetDispatches = [];
+const conversationSafeBridge = new moduleUnderTest.ClassicGoalHostBridge({
+  ports: [9732, 9733],
+  async probePort(port) {
+    if (port !== 9732) return [];
+    return [{
+      runtimePort: 9732,
+      runtimeLabel: "Main-02",
+      targetId: "stale-goal-widget",
+      goalId: "goal_conversation_safe",
+      chatMode: true,
+      conversationId: "conversation_wrong",
+      pageWebSocketDebuggerUrl: "ws://page-wrong",
+      webSocketDebuggerUrl: "ws://widget-wrong",
+    }];
+  },
+  async probeRelayPort(port, conversationId) {
+    if (port !== 9733 || conversationId !== "conversation_authoritative") return [];
+    return [{
+      runtimePort: 9733,
+      runtimeLabel: "Main-03",
+      targetId: "authoritative-conversation-relay",
+      goalId: null,
+      chatMode: true,
+      conversationId,
+      pageWebSocketDebuggerUrl: "ws://page-authoritative",
+      webSocketDebuggerUrl: "ws://relay-authoritative",
+      relayOnly: true,
+    }];
+  },
+  async inspectVisibleReport(candidate) {
+    return {
+      chatMode: true,
+      generating: false,
+      streamStatus: "COMPLETE",
+      latestAssistantText: "",
+      conversationId: candidate.conversationId,
+    };
+  },
+  async sendRaw(candidate, payload) {
+    staleWidgetDispatches.push({ candidate, payload });
+    return { ok: true };
+  },
+});
+const conversationSafeSnapshot = await conversationSafeBridge.inspectWorkingRound({
+  id: "goal_conversation_safe",
+  conversationId: "conversation_authoritative",
+});
+assert.equal(conversationSafeSnapshot.conversationId, "conversation_authoritative");
+assert.equal(conversationSafeSnapshot.runtimePort, 9733);
+assert.equal(conversationSafeSnapshot.relayFallback, true, "a stale same-goal widget in another conversation must be ignored");
+const conversationSafeDispatch = await conversationSafeBridge.dispatchRoundRecovery({
+  goalId: "goal_conversation_safe",
+  conversationId: "conversation_authoritative",
+  round: 3,
+  recoveryId: "recovery_conversation_safe",
+  prompt: "[DEVSPACE_GOAL_ROUND_RECOVERY] stay on authoritative conversation",
+});
+assert.equal(conversationSafeDispatch.ok, true);
+assert.equal(conversationSafeDispatch.runtimePort, 9733);
+assert.equal(staleWidgetDispatches.length, 1);
+assert.equal(staleWidgetDispatches[0].candidate.targetId, "authoritative-conversation-relay");
+assert.notEqual(staleWidgetDispatches[0].candidate.targetId, "stale-goal-widget");
+
 const rolloverHookCalls = [];
 const rolloverBridge = new moduleUnderTest.ClassicGoalHostBridge({
   ports: [9721],

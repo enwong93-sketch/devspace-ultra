@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { probeCandidate, readCoreSchemaFingerprint, readSessionSchemaFingerprint, schemaFingerprint } from "./stable-gateway-candidate.js";
+import { MODEL_SURFACE_FINGERPRINT_VERSION, probeCandidate, readCoreSchemaFingerprint, readSessionSchemaFingerprint, schemaFingerprint } from "./stable-gateway-candidate.js";
 
 const PUBLIC_BASE = "https://devspace-gateway.example.test";
 const EXPECTED_TOOLS = [
@@ -119,8 +119,32 @@ function reorderedTools() {
   ];
 }
 
+assert.equal(MODEL_SURFACE_FINGERPRINT_VERSION, 2);
 assert.equal(schemaFingerprint(EXPECTED_TOOLS), schemaFingerprint(reorderedTools()), "schema fingerprint must ignore object-key and tool ordering");
 assert.notEqual(schemaFingerprint(EXPECTED_TOOLS), schemaFingerprint(EXPECTED_TOOLS.slice(0, 1)), "tool removal must change the fingerprint");
+assert.notEqual(
+  schemaFingerprint(EXPECTED_TOOLS),
+  schemaFingerprint(EXPECTED_TOOLS.map((tool, index) => index === 0 ? { ...tool, description: "Read a file with refreshed agent routing" } : tool)),
+  "tool-description changes must force a fresh MCP initialize so connected agents receive updated routing instructions",
+);
+assert.notEqual(
+  schemaFingerprint(EXPECTED_TOOLS),
+  schemaFingerprint(EXPECTED_TOOLS.map((tool, index) => index === 0 ? { ...tool, outputSchema: { type: "object", properties: { result: { type: "string" } } } } : tool)),
+  "tool output-schema changes must invalidate a resurrected MCP session",
+);
+assert.notEqual(
+  schemaFingerprint(EXPECTED_TOOLS),
+  schemaFingerprint(EXPECTED_TOOLS.map((tool, index) => index === 0 ? { ...tool, _meta: { ui: { visibility: ["model"], resourceUri: "ui://devspace/refreshed.html" } } } : tool)),
+  "tool UI metadata changes must invalidate legacy inline-card sessions",
+);
+assert.notEqual(
+  schemaFingerprint(EXPECTED_TOOLS),
+  schemaFingerprint(EXPECTED_TOOLS.map((tool, index) => index === 0 ? {
+    ...tool,
+    _meta: { devspace: { routingContractVersion: "1", routingFingerprint: "a".repeat(64), modelInstructionsFingerprint: "b".repeat(64) } },
+  } : tool)),
+  "plugin routing or model-instruction metadata changes must force agents onto a freshly initialized MCP surface",
+);
 
 async function testReadsBaselineSchemaFromExistingSession() {
   const core = await createCandidateCore();

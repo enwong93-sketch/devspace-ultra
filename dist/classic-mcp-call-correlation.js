@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { sessionFingerprintFromClassicRequest } from "./classic-conversation-authority.js";
 
 const DEFAULT_TTL_MS = 30_000;
 const DEFAULT_MAX_PENDING = 128;
@@ -64,6 +65,7 @@ export function parseNativeCallMcpRequest(request = {}) {
   if (!conversationId || !callFingerprint) return null;
   return {
     conversationId,
+    sessionFingerprint: sessionFingerprintFromClassicRequest(request),
     callFingerprint,
     toolName: cleanText(body?.params?.name, 220),
     messageIdPresent: Boolean(cleanText(body?.message_id, 240)),
@@ -101,7 +103,7 @@ export class ClassicMcpCallCorrelator {
     this.native = [];
     this.gateway = [];
     this.resolved = [];
-    this.waiters = new Set();
+    this.waiters = new Map();
     this.ambiguousMatches = 0;
   }
 
@@ -126,18 +128,33 @@ export class ClassicMcpCallCorrelator {
     const now = this.now();
     const natives = this.native.filter((item) => item.callFingerprint === callFingerprint && now - item.atMs <= this.ttlMs);
     const gateways = this.gateway.filter((item) => item.callFingerprint === callFingerprint && now - item.atMs <= this.ttlMs);
-    const pairs = [];
+    const candidatePairs = [];
     for (const native of natives) {
-      for (const gateway of gateways) {
-        const skewMs = Math.abs(native.atMs - gateway.atMs);
-        if (skewMs <= this.maxSkewMs) pairs.push({ native, gateway, skewMs });
-      }
+      const choices = gateways
+        .map((gateway) => ({ native, gateway, skewMs: Math.abs(native.atMs - gateway.atMs) }))
+        .filter((pair) => pair.skewMs <= this.maxSkewMs)
+        .sort((a, b) => a.skewMs - b.skewMs || a.gateway.atMs - b.gateway.atMs);
+      if (!choices.length) continue;
+      if (choices.length > 1 && choices[0].skewMs === choices[1].skewMs) continue;
+      const best = choices[0];
+      const reverse = natives
+        .map((candidateNative) => ({ native: candidateNative, gateway: best.gateway, skewMs: Math.abs(candidateNative.atMs - best.gateway.atMs) }))
+        .filter((pair) => pair.skewMs <= this.maxSkewMs)
+        .sort((a, b) => a.skewMs - b.skewMs || a.native.atMs - b.native.atMs);
+      if (!reverse.length || reverse[0].native !== native) continue;
+      if (reverse.length > 1 && reverse[0].skewMs === reverse[1].skewMs) continue;
+      candidatePairs.push(best);
     }
-    if (pairs.length !== 1) {
-      if (pairs.length > 1) this.ambiguousMatches += 1;
+    candidatePairs.sort((a, b) => a.skewMs - b.skewMs || Math.max(a.native.atMs, a.gateway.atMs) - Math.max(b.native.atMs, b.gateway.atMs));
+    if (!candidatePairs.length) {
+      if ((natives.length > 1 && gateways.length > 0) || (gateways.length > 1 && natives.length > 0)) this.ambiguousMatches += 1;
       return null;
     }
-    const [{ native, gateway, skewMs }] = pairs;
+    if (candidatePairs.length > 1 && candidatePairs[0].skewMs === candidatePairs[1].skewMs) {
+      this.ambiguousMatches += 1;
+      return null;
+    }
+    const [{ native, gateway, skewMs }] = candidatePairs;
     this.native = this.native.filter((item) => item !== native);
     this.gateway = this.gateway.filter((item) => item !== gateway);
     const identity = {
@@ -152,30 +169,43 @@ export class ClassicMcpCallCorrelator {
     };
     this.resolved.unshift(identity);
     this.resolved = this.resolved.slice(0, this.maxPending);
-    for (const waiter of [...this.waiters]) {
+    for (const [key, waiter] of [...this.waiters]) {
       if (waiter.callFingerprint !== callFingerprint) continue;
       if (waiter.sessionFingerprint && waiter.sessionFingerprint !== identity.sessionFingerprint) continue;
-      this.waiters.delete(waiter);
-      clearTimeout(waiter.timer);
+      this.waiters.delete(key);
       waiter.resolve(identity);
     }
     return identity;
   }
 
-  waitForIdentity({ callFingerprint, sessionFingerprint = null, timeoutMs = 750 } = {}) {
+  waitForIdentity({ callFingerprint, sessionFingerprint = null, signal } = {}) {
     const call = cleanText(callFingerprint, 64)?.toLowerCase();
     const session = cleanText(sessionFingerprint, 64)?.toLowerCase() || null;
     if (!call || !/^[a-f0-9]{64}$/.test(call)) return Promise.resolve(null);
     const existing = this.resolved.find((item) => item.callFingerprint === call && (!session || item.sessionFingerprint === session));
     if (existing) return Promise.resolve(existing);
-    return new Promise((resolvePromise) => {
-      const waiter = { callFingerprint: call, sessionFingerprint: session, resolve: resolvePromise, timer: null };
-      waiter.timer = setTimeout(() => {
-        this.waiters.delete(waiter);
-        resolvePromise(null);
-      }, Math.max(25, Math.min(2_000, Number(timeoutMs) || 750)));
-      waiter.timer.unref?.();
-      this.waiters.add(waiter);
+    const key = `${call}:${session || "*"}`;
+    const current = this.waiters.get(key);
+    let sharedPromise = current?.promise;
+    if (!sharedPromise) {
+      let resolveWaiter;
+      sharedPromise = new Promise((resolvePromise) => { resolveWaiter = resolvePromise; });
+      this.waiters.set(key, {
+        callFingerprint: call,
+        sessionFingerprint: session,
+        createdAtMs: this.now(),
+        resolve: resolveWaiter,
+        promise: sharedPromise,
+      });
+    }
+    if (!signal) return sharedPromise;
+    if (signal.aborted) return Promise.reject(new Error("MCP conversation correlation was cancelled."));
+    return new Promise((resolvePromise, rejectPromise) => {
+      const onAbort = () => rejectPromise(new Error("MCP conversation correlation was cancelled."));
+      signal.addEventListener("abort", onAbort, { once: true });
+      sharedPromise.then(resolvePromise, rejectPromise).finally(() => {
+        signal.removeEventListener("abort", onAbort);
+      });
     });
   }
 
@@ -184,6 +214,17 @@ export class ClassicMcpCallCorrelator {
     this.native = this.native.filter((item) => item.atMs >= cutoff).slice(-this.maxPending);
     this.gateway = this.gateway.filter((item) => item.atMs >= cutoff).slice(-this.maxPending);
     this.resolved = this.resolved.filter((item) => Date.parse(item.observedAt || "") >= cutoff).slice(0, this.maxPending);
+    for (const [key, waiter] of this.waiters) {
+      if (Number(waiter.createdAtMs || 0) >= cutoff) continue;
+      this.waiters.delete(key);
+      waiter.resolve(null);
+    }
+    while (this.waiters.size > this.maxPending) {
+      const oldest = [...this.waiters.entries()].sort((a, b) => Number(a[1].createdAtMs || 0) - Number(b[1].createdAtMs || 0))[0];
+      if (!oldest) break;
+      this.waiters.delete(oldest[0]);
+      oldest[1].resolve(null);
+    }
   }
 
   diagnostics() {

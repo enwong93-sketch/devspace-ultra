@@ -1,0 +1,39 @@
+import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { resolve } from "node:path";
+
+const execFileAsync = promisify(execFile);
+const root = resolve(import.meta.dirname, "..");
+const npmCli = process.env.npm_execpath;
+assert.ok(npmCli, "npm_execpath is required; run this gate through npm run verify:public-release.");
+const { stdout } = await execFileAsync(process.execPath, [npmCli, "pack", "--dry-run", "--json"], {
+  cwd: root,
+  windowsHide: true,
+  maxBuffer: 32 * 1024 * 1024,
+});
+const report = JSON.parse(stdout);
+const files = new Set((report?.[0]?.files || []).map((entry) => String(entry.path).replaceAll("\\", "/")));
+for (const required of [
+  "install.ps1",
+  "install-skill.ps1",
+  "skills/devspace-ultra-setup/SKILL.md",
+  "skills/devspace-ultra-setup/agents/openai.yaml",
+  "scripts/devspace-public-setup.ps1",
+  "scripts/devspace-duckdns-update.ps1",
+  "scripts/devspace-cloudflare-run.ps1",
+  "scripts/devspace-stable-gateway.mjs",
+  "dist/server.js",
+  "docs/ONE_COMMAND_SETUP.md",
+  "docs/NETWORK_INGRESS.md",
+]) {
+  assert.ok(files.has(required), `npm package is missing required public setup file: ${required}`);
+}
+console.log(JSON.stringify({
+  ok: true,
+  gate: "package-contents",
+  fileCount: files.size,
+  publicInstallerIncluded: true,
+  networkRunnersIncluded: true,
+  documentationIncluded: true,
+}));

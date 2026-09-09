@@ -1,0 +1,45 @@
+name: Publish GitHub release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run verify:public-release
+      - run: npm run verify:stable-gateway
+      - run: npm run verify:capabilities
+      - name: Build npm-compatible archive
+        shell: pwsh
+        run: |
+          npm pack
+          $archive = Get-ChildItem -Filter 'devspace-ultra-*.tgz' | Select-Object -First 1
+          if (-not $archive) { throw 'npm pack did not create an archive.' }
+          $hash = Get-FileHash -Algorithm SHA256 -LiteralPath $archive.FullName
+          @(
+            "SHA256  $($archive.Name)  $($hash.Hash.ToLowerInvariant())",
+            "Tag      $env:GITHUB_REF_NAME"
+          ) | Set-Content -LiteralPath SHA256SUMS.txt -Encoding utf8
+      - name: Publish release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: docs/releases/V0.5.2.md
+          files: |
+            install.ps1
+            install-skill.ps1
+            devspace-ultra-*.tgz
+            SHA256SUMS.txt
+          fail_on_unmatched_files: true

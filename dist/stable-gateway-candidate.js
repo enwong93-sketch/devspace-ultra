@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 
-const DEFAULT_TIMEOUT_MS = 5_000;
 const CANDIDATE_PROTOCOL_VERSION = "2025-11-25";
+export const MODEL_SURFACE_FINGERPRINT_VERSION = 2;
 
 function canonicalize(value) {
   if (Array.isArray(value)) return value.map(canonicalize);
@@ -16,14 +16,21 @@ function normalizeTools(tools) {
   return tools
     .map((tool) => ({
       name: String(tool?.name ?? ""),
+      title: String(tool?.title ?? ""),
+      description: String(tool?.description ?? ""),
       inputSchema: tool?.inputSchema ?? null,
+      outputSchema: tool?.outputSchema ?? null,
       annotations: tool?.annotations ?? null,
+      _meta: tool?._meta ?? null,
     }))
     .sort((a, b) => a.name.localeCompare(b.name));
 }
 
 export function schemaFingerprint(tools) {
-  const canonical = canonicalize(normalizeTools(tools));
+  const canonical = canonicalize({
+    version: MODEL_SURFACE_FINGERPRINT_VERSION,
+    tools: normalizeTools(tools),
+  });
   return createHash("sha256").update(JSON.stringify(canonical)).digest("hex");
 }
 
@@ -57,12 +64,11 @@ function safeError(error) {
   return { error: name };
 }
 
-async function fetchJson(url, options, timeoutMs) {
+async function fetchJson(url, options = {}) {
   const response = await fetch(url, {
     redirect: "manual",
     cache: "no-store",
     ...options,
-    signal: AbortSignal.timeout(timeoutMs),
   });
   let body = null;
   try { body = await response.json(); } catch {}
@@ -82,12 +88,11 @@ function parseMcpPayload(text) {
   return null;
 }
 
-async function mcpPost(coreBase, authorization, body, { backendSessionId, protocolVersion, timeoutMs }) {
+async function mcpPost(coreBase, authorization, body, { backendSessionId, protocolVersion } = {}) {
   const response = await fetch(`${coreBase}/mcp`, {
     method: "POST",
     redirect: "manual",
     cache: "no-store",
-    signal: AbortSignal.timeout(timeoutMs),
     headers: {
       authorization,
       accept: "application/json, text/event-stream",
@@ -109,12 +114,9 @@ async function mcpPost(coreBase, authorization, body, { backendSessionId, protoc
 export async function readCoreSchemaFingerprint({
   coreBaseUrl,
   bearerToken,
-  timeoutMs = DEFAULT_TIMEOUT_MS,
 } = {}) {
   const coreBase = requireLoopbackBase(coreBaseUrl);
   const authorization = authorizationHeader(bearerToken);
-  const boundedTimeout = Number(timeoutMs);
-  if (!Number.isFinite(boundedTimeout) || boundedTimeout <= 0) throw new Error("timeoutMs must be positive.");
 
   const initializeBody = {
     jsonrpc: "2.0",
@@ -126,7 +128,7 @@ export async function readCoreSchemaFingerprint({
       clientInfo: { name: "devspace-stable-gateway-baseline", version: "0.5.0" },
     },
   };
-  const initialized = await mcpPost(coreBase, authorization, initializeBody, { timeoutMs: boundedTimeout });
+  const initialized = await mcpPost(coreBase, authorization, initializeBody);
   const backendSessionId = String(initialized.headers.get("mcp-session-id") ?? "").trim();
   const protocolVersion = String(initialized.payload?.result?.protocolVersion ?? CANDIDATE_PROTOCOL_VERSION);
   if (!initialized.ok || !backendSessionId || !initialized.payload?.result) {
@@ -140,7 +142,6 @@ export async function readCoreSchemaFingerprint({
   }, {
     backendSessionId,
     protocolVersion,
-    timeoutMs: boundedTimeout,
   });
   if (!notification.ok) {
     throw new Error(`Unable to initialize fresh active Core schema session (status ${notification.status}).`);
@@ -154,7 +155,6 @@ export async function readCoreSchemaFingerprint({
   }, {
     backendSessionId,
     protocolVersion,
-    timeoutMs: boundedTimeout,
   });
   const tools = listed.payload?.result?.tools;
   if (!listed.ok || !Array.isArray(tools)) {
@@ -172,14 +172,11 @@ export async function readSessionSchemaFingerprint({
   bearerToken,
   backendSessionId,
   protocolVersion = CANDIDATE_PROTOCOL_VERSION,
-  timeoutMs = DEFAULT_TIMEOUT_MS,
 } = {}) {
   const coreBase = requireLoopbackBase(coreBaseUrl);
   const authorization = authorizationHeader(bearerToken);
   const sessionId = String(backendSessionId ?? "").trim();
   if (!sessionId) throw new Error("backendSessionId is required.");
-  const boundedTimeout = Number(timeoutMs);
-  if (!Number.isFinite(boundedTimeout) || boundedTimeout <= 0) throw new Error("timeoutMs must be positive.");
   const listed = await mcpPost(coreBase, authorization, {
     jsonrpc: "2.0",
     id: 1,
@@ -188,7 +185,6 @@ export async function readSessionSchemaFingerprint({
   }, {
     backendSessionId: sessionId,
     protocolVersion,
-    timeoutMs: boundedTimeout,
   });
   const tools = listed.payload?.result?.tools;
   if (!listed.ok || !Array.isArray(tools)) {
@@ -220,18 +216,15 @@ export async function probeCandidate({
   publicBaseUrl,
   bearerToken,
   expectedSchemaFingerprint,
-  timeoutMs = DEFAULT_TIMEOUT_MS,
 } = {}) {
   const coreBase = requireLoopbackBase(coreBaseUrl);
   const publicBase = normalizeBaseUrl(publicBaseUrl, "publicBaseUrl");
   const authorization = authorizationHeader(bearerToken);
   const expectedFingerprint = String(expectedSchemaFingerprint ?? "").trim();
   if (!/^[a-f0-9]{64}$/i.test(expectedFingerprint)) throw new Error("expectedSchemaFingerprint must be a SHA-256 hex digest.");
-  const boundedTimeout = Number(timeoutMs);
-  if (!Number.isFinite(boundedTimeout) || boundedTimeout <= 0) throw new Error("timeoutMs must be positive.");
 
   try {
-    const health = await fetchJson(`${coreBase}/healthz`, {}, boundedTimeout);
+    const health = await fetchJson(`${coreBase}/healthz`);
     if (!health.response.ok || health.body?.ok !== true) {
       return { ok: false, stage: "health", status: health.response.status };
     }
@@ -243,7 +236,7 @@ export async function probeCandidate({
   const expectedIssuer = `${publicBase}/`;
   let protectedResource;
   try {
-    const probe = await fetchJson(`${coreBase}/.well-known/oauth-protected-resource/mcp`, {}, boundedTimeout);
+    const probe = await fetchJson(`${coreBase}/.well-known/oauth-protected-resource/mcp`);
     protectedResource = probe.body;
     const authorizationServers = Array.isArray(protectedResource?.authorization_servers) ? protectedResource.authorization_servers : [];
     if (!probe.response.ok || protectedResource?.resource !== expectedResource || !authorizationServers.includes(expectedIssuer)) {
@@ -260,7 +253,7 @@ export async function probeCandidate({
 
   let authorizationServer;
   try {
-    const probe = await fetchJson(`${coreBase}/.well-known/oauth-authorization-server`, {}, boundedTimeout);
+    const probe = await fetchJson(`${coreBase}/.well-known/oauth-authorization-server`);
     authorizationServer = probe.body;
     if (!probe.response.ok || !authorizationServerMatches(authorizationServer, publicBase)) {
       return {
@@ -289,7 +282,7 @@ export async function probeCandidate({
   let backendSessionId;
   let negotiatedProtocol = CANDIDATE_PROTOCOL_VERSION;
   try {
-    const initialized = await mcpPost(coreBase, authorization, initializeBody, { timeoutMs: boundedTimeout });
+    const initialized = await mcpPost(coreBase, authorization, initializeBody);
     backendSessionId = String(initialized.headers.get("mcp-session-id") ?? "").trim();
     negotiatedProtocol = String(initialized.payload?.result?.protocolVersion ?? CANDIDATE_PROTOCOL_VERSION);
     if (!initialized.ok || !backendSessionId || !initialized.payload?.result) {
@@ -302,7 +295,6 @@ export async function probeCandidate({
     }, {
       backendSessionId,
       protocolVersion: negotiatedProtocol,
-      timeoutMs: boundedTimeout,
     });
     if (!notification.ok) return { ok: false, stage: "mcp-initialized", status: notification.status };
   } catch (error) {
@@ -319,7 +311,6 @@ export async function probeCandidate({
     }, {
       backendSessionId,
       protocolVersion: negotiatedProtocol,
-      timeoutMs: boundedTimeout,
     });
     tools = listed.payload?.result?.tools;
     if (!listed.ok || !Array.isArray(tools)) {

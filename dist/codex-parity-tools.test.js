@@ -56,10 +56,25 @@ const root = await mkdtemp(join(tmpdir(), "devspace-view-image-"));
 const outside = await mkdtemp(join(tmpdir(), "devspace-view-image-outside-"));
 try {
   await mkdir(join(root, "assets"), { recursive: true });
+  const workspaceSkillDir = join(root, ".agents", "skills", "workspace-retopology");
+  await mkdir(join(workspaceSkillDir, "agents"), { recursive: true });
   await writeFile(join(root, "assets", "image.bin"), pngBytes());
   await writeFile(join(root, "assets", "text.bin"), "not an image");
   await writeFile(join(outside, "outside.png"), pngBytes());
-  const workspace = { id: "ws_test", root };
+  await writeFile(join(workspaceSkillDir, "SKILL.md"), `---\nname: workspace-retopology\ndescription: Clean generated character topology before rigging and animation.\nrouting:\n  aliases:\n    - quad edge loops\n    - topology cleanup\n  exclude:\n    - texture-only edit\n---\n# Workspace retopology\nUse the project retopology workflow.\n`);
+  await writeFile(join(workspaceSkillDir, "agents", "openai.yaml"), `interface:\n  display_name: "Workspace Retopology"\n  short_description: "Animation-ready quad topology for this project"\n  default_prompt: "Use $workspace-retopology before rigging this generated mesh."\ndependencies:\n  tools:\n    - type: "mcp"\n      value: "blender"\n      description: "Project Blender bridge"\npolicy:\n  allow_implicit_invocation: true\n`);
+  const workspaceSkillPath = join(workspaceSkillDir, "SKILL.md");
+  const workspace = {
+    id: "ws_test",
+    root,
+    skills: [{
+      name: "workspace-retopology",
+      description: "Clean generated character topology before rigging and animation.",
+      filePath: workspaceSkillPath,
+      baseDir: workspaceSkillDir,
+      disableModelInvocation: false,
+    }],
+  };
   const workspaces = {
     getWorkspace(id) {
       assert.equal(id, "ws_test");
@@ -97,8 +112,57 @@ try {
   };
   instrumentToolRegistration(server, toolCatalog);
   const capabilityRuntime = {
+    routingFingerprint() { return "a".repeat(64); },
     async search(query) {
-      return query.includes("memory") ? [{ id: "powermem-shared", probedMcpToolNames: ["search_memories"] }] : [];
+      if (query.includes("memory")) return [{ id: "powermem-shared", probedMcpToolNames: ["search_memories"] }];
+      if (query.includes("Blender")) return [{ id: "blender-local", probedMcpToolNames: ["execute_blender_code"] }];
+      return [];
+    },
+    async route(query) {
+      if (query.includes("memory")) return {
+        ok: true,
+        routingFingerprint: "a".repeat(64),
+        candidateCount: 1,
+        ambiguous: false,
+        primary: {
+          routeId: "skill:powermem-shared:memory",
+          kind: "skill",
+          name: "memory",
+          pluginId: "powermem-shared",
+          score: 144,
+          nextAction: { tool: "capability_read", arguments: { pluginId: "powermem-shared", path: "skills/memory/SKILL.md" } },
+        },
+        candidates: [],
+      };
+      if (query.includes("Blender")) return {
+        ok: true,
+        routingFingerprint: "b".repeat(64),
+        candidateCount: 1,
+        ambiguous: false,
+        primary: {
+          routeId: "mcp-tool:blender-local:blender:execute_blender_code",
+          kind: "mcp-tool",
+          name: "execute_blender_code",
+          pluginId: "blender-local",
+          serverId: "blender",
+          toolName: "execute_blender_code",
+          score: 250,
+          nextAction: {
+            tool: "blender_mcp",
+            arguments: { action: "call", toolName: "execute_blender_code", arguments: {} },
+            runtimeRoute: {
+              managerTool: "blender_runtime",
+              owner: "current-conversation",
+              strategy: "reuse-owned-runtime-or-start-isolated",
+              discovery: { tool: "blender_runtime", arguments: { action: "list" } },
+              start: { tool: "blender_runtime", arguments: { action: "start", runtimeId: "<conversation-project-runtime>" } },
+              bindArgument: "runtimeId",
+            },
+          },
+        },
+        candidates: [],
+      };
+      return { ok: true, routingFingerprint: "a".repeat(64), candidateCount: 0, ambiguous: false, primary: null, candidates: [] };
     },
   };
   const codexMcpBridge = {
@@ -172,6 +236,41 @@ try {
   assert.equal(searchResult.structuredContent.coreTools.some((entry) => entry.name === "view_image"), true);
   const capabilitySearch = await handlers.get("tool_search").handler({ query: "memory", limit: 10, includeCapabilities: true });
   assert.equal(capabilitySearch.structuredContent.capabilities[0].id, "powermem-shared");
+  assert.equal(capabilitySearch.structuredContent.capabilityRouting.primary.kind, "skill");
+  assert.equal(capabilitySearch.structuredContent.recommendedRoute.source, "capability-routing");
+  assert.equal(capabilitySearch.structuredContent.recommendedRoute.nextAction.tool, "capability_read");
+  assert.equal(capabilitySearch.structuredContent.routingHarness.primary.kind, "skill");
+  assert.deepEqual(capabilitySearch.structuredContent.routeChain.map((route) => route.kind), ["skill"]);
+  assert.equal(handlers.get("tool_search").definition._meta.devspace.routingContractVersion, "1");
+  assert.equal(handlers.get("tool_search").definition._meta.devspace.routingFingerprint, "a".repeat(64));
+  assert.equal(handlers.get("tool_search").definition._meta.devspace.routingHarnessVersion, "1");
+  assert.match(handlers.get("tool_search").definition.description, /single model-facing routing entry point/i);
+
+  const blenderSearch = await handlers.get("tool_search").handler({
+    query: "continue the Blender character in an isolated runtime",
+    limit: 10,
+    includeCapabilities: true,
+    multiStep: true,
+  });
+  assert.equal(blenderSearch.structuredContent.routingHarness.primary.kind, "mcp-tool");
+  assert.deepEqual(blenderSearch.structuredContent.routeChain.map((route) => route.kind), ["workflow", "runtime", "mcp-tool"]);
+  assert.equal(blenderSearch.structuredContent.routeChain[1].nextAction.tool, "blender_runtime");
+  assert.equal(blenderSearch.structuredContent.routeChain[2].nextAction.tool, "blender_mcp");
+  const workspaceSkillSearch = await handlers.get("tool_search").handler({
+    query: "clean this character with quad edge loops before rigging",
+    workspaceId: "ws_test",
+    limit: 10,
+    includeCapabilities: true,
+  });
+  assert.equal(workspaceSkillSearch.structuredContent.workspaceSkillRouting.primary.name, "workspace-retopology");
+  assert.equal(workspaceSkillSearch.structuredContent.recommendedRoute.source, "workspace-skill-routing");
+  assert.equal(workspaceSkillSearch.structuredContent.recommendedRoute.nextAction.tool, "read");
+  assert.deepEqual(workspaceSkillSearch.structuredContent.recommendedRoute.nextAction.arguments, {
+    workspaceId: "ws_test",
+    path: workspaceSkillPath,
+  });
+  assert.equal(workspaceSkillSearch.structuredContent.deferredRouting.primary.shortDescription, "Animation-ready quad topology for this project");
+  assert.equal(workspaceSkillSearch.structuredContent.deferredRouting.primary.dependencies.some((value) => /project blender bridge/i.test(value)), true);
   const linkedSearch = await handlers.get("tool_search").handler({ query: "blender", limit: 10, includeCapabilities: true });
   assert.equal(linkedSearch.structuredContent.linkedCodexMcp[0].id, "blender_mcp");
   assert.equal(toolCatalog.diagnostics().names.includes("request_user_input"), true);

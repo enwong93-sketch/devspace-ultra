@@ -15,13 +15,11 @@ const readOnly = process.argv.includes("--status");
 try {
   const response = await fetch(ENDPOINT, readOnly ? {
     method: "GET",
-    signal: AbortSignal.timeout(1500),
     cache: "no-store",
   } : {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ message, doing, completed, clearCurrent }),
-    signal: AbortSignal.timeout(1500),
   });
   if (!response.ok) throw new Error(`progress endpoint returned ${response.status}`);
   const body = await response.json();

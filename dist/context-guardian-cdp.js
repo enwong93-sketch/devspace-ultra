@@ -11,10 +11,159 @@ const DEFAULT_ROLLOVER_TIMEOUT_MS = 120_000;
 const NATIVE_DESCRIPTOR_CACHE_TTL_MS = 60_000;
 const NATIVE_DESCRIPTOR_RATE_LIMIT_COOLDOWN_MS = 90_000;
 const NATIVE_DESCRIPTOR_RETRY_DELAYS_MS = [0, 750, 2_000];
-const DEVSPACE_PLUGIN_NAME = "DevSpace Ultra";
+const NATIVE_DESCRIPTOR_MAX_CACHE_ENTRIES = 64;
+const NATIVE_DESCRIPTOR_TRANSIENT_STATUSES = new Set([408, 425, 500, 502, 503, 504]);
+const ROLLOVER_RESPONSE_TIMEOUT_MS = 30_000;
+const ROLLOVER_MAX_TRANSACTIONS = 8;
+const DEVSPACE_CONNECTOR_NAME = "DEV Space Local Gateway";
 
 function sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
 function observedAt() { return new Date().toISOString(); }
+
+export function parseNativeDescriptorRetryAfterMs(value, nowMs = Date.now()) {
+  const text = String(value ?? "").trim();
+  if (!text) return null;
+  const seconds = Number(text);
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.min(5 * 60_000, Math.ceil(seconds * 1_000));
+  const at = Date.parse(text);
+  return Number.isFinite(at) ? Math.max(0, Math.min(5 * 60_000, at - nowMs)) : null;
+}
+
+function isNativeDescriptorRateLimit(error) {
+  const message = error instanceof Error ? error.message : String(error);
+  return error?.code === "NATIVE_DESCRIPTOR_RATE_LIMIT" || /Native conversation descriptor HTTP 429/i.test(message);
+}
+
+function isNativeDescriptorTransient(error) {
+  return error?.code === "NATIVE_DESCRIPTOR_HTTP"
+    && NATIVE_DESCRIPTOR_TRANSIENT_STATUSES.has(Number(error?.status));
+}
+
+export class NativeConversationDescriptorCoordinator {
+  constructor({
+    now = () => Date.now(),
+    sleepImpl = sleep,
+    cacheTtlMs = NATIVE_DESCRIPTOR_CACHE_TTL_MS,
+    rateLimitCooldownMs = NATIVE_DESCRIPTOR_RATE_LIMIT_COOLDOWN_MS,
+    retryDelaysMs = NATIVE_DESCRIPTOR_RETRY_DELAYS_MS,
+    maxCacheEntries = NATIVE_DESCRIPTOR_MAX_CACHE_ENTRIES,
+  } = {}) {
+    this.now = now;
+    this.sleep = sleepImpl;
+    this.cacheTtlMs = Math.max(0, Number(cacheTtlMs) || 0);
+    this.rateLimitCooldownMs = Math.max(1_000, Number(rateLimitCooldownMs) || NATIVE_DESCRIPTOR_RATE_LIMIT_COOLDOWN_MS);
+    this.retryDelaysMs = Array.isArray(retryDelaysMs) && retryDelaysMs.length
+      ? retryDelaysMs.map((value) => Math.max(0, Number(value) || 0))
+      : [0];
+    this.maxCacheEntries = Math.max(1, Number(maxCacheEntries) || NATIVE_DESCRIPTOR_MAX_CACHE_ENTRIES);
+    this.cache = new Map();
+    this.inFlight = new Map();
+    this.cooldowns = new Map();
+  }
+
+  #cooldownError(cooldownUntil) {
+    const error = new Error(`Native conversation descriptor rate limited until ${new Date(cooldownUntil).toISOString()}`);
+    error.code = "NATIVE_DESCRIPTOR_COOLDOWN";
+    error.retryAt = new Date(cooldownUntil).toISOString();
+    return error;
+  }
+
+  #pruneCache() {
+    const now = this.now();
+    for (const [conversationId, until] of this.cooldowns) {
+      if (Number(until || 0) <= now) this.cooldowns.delete(conversationId);
+    }
+    if (this.cache.size <= this.maxCacheEntries && this.cooldowns.size <= this.maxCacheEntries) return;
+    const oldest = [...this.cache.entries()].sort((a, b) => Number(a[1]?.observedAtMs || 0) - Number(b[1]?.observedAtMs || 0));
+    for (const [conversationId] of oldest) {
+      if (this.cache.size <= this.maxCacheEntries) break;
+      this.cache.delete(conversationId);
+    }
+    const limited = [...this.cooldowns.entries()].sort((a, b) => Number(a[1] || 0) - Number(b[1] || 0));
+    for (const [conversationId] of limited) {
+      if (this.cooldowns.size <= this.maxCacheEntries) break;
+      this.cooldowns.delete(conversationId);
+    }
+  }
+
+  async load(conversationId, { force = false, fetchDescriptor } = {}) {
+    const id = String(conversationId || "").trim();
+    if (!id) throw new Error("Native conversation descriptor requires a conversation id.");
+    if (typeof fetchDescriptor !== "function") throw new Error("Native conversation descriptor requires a fetch function.");
+    const now = this.now();
+    const cached = this.cache.get(id);
+    if (!force && cached && now - cached.observedAtMs < this.cacheTtlMs) return cached.descriptor;
+    const cooldownUntil = Number(this.cooldowns.get(id) || 0);
+    if (cooldownUntil > now) {
+      if (cached?.descriptor) return cached.descriptor;
+      throw this.#cooldownError(cooldownUntil);
+    }
+    const existing = this.inFlight.get(id);
+    if (existing) return await existing;
+    const pending = this.#loadFresh(id, cached, fetchDescriptor);
+    this.inFlight.set(id, pending);
+    try {
+      return await pending;
+    } finally {
+      if (this.inFlight.get(id) === pending) this.inFlight.delete(id);
+    }
+  }
+
+  async #loadFresh(id, cached, fetchDescriptor) {
+    let lastError = null;
+    for (let index = 0; index < this.retryDelaysMs.length; index += 1) {
+      const delayMs = this.retryDelaysMs[index];
+      if (delayMs > 0) await this.sleep(delayMs);
+      const now = this.now();
+      const cooldownUntil = Number(this.cooldowns.get(id) || 0);
+      if (cooldownUntil > now) {
+        if (cached?.descriptor) return cached.descriptor;
+        throw this.#cooldownError(cooldownUntil);
+      }
+      try {
+        const descriptor = await fetchDescriptor();
+        this.cache.set(id, { descriptor, observedAtMs: this.now() });
+        this.cooldowns.delete(id);
+        this.#pruneCache();
+        return descriptor;
+      } catch (error) {
+        lastError = error;
+        if (isNativeDescriptorRateLimit(error)) {
+          const retryAfterMs = parseNativeDescriptorRetryAfterMs(error?.retryAfter, this.now());
+          const cooldownMs = Math.max(this.rateLimitCooldownMs, retryAfterMs ?? 0);
+          const next = this.now() + cooldownMs;
+          this.cooldowns.set(id, Math.max(Number(this.cooldowns.get(id) || 0), next));
+          this.#pruneCache();
+          break;
+        }
+        if (!isNativeDescriptorTransient(error) || index + 1 >= this.retryDelaysMs.length) break;
+      }
+    }
+    if (cached?.descriptor) return cached.descriptor;
+    throw lastError || new Error("Native conversation descriptor unavailable.");
+  }
+
+  status() {
+    const now = this.now();
+    const activeCooldowns = [...this.cooldowns.entries()]
+      .filter(([, until]) => Number(until || 0) > now)
+      .sort((a, b) => Number(a[1]) - Number(b[1]));
+    return {
+      cachedConversations: this.cache.size,
+      inFlight: this.inFlight.size,
+      rateLimitedConversations: activeCooldowns.length,
+      nextCooldownExpiry: activeCooldowns.length ? new Date(activeCooldowns[0][1]).toISOString() : null,
+    };
+  }
+
+  clear() {
+    this.cache.clear();
+    this.inFlight.clear();
+    this.cooldowns.clear();
+  }
+}
+
+const sharedNativeConversationDescriptorCoordinator = new NativeConversationDescriptorCoordinator();
 
 async function fetchJson(url, { fetchImpl = globalThis.fetch, timeoutMs = DEFAULT_PROBE_TIMEOUT_MS } = {}) {
   if (typeof fetchImpl !== "function") throw new Error("fetch is unavailable for Context Guardian CDP discovery.");
@@ -412,11 +561,16 @@ export async function rewriteUserTurnRolloverPausedRequest(client, params, {
     return { handled: true, modified: true, oldConversationId, visibleUserMessages };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    await client.call("Fetch.failRequest", {
-      requestId,
-      errorReason: "Aborted",
-    }).catch(() => {});
-    return { handled: true, modified: false, error: message };
+    const originalRequestContinued = await client.call("Fetch.continueRequest", { requestId })
+      .then(() => true)
+      .catch(() => false);
+    return {
+      handled: true,
+      modified: false,
+      originalRequestContinued,
+      sourceConversationPreserved: originalRequestContinued,
+      error: message,
+    };
   }
 }
 
@@ -456,11 +610,16 @@ export async function rewriteHiddenRolloverPausedRequest(client, params, {
     return { handled: true, modified: true };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    await client.call("Fetch.failRequest", {
-      requestId,
-      errorReason: "Aborted",
-    }).catch(() => {});
-    return { handled: true, modified: false, error: message };
+    const originalRequestContinued = await client.call("Fetch.continueRequest", { requestId })
+      .then(() => true)
+      .catch(() => false);
+    return {
+      handled: true,
+      modified: false,
+      originalRequestContinued,
+      sourceConversationPreserved: originalRequestContinued,
+      error: message,
+    };
   }
 }
 
@@ -589,6 +748,26 @@ export function parseNativeClassicModelResponse(text) {
 function inspectExpression() {
   return `(() => {
     const match = location.pathname.match(/\\/c\\/([^/?#]+)/);
+    const conversationId = match?.[1] || null;
+    const lifecycleNow = Date.now();
+    const documentLifecycleKey = '__devspaceClassicDocumentLifecycleV1';
+    const routeLifecycleKey = '__devspaceClassicConversationLifecycleV1';
+    const documentLifecycle = globalThis[documentLifecycleKey] || (globalThis[documentLifecycleKey] = {
+      id: globalThis.crypto?.randomUUID?.() || ('document-' + lifecycleNow + '-' + Math.random().toString(36).slice(2)),
+      createdAtMs: lifecycleNow,
+    });
+    const priorRoute = globalThis[routeLifecycleKey];
+    let routeLifecycle = priorRoute;
+    if (!routeLifecycle || routeLifecycle.documentId !== documentLifecycle.id || routeLifecycle.conversationId !== conversationId) {
+      routeLifecycle = globalThis[routeLifecycleKey] = {
+        documentId: documentLifecycle.id,
+        conversationId,
+        routeEpoch: Math.max(1, Number(priorRoute?.routeEpoch || 0) + 1),
+        enteredAtMs: lifecycleNow,
+        hydratedSinceMs: null,
+        lastSeenAtMs: lifecycleNow,
+      };
+    }
     const radios = [...document.querySelectorAll('[role="radio"]')];
     const work = radios.find((el) => /^(工作|Work)$/i.test((el.innerText || el.textContent || '').trim()));
     const chat = radios.find((el) => /^(對話|Chat)$/i.test((el.innerText || el.textContent || '').trim()));
@@ -602,10 +781,14 @@ function inspectExpression() {
     const domObservedTokens=visible.reduce((sum,el)=>sum+8+tokenText((el.innerText||el.textContent||'').trim()),0);
     const composer=document.querySelector('#prompt-textarea');
     const composerText=(composer?.innerText||composer?.textContent||'').replace(/\\u2060/g,'').trim();
-    const devspacePluginPaired=[...(composer?.querySelectorAll('[data-id^="plugin:"]')||[])].some((el)=>/DevSpace/i.test((el.innerText||el.textContent||'')));
+    const composerReady=Boolean(composer);
+    const routeHydrated=Boolean(conversationId && document.readyState === 'complete' && composerReady && visible.length > 0);
+    routeLifecycle.hydratedSinceMs = routeHydrated ? (routeLifecycle.hydratedSinceMs || lifecycleNow) : null;
+    routeLifecycle.lastSeenAtMs = lifecycleNow;
+    const devspacePluginPaired=[...(composer?.querySelectorAll('[data-id^="plugin:"]')||[])].some((el)=>/DEV\\s*Space(?:[_\\s-]+Local[_\\s-]+Gateway)/i.test((el.innerText||el.textContent||'')));
     return {
       mode,
-      conversationId: match?.[1] || null,
+      conversationId,
       modelSlug: lastModeled?.getAttribute('data-message-model-slug') || null,
       generating: Boolean(document.querySelector('button[data-testid="stop-button"]')),
       composerTextChars: composerText.length,
@@ -613,6 +796,15 @@ function inspectExpression() {
       domObservedTokens,
       visibleMessageCount: visible.length,
       href: location.href,
+      pageVisibilityState: document.visibilityState || null,
+      documentReadyState: document.readyState || null,
+      composerReady,
+      documentId: documentLifecycle.id,
+      routeEpoch: routeLifecycle.routeEpoch,
+      routeEnteredAt: new Date(routeLifecycle.enteredAtMs).toISOString(),
+      routeHydratedAt: routeLifecycle.hydratedSinceMs ? new Date(routeLifecycle.hydratedSinceMs).toISOString() : null,
+      routeStableForMs: routeLifecycle.hydratedSinceMs ? Math.max(0, lifecycleNow - routeLifecycle.hydratedSinceMs) : 0,
+      routeHydrated,
     };
   })()`;
 }
@@ -649,10 +841,10 @@ async function waitForCondition(fn, { timeoutMs = 10_000, pollMs = 150 } = {}) {
 async function pairDevspacePlugin(client) {
   const boxReady = await waitForCondition(async () => await evaluate(client, `Boolean(document.querySelector('#prompt-textarea'))`));
   if (!boxReady) throw new Error("Fresh Chat composer did not appear for DevSpace rollover.");
-  const typed = await evaluate(client, `(() => { const box=document.querySelector('#prompt-textarea'); if(!box)return false; box.focus(); const sel=getSelection(); sel.selectAllChildren(box); sel.deleteFromDocument(); document.execCommand('insertText',false,'@${DEVSPACE_PLUGIN_NAME}'); box.dispatchEvent(new InputEvent('input',{bubbles:true,inputType:'insertText',data:'@${DEVSPACE_PLUGIN_NAME}'})); return true; })()`);
-  if (!typed) throw new Error("Could not open the DevSpace Ultra Chat plugin picker.");
-  const selected = await waitForCondition(async () => await evaluate(client, `(() => { const wrappers=[...document.querySelectorAll('[data-composer-plugin-impression-id]')]; const wrapper=wrappers.find((el)=>{const t=(el.innerText||el.textContent||'').trim();return t.startsWith('${DEVSPACE_PLUGIN_NAME}')&&!/Tailscale/i.test(t)}); const row=wrapper?.querySelector('[tabindex="0"]'); if(!row)return false; row.click(); return true; })()`), { timeoutMs: 7_000, pollMs: 200 });
-  if (!selected) throw new Error("DevSpace Ultra was not available in the Chat plugin picker.");
+  const typed = await evaluate(client, `(() => { const box=document.querySelector('#prompt-textarea'); if(!box)return false; box.focus(); const sel=getSelection(); sel.selectAllChildren(box); sel.deleteFromDocument(); document.execCommand('insertText',false,'@${DEVSPACE_CONNECTOR_NAME}'); box.dispatchEvent(new InputEvent('input',{bubbles:true,inputType:'insertText',data:'@${DEVSPACE_CONNECTOR_NAME}'})); return true; })()`);
+  if (!typed) throw new Error("Could not open the DEV Space Local Gateway Chat plugin picker.");
+  const selected = await waitForCondition(async () => await evaluate(client, `(() => { const wrappers=[...document.querySelectorAll('[data-composer-plugin-impression-id]')]; const wrapper=wrappers.find((el)=>{const t=(el.innerText||el.textContent||'').replace(/\\s+/g,' ').trim();return t.startsWith('${DEVSPACE_CONNECTOR_NAME}')}); const row=wrapper?.querySelector('[tabindex="0"]'); if(!row)return false; row.click(); return true; })()`), { timeoutMs: 7_000, pollMs: 200 });
+  if (!selected) throw new Error("DEV Space Local Gateway was not available in the Chat plugin picker.");
   await sleep(300);
   return true;
 }
@@ -720,11 +912,10 @@ export async function connectClassicContextMetadataPort(port, {
     emit(onConversationIdentity, { runtimeKey, port, ...identity, observedAt: observedAt() });
   };
   let nativeBaseline = null;
-  const nativeDescriptorCache = new Map();
-  const nativeDescriptorCooldowns = new Map();
   let userTurnRolloverArm = null;
   let userTurnPausedHandler = null;
   let userTurnFetchEnabled = false;
+  const rolloverTransactions = new Map();
   const adoptNativeDescriptor = async (conversationId, descriptor, inspected = null) => {
     const current = inspected || await evaluate(client, inspectExpression());
     const observedTokens = Math.max(0, Number(descriptor?.estimatedTokens || 0));
@@ -754,34 +945,11 @@ export async function connectClassicContextMetadataPort(port, {
     return snapshot;
   };
 
-  const parseRetryAfterMs = (value) => {
-    const text = String(value ?? "").trim();
-    if (!text) return null;
-    const seconds = Number(text);
-    if (Number.isFinite(seconds) && seconds >= 0) return Math.min(5 * 60_000, Math.ceil(seconds * 1_000));
-    const at = Date.parse(text);
-    return Number.isFinite(at) ? Math.max(0, Math.min(5 * 60_000, at - Date.now())) : null;
-  };
-
   const loadNativeConversationDescriptor = async (conversationId, { force = false } = {}) => {
     const id = String(conversationId || "").trim();
-    if (!id) throw new Error("Native conversation descriptor requires a conversation id.");
-    const now = Date.now();
-    const cached = nativeDescriptorCache.get(id);
-    if (!force && cached && now - cached.observedAtMs < NATIVE_DESCRIPTOR_CACHE_TTL_MS) return cached.descriptor;
-    const cooldownUntil = Number(nativeDescriptorCooldowns.get(id) || 0);
-    if (!force && cooldownUntil > now) {
-      if (cached?.descriptor) return cached.descriptor;
-      const error = new Error(`Native conversation descriptor rate limited until ${new Date(cooldownUntil).toISOString()}`);
-      error.code = "NATIVE_DESCRIPTOR_COOLDOWN";
-      error.retryAt = new Date(cooldownUntil).toISOString();
-      throw error;
-    }
-    let lastError = null;
-    for (let index = 0; index < NATIVE_DESCRIPTOR_RETRY_DELAYS_MS.length; index += 1) {
-      const delayMs = NATIVE_DESCRIPTOR_RETRY_DELAYS_MS[index];
-      if (delayMs > 0) await sleep(delayMs);
-      try {
+    return await sharedNativeConversationDescriptorCoordinator.load(id, {
+      force,
+      fetchDescriptor: async () => {
         const descriptor = await evaluate(client, nativeConversationDescriptorExpression(id));
         if (descriptor?.ok === false) {
           const error = new Error(`Native conversation descriptor HTTP ${descriptor.status || "unavailable"}`);
@@ -793,23 +961,9 @@ export async function connectClassicContextMetadataPort(port, {
         if (!descriptor || descriptor.conversationId !== id || !descriptor.currentNode) {
           throw new Error("Native conversation descriptor did not return the requested conversation boundary.");
         }
-        nativeDescriptorCache.set(id, { descriptor, observedAtMs: Date.now() });
-        nativeDescriptorCooldowns.delete(id);
         return descriptor;
-      } catch (error) {
-        lastError = error;
-        const message = error instanceof Error ? error.message : String(error);
-        const rateLimited = error?.code === "NATIVE_DESCRIPTOR_RATE_LIMIT" || /Native conversation descriptor HTTP 429/i.test(message);
-        if (!rateLimited) break;
-        const retryAfterMs = parseRetryAfterMs(error?.retryAfter);
-        const fallbackDelay = NATIVE_DESCRIPTOR_RETRY_DELAYS_MS[Math.min(index + 1, NATIVE_DESCRIPTOR_RETRY_DELAYS_MS.length - 1)] || 2_000;
-        const cooldownMs = Math.max(NATIVE_DESCRIPTOR_RATE_LIMIT_COOLDOWN_MS, retryAfterMs ?? fallbackDelay);
-        nativeDescriptorCooldowns.set(id, Date.now() + cooldownMs);
-        if (index + 1 >= NATIVE_DESCRIPTOR_RETRY_DELAYS_MS.length) break;
-      }
-    }
-    if (cached?.descriptor) return cached.descriptor;
-    throw lastError || new Error("Native conversation descriptor unavailable.");
+      },
+    });
   };
 
   const clearUserTurnRolloverArm = async ({ disableFetch = true } = {}) => {
@@ -821,6 +975,21 @@ export async function connectClassicContextMetadataPort(port, {
       await client.call("Fetch.disable").catch(() => {});
     }
   };
+
+  const rolloverEventBase = (arm, oldConversationId, rolloverMode) => ({
+    mode: rolloverMode,
+    runtimeKey,
+    port,
+    goalId: arm?.goalId || null,
+    planId: arm?.planId || null,
+    oldConversationId,
+    sourceMessageId: arm?.sourceMessageId || null,
+    uiContinuityKey: arm?.uiContinuityKey || null,
+    capsuleFingerprint: arm?.capsuleFingerprint || null,
+    capsuleId: arm?.capsuleId || null,
+    sourceDescriptor: arm?.sourceDescriptor || null,
+    compressionContract: arm?.compressionContract || null,
+  });
 
   const verifyUserTurnRollover = async ({ arm, outcome }) => {
     const oldConversationId = String(outcome?.oldConversationId || arm?.oldConversationId || "").trim();
@@ -858,42 +1027,127 @@ export async function connectClassicContextMetadataPort(port, {
       const snapshot = await adoptNativeDescriptor(stable.conversationId, targetDescriptor, after);
       emit(onUserTurnRollover, {
         ok: true,
-        mode: rolloverMode,
-        runtimeKey,
-        port,
-        goalId: arm?.goalId || null,
-        planId: arm?.planId || null,
-        oldConversationId,
+        ...rolloverEventBase(arm, oldConversationId, rolloverMode),
         newConversationId: stable.conversationId,
         conversationId: stable.conversationId,
         visibleUsers: targetDescriptor.visibleUsers,
         visibleAssistants: targetDescriptor.visibleAssistants,
         hiddenMessages: targetDescriptor.hiddenMessages,
         observedTokens: snapshot?.observedTokens ?? null,
-        uiContinuityKey: arm?.uiContinuityKey || null,
-        capsuleFingerprint: arm?.capsuleFingerprint || null,
-        capsuleId: arm?.capsuleId || null,
-        sourceDescriptor: arm?.sourceDescriptor || null,
         targetDescriptor,
-        compressionContract: arm?.compressionContract || null,
         nativeContinuationSourceId: targetDescriptor.contextTruncationContinuation?.sourceConversationId || null,
         devspaceContinuationSourceId: targetDescriptor.devspaceContinuity?.sourceConversationId || null,
+        sourceConversationPreserved: true,
         observedAt: observedAt(),
       });
     } catch (error) {
+      let current = null;
+      try { current = await evaluate(client, inspectExpression()); } catch {}
       emit(onUserTurnRollover, {
         ok: false,
-        mode: rolloverMode,
-        runtimeKey,
-        port,
-        goalId: arm?.goalId || null,
-        planId: arm?.planId || null,
-        oldConversationId,
-        uiContinuityKey: arm?.uiContinuityKey || null,
+        ...rolloverEventBase(arm, oldConversationId, rolloverMode),
+        errorCode: error?.code || null,
+        httpStatus: Number.isFinite(Number(error?.status)) ? Number(error.status) : null,
+        retryAfter: error?.retryAfter || null,
         error: error instanceof Error ? error.message : String(error),
+        currentConversationId: current?.conversationId || null,
+        sourceConversationCurrent: current?.conversationId === oldConversationId,
+        sourceConversationPreserved: true,
+        authorityMigrationCommitted: false,
         observedAt: observedAt(),
       });
     }
+  };
+
+  const clearRolloverTransaction = (transactionId) => {
+    const id = String(transactionId || "").trim();
+    const transaction = id ? rolloverTransactions.get(id) : null;
+    if (transaction?.timer) clearTimeout(transaction.timer);
+    if (id) rolloverTransactions.delete(id);
+    return transaction;
+  };
+
+  const emitRolloverTransportFailure = async (transaction, {
+    errorCode = "AUTO_COMPACT_TRANSPORT_FAILURE",
+    httpStatus = null,
+    retryAfter = null,
+    error = "Auto Compact continuation transport failed.",
+  } = {}) => {
+    const arm = transaction?.arm || {};
+    const oldConversationId = String(arm.oldConversationId || "").trim();
+    const rolloverMode = arm.mode === "hidden-goal-continuation" ? "hidden-goal-continuation" : "user-turn";
+    let current = null;
+    try { current = await evaluate(client, inspectExpression()); } catch {}
+    emit(onUserTurnRollover, {
+      ok: false,
+      ...rolloverEventBase(arm, oldConversationId, rolloverMode),
+      errorCode,
+      httpStatus: Number.isFinite(Number(httpStatus)) ? Number(httpStatus) : null,
+      retryAfter: retryAfter || null,
+      error: String(error || "Auto Compact continuation transport failed."),
+      currentConversationId: current?.conversationId || null,
+      sourceConversationCurrent: current?.conversationId === oldConversationId,
+      sourceConversationPreserved: true,
+      authorityMigrationCommitted: false,
+      observedAt: observedAt(),
+    });
+  };
+
+  const processRolloverTransaction = (transactionId) => {
+    const id = String(transactionId || "").trim();
+    const transaction = id ? rolloverTransactions.get(id) : null;
+    if (!transaction || !transaction.outcome || !transaction.response || transaction.settled) return false;
+    transaction.settled = true;
+    const status = Number(transaction.response.status || 0);
+    if (status < 200 || status >= 300) {
+      clearRolloverTransaction(id);
+      void emitRolloverTransportFailure(transaction, {
+        errorCode: status === 429 ? "AUTO_COMPACT_HTTP_429" : "AUTO_COMPACT_HTTP_ERROR",
+        httpStatus: status || null,
+        retryAfter: transaction.response.retryAfter || null,
+        error: `Auto Compact continuation HTTP ${status || "error"}; source conversation retained and compact cancelled.`,
+      });
+      return true;
+    }
+    if (transaction.timer) clearTimeout(transaction.timer);
+    transaction.timer = null;
+    void verifyUserTurnRollover({ arm: transaction.arm, outcome: transaction.outcome })
+      .finally(() => clearRolloverTransaction(id));
+    return true;
+  };
+
+  const registerRolloverTransaction = (transactionId, arm) => {
+    const id = String(transactionId || "").trim();
+    if (!id) return null;
+    while (rolloverTransactions.size >= ROLLOVER_MAX_TRANSACTIONS) {
+      const oldest = [...rolloverTransactions.entries()]
+        .sort((left, right) => Number(left[1]?.createdAtMs || 0) - Number(right[1]?.createdAtMs || 0))[0];
+      if (!oldest) break;
+      const evicted = clearRolloverTransaction(oldest[0]);
+      if (evicted) void emitRolloverTransportFailure(evicted, {
+        errorCode: "AUTO_COMPACT_TRANSACTION_EVICTED",
+        error: "Auto Compact transaction bound exceeded; source conversation retained.",
+      });
+    }
+    const transaction = {
+      id,
+      arm: { ...arm },
+      outcome: null,
+      response: null,
+      settled: false,
+      createdAtMs: Date.now(),
+      timer: null,
+    };
+    transaction.timer = setTimeout(() => {
+      const expired = clearRolloverTransaction(id);
+      if (expired) void emitRolloverTransportFailure(expired, {
+        errorCode: "AUTO_COMPACT_RESPONSE_TIMEOUT",
+        error: "Auto Compact continuation response timed out; source conversation retained and automatic retry suppressed.",
+      });
+    }, ROLLOVER_RESPONSE_TIMEOUT_MS);
+    transaction.timer.unref?.();
+    rolloverTransactions.set(id, transaction);
+    return transaction;
   };
 
   const armUserTurnRollover = async ({
@@ -964,17 +1218,20 @@ export async function connectClassicContextMetadataPort(port, {
           await clearUserTurnRolloverArm();
           emit(onUserTurnRollover, {
             ok: false,
-            mode: arm.mode,
-            runtimeKey,
-            port,
-            goalId: arm.goalId || null,
-            oldConversationId: arm.oldConversationId,
-            error: "A real user turn arrived before the hidden Goal continuation; the user request was not rewritten.",
+            ...rolloverEventBase(arm, arm.oldConversationId, arm.mode),
+            errorCode: "AUTO_COMPACT_SUPERSEDED_BY_USER_TURN",
+            error: "A real user turn arrived before the hidden Goal continuation; the user request continued unchanged in the source conversation.",
+            sourceConversationCurrent: true,
+            sourceConversationPreserved: true,
+            authorityMigrationCommitted: false,
             observedAt: observedAt(),
           });
           return;
         }
         arm.consuming = true;
+        const consumedArm = { ...arm };
+        const transactionId = String(params?.networkId || requestId).trim();
+        const transaction = registerRolloverTransaction(transactionId, consumedArm);
         const common = {
           attribution: "devspace-ultra",
           toolName: "devspace_context_guardian",
@@ -983,52 +1240,67 @@ export async function connectClassicContextMetadataPort(port, {
           uiContinuityKey: arm.uiContinuityKey,
           capsuleFingerprint: arm.capsuleFingerprint,
         };
-        const outcome = arm.mode === "hidden-goal-continuation"
-          ? await rewriteHiddenRolloverPausedRequest(client, params, { prompt: arm.capsulePrompt, ...common })
-          : await rewriteUserTurnRolloverPausedRequest(client, params, { capsulePrompt: arm.capsulePrompt, ...common });
+        const outcome = consumedArm.mode === "hidden-goal-continuation"
+          ? await rewriteHiddenRolloverPausedRequest(client, params, { prompt: consumedArm.capsulePrompt, ...common })
+          : await rewriteUserTurnRolloverPausedRequest(client, params, { capsulePrompt: consumedArm.capsulePrompt, ...common });
         if (!outcome.handled) {
+          clearRolloverTransaction(transactionId);
           arm.consuming = false;
           await client.call("Fetch.continueRequest", { requestId }).catch(() => {});
           return;
         }
-        const consumedArm = { ...arm };
         await clearUserTurnRolloverArm();
         if (!outcome.modified) {
+          clearRolloverTransaction(transactionId);
           emit(onUserTurnRollover, {
             ok: false,
-            mode: consumedArm.mode,
-            runtimeKey,
-            port,
-            goalId: consumedArm.goalId || null,
-            planId: consumedArm.planId || null,
-            oldConversationId: consumedArm.oldConversationId,
-            error: outcome.error || "Auto Compact request rewrite failed closed.",
+            ...rolloverEventBase(consumedArm, consumedArm.oldConversationId, consumedArm.mode),
+            errorCode: "AUTO_COMPACT_REWRITE_BYPASSED",
+            error: outcome.error || "Auto Compact request rewrite was bypassed; original request continued unchanged.",
+            sourceConversationCurrent: true,
+            sourceConversationPreserved: outcome.sourceConversationPreserved === true,
+            originalRequestContinued: outcome.originalRequestContinued === true,
+            authorityMigrationCommitted: false,
             observedAt: observedAt(),
           });
           return;
         }
-        void verifyUserTurnRollover({
-          arm: consumedArm,
-          outcome: {
-            ...outcome,
-            oldConversationId: consumedArm.oldConversationId,
-            visibleUserMessages,
-          },
-        });
+        if (!transaction) {
+          emit(onUserTurnRollover, {
+            ok: false,
+            ...rolloverEventBase(consumedArm, consumedArm.oldConversationId, consumedArm.mode),
+            errorCode: "AUTO_COMPACT_TRANSACTION_UNAVAILABLE",
+            error: "Auto Compact transaction tracking was unavailable; authority migration remains blocked.",
+            sourceConversationPreserved: true,
+            authorityMigrationCommitted: false,
+            observedAt: observedAt(),
+          });
+          return;
+        }
+        transaction.outcome = {
+          ...outcome,
+          oldConversationId: consumedArm.oldConversationId,
+          visibleUserMessages,
+        };
+        processRolloverTransaction(transactionId);
       })().catch(async (error) => {
         const requestId = params?.requestId;
-        if (requestId) await client.call("Fetch.failRequest", { requestId, errorReason: "Aborted" }).catch(() => {});
-        const arm = userTurnRolloverArm;
+        const transactionId = String(params?.networkId || requestId || "").trim();
+        const transaction = clearRolloverTransaction(transactionId);
+        const arm = transaction?.arm || userTurnRolloverArm || {};
+        const originalRequestContinued = requestId
+          ? await client.call("Fetch.continueRequest", { requestId }).then(() => true).catch(() => false)
+          : false;
         await clearUserTurnRolloverArm();
         emit(onUserTurnRollover, {
           ok: false,
-          mode: arm?.mode || "user-turn",
-          runtimeKey,
-          port,
-          goalId: arm?.goalId || null,
-          planId: arm?.planId || null,
-          oldConversationId: arm?.oldConversationId || null,
+          ...rolloverEventBase(arm, arm?.oldConversationId || "", arm?.mode || "user-turn"),
+          errorCode: "AUTO_COMPACT_HANDLER_ERROR",
           error: error instanceof Error ? error.message : String(error),
+          originalRequestContinued,
+          sourceConversationCurrent: originalRequestContinued,
+          sourceConversationPreserved: originalRequestContinued,
+          authorityMigrationCommitted: false,
           observedAt: observedAt(),
         });
       });
@@ -1071,9 +1343,22 @@ export async function connectClassicContextMetadataPort(port, {
   }));
   disposers.push(client.on("Network.responseReceived", (params) => {
     const requestId = String(params?.requestId || "").trim();
+    const turnResponse = isTurnUrl(params?.response?.url);
+    const responseHeaders = params?.response?.headers || {};
+    const retryAfter = Object.entries(responseHeaders)
+      .find(([name]) => String(name).toLowerCase() === "retry-after")?.[1] || null;
+    const transaction = requestId ? rolloverTransactions.get(requestId) : null;
+    if (transaction && turnResponse) {
+      transaction.response = {
+        status: Number(params?.response?.status || 0) || null,
+        retryAfter: retryAfter == null ? null : String(retryAfter),
+        observedAt: observedAt(),
+      };
+      processRolloverTransaction(requestId);
+    }
     const pendingUsage = requestId ? turnUsageRequests.get(requestId) : null;
-    if (pendingUsage && isTurnUrl(params?.response?.url)) {
-      pendingUsage.responseHeaders = params?.response?.headers || pendingUsage.responseHeaders || {};
+    if (pendingUsage && turnResponse) {
+      pendingUsage.responseHeaders = responseHeaders || pendingUsage.responseHeaders || {};
       emit(onTurnTransportEvent, {
         runtimeKey,
         port,
@@ -1089,12 +1374,36 @@ export async function connectClassicContextMetadataPort(port, {
   }));
   disposers.push(client.on("Network.responseReceivedExtraInfo", (params) => {
     const requestId = String(params?.requestId || "").trim();
+    const headers = params?.headers || {};
+    const retryAfter = Object.entries(headers)
+      .find(([name]) => String(name).toLowerCase() === "retry-after")?.[1] || null;
+    const transaction = requestId ? rolloverTransactions.get(requestId) : null;
+    if (transaction) {
+      if (!transaction.response && Number(params?.statusCode || 0) > 0) {
+        transaction.response = {
+          status: Number(params.statusCode),
+          retryAfter: retryAfter == null ? null : String(retryAfter),
+          observedAt: observedAt(),
+        };
+      } else if (transaction.response && retryAfter != null) {
+        transaction.response.retryAfter = String(retryAfter);
+      }
+      processRolloverTransaction(requestId);
+    }
     const pendingUsage = requestId ? turnUsageRequests.get(requestId) : null;
-    if (pendingUsage) pendingUsage.responseHeaders = params?.headers || pendingUsage.responseHeaders || {};
+    if (pendingUsage) pendingUsage.responseHeaders = headers || pendingUsage.responseHeaders || {};
   }));
   disposers.push(client.on("Network.loadingFailed", (params) => {
     if (params?.requestId) {
-      const pendingUsage = turnUsageRequests.get(String(params.requestId));
+      const requestId = String(params.requestId);
+      const transaction = clearRolloverTransaction(requestId);
+      if (transaction) {
+        void emitRolloverTransportFailure(transaction, {
+          errorCode: "AUTO_COMPACT_NETWORK_FAILURE",
+          error: String(params?.errorText || params?.blockedReason || "Auto Compact continuation network request failed."),
+        });
+      }
+      const pendingUsage = turnUsageRequests.get(requestId);
       if (pendingUsage?.conversationId) {
         emit(onTurnTransportEvent, {
           runtimeKey,
@@ -1107,13 +1416,21 @@ export async function connectClassicContextMetadataPort(port, {
           observedAt: observedAt(),
         });
       }
-      modelResponses.delete(params.requestId);
-      turnUsageRequests.delete(params.requestId);
-      turnIdentityCorrelator.forget(params.requestId);
+      modelResponses.delete(requestId);
+      turnUsageRequests.delete(requestId);
+      turnIdentityCorrelator.forget(requestId);
     }
   }));
   disposers.push(client.on("Network.loadingFinished", (params) => {
     const requestId = String(params?.requestId || "").trim();
+    const transaction = requestId ? rolloverTransactions.get(requestId) : null;
+    if (transaction && !transaction.response && !transaction.settled) {
+      clearRolloverTransaction(requestId);
+      void emitRolloverTransportFailure(transaction, {
+        errorCode: "AUTO_COMPACT_RESPONSE_MISSING",
+        error: "Auto Compact continuation finished without an observable HTTP response; source conversation retained.",
+      });
+    }
     if (requestId) turnIdentityCorrelator.forget(requestId);
     const usageRequest = requestId ? turnUsageRequests.get(requestId) : null;
     if (usageRequest) {
@@ -1230,10 +1547,10 @@ export async function connectClassicContextMetadataPort(port, {
     get pendingCdpCalls() { return client.pendingSize; },
     get pendingUsageRequests() { return turnUsageRequests.size; },
     get pendingIdentityCorrelations() { return turnIdentityCorrelator.pendingSize; },
+    get pendingRolloverTransactions() { return rolloverTransactions.size; },
     async close() {
       await clearUserTurnRolloverArm();
-      nativeDescriptorCache.clear();
-      nativeDescriptorCooldowns.clear();
+      for (const transactionId of [...rolloverTransactions.keys()]) clearRolloverTransaction(transactionId);
       for (const dispose of disposers) dispose();
       client.close();
       await sleep(0);
@@ -1350,6 +1667,7 @@ export class ClassicContextMetadataCdpAdapter {
         pendingCdpCalls: Number(session.pendingCdpCalls || 0),
         pendingUsageRequests: Number(session.pendingUsageRequests || 0),
         pendingIdentityCorrelations: Number(session.pendingIdentityCorrelations || 0),
+        pendingRolloverTransactions: Number(session.pendingRolloverTransactions || 0),
       })),
     };
   }

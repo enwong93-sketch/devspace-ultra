@@ -5,6 +5,7 @@ import { createRequire } from "node:module";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { stringify as stringifyToml } from "smol-toml";
 import * as z from "zod/v4";
+import { ElicitResultSchema } from "@modelcontextprotocol/sdk/types.js";
 import { isPathInsideRoot } from "./roots.js";
 import { resolveShellCommand } from "./process-platform.js";
 
@@ -449,10 +450,13 @@ export function registerCodexSandboxTools(server, {
       }
       const pending = runtime.savePending(normalized);
       try {
-        const response = await server.server.elicitInput(elicitationRequest(pending), {
-          timeout: 10 * 60_000,
-          maxTotalTimeout: 10 * 60_000,
-        });
+        const params = elicitationRequest(pending);
+        const response = typeof extra?.sendRequest === "function"
+          ? await extra.sendRequest({
+              method: "elicitation/create",
+              params: params.mode === "form" ? params : { ...params, mode: "form" },
+            }, ElicitResultSchema)
+          : await server.server.elicitInput(params);
         if (response?.action === "accept" && response?.content?.decision === "Approve once") {
           const approved = runtime.approvePending({ requestKey: pending.requestKey, sessionKey: owner, expectedRequest: normalized });
           return textResult({ ok: true, supported: true, approvalRequired: false, grantRequired: true, ...approved }, "Additional sandbox permissions approved for one command.");

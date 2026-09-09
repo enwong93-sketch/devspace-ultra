@@ -6,24 +6,28 @@ const root = resolve(import.meta.dirname, "..");
 const server = await readFile(resolve(root, "dist/server.js"), "utf8");
 const registry = await readFile(resolve(root, "dist/mcp-sessions.js"), "utf8");
 
-assert.match(server, /MCP_SESSION_IDLE_TIMEOUT_MS\s*=\s*(?:30|60)\s*\*\s*1_000/, "stale MCP sessions must not be retained for hours");
-assert.match(server, /MCP_SESSION_CLEANUP_INTERVAL_MS\s*=\s*5\s*\*\s*1_000/, "session cleanup must run frequently enough to bound reconnect storms");
-assert.match(server, /MCP_MAX_INACTIVE_SESSIONS\s*=\s*\d+/, "server must define an inactive-session hard cap");
-assert.match(server, /MCP_MAX_EVENT_STREAMS\s*=\s*\d+/, "server must define a global MCP event-stream hard cap");
-assert.match(server, /MCP_MAX_SESSIONS\s*=\s*\d+/, "server must define a total Core MCP transport hard cap");
-assert.match(server, /new McpSessionRegistry\(\{[\s\S]*maxInactiveSessions:\s*MCP_MAX_INACTIVE_SESSIONS[\s\S]*maxEventStreams:\s*MCP_MAX_EVENT_STREAMS[\s\S]*maxSessions:\s*MCP_MAX_SESSIONS[\s\S]*\}\)/, "Core must enforce inactive-session, long-event-stream and total-transport caps at runtime rather than relying on delayed cleanup");
-assert.match(server, /const\s+registered\s*=\s*transports\.register\(newSessionId,\s*transport\)/, "initialize must observe whether the bounded registry admitted the new Core transport");
-assert.match(server, /if\s*\(!registered\)[\s\S]{0,240}MCP session capacity/i, "an over-cap initialize must fail closed instead of returning an untracked session ID");
+assert.match(server, /new McpSessionRegistry\(\)/, "Core must use connection-lifecycle cleanup rather than an artificial session-count ceiling");
+assert.doesNotMatch(server, /MCP_SESSION_IDLE_TIMEOUT_MS|MCP_MAX_INACTIVE_SESSIONS|MCP_MAX_EVENT_STREAMS|MCP_MAX_SESSIONS|closeExcessInactive|closeIdle\(/, "Core MCP lifetime must not be terminated by idle clocks or count caps");
 assert.match(server, /transports\.acquire\(sessionId\)/, "existing session requests must be marked in-flight");
-assert.match(server, /transports\.release\(trackedSessionId,\s*\{\s*eventStream:\s*mcpEventStreamRequest\s*\}\)/, "in-flight session and long-event-stream state must be released in a finally path");
-assert.match(server, /closeExcessInactive\(MCP_MAX_INACTIVE_SESSIONS\)/, "cleanup must enforce the inactive-session hard cap");
-assert.match(registry, /entry\.activeRequests\s*>\s*0/, "idle cleanup must skip in-flight sessions");
-assert.match(registry, /closeExcessInactive/, "registry must support bounded inactive-session cleanup");
-assert.match(registry, /#enforceInactiveCap\([^)]*\)/, "registry register path must synchronously evict excess inactive sessions before reconnect bursts can accumulate");
-assert.match(registry, /#enforceEventStreamCap\(\)/, "registry must actively close oldest standalone SSE streams when the event-stream cap is exceeded");
-assert.match(registry, /#enforceSessionCap/, "registry must keep the combined inactive-plus-stream transport population under one global cap");
-assert.match(registry, /eventStreamRequests/, "global cap may evict a pure standalone-SSE session only after inactive transports are exhausted");
-assert.match(registry, /return false/, "register must fail closed instead of evicting a real in-flight tool request when every retained session is protected");
-assert.match(registry, /closeStandaloneSSEStream/, "event-stream cap must close the heavy Core stream while allowing public-session identity to recover later");
+assert.match(server, /transports\.markEventStreamOpen\(trackedSessionId\)/, "Core must bind session lifetime to the real standalone SSE stream");
+assert.match(server, /transports\.release\(trackedSessionId,\s*\{\s*eventStream:\s*mcpEventStreamRequest\s*\}\)/, "Core must observe the actual SSE disconnect in a finally path");
+assert.match(server, /transports\.closeAll\(\)/, "server shutdown must still close every remaining transport explicitly");
 
-console.log(JSON.stringify({ ok: true, gate: "mcp-session-lifecycle-static", inFlightProtected: true, staleSessionsBounded: true, eventStreamsBounded: true, totalTransportsBounded: true }));
+assert.match(registry, /everHadEventStream/);
+assert.match(registry, /disconnectObserved/);
+assert.match(registry, /clientSessions/);
+assert.match(registry, /superseded/);
+assert.match(registry, /#closeRetiredIfIdle/);
+assert.match(registry, /entry\.activeRequests\s*>\s*0/, "an in-flight tool request must protect its transport after the SSE disconnects");
+assert.match(registry, /scheduleMaintenanceGc/, "released per-session MCP server/tool registries must become collectible promptly");
+assert.doesNotMatch(registry, /this\.maxInactiveSessions|this\.maxEventStreams|this\.maxSessions|closeIdle\(|closeExcessInactive\(|idleTimeout|setTimeout|SIGKILL/, "session cleanup must be event-driven and must not impose memory/count/time limits or force-kill work");
+
+console.log(JSON.stringify({
+  ok: true,
+  gate: "mcp-session-lifecycle-static",
+  actualDisconnectLifecycle: true,
+  clientSessionSupersession: true,
+  inFlightProtected: true,
+  artificialCapsRemoved: true,
+  wallClockTerminationRemoved: true,
+}));

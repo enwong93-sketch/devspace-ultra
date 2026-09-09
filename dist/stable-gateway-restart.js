@@ -45,8 +45,8 @@ export function validateDevspaceListeners({ listeners, processes, packageRoot, g
   const observed = [];
   for (const port of expectedPorts) {
     const matches = listeners.filter((listener) => listener.port === port);
-    if (port === Number(gatewayPort) && matches.length !== 1) {
-      throw new Error(`Expected exactly one Stable Gateway listener on ${port}; observed ${matches.length}.`);
+    if (port === Number(gatewayPort) && matches.length > 1) {
+      throw new Error(`Expected at most one Stable Gateway listener on ${port}; observed ${matches.length}.`);
     }
     if (matches.length > 1) throw new Error(`Multiple listener PIDs are bound to DevSpace port ${port}.`);
     if (!matches.length) continue;
@@ -78,10 +78,8 @@ export function buildRestartPowerShell({
   resultPath,
   helperTaskName = null,
   delaySeconds = 5,
-  timeoutSeconds = 90,
 }) {
   const allPids = [...new Set([gatewayPid, ...corePids].map(Number).filter((value) => Number.isInteger(value) && value > 0))];
-  if (!allPids.includes(Number(gatewayPid))) throw new Error("A valid Gateway PID is required.");
   const pidList = allPids.join(",");
   return [
     "$ErrorActionPreference='Stop'",
@@ -100,15 +98,19 @@ export function buildRestartPowerShell({
     "  foreach ($pidValue in $oldPids) { Stop-Process -Id $pidValue -Force -ErrorAction SilentlyContinue }",
     "  Start-Sleep -Seconds 2",
     "  Start-ScheduledTask -TaskName $taskName",
-    `  $deadline=[DateTime]::UtcNow.AddSeconds(${Number(timeoutSeconds)})`,
-    "  do {",
+    "  while (-not $ok) {",
     "    Start-Sleep -Milliseconds 500",
     "    try {",
-    "      $response=Invoke-RestMethod -Uri ('http://127.0.0.1:'+$gatewayPort+'/__devspace/gateway/healthz') -TimeoutSec 2",
+    "      $response=Invoke-RestMethod -Uri ('http://127.0.0.1:'+$gatewayPort+'/__devspace/gateway/healthz')",
     "      if ($response.ok -eq $true) { $ok=$true; $state='ready'; break }",
     "    } catch {}",
-    "  } while ([DateTime]::UtcNow -lt $deadline)",
-    "  if (-not $ok) { $state='health-timeout'; $reason='Gateway did not become ready before the deadline.' }",
+    "    $task=Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue",
+    "    $taskInfo=Get-ScheduledTaskInfo -TaskName $taskName -ErrorAction SilentlyContinue",
+    "    $listener=Get-NetTCPConnection -State Listen -LocalPort $gatewayPort -ErrorAction SilentlyContinue | Select-Object -First 1",
+    "    if (-not $listener -and $task -and $task.State -ne 'Running' -and $taskInfo -and $taskInfo.LastTaskResult -notin @(0,267009)) {",
+    "      throw ('Stable Gateway task exited before readiness (LastTaskResult='+$taskInfo.LastTaskResult+').')",
+    "    }",
+    "  }",
     "} catch {",
     "  $state='failed'",
     "  $reason=$_.Exception.GetType().Name",
@@ -136,7 +138,6 @@ export async function queryListenerProcesses(pids, { run = execFileAsync } = {})
   ].join("; ");
   const result = await run("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
     windowsHide: true,
-    timeout: 15_000,
     maxBuffer: 2 * 1024 * 1024,
   });
   const parsed = JSON.parse(String(result.stdout || "[]").replace(/^\uFEFF/, "") || "[]");

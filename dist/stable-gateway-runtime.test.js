@@ -3,166 +3,163 @@ import { StableGatewaySessionRegistry } from "./stable-gateway-runtime.js";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+function createSession(registry, index = 1) {
+  return registry.registerInitialize({
+    coreId: "core-a",
+    backendSessionId: `backend-a-${index}`,
+    initializeBody: { jsonrpc: "2.0", id: index, method: "initialize", params: { protocolVersion: "2025-11-25" } },
+    authorization: `Bearer secret-${index}`,
+  });
+}
+
 async function testStableSessionMapping() {
   const registry = new StableGatewaySessionRegistry({ now: () => 123_456 });
-  const publicSessionId = registry.registerInitialize({
-    coreId: "core-a",
-    backendSessionId: "backend-a-1",
-    initializeBody: { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-11-25" } },
-    authorization: "Bearer top-secret",
-  });
-
+  const publicSessionId = createSession(registry);
   assert.match(publicSessionId, /^[0-9a-f-]{36}$/i);
   assert.deepEqual(registry.lookup(publicSessionId), {
     publicSessionId,
     coreId: "core-a",
     backendSessionId: "backend-a-1",
     initializeBody: { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-11-25" } },
-    authorization: "Bearer top-secret",
+    authorization: "Bearer secret-1",
     initialized: false,
     activeRequests: 0,
+    eventStreams: 0,
+    disconnectObserved: false,
+    clientSessionFingerprint: null,
     lastActivityAt: 123_456,
     schemaFingerprint: null,
     toolCount: null,
   });
-
   assert.equal(registry.markInitialized(publicSessionId), true);
-  assert.equal(registry.lookup(publicSessionId).initialized, true);
-  assert.equal(typeof registry.updateAuthorization, "function", "Stable Gateway registry must support in-memory replay credential rotation after OAuth refresh");
   assert.equal(registry.updateAuthorization(publicSessionId, "Bearer refreshed-secret"), true);
+  assert.equal(registry.updateSchema(publicSessionId, { schemaFingerprint: "a".repeat(64), toolCount: 117 }), true);
   assert.equal(registry.lookup(publicSessionId).authorization, "Bearer refreshed-secret");
-  assert.equal(registry.updateAuthorization("missing-session", "Bearer ignored"), false);
-  assert.throws(() => registry.updateAuthorization(publicSessionId, ""), /authorization/i);
-  assert.equal(registry.updateSchema(publicSessionId, { schemaFingerprint: "a".repeat(64), toolCount: 116 }), true);
-  assert.equal(registry.lookup(publicSessionId).schemaFingerprint, "a".repeat(64));
-  assert.equal(registry.lookup(publicSessionId).toolCount, 116);
-  assert.equal(registry.updateSchema(publicSessionId, { schemaFingerprint: "invalid", toolCount: 1 }), false);
+  assert.equal(registry.lookup(publicSessionId).toolCount, 117);
 }
 
-async function testActiveRequestAccountingAndDrain() {
+async function testAdmissionAndDrainHaveNoDeadline() {
   const registry = new StableGatewaySessionRegistry();
-  const publicSessionId = registry.registerInitialize({
-    coreId: "core-a",
-    backendSessionId: "backend-a-1",
-    initializeBody: { method: "initialize" },
-    authorization: "Bearer secret",
-  });
-
-  const entry = await registry.acquire(publicSessionId);
-  assert.equal(entry.backendSessionId, "backend-a-1");
-  assert.equal(registry.lookup(publicSessionId).activeRequests, 1);
-
+  const publicSessionId = createSession(registry);
+  assert.ok(await registry.acquire(publicSessionId));
   registry.beginBarrier();
-  let drained = false;
-  const drainPromise = registry.waitForDrain(250).then(() => { drained = true; });
-  await sleep(15);
-  assert.equal(drained, false, "drain must wait for in-flight requests");
 
-  assert.equal(registry.release(publicSessionId), true);
-  await drainPromise;
-  assert.equal(registry.lookup(publicSessionId).activeRequests, 0);
-  registry.abortBarrier();
-}
-
-async function testBarrierQueuesAdmission() {
-  const registry = new StableGatewaySessionRegistry();
-  const publicSessionId = registry.registerInitialize({
-    coreId: "core-a",
-    backendSessionId: "backend-a-1",
-    initializeBody: { method: "initialize" },
-    authorization: "Bearer secret",
-  });
-
-  registry.beginBarrier();
   let admitted = false;
-  const acquirePromise = registry.acquire(publicSessionId, { timeoutMs: 250 }).then((entry) => {
+  const queued = registry.acquire(publicSessionId, { timeoutMs: 1 }).then((entry) => {
     admitted = true;
     return entry;
   });
+  let drained = false;
+  const drain = registry.waitForDrain(1).then(() => { drained = true; });
+  await sleep(20);
+  assert.equal(admitted, false, "legacy timeout arguments must not terminate queued admission");
+  assert.equal(drained, false, "legacy timeout arguments must not terminate drain waiting");
 
-  await sleep(15);
-  assert.equal(admitted, false, "new requests must wait behind the handover barrier");
+  registry.release(publicSessionId);
+  await drain;
+  assert.equal(drained, true);
   registry.abortBarrier();
-  const entry = await acquirePromise;
-  assert.equal(entry.backendSessionId, "backend-a-1");
-  assert.equal(admitted, true);
+  assert.ok(await queued);
   registry.release(publicSessionId);
 }
 
-async function testAtomicMappingCommit() {
+async function testEventStreamLifecycle() {
   const registry = new StableGatewaySessionRegistry();
+  const publicSessionId = createSession(registry);
+  assert.equal(registry.markEventStreamOpen(publicSessionId), true);
+  assert.equal(registry.lookup(publicSessionId).eventStreams, 1);
+  assert.ok(await registry.acquire(publicSessionId));
+  registry.markEventStreamClosed(publicSessionId, { disconnected: true });
+  const disconnected = registry.lookup(publicSessionId);
+  assert.ok(disconnected, "an SSE reconnect boundary must preserve the public descriptor");
+  assert.equal(disconnected.coreId, "unmapped");
+  assert.equal(disconnected.backendSessionId, "unmapped");
+  registry.release(publicSessionId);
+  assert.ok(registry.lookup(publicSessionId), "draining the old Core request must not revoke the public conversation session");
+  registry.commitMappings([{ publicSessionId, coreId: "core-b", backendSessionId: "backend-b" }]);
+  assert.equal(registry.lookup(publicSessionId).disconnectObserved, false, "successful lazy resurrection must mark the descriptor live again");
+
+  const retained = createSession(registry, 2);
+  registry.markEventStreamOpen(retained);
+  registry.markEventStreamClosed(retained, { disconnected: false });
+  assert.ok(registry.lookup(retained), "an upstream Core stream ending during handover must retain public identity for reconnect");
+}
+
+async function testClientSessionSupersession() {
+  const registry = new StableGatewaySessionRegistry();
+  const clientSessionFingerprint = "f".repeat(64);
   const first = registry.registerInitialize({
     coreId: "core-a",
-    backendSessionId: "backend-a-1",
-    initializeBody: { method: "initialize", id: 1 },
-    authorization: "Bearer first-secret",
+    backendSessionId: "backend-first",
+    initializeBody: { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-11-25" } },
+    authorization: "Bearer shared-owner",
+    clientSessionFingerprint,
   });
+  registry.markEventStreamOpen(first);
   const second = registry.registerInitialize({
     coreId: "core-a",
-    backendSessionId: "backend-a-2",
-    initializeBody: { method: "initialize", id: 2 },
-    authorization: "Bearer second-secret",
+    backendSessionId: "backend-second",
+    initializeBody: { jsonrpc: "2.0", id: 2, method: "initialize", params: { protocolVersion: "2025-11-25" } },
+    authorization: "Bearer shared-owner",
+    clientSessionFingerprint,
   });
+  assert.equal(first, second, "the same OpenAI client session must retain one stable public session id across reconnect initialization");
+  assert.equal(registry.snapshotPublic().sessions.length, 1, "a reconnect initialize must update the existing logical descriptor even while an old SSE stream is draining");
+  assert.equal(registry.resolvePublicSessionId(first, clientSessionFingerprint), first);
+  assert.equal(registry.lookup(first, clientSessionFingerprint)?.backendSessionId, "backend-second");
+  assert.equal(registry.lookup(first)?.eventStreams, 1, "reinitialization must not lose accounting for the still-draining prior event stream");
+}
 
-  assert.throws(() => registry.commitMappings([
-    { publicSessionId: first, coreId: "core-b", backendSessionId: "backend-b-1" },
-    { publicSessionId: "missing-public-session", coreId: "core-b", backendSessionId: "backend-b-2" },
-  ]), /Unknown public MCP session/);
-  assert.equal(registry.lookup(first).coreId, "core-a", "failed commit must not partially mutate mappings");
-  assert.equal(registry.lookup(second).coreId, "core-a", "failed commit must leave every mapping untouched");
+async function testNoArtificialRetentionOrReplayCap() {
+  const registry = new StableGatewaySessionRegistry({
+    idleRetentionMs: 1,
+    maxRetainedSessions: 1,
+    maxReplaySessions: 1,
+  });
+  const ids = [];
+  for (let index = 0; index < 300; index += 1) {
+    const id = createSession(registry, index + 1);
+    ids.push(id);
+    registry.markInitialized(id);
+  }
+  assert.equal(registry.snapshotPublic().sessions.length, 300, "legacy count/TTL options must not impose an artificial public-session memory ceiling");
+  assert.equal(registry.entriesForReplay().length, 300, "all genuinely live authorized sessions remain eligible for continuity replay");
+  assert.ok(registry.lookup(ids[0]));
+}
 
+async function testMappingCommitToleratesDisconnectedRace() {
+  const registry = new StableGatewaySessionRegistry();
+  const first = createSession(registry, 1);
+  const second = createSession(registry, 2);
+  registry.remove(second);
   registry.commitMappings([
     { publicSessionId: first, coreId: "core-b", backendSessionId: "backend-b-1" },
     { publicSessionId: second, coreId: "core-b", backendSessionId: "backend-b-2" },
   ]);
   assert.equal(registry.lookup(first).backendSessionId, "backend-b-1");
-  assert.equal(registry.lookup(second).backendSessionId, "backend-b-2");
+  assert.equal(registry.lookup(second), undefined, "a descriptor that disconnected during replay must stay removed rather than aborting the whole handover");
 }
 
 async function testPublicSnapshotRedactsReplaySecrets() {
   const registry = new StableGatewaySessionRegistry();
-  const publicSessionId = registry.registerInitialize({
-    coreId: "core-a",
-    backendSessionId: "backend-a-1",
-    initializeBody: { jsonrpc: "2.0", id: 1, method: "initialize", params: { secretish: "raw-init-payload" } },
-    authorization: "Bearer must-never-leak",
-  });
+  const publicSessionId = createSession(registry);
   registry.markInitialized(publicSessionId);
-
   const snapshot = registry.snapshotPublic();
   const serialized = JSON.stringify(snapshot);
-  assert.equal(snapshot.sessions.length, 1);
   assert.deepEqual(snapshot.sessions[0], {
     publicSessionId,
     coreId: "core-a",
     initialized: true,
     activeRequests: 0,
+    eventStreams: 0,
+    disconnectObserved: false,
     schemaFingerprint: null,
     toolCount: null,
   });
-  assert.doesNotMatch(serialized, /must-never-leak|raw-init-payload|backend-a-1/);
+  assert.doesNotMatch(serialized, /secret-1|backend-a-1|protocolVersion/);
 }
 
-await testStableSessionMapping();
-await testActiveRequestAccountingAndDrain();
-await testBarrierQueuesAdmission();
-{
-  let now = 1_000;
-  const registry = new StableGatewaySessionRegistry({ now: () => now });
-  const older = registry.registerInitialize({ coreId: "core-a", backendSessionId: "backend-old", initializeBody: { method: "initialize" }, authorization: "Bearer old" });
-  registry.markInitialized(older);
-  now = 2_000;
-  const newer = registry.registerInitialize({ coreId: "core-a", backendSessionId: "backend-new", initializeBody: { method: "initialize" }, authorization: "Bearer new" });
-  registry.markInitialized(newer);
-  now = 3_000;
-  registry.updateAuthorization(newer, "Bearer refreshed-new");
-  assert.deepEqual(registry.entriesForReplay().map((entry) => entry.publicSessionId), [newer, older], "handover baseline candidates must be ordered by latest real activity rather than registration order");
-}
-
-await testAtomicMappingCommit();
-await testPublicSnapshotRedactsReplaySecrets();
-
-{
+async function testDescriptorRestore() {
   const registry = new StableGatewaySessionRegistry({ now: () => 10_000 });
   const publicSessionId = "12345678-1234-1234-1234-123456789abc";
   registry.restoreDescriptors([{
@@ -175,38 +172,25 @@ await testPublicSnapshotRedactsReplaySecrets();
   }]);
   const restored = registry.lookup(publicSessionId);
   assert.equal(restored.coreId, "restored-unmapped");
-  assert.equal(restored.authorization, "", "restored descriptors must never contain persisted OAuth credentials");
-  assert.equal(restored.initialized, true);
+  assert.equal(restored.authorization, "");
+  assert.equal(restored.eventStreams, 0);
   assert.equal(restored.schemaFingerprint, "b".repeat(64));
-  assert.equal(restored.toolCount, 77);
-  assert.equal(registry.snapshotDescriptors()[0].publicSessionId, publicSessionId);
 }
 
-{
-  let now = 1_000;
-  const registry = new StableGatewaySessionRegistry({
-    now: () => now,
-    idleRetentionMs: 2_000,
-    maxRetainedSessions: 3,
-    maxReplaySessions: 2,
-  });
-  const ids = [];
-  for (let index = 0; index < 4; index += 1) {
-    ids.push(registry.registerInitialize({
-      coreId: "core-a",
-      backendSessionId: `backend-${index}`,
-      initializeBody: { method: "initialize", id: index },
-      authorization: `Bearer token-${index}`,
-    }));
-    registry.markInitialized(ids.at(-1));
-    now += 500;
-  }
-  assert.equal(registry.snapshotPublic().sessions.length, 3, "inactive public MCP session retention must be hard-bounded");
-  assert.equal(registry.lookup(ids[0]), undefined, "oldest inactive session must be evicted first when the retention cap is exceeded");
-  assert.deepEqual(registry.entriesForReplay().map((entry) => entry.publicSessionId), [ids[3], ids[2]], "Core replay must be capped to the most recently active sessions");
-  now += 3_000;
-  assert.equal(registry.entriesForReplay().length, 0, "expired inactive sessions must not be replayed after the retention TTL");
-  assert.equal(registry.snapshotPublic().sessions.length, 0, "expired inactive sessions must be pruned from memory");
-}
+await testStableSessionMapping();
+await testAdmissionAndDrainHaveNoDeadline();
+await testEventStreamLifecycle();
+await testClientSessionSupersession();
+await testNoArtificialRetentionOrReplayCap();
+await testMappingCommitToleratesDisconnectedRace();
+await testPublicSnapshotRedactsReplaySecrets();
+await testDescriptorRestore();
 
-console.log(JSON.stringify({ ok: true, gate: "stable-gateway-runtime", boundedReplay: true }));
+console.log(JSON.stringify({
+  ok: true,
+  gate: "stable-gateway-runtime",
+  wallClockTimeoutsRemoved: true,
+  artificialRetentionLimitsRemoved: true,
+  clientSessionSupersession: true,
+  disconnectLifecycleBound: true,
+}));

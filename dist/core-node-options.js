@@ -1,17 +1,14 @@
 const PROFILES = Object.freeze({
-  system: Object.freeze([]),
-  "bounded-512": Object.freeze([
-    "--max-old-space-size=464",
-    "--max-semi-space-size=16",
-  ]),
+  system: Object.freeze(["--expose-gc"]),
 });
 
-const ALLOWED_ARGUMENT = /^--(?:max-old-space-size|max-semi-space-size)=\d+$/;
+const LEGACY_UNBOUNDED_ALIASES = new Set(["bounded-512"]);
 
 export function normalizeCoreHeapProfile(value = "system") {
   const profile = String(value || "system").trim().toLowerCase();
+  if (LEGACY_UNBOUNDED_ALIASES.has(profile)) return "system";
   if (!Object.hasOwn(PROFILES, profile)) {
-    throw new Error(`Invalid Stable Gateway Core heap profile: ${value}. Expected ${Object.keys(PROFILES).join(" or ")}.`);
+    throw new Error(`Invalid Stable Gateway Core heap profile: ${value}. Production accepts only system-managed heap sizing.`);
   }
   return profile;
 }
@@ -25,8 +22,10 @@ export function validateCoreNodeArgs(args = [], { allowDiagnosticGc = false } = 
   if (!Array.isArray(args)) throw new Error("Core Node arguments must be an array.");
   const values = args.map(String);
   for (const argument of values) {
-    if (ALLOWED_ARGUMENT.test(argument)) continue;
     if (allowDiagnosticGc && argument === "--expose-gc") continue;
+    if (/^--(?:max-old-space-size|max-semi-space-size)=/i.test(argument)) {
+      throw new Error(`Stable Gateway production Core memory caps are forbidden: ${argument}`);
+    }
     throw new Error(`Unsupported Stable Gateway Core Node argument: ${argument}`);
   }
   return values;

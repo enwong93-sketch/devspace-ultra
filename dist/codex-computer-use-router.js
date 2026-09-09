@@ -71,17 +71,24 @@ export function codexComputerUseRoute(task) {
 export function registerCodexComputerUseRouter(server, {
   capabilityRuntime,
   codexMcpBridge,
+  resolveConversation = null,
 } = {}) {
   if (!codexMcpBridge && !capabilityRuntime) throw new Error("Linked Codex node_repl or Capability Runtime is required for Computer Use.");
-  const dependencies = { capabilityRuntime, codexMcpBridge };
+  const scopedDependencies = async (extra) => {
+    if (typeof resolveConversation !== "function") throw new Error("Computer Use requires a conversation authority resolver.");
+    const resolved = await resolveConversation(extra);
+    const ownerConversationId = String(resolved?.conversationId || "").trim();
+    if (!ownerConversationId) throw new Error("Computer Use requires the current ChatGPT conversation identity.");
+    return { capabilityRuntime, codexMcpBridge, ownerConversationId };
+  };
 
   server.registerTool("codex_computer_use_status", {
     title: "Codex Computer Use status",
     description: "Read-only check of the installed OpenAI bundled Computer Use runtime. It initializes @oai/sky through the existing persistent Codex node_repl and performs no desktop input.",
     inputSchema: {},
     annotations: READ_ONLY,
-  }, async () => {
-    try { return resultFromComputerUse(await codexComputerUseStatus(dependencies)); }
+  }, async (_, extra) => {
+    try { return resultFromComputerUse(await codexComputerUseStatus(await scopedDependencies(extra))); }
     catch (error) { return errorResult(error); }
   });
 
@@ -108,9 +115,9 @@ export function registerCodexComputerUseRouter(server, {
       timeoutMs: z.number().int().min(1_000).max(120_000).default(30_000),
     },
     annotations: EXECUTING,
-  }, async ({ action, input = {}, timeoutMs = 30_000 }) => {
+  }, async ({ action, input = {}, timeoutMs = 30_000 }, extra) => {
     try {
-      return resultFromComputerUse(await callCodexComputerUse(dependencies, { action, input, timeoutMs }));
+      return resultFromComputerUse(await callCodexComputerUse(await scopedDependencies(extra), { action, input, timeoutMs }));
     } catch (error) {
       return errorResult(error);
     }

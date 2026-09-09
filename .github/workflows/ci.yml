@@ -33,6 +33,9 @@ jobs:
         run: |
           $files = @(
             'install.ps1',
+            'scripts/devspace-ultra-setup.ps1',
+            'scripts/devspace-local-ingress.ps1',
+            'scripts/devspace-stable-gateway-startup.ps1',
             'scripts/chat-swarm-classic-controller.ps1',
             'scripts/chat-swarm-classic-runtime-clone.ps1',
             'scripts/chat-swarm-classic-runtime-identity.ps1',

@@ -52,6 +52,32 @@ function Normalize-Domain {
     return $value
 }
 
+function Get-DefaultInterfaceAlias {
+    $routes = @(
+        Get-NetRoute `
+            -AddressFamily IPv4 `
+            -DestinationPrefix "0.0.0.0/0" `
+            -ErrorAction SilentlyContinue |
+            Where-Object {
+                $_.NextHop -and
+                $_.NextHop -ne "0.0.0.0" -and
+                $_.State -eq "Alive"
+            } |
+            Sort-Object RouteMetric, InterfaceMetric
+    )
+    foreach ($route in $routes) {
+        $adapter = Get-NetAdapter -InterfaceIndex $route.InterfaceIndex -ErrorAction SilentlyContinue
+        if ($adapter -and $adapter.Status -eq "Up") {
+            return [string]$adapter.Name
+        }
+    }
+    $fallback = Get-NetIPConfiguration -ErrorAction SilentlyContinue |
+        Where-Object { $_.IPv4DefaultGateway -and $_.NetAdapter.Status -eq "Up" } |
+        Select-Object -First 1
+    if ($fallback) { return [string]$fallback.InterfaceAlias }
+    throw "Unable to auto-detect the active physical network interface. Pass -InterfaceAlias explicitly."
+}
+
 function Get-LanInfo {
     param([string]$Alias)
     $net = Get-NetIPConfiguration -InterfaceAlias $Alias -ErrorAction Stop
@@ -61,18 +87,77 @@ function Get-LanInfo {
     return [pscustomobject]@{ InterfaceAlias = $Alias; LocalIPv4 = [string]$ip; Gateway = [string]$gateway }
 }
 
+function Find-UpnpDescriptionLocations {
+    param([string]$Gateway)
+    $locations = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($candidate in @(
+        "http://$Gateway`:1900/ssoyt/rootDesc.xml",
+        "http://$Gateway`:1900/rootDesc.xml",
+        "http://$Gateway`:5000/rootDesc.xml",
+        "http://$Gateway/upnp/IGD.xml",
+        "http://$Gateway/igd.xml"
+    )) {
+        $null = $locations.Add($candidate)
+    }
+    $udp = $null
+    try {
+        $udp = New-Object System.Net.Sockets.UdpClient
+        $udp.Client.ReceiveTimeout = 500
+        $payload = @(
+            "M-SEARCH * HTTP/1.1",
+            "HOST: 239.255.255.250:1900",
+            'MAN: "ssdp:discover"',
+            "MX: 2",
+            "ST: urn:schemas-upnp-org:device:InternetGatewayDevice:1",
+            "",
+            ""
+        ) -join "`r`n"
+        $bytes = [System.Text.Encoding]::ASCII.GetBytes($payload)
+        $null = $udp.Send($bytes, $bytes.Length, "239.255.255.250", 1900)
+        $deadline = [DateTime]::UtcNow.AddSeconds(3)
+        while ([DateTime]::UtcNow -lt $deadline) {
+            try {
+                $remote = New-Object System.Net.IPEndPoint([System.Net.IPAddress]::Any, 0)
+                $responseBytes = $udp.Receive([ref]$remote)
+                $responseText = [System.Text.Encoding]::ASCII.GetString($responseBytes)
+                $match = [regex]::Match($responseText, '(?im)^LOCATION:\s*(\S+)\s*$')
+                if (-not $match.Success) { continue }
+                $uri = $null
+                if (-not [uri]::TryCreate($match.Groups[1].Value.Trim(), [System.UriKind]::Absolute, [ref]$uri)) { continue }
+                if ($uri.Scheme -notin @("http", "https")) { continue }
+                if ($uri.Host -ne $Gateway) { continue }
+                $null = $locations.Add($uri.AbsoluteUri)
+            } catch [System.Net.Sockets.SocketException] {
+                continue
+            }
+        }
+    } catch {
+        # Static descriptor candidates remain available when multicast discovery
+        # is blocked by the router or Windows network profile.
+    } finally {
+        if ($udp) { $udp.Dispose() }
+    }
+    return @($locations)
+}
+
 function Get-UpnpWanService {
     param([string]$Gateway)
-    # Archer AX55 Pro exposes its IGD descriptor here. We deliberately ask the
-    # router itself rather than an internet IP service so Surfshark cannot poison DDNS.
-    $root = "http://$Gateway`:1900/ssoyt/rootDesc.xml"
-    [xml]$desc = (Invoke-WebRequest -UseBasicParsing -Uri $root -TimeoutSec 5).Content
-    $svc = $desc.SelectNodes("//*[local-name()='service']") |
-        Where-Object { $_.serviceType -match "WANIPConnection|WANPPPConnection" } |
-        Select-Object -First 1
-    if (-not $svc) { throw "Router UPnP WANIPConnection/WANPPPConnection service is unavailable." }
-    $control = [uri]::new([uri]$root, [string]$svc.controlURL).AbsoluteUri
-    return [pscustomobject]@{ Root = $root; Control = $control; ServiceType = [string]$svc.serviceType }
+    # Query the home router directly rather than a generic internet-IP service,
+    # so a machine-wide VPN cannot silently publish its egress IP to DuckDNS.
+    foreach ($root in Find-UpnpDescriptionLocations -Gateway $Gateway) {
+        try {
+            [xml]$desc = (Invoke-WebRequest -UseBasicParsing -Uri $root -TimeoutSec 5).Content
+            $svc = $desc.SelectNodes("//*[local-name()='service']") |
+                Where-Object { $_.serviceType -match "WANIPConnection|WANPPPConnection" } |
+                Select-Object -First 1
+            if (-not $svc) { continue }
+            $control = [uri]::new([uri]$root, [string]$svc.controlURL).AbsoluteUri
+            return [pscustomobject]@{ Root = $root; Control = $control; ServiceType = [string]$svc.serviceType }
+        } catch {
+            continue
+        }
+    }
+    throw "Router UPnP WANIPConnection/WANPPPConnection service is unavailable. Enable UPnP/port forwarding or use the Cloudflare fallback."
 }
 
 function Invoke-UpnpSoap {
@@ -105,6 +190,19 @@ function Get-RouterWanIp {
     $ip = $match.Groups[1].Value.Trim()
     $parsed = $null
     if (-not [System.Net.IPAddress]::TryParse($ip, [ref]$parsed)) { throw "Router returned an invalid WAN address." }
+    $octets = $parsed.GetAddressBytes()
+    $privateOrReserved = (
+        $octets[0] -eq 10 -or
+        ($octets[0] -eq 100 -and $octets[1] -ge 64 -and $octets[1] -le 127) -or
+        ($octets[0] -eq 127) -or
+        ($octets[0] -eq 169 -and $octets[1] -eq 254) -or
+        ($octets[0] -eq 172 -and $octets[1] -ge 16 -and $octets[1] -le 31) -or
+        ($octets[0] -eq 192 -and $octets[1] -eq 168) -or
+        $octets[0] -ge 224
+    )
+    if ($privateOrReserved) {
+        throw "Router WAN address $ip is private/CGNAT/reserved, so direct DuckDNS ingress cannot be verified. Use the Cloudflare fallback or obtain a public IPv4 address."
+    }
     return $ip
 }
 
@@ -357,7 +455,7 @@ switch ($Action) {
     "install" {
         if (-not (Test-Administrator)) { throw "Run the install action from an elevated PowerShell." }
         $normalizedDomain = Normalize-Domain $Domain
-        if (-not $InterfaceAlias) { throw "InterfaceAlias is required for install." }
+        if (-not $InterfaceAlias) { $InterfaceAlias = Get-DefaultInterfaceAlias }
         if ($GatewayPort -lt 1 -or $GatewayPort -gt 65535) { throw "GatewayPort is invalid." }
         New-Item -ItemType Directory -Force $StateDir | Out-Null
         New-Item -ItemType Directory -Force $logDir | Out-Null

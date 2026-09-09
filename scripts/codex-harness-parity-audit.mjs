@@ -102,6 +102,14 @@ export function evaluateParity({ codexText, devspaceText }) {
       note: "DevSpace additionally exposes trusted tools, prompts, resources and isolated stateful instances.",
     },
     {
+      id: "progressive-capability-routing",
+      priority: "P0",
+      codex: ["search_info", "ToolSearchInfo"],
+      devspaceAll: ["capability_route", "ROUTING_CONTRACT_VERSION", "allowImplicitInvocation", "routingFingerprint"],
+      target: "complete",
+      note: "Codex-style direct/deferred routing: bounded metadata selects one skill/plugin/tool, explicit-only and negative gates are enforced, then full instructions/schema load only for the selected route.",
+    },
+    {
       id: "codex-mcp-catalog-import",
       priority: "P0",
       codex: ["mcp_servers"],

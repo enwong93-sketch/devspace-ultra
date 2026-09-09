@@ -65,7 +65,7 @@ const sourceDescriptor = {
   assert.ok(capsule.nextSteps.some((item) => /Selective Auto Compact continuation/.test(item)));
 }
 
-function makeHarness({ stage = "rollover", workingGoal = goal, snapshot = {}, runtimes = null, armResult = null } = {}) {
+function makeHarness({ stage = "rollover", workingGoal = goal, snapshot = {}, runtimes = null, armResult = null, autoCompactEnabled = true } = {}) {
   const calls = {
     checkpoints: [],
     userArms: [],
@@ -74,6 +74,7 @@ function makeHarness({ stage = "rollover", workingGoal = goal, snapshot = {}, ru
     statuses: [],
     snapshots: [],
     capsuleMeta: [],
+    nativeDescriptors: 0,
   };
   const contextGuardian = {
     async observeRuntimeSnapshot() {},
@@ -107,13 +108,17 @@ function makeHarness({ stage = "rollover", workingGoal = goal, snapshot = {}, ru
         modelSlug: "gpt-5-6-thinking",
         generating: false,
         composerTextChars: 0,
+        documentReadyState: "complete",
+        composerReady: true,
+        routeHydrated: true,
+        routeStableForMs: 5_000,
         ...snapshot,
       };
       calls.snapshots.push(value);
       return value;
     },
     async recentVisibleMessages() { return recentMessages; },
-    async nativeConversationDescriptor() { return { ...sourceDescriptor }; },
+    async nativeConversationDescriptor() { calls.nativeDescriptors += 1; return { ...sourceDescriptor }; },
     async captureNativeSnapshot() { throw new Error("forbidden legacy reload"); },
     async armUserTurnRollover(_runtimeKey, input) {
       calls.userArms.push(input);
@@ -126,6 +131,7 @@ function makeHarness({ stage = "rollover", workingGoal = goal, snapshot = {}, ru
     async cancelUserTurnRollover() { return { cancelled: false }; },
   };
   const continuityRuntime = {
+    enabled: autoCompactEnabled,
     async checkpoint(input) {
       calls.checkpoints.push(input);
       return {
@@ -168,6 +174,29 @@ function makeHarness({ stage = "rollover", workingGoal = goal, snapshot = {}, ru
   assert.equal(result.results[0].action, "normal");
   assert.equal(calls.userArms.length, 0);
   assert.equal(calls.hiddenArms.length, 0);
+}
+
+{
+  const { coordinator, calls } = makeHarness({ stage: "rollover", autoCompactEnabled: false });
+  const result = await coordinator.pollOnce();
+  assert.equal(result.action, "auto-compact-disabled");
+  assert.equal(result.results.length, 0);
+  assert.equal(calls.snapshots.length, 0);
+  assert.equal(calls.nativeDescriptors, 0, "disabled Auto Compact must not fetch native conversation descriptors");
+  assert.equal(calls.checkpoints.length, 0);
+  assert.equal(calls.userArms.length, 0);
+}
+
+{
+  const { coordinator, calls } = makeHarness({
+    stage: "rollover",
+    snapshot: { routeHydrated: false, routeStableForMs: 0, composerReady: false },
+  });
+  const result = await coordinator.pollOnce();
+  assert.equal(result.results[0].action, "skipped-route-hydration");
+  assert.equal(calls.nativeDescriptors, 0, "conversation re-entry must not probe native descriptors before route hydration settles");
+  assert.equal(calls.checkpoints.length, 0);
+  assert.equal(calls.userArms.length, 0);
 }
 
 {

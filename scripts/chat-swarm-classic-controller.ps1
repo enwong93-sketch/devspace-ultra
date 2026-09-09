@@ -333,22 +333,26 @@ function Set-WorkerProtection {
     if ($state.PSObject.Properties.Name -contains "protectedWorkers") {
         foreach ($number in @($state.protectedWorkers)) { [void]$protected.Add([int]$number) }
     }
-    $protection = if ($state.PSObject.Properties.Name -contains "protection" -and $state.protection) { $state.protection } else { [pscustomobject]@{} }
+    $protection = [ordered]@{}
+    if ($state.PSObject.Properties.Name -contains "protection" -and $state.protection) {
+        foreach ($property in $state.protection.PSObject.Properties) {
+            $protection[[string]$property.Name] = $property.Value
+        }
+    }
     $key = [string]$Runtime.Number
     if ($Enabled) {
         [void]$protected.Add([int]$Runtime.Number)
         $url = Get-WorkerConversationUrl -Runtime $Runtime
-        $record = [pscustomobject]@{
+        $protection[$key] = [ordered]@{
             reason = $Reason
             protectedAt = (Get-Date).ToString("o")
             conversationUrl = $url
             packageName = $Runtime.PackageName
         }
-        $protection | Add-Member -NotePropertyName $key -NotePropertyValue $record -Force
     }
     else {
         [void]$protected.Remove([int]$Runtime.Number)
-        $protection.PSObject.Properties.Remove($key)
+        [void]$protection.Remove($key)
     }
     $state | Add-Member -NotePropertyName protectedWorkers -NotePropertyValue @($protected | Sort-Object) -Force
     $state | Add-Member -NotePropertyName protection -NotePropertyValue $protection -Force

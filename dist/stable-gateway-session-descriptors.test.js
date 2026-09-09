@@ -12,6 +12,7 @@ try {
     initializeBody: { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-11-25", clientInfo: { name: "test", version: "1" } } },
     initialized: true,
     lastActivityAt: 1234,
+    clientSessionFingerprint: "c".repeat(64),
     schemaFingerprint: "a".repeat(64),
     toolCount: 116,
     authorization: "Bearer MUST-NOT-PERSIST",
@@ -23,6 +24,7 @@ try {
   assert.equal(loaded.length, 1);
   assert.equal(loaded[0].initialized, true);
   assert.equal(loaded[0].publicSessionId, "12345678-1234-1234-1234-123456789abc");
+  assert.equal(loaded[0].clientSessionFingerprint, "c".repeat(64));
   assert.equal(loaded[0].schemaFingerprint, "a".repeat(64));
   assert.equal(loaded[0].toolCount, 116);
 
@@ -47,12 +49,12 @@ try {
       initializeBody: { jsonrpc: "2.0", id: 1, method: "initialize", params: {} },
       initialized: true,
       lastActivityAt: 6789,
-      schemaFingerprint: null,
-      toolCount: null,
+      schemaFingerprint: "b".repeat(64),
+      toolCount: 119,
     }],
   })));
-  assert.equal((await loadStableGatewaySessionDescriptors(unknownV2Path)).length, 0, "version 2 descriptors without a known schema must also be dropped");
-  console.log(JSON.stringify({ ok: true, gate: "stable-gateway-session-descriptors", credentialsPersisted: false, restartDurable: true, schemaRevisionPersisted: true, unknownSchemaDroppedAtStartup: true }));
+  assert.equal((await loadStableGatewaySessionDescriptors(unknownV2Path)).length, 0, "pre-v3 descriptors must be dropped once because they lack the client-session key needed for event-driven supersession");
+  console.log(JSON.stringify({ ok: true, gate: "stable-gateway-session-descriptors", credentialsPersisted: false, restartDurable: true, clientSessionFingerprintPersisted: true, legacyDescriptorReset: true, schemaRevisionPersisted: true }));
 } finally {
   await rm(root, { recursive: true, force: true });
 }

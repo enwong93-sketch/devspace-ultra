@@ -69,16 +69,24 @@ export function createClassicHostOverlayOwnerStore({ stateDir } = {}) {
 
 export async function resolveClassicHostOverlayOwner({ goal, goalHostBridge, contextAdapter } = {}) {
   const goalId = cleanProjectionText(goal?.id, 120);
+  const boundConversationId = cleanProjectionText(goal?.conversationId, 180) || null;
   if (!goalId || !contextAdapter || typeof contextAdapter.refreshSnapshot !== "function") return null;
 
   if (typeof goalHostBridge?.findMatchingCandidate === "function") {
     try {
-      const candidate = await goalHostBridge.findMatchingCandidate(goalId);
+      const candidate = await goalHostBridge.findMatchingCandidate(goalId, {
+        conversationId: boundConversationId,
+      });
       if (Number.isInteger(candidate?.runtimePort)) {
         const runtimeKey = runtimeKeyForPort(candidate.runtimePort);
         const snapshot = await contextAdapter.refreshSnapshot(runtimeKey);
         const conversationId = cleanProjectionText(snapshot?.conversationId, 180);
-        if (snapshot?.ok && snapshot.mode !== "work" && conversationId) {
+        if (
+          snapshot?.ok
+          && snapshot.mode !== "work"
+          && conversationId
+          && (!boundConversationId || conversationId === boundConversationId)
+        ) {
           return { goalId, runtimeKey, conversationId };
         }
       }
@@ -102,6 +110,7 @@ export async function resolveClassicHostOverlayOwner({ goal, goalHostBridge, con
       snapshot?.ok
       && snapshot.mode === "chat"
       && conversationId
+      && (!boundConversationId || conversationId === boundConversationId)
       && snapshot.generating === true
       && Number(snapshot.composerTextChars || 0) === 0
       && Number(snapshot.visibleMessageCount || 0) === 0

@@ -15,7 +15,8 @@ assert.match(source, /registerAppResource\(server, "DevSpace Goal Dock", GOAL_DO
 assert.match(source, /new URL\("\.\/ui\/goal-dock\.html", import\.meta\.url\)/);
 assert.match(source, /registerAppResource\(server, "DevSpace Goal Continuation Relay", GOAL_RELAY_URI,/);
 assert.match(source, /new URL\("\.\/ui\/goal-continuation-relay\.html", import\.meta\.url\)/);
-assert.match(source, /const resolveConversation = async \(extra\) => \{[\s\S]*conversationAuthority\.resolveMcpExtra\(extra\)/, "production Goal tools must resolve conversation identity only through the native authority registry");
+assert.match(source, /const resolveConversationAuthority = async \(extra\) => \{[\s\S]*conversationAuthority\.resolveMcpExtra\(extra\)/, "production Goal tools must resolve conversation identity only through the native authority registry");
+assert.match(source, /const resolveConversation = resolveConversationAuthority;/, "Goal tools must receive the request-scoped native authority resolver");
 assert.match(source, /registerGoalTools\(server, goalRuntime, \{\s*resourceUri: GOAL_DOCK_URI,\s*relayResourceUri: GOAL_RELAY_URI,\s*hostBridge: goalHostBridge,\s*onMount:\s*\(\{ goal \}\) => hostOverlayProjection\?\.requestOwnerRebind\?\.\(\{ goalId: goal\?\.id \}\),\s*resolveConversation,?\s*\}\)/s, "Goal tools must receive the native conversation resolver while explicit mount remains read-only for Goal state");
 assert.match(source, /createMcpServer\([^)]*goalRuntime[^)]*goalHostBridge[^)]*hostOverlayProjection[^)]*conversationAuthority[^)]*conversationAuthorityReady/s);
 assert.match(source, /await goalRuntime\.close\(\)/);

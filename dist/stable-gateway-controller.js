@@ -2,8 +2,8 @@ import { StableGatewaySessionRegistry } from "./stable-gateway-runtime.js";
 import { createStableGatewayProxy } from "./stable-gateway-proxy.js";
 import { StableGatewayAdmissionGate } from "./stable-gateway-admission.js";
 
-const DEFAULT_DRAIN_TIMEOUT_MS = 15_000;
-const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const CORE_RECOVERY_RETRY_MS = 2_000;
 
 function normalizePublicBaseUrl(value) {
   const parsed = new URL(String(value ?? "").trim());
@@ -58,8 +58,6 @@ export function createStableGatewayController({
   activityJournal = null,
   registry = new StableGatewaySessionRegistry(),
   admission = new StableGatewayAdmissionGate(),
-  drainTimeoutMs = DEFAULT_DRAIN_TIMEOUT_MS,
-  requestTimeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
 } = {}) {
   const publicBase = normalizePublicBaseUrl(publicBaseUrl);
   const configPath = String(configDir ?? "").trim();
@@ -78,10 +76,10 @@ export function createStableGatewayController({
   const createCandidateSnapshot = requireDependency(dependencies, "createCandidateSnapshot");
   const probeCandidate = requireDependency(dependencies, "probeCandidate");
   const readCoreSchemaFingerprint = requireDependency(dependencies, "readCoreSchemaFingerprint");
-  const drainTimeout = Number(drainTimeoutMs);
-  const requestTimeout = Number(requestTimeoutMs);
-  if (!Number.isFinite(drainTimeout) || drainTimeout <= 0) throw new Error("drainTimeoutMs must be positive.");
-  if (!Number.isFinite(requestTimeout) || requestTimeout <= 0) throw new Error("requestTimeoutMs must be positive.");
+  // Core recovery/handover events remain machine diagnostics only. User-visible
+  // progress is authored explicitly by the active agent through
+  // devspace_progress_report, never synthesized from controller state. Keep the
+  // structured activity journal for local liveness diagnostics and recovery tests.
 
   let activeSlot = requestedSlot;
   let activeHandle = initialCoreHandle ?? null;
@@ -162,50 +160,49 @@ export function createStableGatewayController({
       });
       admission.closeAdmission();
       registry.beginBarrier();
-      let replacement = null;
-      try {
-        await Promise.all([
-          admission.waitForDrain(drainTimeout),
-          registry.waitForDrain(drainTimeout),
-        ]);
-        replacement = await startActive(slot);
-        const replayed = await proxy.replaySessionsToCore({ id: slotId(slot), baseUrl: replacement.baseUrl });
-        registry.commitMappings(replayed.mappings);
-        proxy.setActiveCore({ id: slotId(slot), baseUrl: replacement.baseUrl });
-        activeHandle = replacement;
-        watchActiveHandle(replacement, slot);
-        fatalCoreRecoveryError = null;
-        noteActivity({
-          title: "Core recovery completed",
-          detail: `Core ${String(slot).toUpperCase()} restarted as PID ${replacement.pid ?? "unknown"}; replayed ${replayed.mappings.length} session(s), dropped ${replayed.droppedPublicSessionIds.length} stale session(s).`,
-        });
-        reopenAdmission();
-        return {
-          ok: true,
-          activeSlot: slot,
-          activePid: replacement.pid ?? null,
-          replayedSessions: replayed.mappings.length,
-          droppedSessions: replayed.droppedPublicSessionIds.length,
-        };
-      } catch (error) {
-        if (replacement) await stopCoreSlot(replacement).catch(() => {});
-        fatalCoreRecoveryError = error instanceof Error ? error.message : String(error);
-        noteActivity({
-          title: "Core recovery failed",
-          detail: fatalCoreRecoveryError,
-          state: "failed",
-        });
-        activeHandle = null;
-        reopenAdmission();
-        return {
-          ok: false,
-          activeSlot: slot,
-          error: fatalCoreRecoveryError,
-        };
-      } finally {
-        coreRecoveryPromise = null;
+      await Promise.all([
+        admission.waitForDrain(),
+        registry.waitForDrain(),
+      ]);
+      activeHandle = null;
+      while (!closing) {
+        let replacement = null;
+        try {
+          replacement = await startActive(slot);
+          const replayed = await proxy.replaySessionsToCore({ id: slotId(slot), baseUrl: replacement.baseUrl });
+          registry.commitMappings(replayed.mappings);
+          proxy.setActiveCore({ id: slotId(slot), baseUrl: replacement.baseUrl });
+          activeHandle = replacement;
+          watchActiveHandle(replacement, slot);
+          fatalCoreRecoveryError = null;
+          noteActivity({
+            title: "Core recovery completed",
+            detail: `Core ${String(slot).toUpperCase()} restarted as PID ${replacement.pid ?? "unknown"}; replayed ${replayed.mappings.length} session(s), dropped ${replayed.droppedPublicSessionIds.length} stale session(s).`,
+          });
+          reopenAdmission();
+          return {
+            ok: true,
+            activeSlot: slot,
+            activePid: replacement.pid ?? null,
+            replayedSessions: replayed.mappings.length,
+            droppedSessions: replayed.droppedPublicSessionIds.length,
+          };
+        } catch (error) {
+          if (replacement) await stopCoreSlot(replacement).catch(() => {});
+          fatalCoreRecoveryError = error instanceof Error ? error.message : String(error);
+          noteActivity({
+            title: "Core recovery retrying",
+            detail: fatalCoreRecoveryError,
+            state: "running",
+          });
+          await sleep(CORE_RECOVERY_RETRY_MS);
+        }
       }
-    })();
+      reopenAdmission();
+      return { ok: false, activeSlot: slot, state: "closing" };
+    })().finally(() => {
+      coreRecoveryPromise = null;
+    });
     return coreRecoveryPromise;
   };
 
@@ -226,7 +223,6 @@ export function createStableGatewayController({
       publicBaseUrl: publicBase,
       registry,
       activityJournal,
-      requestTimeoutMs: requestTimeout,
     });
     watchActiveHandle(activeHandle, activeSlot);
     return status();
@@ -237,14 +233,10 @@ export function createStableGatewayController({
       sendUnavailable(res, "Stable Gateway is not started.");
       return;
     }
-    if (fatalCoreRecoveryError) {
-      sendUnavailable(res, `Stable Gateway Core recovery failed: ${fatalCoreRecoveryError}`);
-      return;
-    }
     const replayableStream = isReplayableMcpEventStream(req);
     const admit = replayableStream
-      ? admission.waitForOpen({ timeoutMs: requestTimeout })
-      : admission.enter({ timeoutMs: requestTimeout });
+      ? admission.waitForOpen()
+      : admission.enter();
     void admit
       .then(() => {
         if (replayableStream) {
@@ -287,7 +279,6 @@ export function createStableGatewayController({
     if (handoverInProgress) throw new Error("Stable Gateway handover is already in progress.");
     if (coreRecoveryPromise) throw new Error("Stable Gateway Core recovery is in progress.");
     if (fatalHandoverError) throw new Error(`Stable Gateway is blocked after fatal rollback failure: ${fatalHandoverError}`);
-    if (fatalCoreRecoveryError) throw new Error(`Stable Gateway is blocked after fatal Core recovery failure: ${fatalCoreRecoveryError}`);
     handoverInProgress = true;
     const oldSlot = activeSlot;
     const nextSlot = oldSlot === "a" ? "b" : "a";
@@ -321,8 +312,8 @@ export function createStableGatewayController({
       registry.beginBarrier();
       barrierStarted = true;
       await Promise.all([
-        admission.waitForDrain(drainTimeout),
-        registry.waitForDrain(drainTimeout),
+        admission.waitForDrain(),
+        registry.waitForDrain(),
       ]);
 
       await ensureStopped(oldHandle, "Active Core");
@@ -406,8 +397,9 @@ export function createStableGatewayController({
       activePid: activeHandle?.pid ?? null,
       handoverInProgress,
       coreRecoveryInProgress: Boolean(coreRecoveryPromise),
-      fatal: Boolean(fatalHandoverError || fatalCoreRecoveryError),
-      fatalCoreRecoveryError,
+      fatal: Boolean(fatalHandoverError),
+      fatalCoreRecoveryError: null,
+      coreRecoveryLastError: fatalCoreRecoveryError,
       admission: admission.snapshot(),
       sessions: registry.snapshotPublic(),
     };

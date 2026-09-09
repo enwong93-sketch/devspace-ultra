@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { ToolListChangedNotificationSchema } from "@modelcontextprotocol/sdk/types.js";
 import {
   CapabilityRuntime,
   installedCapabilitySkillPaths,
@@ -13,7 +14,7 @@ import {
 
 async function makeFixtureSource(root) {
   const source = join(root, "fixture-source");
-  await mkdir(join(source, "skills", "powermem-like"), { recursive: true });
+  await mkdir(join(source, "skills", "powermem-like", "agents"), { recursive: true });
   await mkdir(join(source, ".claude-plugin"), { recursive: true });
   await mkdir(join(source, ".codex-plugin"), { recursive: true });
   await mkdir(join(source, "claude-commands"), { recursive: true });
@@ -25,6 +26,11 @@ async function makeFixtureSource(root) {
     name: "Fixture Memory Capability",
     version: "1.2.3",
     description: "Fixture covering skills, MCP, instructions, and command tools.",
+    routing: {
+      aliases: ["durable memory", "remember prior decisions"],
+      exclude: ["temporary scratchpad only"],
+      priority: 4
+    },
     skills: ["skills"],
     mcpServers: {
       memory: {
@@ -113,7 +119,8 @@ async function makeFixtureSource(root) {
     packages: [{ registryType: "nuget", identifier: "Fixture.Memory.Mcp", version: "1.0.0", transport: { type: "stdio" } }],
   }, null, 2));
   await writeFile(join(source, "AGENTS.md"), "# Fixture plugin instructions\nUse memory carefully.\n");
-  await writeFile(join(source, "skills", "powermem-like", "SKILL.md"), `---\nname: powermem-like\ndescription: Reusable test memory workflow.\n---\n# Memory skill\nUse the MCP memory tool.\n`);
+  await writeFile(join(source, "skills", "powermem-like", "SKILL.md"), `---\nname: powermem-like\ndescription: Reusable test memory workflow for prior decisions and durable preferences.\nrouting:\n  aliases:\n    - recall user history\n  exclude:\n    - disposable note\n---\n# Memory skill\nUse the MCP memory tool.\n`);
+  await writeFile(join(source, "skills", "powermem-like", "agents", "openai.yaml"), `interface:\n  display_name: "PowerMem Like"\n  short_description: "Recall and store durable user decisions"\n  default_prompt: "Use $powermem-like to recall relevant prior decisions before work."\ndependencies:\n  tools:\n    - type: "mcp"\n      value: "memory"\n      description: "Memory MCP server"\npolicy:\n  allow_implicit_invocation: true\n`);
   await writeFile(join(source, "fixture-command.mjs"), `let input=''; for await (const chunk of process.stdin) input += chunk; const value = input ? JSON.parse(input) : {}; process.stdout.write(JSON.stringify({echo:value, source:'command-tool'}));`);
   const mcpServerModule = import.meta.resolve("@modelcontextprotocol/sdk/server/mcp.js");
   const stdioServerModule = import.meta.resolve("@modelcontextprotocol/sdk/server/stdio.js");
@@ -125,14 +132,20 @@ async function makeFixtureSource(root) {
 function fakeServer(registrations) {
   return {
     registerTool(name, definition, handler) {
-      registrations.push({ name, definition, handler });
+      const record = { name, definition, handler };
+      registrations.push(record);
+      return {
+        update(updates = {}) { Object.assign(record.definition, updates); },
+      };
     },
   };
 }
 
 async function connectCapabilityMcpSession(runtime, label) {
   const server = new McpServer({ name: `capability-test-server-${label}`, version: "0.3.0-dev" });
-  registerCapabilityTools(server, runtime);
+  registerCapabilityTools(server, runtime, {
+    resolveConversation: async () => ({ conversationId: `conversation-${label}` }),
+  });
   const client = new Client({ name: `capability-test-client-${label}`, version: "0.3.0-dev" });
   const [serverTransport, clientTransport] = InMemoryTransport.createLinkedPair();
   await server.connect(serverTransport);
@@ -169,6 +182,14 @@ async function run() {
     assert.equal(installed.plugin.trusted, false);
     assert.deepEqual(installed.plugin.detectedFormats.sort(), ["agent-instructions", "agent-skills", "claude-agents", "claude-commands", "claude-hooks-metadata", "claude-plugin", "codex-app-dependencies", "codex-bundled-content-metadata", "codex-execution-requirements-metadata", "codex-hooks-metadata", "codex-interface-metadata", "codex-plugin", "command-tools", "devspace-plugin", "mcp", "mcp-registry-server-json", "nested-mcp-profiles"].sort());
     assert.equal(installed.plugin.skills[0].name, "powermem-like");
+    assert.equal(installed.plugin.skills[0].displayName, "PowerMem Like");
+    assert.equal(installed.plugin.skills[0].shortDescription, "Recall and store durable user decisions");
+    assert.deepEqual(installed.plugin.skills[0].defaultPrompts, ["Use $powermem-like to recall relevant prior decisions before work."]);
+    assert.equal(installed.plugin.skills[0].dependencies.some((value) => /memory mcp server/i.test(value)), true);
+    assert.equal(installed.plugin.skills[0].routing.aliases.includes("recall user history"), true);
+    assert.equal(installed.plugin.skills[0].routing.negativeTriggers.includes("disposable note"), true);
+    assert.equal(installed.plugin.routingAliases.includes("durable memory"), true);
+    assert.equal(installed.plugin.routing.negativeTriggers.includes("temporary scratchpad only"), true);
     assert.equal(installed.plugin.mcpServers.some((server) => server.id === "memory"), true);
     assert.equal(installed.plugin.mcpServers.some((server) => server.id === "io.github.fixture/memory:package-1" && server.status === "not-probed"), true);
     const registryRemote = installed.plugin.mcpServers.find((server) => server.id === "io.github.fixture/memory:remote-1");
@@ -225,66 +246,83 @@ async function run() {
       /symbolic link/,
     );
 
-    const [sharedMcpA, sharedMcpB, sharedMcpC] = await Promise.all([
+    const [internalMcpA, internalMcpB, internalMcpC] = await Promise.all([
       runtime.getMcpClient("fixture-memory", "memory"),
       runtime.getMcpClient("fixture-memory", "memory"),
       runtime.getMcpClient("fixture-memory", "memory"),
     ]);
-    assert.equal(sharedMcpA, sharedMcpB);
-    assert.equal(sharedMcpB, sharedMcpC);
+    assert.equal(internalMcpA, internalMcpB, "internal discovery calls may reuse only the isolated internal-service connection");
+    assert.equal(internalMcpB, internalMcpC);
+    const conversationMcpA = await runtime.getMcpClient("fixture-memory", "memory", undefined, "conversation-a");
+    const conversationMcpAAgain = await runtime.getMcpClient("fixture-memory", "memory", undefined, "conversation-a");
+    const conversationMcpB = await runtime.getMcpClient("fixture-memory", "memory", undefined, "conversation-b");
+    assert.equal(conversationMcpA, conversationMcpAAgain);
+    assert.notEqual(conversationMcpA, conversationMcpB, "different conversations must receive different MCP clients by default");
+    assert.notEqual(conversationMcpA, internalMcpA, "agent calls must not reuse the internal discovery connection");
     await runtime.refresh({ pluginId: "fixture-memory", probeMcp: false });
     const refreshedMcp = await runtime.getMcpClient("fixture-memory", "memory");
-    assert.notEqual(refreshedMcp, sharedMcpA);
+    assert.notEqual(refreshedMcp, internalMcpA);
 
-    await runtime.closeClientKey("fixture-memory::memory");
-    let timeoutOptions = null;
-    let timeoutClientClosed = 0;
-    let timeoutTransportClosed = 0;
-    runtime.mcpClients.set("fixture-memory::memory", {
-      client: { async close() { timeoutClientClosed += 1; } },
-      transport: { async close() { timeoutTransportClosed += 1; } },
+    const memoryDefinition = runtime.discovered.get("fixture-memory").mcpServers.find((server) => server.id === "memory");
+    const internalPolicy = runtime.mcpConnectionPolicy(memoryDefinition, null, null);
+    const internalKey = runtime.clientKey("fixture-memory", "memory", null, internalPolicy);
+    await runtime.closeClientKey(internalKey);
+    let requestOptions = "not-called";
+    let pooledClientClosed = 0;
+    let pooledTransportClosed = 0;
+    const noDeadlineHolder = {
+      client: { async close() { pooledClientClosed += 1; } },
+      transport: { async close() { pooledTransportClosed += 1; } },
       definition: {},
+    };
+    runtime.mcpClients.set(internalKey, noDeadlineHolder);
+    runtime.connectionManager.connectionStates.set(internalKey, {
+      key: internalKey,
+      pluginId: "fixture-memory",
+      serverId: "memory",
+      scope: "conversation-isolated",
+      isolationKind: "conversation",
+      ownerConversationId: internalPolicy.ownerConversationId,
+      state: "ready",
+      connecting: false,
     });
-    await assert.rejects(
-      () => runtime.executeMcpRequest("fixture-memory", "memory", undefined, async (_client, options) => {
-        timeoutOptions = options;
-        const error = new Error("Request timed out");
-        error.code = -32001;
-        throw error;
-      }),
-      /timed out/i,
-    );
-    assert.equal(timeoutOptions.timeout, 60_000, "MCP calls must use the SDK-native request timeout");
-    assert.equal(timeoutOptions.maxTotalTimeout, 60_000, "MCP calls must bound total request lifetime as well");
-    assert.equal(timeoutClientClosed, 1, "request timeout must invalidate the pooled MCP client");
-    assert.equal(timeoutTransportClosed, 1, "request timeout must close the pooled MCP transport");
-    assert.equal(runtime.mcpClients.has("fixture-memory::memory"), false, "timed-out pooled client must be removed so the next call reconnects cleanly");
+    const noDeadlineResult = await runtime.executeMcpRequest("fixture-memory", "memory", undefined, async (_client, options) => {
+      requestOptions = options;
+      return { ok: true };
+    });
+    assert.deepEqual(noDeadlineResult.result, { ok: true });
+    assert.equal(requestOptions, undefined, "Capability MCP calls must not receive SDK wall-clock timeout options");
+    assert.equal(pooledClientClosed, 0);
+    assert.equal(pooledTransportClosed, 0);
+    assert.equal(runtime.mcpClients.get(internalKey), noDeadlineHolder, "a healthy client must remain in its isolated scope without a timeout-driven recycle");
+    await runtime.closeClientKey(internalKey);
     const recoveredMcp = await runtime.getMcpClient("fixture-memory", "memory");
-    assert.notEqual(recoveredMcp, refreshedMcp, "a timed-out MCP client must not be reused");
+    assert.notEqual(recoveredMcp, refreshedMcp);
 
     const instanceA = await runtime.claimInstance({
       pluginId: "fixture-memory",
       serverId: "memory",
       instanceId: "project-a",
       ownerLabel: "agent-A",
+      ownerConversationId: "conversation-a",
       env: { CAP_INSTANCE_MARKER: "A" },
-      leaseSeconds: 300,
     });
     const instanceB = await runtime.claimInstance({
       pluginId: "fixture-memory",
       serverId: "memory",
       instanceId: "project-b",
       ownerLabel: "agent-B",
+      ownerConversationId: "conversation-b",
       env: { CAP_INSTANCE_MARKER: "B" },
-      leaseSeconds: 300,
     });
     await assert.rejects(() => runtime.claimInstance({
       pluginId: "fixture-memory",
       serverId: "memory",
       instanceId: "project-a",
       ownerLabel: "competing-agent",
+      ownerConversationId: "conversation-c",
       env: {},
-    }), /already claimed/);
+    }), /belongs to another conversation|already claimed/);
     const [instanceClientA, instanceClientB] = await Promise.all([
       runtime.getMcpClient("fixture-memory", "memory", instanceA.instanceToken),
       runtime.getMcpClient("fixture-memory", "memory", instanceB.instanceToken),
@@ -302,6 +340,7 @@ async function run() {
     const instanceList = await runtime.listInstances({ pluginId: "fixture-memory", serverId: "memory" });
     assert.deepEqual(instanceList.map((item) => item.instanceId), ["project-a", "project-b"]);
     assert.deepEqual(instanceList[0].envNames, ["CAP_INSTANCE_MARKER"]);
+    assert.equal(instanceList[0].expiresAt, null, "stateful capability instances must remain active until explicit release, not a lease deadline");
     assert.equal(JSON.stringify(instanceList).includes('"A"'), false);
     await runtime.releaseInstance(instanceA.instanceToken);
     await runtime.releaseInstance(instanceB.instanceToken);
@@ -373,6 +412,7 @@ async function run() {
     registerCapabilityTools(fakeServer(workerTools), runtime);
     const expectedNames = [
       "capability_list",
+      "capability_route",
       "capability_search",
       "capability_import_codex",
       "capability_inspect",
@@ -383,10 +423,14 @@ async function run() {
       "capability_uninstall",
       "capability_refresh",
       "capability_read",
+      "capability_connection",
       "capability_instance",
+      "devspace_connection_isolation_status",
       "list_mcp_resources",
       "list_mcp_resource_templates",
       "read_mcp_resource",
+      "blender_runtime",
+      "blender_mcp",
       "capability_call",
     ];
     assert.deepEqual(mainTools.map((item) => item.name), expectedNames);
@@ -399,11 +443,28 @@ async function run() {
       const protocolWorkerTools = await protocolWorker.client.listTools();
       assert.deepEqual(protocolMainTools.tools.map((tool) => tool.name), expectedNames);
       assert.deepEqual(protocolWorkerTools.tools.map((tool) => tool.name), expectedNames);
+      const protocolRouteTool = protocolWorkerTools.tools.find((tool) => tool.name === "capability_route");
+      assert.equal(protocolRouteTool._meta.devspace.routingContractVersion, "1");
+      const blenderExecutionTool = protocolWorkerTools.tools.find((tool) => tool.name === "blender_mcp");
+      assert.match(blenderExecutionTool.description, /actual execution entry point/i);
+      assert.match(protocolRouteTool._meta.devspace.routingFingerprint, /^[a-f0-9]{64}$/);
       const protocolSearch = await protocolWorker.client.callTool({
         name: "capability_search",
         arguments: { query: "powermem-like memory", includeDisabled: false, limit: 10 },
       });
       assert.equal(protocolSearch.structuredContent.plugins[0].id, "fixture-memory");
+      const protocolRoute = await protocolWorker.client.callTool({
+        name: "capability_route",
+        arguments: { query: "recall durable user decisions", includeDisabled: false, probeMcp: false, limit: 8 },
+      });
+      assert.equal(protocolRoute.structuredContent.primary.kind, "skill");
+      assert.equal(protocolRoute.structuredContent.primary.name, "powermem-like");
+      assert.deepEqual(protocolRoute.structuredContent.primary.nextAction, {
+        arguments: { path: "skills/powermem-like/SKILL.md", pluginId: "fixture-memory" },
+        then: "Follow the selected SKILL.md and resolve only its declared tool dependencies.",
+        tool: "capability_read",
+      });
+      assert.match(protocolRoute.structuredContent.routingFingerprint, /^[a-f0-9]{64}$/);
       const protocolClaim = await protocolMain.client.callTool({
         name: "capability_instance",
         arguments: {
@@ -412,7 +473,6 @@ async function run() {
           serverId: "memory",
           instanceId: "protocol-project",
           env: { CAP_INSTANCE_MARKER: "PROTOCOL" },
-          leaseSeconds: 300,
         },
       });
       const protocolInstanceToken = protocolClaim.structuredContent.instanceToken;
@@ -425,7 +485,6 @@ async function run() {
           serverId: "memory",
           instanceId: "protocol-project",
           env: { CAP_INSTANCE_MARKER: "WORKER" },
-          leaseSeconds: 300,
         },
       });
       assert.equal(competingProtocolClaim.isError, true);
@@ -454,6 +513,7 @@ async function run() {
       await protocolWorker.server.close().catch(() => {});
     }
 
+    const routingFingerprintBeforeProbe = runtime.routingFingerprint({ includeDisabled: true });
     const mainList = await mainTools.find((item) => item.name === "capability_list").handler({ includeDisabled: false, probeMcp: true });
     const workerList = await workerTools.find((item) => item.name === "capability_list").handler({ includeDisabled: false, probeMcp: false });
     assert.equal(mainList.structuredContent.plugins[0].id, "fixture-memory");
@@ -462,10 +522,51 @@ async function run() {
     assert.equal(mainList.structuredContent.plugins[0].counts.skills, 1);
     assert.equal(mainList.structuredContent.plugins[0].probedMcpPromptNames.includes("memory-review"), true);
     assert.equal(mainList.structuredContent.plugins[0].probedMcpResourceUris.includes("memory://fixture/status"), true);
+    assert.equal(runtime.routingFingerprint({ includeDisabled: true }), routingFingerprintBeforeProbe, "session routing fingerprint must not depend on whether deferred MCP schemas happened to be probed");
     const searched = await workerTools.find((item) => item.name === "capability_search").handler({ query: "powermem-like memory", includeDisabled: false, limit: 10 });
     assert.equal(searched.structuredContent.plugins[0].id, "fixture-memory");
     assert.equal(searched.structuredContent.plugins[0].score > 0, true);
+    const routed = await workerTools.find((item) => item.name === "capability_route").handler({ query: "remember prior decisions", includeDisabled: false, probeMcp: false, limit: 8 });
+    assert.equal(routed.structuredContent.primary.kind, "skill");
+    assert.equal(routed.structuredContent.primary.pluginId, "fixture-memory");
+    assert.equal(routed.structuredContent.primary.nextAction.tool, "capability_read");
+    const runtimeRoute = await workerTools.find((item) => item.name === "capability_route").handler({
+      query: "兩個 agent 同時操作兩個 Blender，用不同 port 同獨立 runtime",
+      includeDisabled: false,
+      probeMcp: false,
+      limit: 8,
+    });
+    assert.equal(runtimeRoute.structuredContent.primary.kind, "runtime");
+    assert.equal(runtimeRoute.structuredContent.primary.routeId, "runtime:blender-isolated");
+    assert.equal(runtimeRoute.structuredContent.primary.nextAction.tool, "blender_runtime");
+    const connectionRoute = await workerTools.find((item) => item.name === "capability_route").handler({
+      query: "set up isolated MCP connection manager for multiple application ports",
+      includeDisabled: false,
+      probeMcp: false,
+      limit: 8,
+    });
+    assert.equal(connectionRoute.structuredContent.primary.kind, "workflow");
+    assert.equal(connectionRoute.structuredContent.primary.nextAction.tool, "capability_connection");
+    const progressRoute = await workerTools.find((item) => item.name === "capability_route").handler({
+      query: "完成中型步驟後親自寫進度旁白卡俾用戶",
+      includeDisabled: false,
+      probeMcp: false,
+      limit: 8,
+    });
+    assert.equal(progressRoute.structuredContent.primary.kind, "workflow");
+    assert.equal(progressRoute.structuredContent.primary.nextAction.tool, "devspace_progress_report");
+    assert.equal(workerTools.find((item) => item.name === "capability_route").definition._meta.devspace.routingContractVersion, "1");
+    assert.match(workerTools.find((item) => item.name === "capability_route").definition._meta.devspace.routingFingerprint, /^[a-f0-9]{64}$/);
 
+    const liveRouteDefinition = mainTools.find((item) => item.name === "capability_route").definition;
+    const fixtureOnlyRoutingFingerprint = liveRouteDefinition._meta.devspace.routingFingerprint;
+    const liveRoutingProtocol = await connectCapabilityMcpSession(runtime, "live-routing-refresh");
+    let toolListChangedNotifications = 0;
+    liveRoutingProtocol.client.setNotificationHandler(ToolListChangedNotificationSchema, async () => {
+      toolListChangedNotifications += 1;
+    });
+    const protocolFingerprintBeforeMutation = (await liveRoutingProtocol.client.listTools()).tools
+      .find((tool) => tool.name === "capability_route")._meta.devspace.routingFingerprint;
     const computerUseSource = join(root, "computer-use-source");
     await mkdir(join(computerUseSource, "skills", "computer-use"), { recursive: true });
     await mkdir(join(computerUseSource, ".codex-plugin"), { recursive: true });
@@ -483,16 +584,34 @@ async function run() {
     }, null, 2));
     await writeFile(join(computerUseSource, "skills", "computer-use", "SKILL.md"), "---\nname: computer-use\ndescription: Control Windows apps\n---\n# Computer Use\n");
     const installedComputerUse = await runtime.install({ source: computerUseSource, enable: true, trust: true });
+    await new Promise((resolve) => setTimeout(resolve, 25));
     assert.equal(installedComputerUse.plugin.id, "computer-use");
+    const withComputerUseRoutingFingerprint = liveRouteDefinition._meta.devspace.routingFingerprint;
+    assert.notEqual(withComputerUseRoutingFingerprint, fixtureOnlyRoutingFingerprint, "an installed route must update the live model-facing capability_route metadata");
+    assert.equal(toolListChangedNotifications >= 1, true, "active MCP clients must be told that the model-facing routing surface changed");
+    const protocolFingerprintAfterInstall = (await liveRoutingProtocol.client.listTools()).tools
+      .find((tool) => tool.name === "capability_route")._meta.devspace.routingFingerprint;
+    assert.notEqual(protocolFingerprintAfterInstall, protocolFingerprintBeforeMutation);
+    assert.equal(protocolFingerprintAfterInstall, withComputerUseRoutingFingerprint);
     const desktopRoute = await runtime.search("open excel windows desktop app", { limit: 10 });
     assert.equal(desktopRoute[0].id, "computer-use");
     assert.equal(desktopRoute[0].routingAliases.some((value) => value.includes("excel")), true);
     const notepadRoute = await runtime.search("open notepad", { limit: 10 });
     assert.equal(notepadRoute[0].id, "computer-use");
     const removedComputerUse = await runtime.uninstall("computer-use");
+    await new Promise((resolve) => setTimeout(resolve, 25));
     assert.equal(removedComputerUse.removed, true);
+    assert.equal(liveRouteDefinition._meta.devspace.routingFingerprint, fixtureOnlyRoutingFingerprint, "removing the route must restore the prior live routing fingerprint");
+    const protocolFingerprintAfterRemoval = (await liveRoutingProtocol.client.listTools()).tools
+      .find((tool) => tool.name === "capability_route")._meta.devspace.routingFingerprint;
+    assert.equal(protocolFingerprintAfterRemoval, protocolFingerprintBeforeMutation);
+    await liveRoutingProtocol.client.close().catch(() => {});
+    await liveRoutingProtocol.server.close().catch(() => {});
 
     await runtime.setEnabled("fixture-memory", false);
+    await Promise.resolve();
+    const disabledRoutingFingerprint = liveRouteDefinition._meta.devspace.routingFingerprint;
+    assert.notEqual(disabledRoutingFingerprint, fixtureOnlyRoutingFingerprint, "enable/disable policy is part of the live routing surface");
     await assert.rejects(() => runtime.call({
       pluginId: "fixture-memory",
       kind: "tool",
@@ -501,7 +620,9 @@ async function run() {
     }), /disabled/);
 
     const reenabled = await runtime.setEnabled("fixture-memory", true);
+    await Promise.resolve();
     assert.equal(reenabled.plugin.enabled, true);
+    assert.equal(liveRouteDefinition._meta.devspace.routingFingerprint, fixtureOnlyRoutingFingerprint);
     assert.equal(reenabled.plugin.trusted, true);
     const removed = await runtime.uninstall("fixture-memory");
     assert.equal(removed.removed, true);
@@ -517,6 +638,7 @@ async function run() {
       realMcpProtocolMainAndWorkerCatalog: true,
       mainAndWorkerCatalog: true,
       progressiveCapabilitySearch: true,
+      liveToolListChangedRouting: true,
       dedupedSharedMcpConnection: true,
       isolatedStatefulMcpInstances: true,
       exclusiveInstanceClaim: true,

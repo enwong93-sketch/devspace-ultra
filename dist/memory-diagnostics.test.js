@@ -61,6 +61,7 @@ const snapshot = createMemoryDiagnostics({
   },
   config: {
     passiveCore: true,
+    goalRoundRecoveryEnabled: false,
     pluginsEnabled: true,
     skillsEnabled: true,
     artifactsEnabled: true,
@@ -106,6 +107,7 @@ assert.equal(snapshot.streamRecoveryCdp.pendingCalls, 5);
 assert.equal(snapshot.streamRecoveryCdp.trackedRequestUrls, 6);
 assert.deepEqual(snapshot.features.classicMainDebugPorts, [19001]);
 assert.equal(snapshot.features.passiveCore, true);
+assert.equal(snapshot.features.goalRoundRecoveryEnabled, false);
 assert.equal(snapshot.features.autoCompactEnabled, false);
 
 const empty = createMemoryDiagnostics({

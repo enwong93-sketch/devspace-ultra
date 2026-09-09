@@ -35,6 +35,7 @@ export function createMemoryDiagnostics({
   processSessions,
   workspaces,
   capabilityRuntime,
+  blenderRuntimeManager,
   turnTransportObserver,
   mcpCallCorrelator,
   contextMetadataAdapter,
@@ -49,6 +50,7 @@ export function createMemoryDiagnostics({
   const heap = heapStatistics();
   const mcp = safeDiagnostics(transports);
   const capabilities = safeDiagnostics(capabilityRuntime);
+  const blenderRuntimes = safeDiagnostics(blenderRuntimeManager);
   const turn = safeStatus(turnTransportObserver);
   const callCorrelation = safeDiagnostics(mcpCallCorrelator);
   const context = safeStatus(contextMetadataAdapter);
@@ -73,6 +75,10 @@ export function createMemoryDiagnostics({
     },
     registries: {
       mcpSessions: finiteNumber(mcp?.sessions),
+      mcpClientSessions: finiteNumber(mcp?.clientSessions),
+      mcpIdentifiedSessions: finiteNumber(mcp?.identifiedSessions),
+      mcpUnidentifiedSessions: finiteNumber(mcp?.unidentifiedSessions),
+      mcpSupersededSessions: finiteNumber(mcp?.supersededSessions),
       mcpActiveRequests: finiteNumber(mcp?.activeRequests),
       mcpEventStreams: finiteNumber(mcp?.eventStreams),
       mcpEventStreamsClosing: finiteNumber(mcp?.eventStreamsClosing),
@@ -94,6 +100,9 @@ export function createMemoryDiagnostics({
       mcpConnecting: finiteNumber(capabilities?.mcpConnecting),
       mcpStartupTails: finiteNumber(capabilities?.mcpStartupTails),
       mcpInstances: finiteNumber(capabilities?.mcpInstances),
+      blenderRuntimes: finiteNumber(blenderRuntimes?.runtimes),
+      blenderRuntimesRunning: finiteNumber(blenderRuntimes?.running),
+      blenderRuntimeConnections: finiteNumber(blenderRuntimes?.isolatedConnections),
     },
     turnTransportCdp: {
       connected: finiteNumber(turn?.connected),
@@ -112,6 +121,7 @@ export function createMemoryDiagnostics({
     },
     features: {
       passiveCore: config?.passiveCore === true,
+      goalRoundRecoveryEnabled: config?.goalRoundRecoveryEnabled !== false,
       pluginsEnabled: config?.pluginsEnabled === true,
       skillsEnabled: config?.skillsEnabled === true,
       artifactsEnabled: config?.artifactsEnabled === true,

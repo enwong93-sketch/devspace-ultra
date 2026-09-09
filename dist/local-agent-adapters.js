@@ -6,7 +6,6 @@ const ACP_COMMANDS = {
     cursor: ["cursor-agent", "acp"],
     copilot: ["copilot", "--acp"],
 };
-const PI_AGENT_TIMEOUT_MS = 120_000;
 export async function runLocalAgentProvider(provider, input) {
     return createLocalAgentAdapter(provider).run(input);
 }
@@ -299,7 +298,7 @@ class PiRpcLocalAgentAdapter {
         try {
             const state = await rpc.request({ type: "get_state" });
             const providerSessionId = readNestedString(state, ["sessionId"]) ?? input.providerSessionId ?? null;
-            const done = rpc.waitForEvent((event) => asRecord(event)?.type === "agent_end", PI_AGENT_TIMEOUT_MS);
+            const done = rpc.waitForEvent((event) => asRecord(event)?.type === "agent_end");
             await rpc.request({ type: "prompt", message: input.prompt });
             const agentEnd = await done;
             const sessionMessages = await rpc.request({ type: "get_messages" });
@@ -341,6 +340,7 @@ class JsonLineRpc {
     child;
     pending = new Map();
     eventSubscribers = new Set();
+    fatalSubscribers = new Set();
     buffer = "";
     nextId = 1;
     stderr = "";
@@ -370,19 +370,25 @@ class JsonLineRpc {
         this.eventSubscribers.add(callback);
         return () => this.eventSubscribers.delete(callback);
     }
-    waitForEvent(predicate, timeoutMs) {
+    waitForEvent(predicate) {
+        if (this.fatalError)
+            return Promise.reject(this.fatalError);
         return new Promise((resolve, reject) => {
-            const timer = setTimeout(() => {
+            const cleanup = () => {
                 unsubscribe();
-                reject(new Error(`Pi RPC timed out waiting for agent completion\n${this.stderr}`.trim()));
-            }, timeoutMs);
+                this.fatalSubscribers.delete(onFatal);
+            };
+            const onFatal = (error) => {
+                cleanup();
+                reject(error);
+            };
             const unsubscribe = this.onEvent((event) => {
                 if (!predicate(event))
                     return;
-                clearTimeout(timer);
-                unsubscribe();
+                cleanup();
                 resolve(event);
             });
+            this.fatalSubscribers.add(onFatal);
         });
     }
     handleStdout(chunk) {
@@ -430,6 +436,10 @@ class JsonLineRpc {
             pending.reject(error);
         }
         this.pending.clear();
+        const subscribers = [...this.fatalSubscribers];
+        this.fatalSubscribers.clear();
+        for (const subscriber of subscribers)
+            subscriber(error);
     }
 }
 async function createOpencodeSession(client, input) {

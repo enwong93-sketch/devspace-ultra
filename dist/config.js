@@ -218,6 +218,9 @@ export function loadConfig(env = process.env) {
         passiveCore: env.DEVSPACE_PASSIVE_CORE === undefined
             ? false
             : parseBoolean(env.DEVSPACE_PASSIVE_CORE),
+        goalRoundRecoveryEnabled: env.DEVSPACE_GOAL_ROUND_RECOVERY === undefined
+            ? files.config.goalRoundRecoveryEnabled !== false
+            : parseBoolean(env.DEVSPACE_GOAL_ROUND_RECOVERY),
         classicMainDebugPorts: parsePortList(env.DEVSPACE_CLASSIC_MAIN_DEBUG_PORTS ?? files.config.classicMainDebugPorts, "DEVSPACE_CLASSIC_MAIN_DEBUG_PORTS"),
         classicStreamRecoveryEnabled: env.DEVSPACE_CLASSIC_STREAM_RECOVERY === undefined
             ? files.config.classicStreamRecoveryEnabled !== false

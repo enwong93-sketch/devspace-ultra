@@ -1,11 +1,3 @@
-const DEFAULT_TIMEOUT_MS = 30_000;
-
-function positiveTimeout(value) {
-  const timeoutMs = Number(value);
-  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new Error("timeoutMs must be positive.");
-  return timeoutMs;
-}
-
 export class StableGatewayAdmissionGate {
   constructor() {
     this.closed = false;
@@ -29,28 +21,16 @@ export class StableGatewayAdmissionGate {
     return true;
   }
 
-  async waitForOpen({ timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
-    const boundedTimeout = positiveTimeout(timeoutMs);
+  async waitForOpen(_options = {}) {
     if (!this.closed) return;
-    let waiter;
-    await new Promise((resolvePromise, rejectPromise) => {
-      const timer = setTimeout(() => {
-        if (waiter) this.waiters.delete(waiter);
-        rejectPromise(new Error(`Gateway admission timed out after ${boundedTimeout}ms.`));
-      }, boundedTimeout);
-      timer.unref?.();
-      waiter = {
-        resolve: () => {
-          clearTimeout(timer);
-          resolvePromise();
-        },
-      };
+    await new Promise((resolvePromise) => {
+      const waiter = { resolve: resolvePromise };
       this.waiters.add(waiter);
     });
   }
 
-  async enter({ timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
-    await this.waitForOpen({ timeoutMs });
+  async enter(options = {}) {
+    await this.waitForOpen(options);
     this.activeRequests += 1;
   }
 
@@ -62,23 +42,10 @@ export class StableGatewayAdmissionGate {
     for (const waiter of waiters) waiter.resolve();
   }
 
-  async waitForDrain(timeoutMs = DEFAULT_TIMEOUT_MS) {
-    const boundedTimeout = positiveTimeout(timeoutMs);
+  async waitForDrain(_options = {}) {
     if (this.activeRequests === 0) return;
-    let waiter;
-    await new Promise((resolvePromise, rejectPromise) => {
-      const timer = setTimeout(() => {
-        if (waiter) this.drainWaiters.delete(waiter);
-        rejectPromise(new Error(`Gateway HTTP drain timed out after ${boundedTimeout}ms.`));
-      }, boundedTimeout);
-      timer.unref?.();
-      waiter = {
-        resolve: () => {
-          clearTimeout(timer);
-          resolvePromise();
-        },
-      };
-      this.drainWaiters.add(waiter);
+    await new Promise((resolvePromise) => {
+      this.drainWaiters.add({ resolve: resolvePromise });
     });
   }
 

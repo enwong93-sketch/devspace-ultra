@@ -22,12 +22,15 @@ import { ensureDevspaceDefaultSkills, generateOwnerToken, loadDevspaceFiles, res
 import { expandHomePath } from "./roots.js";
 import { shutdownHttpServer } from "./server-shutdown.js";
 const require = createRequire(import.meta.url);
-const SUPPORTED_NODE_RANGE = ">=20.12 <27";
+const SUPPORTED_NODE_RANGE = ">=22.19 <27";
 async function main(argv) {
     assertSupportedNode();
     const [rawCommand, ...args] = argv;
     const command = normalizeCommand(rawCommand);
     switch (command) {
+        case "setup":
+            await runSetupCommand(args);
+            return;
         case "serve":
             await ensureConfigured();
             await serve();
@@ -61,13 +64,211 @@ async function main(argv) {
 function normalizeCommand(command) {
     if (!command || command === "serve" || command === "start")
         return "serve";
-    if (command === "init" || command === "doctor" || command === "config" || command === "edge" || command === "context" || command === "agents")
+    if (command === "setup" || command === "init" || command === "doctor" || command === "config" || command === "edge" || command === "context" || command === "agents")
         return command;
     if (command === "help" || command === "--help" || command === "-h")
         return "help";
     if (command === "version" || command === "--version" || command === "-v")
         return "version";
     throw new Error(`Unknown command: ${command}`);
+}
+
+function optionValue(args, name) {
+    const index = args.indexOf(name);
+    if (index < 0 || index + 1 >= args.length)
+        return null;
+    return String(args[index + 1]);
+}
+
+function optionValues(args, name) {
+    const values = [];
+    for (let index = 0; index < args.length; index += 1) {
+        if (args[index] === name && index + 1 < args.length)
+            values.push(String(args[index + 1]));
+    }
+    return values;
+}
+
+async function runSetupCommand(args) {
+    if (process.platform !== "win32") {
+        prompts.log.warn("The integrated Stable Gateway + DuckDNS/Caddy setup is currently Windows-only.");
+        await runInit({ force: args.includes("--force") });
+        prompts.log.info("Use your own HTTPS reverse proxy, or run `devspace edge cloudflare setup` for the Cloudflare fallback.");
+        return;
+    }
+
+    const files = loadDevspaceFiles();
+    const nonInteractive = args.includes("--non-interactive");
+    if (nonInteractive && (!optionValue(args, "--edge") || optionValues(args, "--root").length === 0)) {
+        throw new Error("Non-interactive setup requires --edge <duckdns|cloudflare|local> and at least one --root <path>.");
+    }
+
+    const defaultRoots = files.config.allowedRoots?.join(", ") || process.cwd();
+    const rootOptions = optionValues(args, "--root");
+    const rootsAnswer = rootOptions.length
+        ? rootOptions.join(",")
+        : await textPrompt({
+            message: `Where are your projects located? Press Enter to use ${defaultRoots}`,
+            placeholder: defaultRoots,
+            defaultValue: defaultRoots,
+            validate: (value) => value?.trim() ? undefined : "Enter at least one project root.",
+        });
+    const allowedRoots = rootsAnswer
+        .split(",")
+        .map((root) => resolve(expandHomePath(root.trim())))
+        .filter(Boolean);
+
+    const defaultGatewayPort = String(files.config.stableGatewayPort ?? files.config.port ?? 7678);
+    const gatewayPortText = optionValue(args, "--gateway-port")
+        ?? await textPrompt({
+            message: `Which local Stable Gateway port should DevSpace use? Press Enter to use ${defaultGatewayPort}`,
+            placeholder: defaultGatewayPort,
+            defaultValue: defaultGatewayPort,
+            validate: validatePort,
+        });
+    const gatewayPort = Number(gatewayPortText);
+
+    let edge = optionValue(args, "--edge");
+    if (!edge) {
+        edge = await selectPrompt({
+            message: "How should ChatGPT reach this computer?",
+            options: [
+                {
+                    value: "duckdns",
+                    label: "DuckDNS + Caddy (recommended)",
+                    hint: "Direct DDNS route; no Worker request quota. Requires public IPv4 and router UPnP/port forwarding.",
+                },
+                {
+                    value: "cloudflare",
+                    label: "Cloudflare Worker + Tunnel fallback",
+                    hint: "Works without inbound ports/UPnP. Workers Free currently allows 100,000 requests/day.",
+                },
+                {
+                    value: "local",
+                    label: "Local only",
+                    hint: "Install the Stable Gateway now and configure a public HTTPS route later.",
+                },
+            ],
+            initialValue: "duckdns",
+        });
+    }
+    if (!["duckdns", "cloudflare", "local"].includes(edge)) {
+        throw new Error("--edge must be duckdns, cloudflare, or local.");
+    }
+
+    let domain = optionValue(args, "--domain");
+    if (edge === "duckdns" && !domain) {
+        if (nonInteractive)
+            throw new Error("Non-interactive DuckDNS setup requires --domain <name.duckdns.org>.");
+        domain = await textPrompt({
+            message: "DuckDNS hostname (for example devspace-example.duckdns.org)",
+            placeholder: "devspace-example.duckdns.org",
+            defaultValue: "",
+            validate: validateDuckDnsDomain,
+        });
+    }
+    if (domain)
+        domain = normalizeDuckDnsDomain(domain);
+
+    const stateDir = resolve(expandHomePath(files.config.stateDir
+        ?? join(process.env.USERPROFILE || process.env.HOME || ".", ".local", "share", "devspace-ultra")));
+    const localBaseUrl = `http://127.0.0.1:${gatewayPort}`;
+    const selectedBaseUrl = edge === "duckdns" ? `https://${domain}` : files.config.publicBaseUrl ?? localBaseUrl;
+    const config = {
+        ...files.config,
+        host: "127.0.0.1",
+        port: gatewayPort,
+        allowedRoots,
+        publicBaseUrl: selectedBaseUrl,
+        stateDir,
+        toolMode: "ultra",
+        pluginsEnabled: true,
+        skillsEnabled: true,
+        artifactsEnabled: true,
+        subagents: files.config.subagents ?? true,
+        stableGatewayPort: gatewayPort,
+        stableGatewayPublicBaseUrl: selectedBaseUrl,
+        stableGatewayStateDir: stateDir,
+        stableGatewayCoreAPort: gatewayPort + 10,
+        stableGatewayCoreBPort: gatewayPort + 11,
+        stableGatewayCoreHeapProfile: "system",
+        autoCompactEnabled: files.config.autoCompactEnabled === true,
+        goalRoundRecoveryEnabled: files.config.goalRoundRecoveryEnabled === true,
+    };
+    const auth = {
+        ownerToken: files.auth.ownerToken ?? generateOwnerToken(),
+    };
+    const configPath = writeDevspaceConfig(config);
+    const authPath = writeDevspaceAuth(auth);
+    ensureDevspaceDefaultSkills();
+
+    prompts.intro("DevSpace Ultra one-command setup");
+    prompts.log.info(`Config: ${configPath}`);
+    prompts.log.info(`Stable Gateway: ${localBaseUrl}`);
+    if (edge === "cloudflare") {
+        prompts.log.warn("Cloudflare Workers Free currently allows 100,000 requests per day and 10 ms CPU time per invocation. DuckDNS/Caddy avoids that Worker request quota.");
+    }
+
+    const setupScript = fileURLToPath(new URL("../scripts/devspace-ultra-setup.ps1", import.meta.url));
+    const powershellArgs = [
+        "-NoProfile",
+        "-ExecutionPolicy", "Bypass",
+        "-File", setupScript,
+        "-Edge", edge,
+        "-GatewayPort", String(gatewayPort),
+        "-ConfigDir", files.dir,
+        "-PackageRoot", resolve(fileURLToPath(new URL("..", import.meta.url))),
+    ];
+    const interfaceAlias = optionValue(args, "--interface");
+    const workerName = optionValue(args, "--worker-name");
+    if (domain)
+        powershellArgs.push("-Domain", domain);
+    if (interfaceAlias)
+        powershellArgs.push("-InterfaceAlias", interfaceAlias);
+    if (workerName)
+        powershellArgs.push("-WorkerName", workerName);
+
+    let exitCode = await runInherited("powershell.exe", powershellArgs);
+    if (exitCode !== 0 && edge === "duckdns" && !nonInteractive) {
+        const useCloudflare = await confirmPrompt({
+            message: "DuckDNS direct ingress did not complete. Set up the Cloudflare fallback instead?",
+            initialValue: true,
+        });
+        if (useCloudflare) {
+            writeDevspaceConfig({ ...config, publicBaseUrl: localBaseUrl, stableGatewayPublicBaseUrl: localBaseUrl });
+            const fallbackArgs = powershellArgs.map((value, index, values) => values[index - 1] === "-Edge" ? "cloudflare" : value);
+            exitCode = await runInherited("powershell.exe", fallbackArgs);
+            edge = "cloudflare";
+        }
+    }
+    if (exitCode !== 0)
+        throw new Error(`Windows setup failed with exit code ${exitCode}. Existing configuration and generated owner token were preserved for repair/retry.`);
+
+    const refreshed = loadDevspaceFiles();
+    const publicBaseUrl = refreshed.config.edgePublicBaseUrl ?? refreshed.config.publicBaseUrl ?? localBaseUrl;
+    prompts.note([
+        `Public MCP URL: ${publicBaseUrl.replace(/\/+$/, "")}/mcp`,
+        `Local health: ${localBaseUrl}/healthz`,
+        `Owner password is stored at: ${authPath}`,
+        edge === "duckdns"
+            ? "Ingress: DuckDNS + Caddy + router port mapping (primary path, no Cloudflare Worker request quota)."
+            : edge === "cloudflare"
+                ? "Ingress: Cloudflare Worker/VPC fallback. Workers Free currently allows 100,000 requests/day; paid-plan terms may differ."
+                : "Ingress: local only; configure a public HTTPS route before adding DevSpace to ChatGPT.",
+    ].join("\n"), "DevSpace Ultra configured");
+    prompts.outro("Setup complete. The Stable Gateway will start automatically at Windows logon.");
+}
+
+function runInherited(command, args) {
+    return new Promise((resolvePromise, rejectPromise) => {
+        const child = spawn(command, args, {
+            stdio: "inherit",
+            windowsHide: false,
+            shell: false,
+        });
+        child.once("error", rejectPromise);
+        child.once("exit", (code) => resolvePromise(Number(code ?? 1)));
+    });
 }
 async function ensureConfigured() {
     const files = loadDevspaceFiles();
@@ -478,6 +679,9 @@ function printHelp() {
         "",
         "Usage:",
         "  devspace                 Run first-time setup if needed, then start the server",
+        "  devspace setup           One-command Windows setup; DuckDNS+Caddy is primary, Cloudflare is fallback",
+        "    --edge duckdns --domain <name.duckdns.org> [--root <path>]",
+        "    --edge cloudflare [--root <path>]",
         "  devspace serve           Start the server",
         "  devspace init            Create or update ~/.devspace/config.json and auth.json",
         "  devspace doctor          Show config, runtime, and native dependency status",
@@ -746,6 +950,33 @@ async function textPrompt(options) {
         throw new SetupCancelledError();
     const value = String(result).trim();
     return value || options.defaultValue;
+}
+async function selectPrompt(options) {
+    const result = await prompts.select(options);
+    if (prompts.isCancel(result))
+        throw new SetupCancelledError();
+    return String(result);
+}
+async function confirmPrompt(options) {
+    const result = await prompts.confirm(options);
+    if (prompts.isCancel(result))
+        throw new SetupCancelledError();
+    return result === true;
+}
+function normalizeDuckDnsDomain(value) {
+    const domain = String(value ?? "").trim().toLowerCase();
+    if (!/^[a-z0-9][a-z0-9-]{0,62}\.duckdns\.org$/.test(domain))
+        throw new Error("DuckDNS hostname must look like devspace-example.duckdns.org.");
+    return domain;
+}
+function validateDuckDnsDomain(value) {
+    try {
+        normalizeDuckDnsDomain(value);
+        return undefined;
+    }
+    catch (error) {
+        return error instanceof Error ? error.message : String(error);
+    }
 }
 function validatePort(value) {
     const port = Number(value);

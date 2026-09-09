@@ -1,0 +1,20 @@
+{
+  "id": "devspace-network-setup",
+  "name": "DevSpace Network Setup",
+  "version": "0.5.2",
+  "description": "Agent-guided one-command DevSpace Ultra setup and upgrade. Prefer DuckDNS/DDNS plus Caddy; guide unavoidable account/router actions; use Cloudflare named-tunnel fallback only when direct ingress is unavailable.",
+  "aliases": [
+    "devspace setup",
+    "one command setup",
+    "duckdns setup",
+    "ddns setup",
+    "caddy setup",
+    "cloudflare fallback",
+    "安裝 devspace",
+    "一鍵安裝",
+    "duckdns 安裝",
+    "ddns 連線"
+  ],
+  "instructions": ["AGENTS.md"],
+  "skills": ["skills"]
+}

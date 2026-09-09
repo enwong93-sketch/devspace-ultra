@@ -144,6 +144,36 @@ await manager.close();
     },
   });
   assert.equal(ambiguous, null, "multiple hidden-style active Chats must fail closed instead of guessing an owner");
+
+  let candidateOptions = null;
+  const boundWrongConversation = await overlayModule.resolveClassicHostOverlayOwner({
+    goal: { ...goal, conversationId: "conversation-authoritative" },
+    goalHostBridge: {
+      async findMatchingCandidate(_goalId, options) {
+        candidateOptions = options;
+        return {
+          runtimePort: 9732,
+          conversationId: "conversation-wrong",
+        };
+      },
+    },
+    contextAdapter: {
+      status() { return { runtimes: [{ runtimeKey: "main-02", port: 9732 }] }; },
+      async refreshSnapshot(runtimeKey) {
+        return {
+          ok: true,
+          runtimeKey,
+          mode: "chat",
+          conversationId: "conversation-wrong",
+          generating: true,
+          composerTextChars: 0,
+          visibleMessageCount: 0,
+        };
+      },
+    },
+  });
+  assert.deepEqual(candidateOptions, { conversationId: "conversation-authoritative" });
+  assert.equal(boundWrongConversation, null, "a bound Goal must never project its overlay into a different conversation even when a stale widget survives there");
 }
 
 console.log(JSON.stringify({

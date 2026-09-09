@@ -1,5 +1,21 @@
 # DevSpace Ultra
 
+## One-command Windows setup
+
+DuckDNS/DDNS direct ingress is the recommended production route. It keeps the Local Gateway and every Core/application port on loopback, while Caddy exposes only the OAuth-protected HTTPS endpoint.
+
+For the most reliable guided path, install the setup Agent Skill first, then ask the Agent to use `devspace-ultra-setup`. The Skill lets the Agent execute local installation/repair commands and guide the user through the unavoidable DuckDNS-account and router-port-forwarding steps one at a time.
+
+```powershell
+$p=Join-Path $env:TEMP 'devspace-ultra-install-skill.ps1'; iwr https://raw.githubusercontent.com/enwong93-sketch/devspace-ultra/v0.5.2/install-skill.ps1 -OutFile $p; & $p
+```
+
+```powershell
+$p=Join-Path $env:TEMP 'devspace-ultra-install.ps1'; iwr https://raw.githubusercontent.com/enwong93-sketch/devspace-ultra/v0.5.2/install.ps1 -OutFile $p; & $p -Network DuckDNS
+```
+
+Use the Cloudflare named-tunnel fallback only when DDNS/direct inbound access is unavailable. A Worker relay/free plan is quota-governed and must not be treated as unlimited. See [one-command setup](docs/ONE_COMMAND_SETUP.md) and [network ingress policy](docs/NETWORK_INGRESS.md).
+
 **DevSpace Ultra** is an MIT-licensed distribution of DevSpace with an elastic ChatGPT Classic multi-agent runtime layer.
 
 It keeps the original DevSpace local MCP workspace capabilities — local files, code search, editing, terminal execution, artifacts, skills, and secure self-hosting — and adds both a production-oriented Chat Swarm worker control plane and isolated user-facing **Multi-Main** ChatGPT Classic runtimes on one Windows computer.
@@ -47,7 +63,9 @@ DevSpace Ultra 0.3 adds a shared **universal agent capability/plugin layer** on 
 
 The runtime exposes a compact progressive-disclosure `capability_*` surface for discovering, installing, inspecting, enabling, updating, isolating, and calling reusable capabilities. It understands Agent Skills, instruction packs, MCP tools/prompts/resources, DevSpace manifests, Claude-style and Codex-style plugin metadata, nested MCP profiles, official MCP Registry metadata, and explicitly declared local command tools. Managed packages live under `~/.devspace/plugins/packages`; enabled + trusted plugin `SKILL.md` files join normal workspace skill discovery automatically.
 
-Shared MCP services reuse one backend connection. Stateful application MCPs can instead claim isolated named instances with private tokens and ephemeral per-instance environment, allowing the same MCP type to serve independent projects without sharing process state. Git/local installation is separated from execution trust: downloading a repository does not execute it, executable surfaces stay disabled until explicitly trusted, and plugin secrets remain environment-driven instead of being copied into the registry. See [Unified Agent Capability Runtime](docs/capability-runtime.md).
+`capability_route` adds a task-level routing contract inspired by Codex progressive disclosure: bounded names, aliases, descriptions, `agents/openai.yaml` interface metadata, default prompts, dependencies, negative applicability gates, trust state, exposure, and implicit-invocation policy select one exact Skill/plugin/tool `nextAction`. `tool_search` unifies these deferred routes with direct DevSpace tools. Stable Gateway fingerprints the complete model-facing tool surface—including descriptions, output schemas, UI/routing metadata, and model instructions—so stale sessions cannot silently retain old routing behavior. See [Capability Routing Contract](docs/capability-routing.md).
+
+Every ChatGPT conversation receives its own MCP client/session transport, even when the provider itself is stateless. Stateful application MCPs are additionally bound to conversation, instance, runtime, process, and port; an already-open Blender can be adopted without restarting it, while future projects receive distinct runtimes. Git/local installation is separated from execution trust: downloading a repository does not execute it, executable surfaces stay disabled until explicitly trusted, and plugin secrets remain environment-driven instead of being copied into the registry. See [Unified Agent Capability Runtime](docs/capability-runtime.md).
 
 ### Automatic Conversation Continuity — Workers and Main
 

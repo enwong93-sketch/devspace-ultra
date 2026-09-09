@@ -1,52 +1,148 @@
+[CmdletBinding()]
+param(
+    [ValidateSet("DuckDNS", "Cloudflare", "Local")]
+    [string] $Network = "DuckDNS",
+
+    [string] $DuckDnsDomain = $env:DEVSPACE_DUCKDNS_DOMAIN,
+    [string] $PublicHostname = $env:DEVSPACE_PUBLIC_HOSTNAME,
+    [string] $AllowedRoot = $HOME,
+    [string] $Repository = "https://github.com/enwong93-sketch/devspace-ultra.git",
+    [string] $Ref = "v0.5.2",
+    [switch] $NonInteractive,
+    [switch] $SkipCaddy
+)
+
+Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+$ProgressPreference = "SilentlyContinue"
 
-Write-Host "DevSpace Ultra installer" -ForegroundColor Cyan
+function Write-Step([string] $Message) {
+    Write-Host "`n==> $Message" -ForegroundColor Cyan
+}
 
-function Require-Command {
-    param([Parameter(Mandatory)][string]$Name)
-    $command = Get-Command $Name -ErrorAction SilentlyContinue
-    if (-not $command) {
-        throw "$Name is required. Install Node.js 22.19 or newer (but lower than 27), then run this installer again."
+function Get-NodeVersion {
+    $command = Get-Command node -ErrorAction SilentlyContinue
+    if (-not $command) { return $null }
+    try { return [version]((& node -p "process.versions.node").Trim()) }
+    catch { return $null }
+}
+
+function Ensure-Winget {
+    if (-not (Get-Command winget.exe -ErrorAction SilentlyContinue)) {
+        throw "winget is required to install missing Node.js or Git. Install Microsoft App Installer, then run this command again."
     }
-    $command
 }
 
-$node = Require-Command -Name "node"
-$npm = Require-Command -Name "npm"
-
-$versionText = (& $node.Source --version).Trim().TrimStart('v')
-$parts = $versionText.Split('.')
-$major = [int]$parts[0]
-$minor = if ($parts.Length -gt 1) { [int]$parts[1] } else { 0 }
-if ($major -lt 22 -or $major -ge 27 -or ($major -eq 22 -and $minor -lt 19)) {
-    throw "Unsupported Node.js $versionText. DevSpace Ultra requires Node.js >=22.19 and <27."
+function Ensure-Node {
+    $version = Get-NodeVersion
+    if ($version -and $version -ge [version]"22.19.0" -and $version -lt [version]"27.0.0") {
+        Write-Host "Node.js $version is compatible."
+        return
+    }
+    Ensure-Winget
+    Write-Step "Installing a supported Node.js LTS release"
+    & winget.exe install --exact --id OpenJS.NodeJS.LTS --silent --accept-package-agreements --accept-source-agreements
+    if ($LASTEXITCODE -ne 0) { throw "Node.js installation failed with exit code $LASTEXITCODE." }
+    $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
+    $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+    $env:Path = "$machinePath;$userPath"
+    $version = Get-NodeVersion
+    if (-not $version -or $version -lt [version]"22.19.0" -or $version -ge [version]"27.0.0") {
+        throw "A compatible Node.js executable is still unavailable after installation."
+    }
 }
 
-Write-Host "Node.js $versionText detected." -ForegroundColor Green
-Write-Host "Installing DevSpace Ultra from GitHub..." -ForegroundColor Cyan
-& $npm.Source install -g "github:enwong93-sketch/devspace-ultra#main"
-if ($LASTEXITCODE -ne 0) { throw "npm install failed with exit code $LASTEXITCODE." }
+function Ensure-Git {
+    if (Get-Command git.exe -ErrorAction SilentlyContinue) { return }
+    Ensure-Winget
+    Write-Step "Installing Git"
+    & winget.exe install --exact --id Git.Git --silent --accept-package-agreements --accept-source-agreements
+    if ($LASTEXITCODE -ne 0) { throw "Git installation failed with exit code $LASTEXITCODE." }
+    $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
+    $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+    $env:Path = "$machinePath;$userPath"
+}
 
-$ultra = Get-Command "devspace-ultra" -ErrorAction SilentlyContinue
-if (-not $ultra) { throw "Installation completed but devspace-ultra is not on PATH. Restart the terminal and try again." }
-
-Write-Host "DevSpace Ultra installed successfully." -ForegroundColor Green
-
-if ($IsWindows -or $env:OS -eq "Windows_NT") {
-    $chatgpt = Get-AppxPackage -Name "OpenAI.ChatGPT-Desktop" -ErrorAction SilentlyContinue |
-        Sort-Object Version -Descending |
+function Find-InstalledPackageRoot {
+    $globalRoot = (& npm root --global).Trim()
+    $candidates = @(
+        (Join-Path $globalRoot "devspace-ultra"),
+        (Join-Path $globalRoot "@waishnav\devspace")
+    )
+    foreach ($candidate in $candidates) {
+        $manifest = Join-Path $candidate "package.json"
+        if (-not (Test-Path -LiteralPath $manifest)) { continue }
+        try {
+            $package = Get-Content -LiteralPath $manifest -Raw | ConvertFrom-Json
+            if ($package.name -in @("devspace-ultra", "@waishnav/devspace")) { return $candidate }
+        }
+        catch {}
+    }
+    $match = Get-ChildItem -LiteralPath $globalRoot -Filter package.json -File -Recurse -Depth 3 -ErrorAction SilentlyContinue |
+        Where-Object {
+            try {
+                $package = Get-Content -LiteralPath $_.FullName -Raw | ConvertFrom-Json
+                return $package.name -in @("devspace-ultra", "@waishnav/devspace")
+            }
+            catch { return $false }
+        } |
         Select-Object -First 1
-    if ($chatgpt) {
-        Write-Host "ChatGPT Classic package $($chatgpt.Version) detected. Windows autonomous worker runtimes can be provisioned after DevSpace setup." -ForegroundColor Green
-    }
-    else {
-        Write-Host "ChatGPT Classic Microsoft Store package was not detected. Base DevSpace and Chat Swarm still work, but Windows autonomous desktop runtime cloning needs that package." -ForegroundColor Yellow
-    }
+    if ($match) { return Split-Path -Parent $match.FullName }
+    throw "DevSpace Ultra was installed, but its package directory could not be located."
 }
 
-Write-Host ""
-Write-Host "Next:" -ForegroundColor Cyan
-Write-Host "  devspace-ultra init"
-Write-Host "  devspace-ultra serve"
-Write-Host ""
-Write-Host "The compatibility alias 'devspace' is also installed."
+if ($env:OS -ne "Windows_NT") {
+    throw "This installer currently targets Windows because ChatGPT Classic runtime management and Scheduled Tasks are Windows-specific."
+}
+
+Write-Step "Checking prerequisites"
+Ensure-Node
+Ensure-Git
+
+Write-Step "Installing DevSpace Ultra from GitHub"
+$source = if ($Ref) { "$Repository#$Ref" } else { $Repository }
+& npm install --global $source --ignore-scripts --no-audit --no-fund
+if ($LASTEXITCODE -ne 0) { throw "npm installation failed with exit code $LASTEXITCODE." }
+
+$packageRoot = Find-InstalledPackageRoot
+$setupScript = Join-Path $packageRoot "scripts\devspace-public-setup.ps1"
+if (-not (Test-Path -LiteralPath $setupScript)) {
+    throw "Installed package is missing scripts\devspace-public-setup.ps1."
+}
+
+$skillInstaller = Join-Path $packageRoot "install-skill.ps1"
+if (-not (Test-Path -LiteralPath $skillInstaller)) {
+    throw "Installed package is missing install-skill.ps1."
+}
+
+Write-Step "Installing the DevSpace Ultra guided setup Agent Skill"
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $skillInstaller -SourceRoot $packageRoot
+if ($LASTEXITCODE -ne 0) {
+    throw "Agent Skill installation failed with exit code $LASTEXITCODE."
+}
+
+Write-Step "Configuring Local Gateway and public ingress"
+function Quote-NativeArgument([string] $Value) {
+    if ($Value.Contains('"')) { throw "A setup argument contains an unsupported quote character." }
+    return '"' + $Value + '"'
+}
+
+$arguments = @(
+    "-NoProfile",
+    "-ExecutionPolicy", "Bypass",
+    "-File", (Quote-NativeArgument $setupScript),
+    "-Network", $Network,
+    "-AllowedRoot", (Quote-NativeArgument $AllowedRoot)
+)
+if ($DuckDnsDomain) { $arguments += @("-DuckDnsDomain", (Quote-NativeArgument $DuckDnsDomain)) }
+if ($PublicHostname) { $arguments += @("-PublicHostname", (Quote-NativeArgument $PublicHostname)) }
+if ($NonInteractive) { $arguments += "-NonInteractive" }
+if ($SkipCaddy) { $arguments += "-SkipCaddy" }
+
+$process = Start-Process powershell.exe -Verb RunAs -Wait -PassThru -ArgumentList ($arguments -join " ")
+if ($process.ExitCode -ne 0) { throw "DevSpace Ultra setup exited with code $($process.ExitCode)." }
+
+Write-Host "`nDevSpace Ultra setup completed." -ForegroundColor Green
+Write-Host "Network route: $Network"
+Write-Host "Package root: $packageRoot"
+Write-Host "Re-run this same tagged command to upgrade or reconcile the installation."

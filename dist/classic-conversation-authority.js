@@ -20,23 +20,25 @@ export function fingerprintClassicSession(value) {
   return createHash("sha256").update(text).digest("hex");
 }
 
+function firstSessionHeader(headers = {}) {
+  for (const name of ["x-openai-session", "oai-session-id", "openai-session-id"]) {
+    const value = Array.isArray(headers[name]) ? headers[name][0] : headers[name];
+    if (String(value ?? "").trim()) return value;
+  }
+  return null;
+}
+
 export function sessionFingerprintFromMcpExtra(extra = {}) {
   const meta = extra?._meta && typeof extra._meta === "object" ? extra._meta : {};
   const rawMeta = typeof meta["openai/session"] === "string" ? meta["openai/session"] : "";
   if (rawMeta.trim()) return fingerprintClassicSession(rawMeta);
   const headers = normalizedHeaders(extra?.requestInfo?.headers);
-  const rawHeader = Array.isArray(headers["x-openai-session"])
-    ? headers["x-openai-session"][0]
-    : headers["x-openai-session"];
-  return fingerprintClassicSession(rawHeader);
+  return fingerprintClassicSession(firstSessionHeader(headers));
 }
 
 export function sessionFingerprintFromClassicRequest(request = {}) {
   const headers = normalizedHeaders(request?.headers);
-  const raw = Array.isArray(headers["x-openai-session"])
-    ? headers["x-openai-session"][0]
-    : headers["x-openai-session"];
-  return fingerprintClassicSession(raw);
+  return fingerprintClassicSession(firstSessionHeader(headers));
 }
 
 async function atomicWrite(path, value) {
@@ -58,6 +60,7 @@ export class ClassicConversationAuthorityRegistry {
   constructor({ statePath } = {}) {
     this.statePath = requireText(statePath, "statePath");
     this.entries = new Map();
+    this.waiters = new Map();
   }
 
   async load() {
@@ -72,20 +75,27 @@ export class ClassicConversationAuthorityRegistry {
     return this.snapshot();
   }
 
-  async observeNativeTurn({ sessionFingerprint, conversationId, runtimeKey, observedAt } = {}) {
+  async observeNativeTurn({ sessionFingerprint, conversationId, runtimeKey, observedAt, authoritativeCurrent = false } = {}) {
     const fingerprint = requireText(sessionFingerprint, "sessionFingerprint").toLowerCase();
     if (!/^[a-f0-9]{64}$/.test(fingerprint)) throw new Error("sessionFingerprint must be a SHA-256 hex digest.");
     const conversation = requireText(conversationId, "conversationId");
     const runtime = String(runtimeKey || "").trim();
     const at = String(observedAt || new Date().toISOString());
     const existing = this.entries.get(fingerprint) || cleanEntry(fingerprint);
-    if (!existing.conversationIds.includes(conversation)) existing.conversationIds.push(conversation);
-    if (runtime && !existing.runtimeKeys.includes(runtime)) existing.runtimeKeys.push(runtime);
+    if (authoritativeCurrent) {
+      existing.conversationIds = [conversation];
+      if (runtime) existing.runtimeKeys = [runtime];
+    } else {
+      if (!existing.conversationIds.includes(conversation)) existing.conversationIds.push(conversation);
+      if (runtime && !existing.runtimeKeys.includes(runtime)) existing.runtimeKeys.push(runtime);
+    }
     existing.ambiguous = existing.conversationIds.length > 1;
     existing.updatedAt = at;
     this.entries.set(fingerprint, existing);
     await this.#persist();
-    return this.resolveFingerprint(fingerprint);
+    const resolved = this.resolveFingerprint(fingerprint);
+    if (resolved) this.#resolveWaiters(fingerprint, resolved);
+    return resolved;
   }
 
   resolveFingerprint(value) {
@@ -139,6 +149,36 @@ export class ClassicConversationAuthorityRegistry {
     const fingerprint = sessionFingerprintFromMcpExtra(extra);
     if (!fingerprint) return null;
     return this.resolveFingerprint(fingerprint);
+  }
+
+  async waitForFingerprint(value, { signal } = {}) {
+    const fingerprint = String(value || "").trim().toLowerCase();
+    if (!/^[a-f0-9]{64}$/.test(fingerprint)) return null;
+    const immediate = this.resolveFingerprint(fingerprint);
+    if (immediate) return immediate;
+    const current = this.waiters.get(fingerprint);
+    let sharedPromise = current?.promise;
+    if (!sharedPromise) {
+      let resolveWaiter;
+      sharedPromise = new Promise((resolvePromise) => { resolveWaiter = resolvePromise; });
+      this.waiters.set(fingerprint, { resolve: resolveWaiter, promise: sharedPromise });
+    }
+    if (!signal) return await sharedPromise;
+    if (signal.aborted) throw new Error("Conversation identity wait was cancelled.");
+    return await new Promise((resolvePromise, rejectPromise) => {
+      const onAbort = () => rejectPromise(new Error("Conversation identity wait was cancelled."));
+      signal.addEventListener("abort", onAbort, { once: true });
+      sharedPromise.then(resolvePromise, rejectPromise).finally(() => {
+        signal.removeEventListener("abort", onAbort);
+      });
+    });
+  }
+
+  #resolveWaiters(fingerprint, resolved) {
+    const waiter = this.waiters.get(fingerprint);
+    if (!waiter) return;
+    this.waiters.delete(fingerprint);
+    waiter.resolve(structuredClone(resolved));
   }
 
   snapshot() {

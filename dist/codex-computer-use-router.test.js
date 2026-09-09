@@ -7,8 +7,9 @@ assert.equal(codexComputerUseRoute("Edit the source code and run unit tests").us
 
 const calls = [];
 const fakeBridge = {
-  async probe(serverId) {
+  async probe(serverId, ownerConversationId) {
     assert.equal(serverId, "node_repl");
+    assert.equal(ownerConversationId, "conversation-a");
     return {
       id: "node_repl",
       status: "online",
@@ -22,7 +23,8 @@ const fakeBridge = {
       }],
     };
   },
-  async callTool(input) {
+  async callTool(input, ownerConversationId) {
+    assert.equal(ownerConversationId, "conversation-a");
     calls.push(input);
     const code = String(input.arguments.code || "");
     const payload = code.includes("runtime:")
@@ -43,6 +45,7 @@ registerCodexComputerUseRouter({
 }, {
   codexMcpBridge: fakeBridge,
   capabilityRuntime: null,
+  resolveConversation: async () => ({ conversationId: "conversation-a" }),
 });
 
 assert.deepEqual(registrations.map((entry) => entry.name), ["codex_computer_use_status", "codex_computer_use"]);

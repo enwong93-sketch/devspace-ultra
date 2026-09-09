@@ -16,7 +16,7 @@ const packageJson = JSON.parse(packageText);
 const plugin = JSON.parse(pluginText);
 
 assert.match(server, /BUILTIN_CODEX_COMPUTER_USE_PLUGIN/);
-assert.match(server, /registerCodexComputerUseRouter\(server, \{ capabilityRuntime, codexMcpBridge \}\)/);
+assert.match(server, /registerCodexComputerUseRouter\(server, \{ capabilityRuntime, codexMcpBridge, resolveConversation: resolveConversationAuthority \}\)/);
 assert.doesNotMatch(server, /CodexSandboxRuntime|registerCodexSandboxTools|request_permissions|exec_sandboxed/);
 assert.match(router, /server\.registerTool\("codex_computer_use"/);
 assert.match(router, /callCodexComputerUse/);
@@ -44,7 +44,8 @@ assert.match(skill, /shared persistent Codex `node_repl` importing `@oai\/sky`/)
 assert.equal(packageJson.files.includes("capabilities"), true);
 assert.equal(Object.hasOwn(packageJson.scripts, "verify:codex-sandbox"), false);
 assert.match(packageJson.scripts["verify:ultra"], /verify:computer-use/);
-assert.match(runtime, /MAX_TOOL_TIMEOUT_MS = 5 \* 60_000/);
+assert.doesNotMatch(runtime, /MAX_TOOL_TIMEOUT_MS|Promise\.race\(|setTimeout\(/,
+  "capability execution must not impose an artificial wall-clock termination deadline");
 assert.match(canary, /"codex_computer_use_status"/);
 assert.match(canary, /"codex_computer_use"/);
 assert.match(canary, /for \(const removedTool of \["codex_sandbox_status", "request_permissions", "exec_sandboxed"\]\)/);
