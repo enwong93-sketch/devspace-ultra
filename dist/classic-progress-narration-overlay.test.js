@@ -97,7 +97,11 @@ assert.deepEqual(
 const script = buildProgressNarrationScript(map);
 assert.match(script, /DevSpace 進度旁白/);
 assert.match(script, /aria-live','polite'/);
-assert.match(script, /const UI_VERSION = "5"/);
+assert.match(script, /const UI_VERSION = "6"/);
+assert.match(script, /devspace-progress-time/);
+assert.match(script, /Intl\.DateTimeFormat/);
+assert.match(script, /font-variant-numeric:tabular-nums/);
+assert.match(script, /date\.toISOString\(\)\.slice\(0,16\)/);
 assert.match(script, /style\.dataset\.uiVersion === UI_VERSION/);
 assert.match(script, /root\.dataset\.uiVersion === UI_VERSION && controls === 4/);
 assert.match(script, /const structureRebuilt = ensureStructure\(\)/);
@@ -210,6 +214,7 @@ try {
     agentHistoryRetained: true,
     optionalStatePathsFailOpen: true,
     visibleInChatAndWorkModes: true,
+    perMessageLocalTimeCode: true,
     ariaLive: true,
     boundedMessages: true,
     leaseFailClosed: true,

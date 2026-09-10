@@ -29,3 +29,13 @@ Plugin authors should provide precise positive and negative routing boundaries. 
 For all capability and linked Codex MCPs, `capability_connection` is the connection authority. Every ChatGPT conversation receives an isolated MCP client/session transport even when the provider itself is stateless; a provider may reuse its own backend process internally, but DevSpace never shares one MCP connection object across conversations. Stateful application services are additionally bound by plugin/server/instance/runtime/conversation, have no lease timeout or arbitrary count ceiling, reconnect on the next real call after a transport failure, and are released only explicitly or at Local Gateway shutdown. Never share one stateful runtime between unrelated conversations.
 
 For live Blender work, the guidance packages (`arjun988-blender-skills`, `blender-retopology`) do not themselves prove that Blender was changed. Use `blender_runtime` to start or attach one conversation-owned Blender process/port per concurrently edited project, then pass its `runtimeId` to `blender_mcp`. Call `action=list` only when that runtime's live schema is unknown, then immediately call `action=call` with a returned tool. Use `execute_blender_code` for mutations and Blender screenshot/summary tools for readback; never stop after merely listing the Blender MCP directory.
+
+### Host lazy-tool fallback
+
+A ChatGPT host may expose only part of a large MCP catalogue to one model turn. If `exec_command` is callable but a deferred `blender_runtime`, `blender_mcp`, or `devspace_progress_report` recipient is omitted, do **not** wait for the palette, repeatedly reconnect, restart Blender, or create a replacement runtime. Immediately call the installed compatibility entry point through `exec_command`:
+
+`devspace-conversation-bridge <status|list|call|progress> --runtime-key <current-main-key> ...`
+
+On a legacy `@waishnav/devspace` installation where the npm bin link has not yet been refreshed, the equivalent local entry is `node "%APPDATA%\npm\node_modules\@waishnav\devspace\scripts\devspace-conversation-bridge.mjs" ...`.
+
+The bridge resolves the authoritative conversation, rejects a Blender runtime owned by another conversation, and routes the already assigned runtime through the same isolated `CapabilityRuntime` transport. For Blender, always pass the known `runtimeId`; run `status`, then `list` only if the live schema is unknown, then `call` a returned tool. For narration, the working Agent writes its own natural-language text and uses `progress --message-file <file>`. The bridge must never choose between multiple unclaimed runtimes or terminate/restart an existing Blender process.

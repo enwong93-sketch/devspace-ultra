@@ -90,6 +90,9 @@ try {
   assert.notEqual(runtimeA.instanceToken, runtimeB.instanceToken);
   assert.equal(claims.length, 2);
   assert.equal(adoptions.length, 2);
+  assert.deepEqual(claims.map((claim) => claim.instanceId), ["agent-a", "agent-b"]);
+  assert.deepEqual(claims.map((claim) => claim.env.BLENDER_MCP_HOST), ["127.0.0.1", "127.0.0.1"]);
+  assert.deepEqual(claims.map((claim) => claim.env.BLENDER_MCP_PORT), [String(first.port), String(second.port)]);
   assert.deepEqual(claims.map((claim) => claim.env.BLENDER_PORT), [String(first.port), String(second.port)]);
   assert.deepEqual((await manager.list("conversation-a")).map((runtime) => runtime.runtimeId), ["agent-a"]);
   assert.deepEqual((await manager.list("conversation-b")).map((runtime) => runtime.runtimeId), ["agent-b"]);

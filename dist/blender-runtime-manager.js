@@ -278,10 +278,14 @@ export class BlenderRuntimeManager {
     const claimed = await this.capabilityRuntime.claimInstance({
       pluginId: "blender-local",
       serverId: "blender",
+      instanceId: runtime.runtimeId,
       runtimeId: runtime.runtimeId,
       ownerLabel: runtime.ownerLabel,
       ownerConversationId: runtime.ownerConversationId,
       env: {
+        BLENDER_MCP_HOST: LOOPBACK,
+        BLENDER_MCP_PORT: String(runtime.port),
+        // Keep the legacy aliases for older/community Blender MCP servers.
         BLENDER_HOST: LOOPBACK,
         BLENDER_PORT: String(runtime.port),
       },

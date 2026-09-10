@@ -5,7 +5,7 @@ import { activeProgressRows } from "./goal-progress-narrator.js";
 const ROOT_ID = "devspace-progress-narration-root";
 const STYLE_ID = "devspace-progress-narration-style";
 const LEASE_KEY = "__devspaceProgressNarrationLeaseV1";
-const UI_VERSION = "5";
+const UI_VERSION = "6";
 const LEGACY_INLINE_RESOURCE_TITLES = [
   "ui://devspace/goal-dock.html",
   "ui://devspace/plan-card.html",
@@ -260,6 +260,7 @@ export function buildProgressNarrationScript(map) {
 #${ROOT_ID} .devspace-progress-scroll::-webkit-scrollbar-thumb{background:rgba(70,70,70,.62);border:2px solid transparent;background-clip:padding-box;border-radius:8px}
 #${ROOT_ID} .devspace-progress-scroll::-webkit-scrollbar-thumb:hover{background:rgba(40,40,40,.76);border:2px solid transparent;background-clip:padding-box}
 #${ROOT_ID} .devspace-progress-message{margin-top:7px;font-size:13px;line-height:1.48;font-weight:400;color:inherit;white-space:normal;overflow-wrap:anywhere}
+#${ROOT_ID} .devspace-progress-time{margin-bottom:3px;font-size:10px;line-height:1.2;font-weight:500;opacity:.62;letter-spacing:.01em;font-variant-numeric:tabular-nums;white-space:nowrap}
 #${ROOT_ID} .devspace-progress-message+ .devspace-progress-message{padding-top:7px;border-top:1px solid rgba(0,0,0,.07)}
 #${ROOT_ID}[data-size="compact"]{border-radius:12px}
 #${ROOT_ID}[data-size="compact"] .devspace-progress-header{border-bottom:0;min-height:38px;padding-top:5px;padding-bottom:4px}
@@ -389,6 +390,25 @@ html.dark #${ROOT_ID} .devspace-progress-scroll{scrollbar-color:rgba(220,220,220
       root.append(header, scroll);
       return true;
     };
+    const formatTimeCode = (at) => {
+      const parsed = Date.parse(at || '');
+      if (!Number.isFinite(parsed)) return '';
+      const date = new Date(parsed);
+      try {
+        const parts = new Intl.DateTimeFormat(undefined, {
+          year:'numeric', month:'2-digit', day:'2-digit',
+          hour:'2-digit', minute:'2-digit', hour12:false,
+        }).formatToParts(date);
+        const part = (type) => parts.find((item) => item.type === type)?.value || '';
+        const year = part('year');
+        const month = part('month');
+        const day = part('day');
+        const hour = part('hour');
+        const minute = part('minute');
+        if (year && month && day && hour && minute) return '[' + year + '-' + month + '-' + day + ' ' + hour + ':' + minute + ']';
+      } catch {}
+      return '[' + date.toISOString().slice(0,16).replace('T',' ') + ' UTC]';
+    };
     const renderMessages = ({ preserveScroll = false } = {}) => {
       ensureStructure();
       const scroll = root.querySelector('.devspace-progress-scroll');
@@ -400,7 +420,14 @@ html.dark #${ROOT_ID} .devspace-progress-scroll{scrollbar-color:rgba(220,220,220
       for (const item of selected) {
         const paragraph = document.createElement('div');
         paragraph.className = 'devspace-progress-message';
-        paragraph.textContent = String(item.text || '');
+        const timestamp = document.createElement('div');
+        timestamp.className = 'devspace-progress-time';
+        timestamp.textContent = formatTimeCode(item.at);
+        const body = document.createElement('div');
+        body.className = 'devspace-progress-message-text';
+        body.textContent = String(item.text || '');
+        if (timestamp.textContent) paragraph.append(timestamp, body);
+        else paragraph.append(body);
         scroll.appendChild(paragraph);
       }
       const count = root.querySelector('.devspace-progress-count');
