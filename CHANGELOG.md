@@ -3,6 +3,7 @@
 ## 0.5.3 — 2026-09-10
 
 - Fixed isolated Blender runtimes for the official Blender Lab MCP server by passing its required `BLENDER_MCP_HOST` / `BLENDER_MCP_PORT` variables while retaining the community aliases. Every runtime claim now also carries an explicit instance ID, so two conversations cannot collapse onto the default port.
+- Successful live Blender MCP readback now refreshes the persisted runtime `.blend` path. Saving or switching the file inside an already-open Blender no longer leaves routing/status metadata advertising a stale filename.
 - Added the public `devspace-conversation-bridge` compatibility entry point for ChatGPT turns where the host lazily omits deferred tools. It resolves the current Main conversation from native authority, enforces runtime ownership, preserves an already-open Blender process, routes calls through the same isolated CapabilityRuntime, and writes Agent-authored narration through the Stable Gateway serializer.
 - Prioritized `devspace_progress_report`, `blender_runtime`, and `blender_mcp` at the front of the MCP tool catalogue while retaining the compatibility bridge as a deterministic fallback.
 - Added a local timestamp to every progress-card message using the message's persisted `at` value. The Agent continues to write untemplated natural language; the floating UI adds `[YYYY-MM-DD HH:mm]` automatically.

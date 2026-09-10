@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { loadConfig } from "../dist/config.js";
 import { CapabilityRuntime } from "../dist/capability-runtime.js";
+import { BlenderRuntimeManager } from "../dist/blender-runtime-manager.js";
 import { loadDevspaceFiles } from "../dist/user-config.js";
 
 function fail(message) {
@@ -151,24 +152,18 @@ function capabilityOptions(config) {
 async function connectBlenderRuntime(runtime, ownerConversationId) {
   const config = loadConfig();
   const capabilityRuntime = new CapabilityRuntime(capabilityOptions(config));
-  await capabilityRuntime.ready;
-  const claimed = await capabilityRuntime.claimInstance({
-    pluginId: "blender-local",
-    serverId: "blender",
-    instanceId: runtime.runtimeId,
-    runtimeId: runtime.runtimeId,
-    ownerLabel: runtime.ownerLabel || "DevSpace conversation bridge",
-    ownerConversationId,
-    env: {
-      // Blender Lab's official MCP server uses the BLENDER_MCP_* names.
-      BLENDER_MCP_HOST: "127.0.0.1",
-      BLENDER_MCP_PORT: String(runtime.port),
-      // Retain the community-server aliases for compatibility.
-      BLENDER_HOST: "127.0.0.1",
-      BLENDER_PORT: String(runtime.port),
-    },
+  const blenderRuntimeManager = new BlenderRuntimeManager({
+    stateDir: config.stateDir,
+    capabilityRuntime,
   });
-  return { capabilityRuntime, instanceToken: claimed.instanceToken };
+  await blenderRuntimeManager.ready;
+  const status = await blenderRuntimeManager.status(runtime.runtimeId, ownerConversationId);
+  return {
+    capabilityRuntime,
+    blenderRuntimeManager,
+    instanceToken: status.instanceToken,
+    status,
+  };
 }
 
 function publicRuntime(runtime, online) {
@@ -265,21 +260,21 @@ if (String(runtime.ownerConversationId || "") !== conversationId) {
   fail(`Blender runtime ${runtimeId} belongs to a different ChatGPT conversation.`);
 }
 const online = await portOnline(runtime.port);
-if (command === "status") {
-  const alive = processAlive(runtime.processId);
-  console.log(JSON.stringify({
-    ok: online && alive,
-    action: "status",
-    runtimeKey,
-    conversationId,
-    runtime: publicRuntime(runtime, online),
-  }));
-  process.exit(online && alive ? 0 : 2);
-}
 if (!online) fail(`Blender runtime ${runtimeId} is not listening on 127.0.0.1:${runtime.port}.`);
 
 const connection = await connectBlenderRuntime(runtime, conversationId);
 try {
+  if (command === "status") {
+    const alive = processAlive(runtime.processId);
+    console.log(JSON.stringify({
+      ok: alive,
+      action: "status",
+      runtimeKey,
+      conversationId,
+      runtime: connection.status?.runtime || publicRuntime(runtime, true),
+    }));
+    process.exit(alive ? 0 : 2);
+  }
   const listed = await connection.capabilityRuntime.listMcpTools(
     "blender-local",
     "blender",
@@ -322,6 +317,11 @@ try {
       const detail = content.map((item) => item?.text).filter(Boolean).join("\n").slice(0, 4000);
       fail(`Blender MCP tool ${toolName} returned an error.${detail ? ` ${detail}` : ""}`);
     }
+    await connection.blenderRuntimeManager.observeMcpResult(
+      runtimeId,
+      conversationId,
+      result,
+    ).catch(() => null);
     console.log(JSON.stringify({
       ok: true,
       action: "call",
@@ -333,5 +333,6 @@ try {
     }));
   }
 } finally {
+  await connection.blenderRuntimeManager.close().catch(() => {});
   await connection.capabilityRuntime.close().catch(() => {});
 }

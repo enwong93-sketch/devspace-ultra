@@ -59,6 +59,21 @@ const capabilityRuntime = {
     assert.match(ownerConversationId, /^conversation-/);
     return { client: {} };
   },
+  async call(input, { ownerConversationId }) {
+    const instance = instances.get(input.instanceToken);
+    assert.ok(instance);
+    assert.equal(instance.ownerConversationId, ownerConversationId);
+    return {
+      ok: true,
+      result: {
+        structuredContent: {
+          status: "ok",
+          result: { filepath: join(stateDir, `${instance.runtimeId}-live.blend`) },
+        },
+        isError: false,
+      },
+    };
+  },
   async releaseInstance(token, ownerConversationId) {
     releases.push({ token, ownerConversationId });
     instances.delete(token);
@@ -104,7 +119,9 @@ try {
   const accessA = await manager.access("agent-a", "conversation-a");
   assert.equal(accessA.instanceToken, runtimeA.instanceToken);
   assert.equal(await manager.defaultInstanceToken("conversation-a"), runtimeA.instanceToken);
-  assert.equal((await manager.defaultRuntime("conversation-b")).runtime.runtimeId, "agent-b");
+  const defaultB = await manager.defaultRuntime("conversation-b");
+  assert.equal(defaultB.runtime.runtimeId, "agent-b");
+  assert.equal(defaultB.runtime.blendFile, join(stateDir, "agent-b-live.blend"));
 
   await assert.rejects(
     () => manager.attach({

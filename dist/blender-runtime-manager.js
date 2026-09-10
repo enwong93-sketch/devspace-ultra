@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { createConnection, createServer as createNetServer } from "node:net";
 import { closeSync, existsSync, openSync } from "node:fs";
 import { mkdir, readFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn, execFile } from "node:child_process";
 import { atomicWriteJson } from "./atomic-file.js";
@@ -174,6 +174,44 @@ function publicRuntime(runtime) {
     connectedAt: runtime.connectedAt || null,
     lastError: runtime.lastError || null,
   };
+}
+
+function normalizeObservedBlendFile(value) {
+  const text = typeof value === "string" ? value.trim() : "";
+  if (!text || !isAbsolute(text) || !text.toLowerCase().endsWith(".blend")) return null;
+  return resolve(text);
+}
+
+function observedBlendFile(value, seen = new Set(), depth = 0) {
+  if (depth > 12 || value == null) return null;
+  if (typeof value === "string") {
+    const direct = normalizeObservedBlendFile(value);
+    if (direct) return direct;
+    const text = value.trim();
+    if ((text.startsWith("{") && text.endsWith("}")) || (text.startsWith("[") && text.endsWith("]"))) {
+      try { return observedBlendFile(JSON.parse(text), seen, depth + 1); } catch {}
+    }
+    return null;
+  }
+  if (typeof value !== "object" || seen.has(value)) return null;
+  seen.add(value);
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = observedBlendFile(item, seen, depth + 1);
+      if (found) return found;
+    }
+    return null;
+  }
+  for (const key of ["filepath", "blendFile", "blend_file"]) {
+    const found = observedBlendFile(value[key], seen, depth + 1);
+    if (found) return found;
+  }
+  for (const [key, item] of Object.entries(value)) {
+    if (["filepath", "blendFile", "blend_file", "backups"].includes(key)) continue;
+    const found = observedBlendFile(item, seen, depth + 1);
+    if (found) return found;
+  }
+  return null;
 }
 
 export class BlenderRuntimeManager {
@@ -584,6 +622,37 @@ export class BlenderRuntimeManager {
     }
   }
 
+  async observeMcpResult(runtimeId, ownerConversationId, value) {
+    await this.ready;
+    const runtime = this.runtimes.get(normalizeRuntimeId(runtimeId));
+    if (!runtime) throw new Error(`Unknown Blender runtime: ${runtimeId}`);
+    this.assertOwner(runtime, ownerConversationId);
+    const blendFile = observedBlendFile(value);
+    if (!blendFile) {
+      return { ok: true, runtimeId: runtime.runtimeId, updated: false, blendFile: runtime.blendFile || null };
+    }
+    const previousBlendFile = runtime.blendFile || null;
+    if (previousBlendFile === blendFile) {
+      return { ok: true, runtimeId: runtime.runtimeId, updated: false, blendFile };
+    }
+    runtime.blendFile = blendFile;
+    await this.persist();
+    return { ok: true, runtimeId: runtime.runtimeId, updated: true, previousBlendFile, blendFile };
+  }
+
+  async refreshLiveBlendFile(runtime) {
+    if (!runtime?.instanceToken || typeof this.capabilityRuntime.call !== "function") return null;
+    const response = await this.capabilityRuntime.call({
+      pluginId: "blender-local",
+      kind: "mcp",
+      serverId: "blender",
+      toolName: "get_blendfile_summary_path_info",
+      arguments: {},
+      instanceToken: runtime.instanceToken,
+    }, { ownerConversationId: runtime.ownerConversationId });
+    return await this.observeMcpResult(runtime.runtimeId, runtime.ownerConversationId, response);
+  }
+
   async access(runtimeId, ownerConversationId) {
     await this.ready;
     const runtime = this.runtimes.get(normalizeRuntimeId(runtimeId));
@@ -626,7 +695,10 @@ export class BlenderRuntimeManager {
     this.assertOwner(runtime, ownerConversationId);
     runtime.portOnline = await portAccepting(runtime.port);
     runtime.state = runtime.portOnline ? "online" : processAlive(runtime.processId) ? "starting" : "offline";
-    if (runtime.portOnline) await this.ensureInstance(runtime);
+    if (runtime.portOnline) {
+      await this.ensureInstance(runtime);
+      await this.refreshLiveBlendFile(runtime).catch(() => null);
+    }
     await this.persist();
     return { ok: true, runtime: publicRuntime(runtime), instanceToken: runtime.instanceToken };
   }

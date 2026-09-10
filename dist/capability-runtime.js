@@ -3249,14 +3249,21 @@ export function registerCapabilityTools(server, runtime, {
         });
       }
       if (!input.toolName) throw new Error("toolName is required when action=call.");
-      return textResult(await runtime.call({
+      const called = await runtime.call({
         pluginId: "blender-local",
         kind: "mcp",
         serverId: "blender",
         toolName: input.toolName,
         arguments: input.arguments,
         instanceToken,
-      }, { ownerConversationId }));
+      }, { ownerConversationId });
+      const resolvedRuntimeId = input.runtimeId
+        || runtime.findInstanceByToken(instanceToken)?.runtimeId
+        || null;
+      if (resolvedRuntimeId && typeof blenderRuntimeManager.observeMcpResult === "function") {
+        await blenderRuntimeManager.observeMcpResult(resolvedRuntimeId, ownerConversationId, called).catch(() => null);
+      }
+      return textResult(called);
     }
     catch (error) { return errorResult(error); }
   });
