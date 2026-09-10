@@ -170,7 +170,7 @@ async function createHarness({ failActiveB = false, failCandidate = false, rejec
   };
 }
 
-function openMcpEventStream(baseUrl, publicSessionId) {
+function openMcpEventStream(baseUrl, publicSessionId, { sendAccept = true } = {}) {
   const target = new URL("/mcp", baseUrl);
   let firstChunkResolve;
   const firstChunk = new Promise((resolve) => { firstChunkResolve = resolve; });
@@ -181,7 +181,7 @@ function openMcpEventStream(baseUrl, publicSessionId) {
       path: target.pathname,
       method: "GET",
       headers: {
-        accept: "text/event-stream",
+        ...(sendAccept ? { accept: "text/event-stream" } : {}),
         authorization: "Bearer replay-secret",
         "mcp-session-id": publicSessionId,
       },
@@ -251,6 +251,27 @@ async function testLongLivedEventStreamDoesNotBlockHandoverDrain() {
     assert.equal(h.controller.status().sessions.totalActiveRequests, 0, "replayable MCP GET/SSE must not count as an in-flight MCP request either");
     const result = await h.controller.handover();
     assert.equal(result.ok, true, "handover must complete while an old-Core MCP event stream is open; stopping the old Core is allowed to terminate that replayable stream");
+    assert.equal(result.activeSlot, "b");
+    await stream.completed;
+  } finally {
+    if (h.initial.state.releaseSse) h.initial.state.releaseSse();
+    await stream?.completed?.catch?.(() => {});
+    await h.close();
+  }
+}
+
+async function testEventStreamWithoutAcceptHeaderDoesNotBlockHandoverDrain() {
+  const h = await createHarness();
+  let stream = null;
+  try {
+    const publicSessionId = await initializeSession(h);
+    stream = openMcpEventStream(h.gatewayBaseUrl, publicSessionId, { sendAccept: false });
+    await stream.firstChunk;
+    await waitUntil(() => h.initial.state.sseActive === true);
+    assert.equal(h.controller.status().admission.activeRequests, 0, "GET /mcp is replayable even when the host omits Accept: text/event-stream");
+    assert.equal(h.controller.status().sessions.totalNonStreamActiveRequests, 0);
+    const result = await h.controller.handover();
+    assert.equal(result.ok, true);
     assert.equal(result.activeSlot, "b");
     await stream.completed;
   } finally {
@@ -336,6 +357,7 @@ async function testCandidateFailureNeverStopsA() {
 }
 
 await testLongLivedEventStreamDoesNotBlockHandoverDrain();
+await testEventStreamWithoutAcceptHeaderDoesNotBlockHandoverDrain();
 await testSuccessfulHandover();
 await testReplayFailureDropsStaleSessionButKeepsHealthyCoreB();
 await testCandidateFailureNeverStopsA();

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.4 — 2026-09-10
+
+- Fixed Stable Gateway quiet-boundary starvation when ChatGPT keeps long-lived replayable MCP event streams open. Pure SSE streams are now excluded from the non-stream in-flight counter, while real tool/HTTP requests still block handover until they finish.
+- Added deterministic gates proving that four open event streams can hand over safely, while one remaining non-stream request continues to fail closed.
+- Preserved the v0.5.3 Main tool bridge, isolated Blender routing, live `.blend` metadata correction, timestamped narration, system-managed heap, and disabled-by-default Goal Recovery/Auto Compact safety posture.
+
 ## 0.5.3 — 2026-09-10
 
 - Fixed isolated Blender runtimes for the official Blender Lab MCP server by passing its required `BLENDER_MCP_HOST` / `BLENDER_MCP_PORT` variables while retaining the community aliases. Every runtime claim now also carries an explicit instance ID, so two conversations cannot collapse onto the default port.

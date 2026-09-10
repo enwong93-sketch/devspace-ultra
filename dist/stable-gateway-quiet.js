@@ -11,12 +11,15 @@ function activeCounts(status) {
   const eventStreams = Array.isArray(status?.sessions?.sessions)
     ? status.sessions.sessions.reduce((total, session) => total + Math.max(0, Number(session?.eventStreams || 0)), 0)
     : 0;
+  const reportedNonStream = Number(status?.sessions?.totalNonStreamActiveRequests);
   return {
     admissionActive: Math.max(0, Number(status?.admission?.activeRequests || 0)),
     // Long-lived replayable MCP event streams must survive a Core handover and
     // therefore cannot permanently block the quiet boundary. Only non-stream
     // session requests represent in-flight work that must finish first.
-    sessionActive: Math.max(0, sessionActive - eventStreams),
+    sessionActive: Number.isFinite(reportedNonStream)
+      ? Math.max(0, reportedNonStream)
+      : Math.max(0, sessionActive - eventStreams),
     eventStreams,
   };
 }

@@ -30,8 +30,10 @@ function isReplayableMcpEventStream(req) {
   if (String(req?.method || "").toUpperCase() !== "GET") return false;
   let pathname = "";
   try { pathname = new URL(String(req?.url || "/"), "http://127.0.0.1").pathname; } catch {}
-  if (pathname !== "/mcp") return false;
-  return String(req?.headers?.accept || "").toLowerCase().includes("text/event-stream");
+  // Streamable HTTP reserves GET /mcp for the replayable server-event stream.
+  // Some ChatGPT hosts omit an explicit Accept header, so requiring it causes
+  // the open stream to be counted forever as an ordinary draining request.
+  return pathname === "/mcp";
 }
 
 function sendUnavailable(res, message) {

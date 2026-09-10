@@ -66,9 +66,20 @@ async function testAdmissionAndDrainHaveNoDeadline() {
 async function testEventStreamLifecycle() {
   const registry = new StableGatewaySessionRegistry();
   const publicSessionId = createSession(registry);
+  assert.ok(await registry.acquire(publicSessionId));
   assert.equal(registry.markEventStreamOpen(publicSessionId), true);
   assert.equal(registry.lookup(publicSessionId).eventStreams, 1);
+  assert.equal(registry.snapshotPublic().totalActiveRequests, 1);
+  assert.equal(registry.snapshotPublic().totalNonStreamActiveRequests, 0);
+  await registry.waitForDrain();
   assert.ok(await registry.acquire(publicSessionId));
+  assert.equal(registry.snapshotPublic().totalNonStreamActiveRequests, 1);
+  let drained = false;
+  const drain = registry.waitForDrain().then(() => { drained = true; });
+  await sleep(10);
+  assert.equal(drained, false, "a real non-stream request must continue to block drain");
+  registry.release(publicSessionId);
+  await drain;
   registry.markEventStreamClosed(publicSessionId, { disconnected: true });
   const disconnected = registry.lookup(publicSessionId);
   assert.ok(disconnected, "an SSE reconnect boundary must preserve the public descriptor");

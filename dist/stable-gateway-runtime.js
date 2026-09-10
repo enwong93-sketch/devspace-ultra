@@ -237,7 +237,7 @@ export class StableGatewaySessionRegistry {
   }
 
   async waitForDrain() {
-    if (this.#totalActiveRequests() === 0) return;
+    if (this.#totalNonStreamActiveRequests() === 0) return;
     await new Promise((resolve) => {
       this.drainWaiters.add({ resolve });
     });
@@ -300,6 +300,7 @@ export class StableGatewaySessionRegistry {
     return {
       barrierActive: Boolean(this.barrier),
       totalActiveRequests: this.#totalActiveRequests(),
+      totalNonStreamActiveRequests: this.#totalNonStreamActiveRequests(),
       sessions: Array.from(this.sessions.values(), (entry) => ({
         publicSessionId: entry.publicSessionId,
         coreId: entry.coreId,
@@ -337,8 +338,16 @@ export class StableGatewaySessionRegistry {
     return total;
   }
 
+  #totalNonStreamActiveRequests() {
+    let total = 0;
+    for (const entry of this.sessions.values()) {
+      total += Math.max(0, Number(entry.activeRequests || 0) - Number(entry.eventStreams || 0));
+    }
+    return total;
+  }
+
   #notifyDrainIfReady() {
-    if (this.#totalActiveRequests() !== 0 || this.drainWaiters.size === 0) return;
+    if (this.#totalNonStreamActiveRequests() !== 0 || this.drainWaiters.size === 0) return;
     const waiters = Array.from(this.drainWaiters);
     this.drainWaiters.clear();
     for (const waiter of waiters) waiter.resolve();
