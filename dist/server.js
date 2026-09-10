@@ -25,6 +25,7 @@ import { editFileTool, findFilesTool, grepFilesTool, listDirectoryTool, readFile
 import { SingleUserOAuthProvider } from "./oauth-provider.js";
 import { McpSessionRegistry, } from "./mcp-sessions.js";
 import { createMcpSessionServerFromTemplate, mcpServerTemplateDiagnostics } from "./mcp-server-template.js";
+import { prioritizeMcpTools } from "./mcp-tool-priority.js";
 import { McpConversationRequestContext } from "./mcp-conversation-request-context.js";
 import { BlenderRuntimeManager } from "./blender-runtime-manager.js";
 import { ProcessSessionManager } from "./process-sessions.js";
@@ -1729,6 +1730,7 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
         capabilityRuntime,
         workspaces,
     });
+    prioritizeMcpTools(server);
     return server;
 }
 export function createServer(config = loadConfig(), options = {}) {
