@@ -1,6 +1,6 @@
 {
   "name": "devspace-ultra",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "description": "DevSpace Ultra: elastic ChatGPT Classic orchestration, Goal/Plan UX, Stream Recovery, universal capabilities, and model-aware long-context continuity.",
   "type": "module",
   "main": "dist/server.js",

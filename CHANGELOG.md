@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.3 — 2026-09-10
+
+- Fixed isolated Blender runtimes for the official Blender Lab MCP server by passing its required `BLENDER_MCP_HOST` / `BLENDER_MCP_PORT` variables while retaining the community aliases. Every runtime claim now also carries an explicit instance ID, so two conversations cannot collapse onto the default port.
+- Added the public `devspace-conversation-bridge` compatibility entry point for ChatGPT turns where the host lazily omits deferred tools. It resolves the current Main conversation from native authority, enforces runtime ownership, preserves an already-open Blender process, routes calls through the same isolated CapabilityRuntime, and writes Agent-authored narration through the Stable Gateway serializer.
+- Prioritized `devspace_progress_report`, `blender_runtime`, and `blender_mcp` at the front of the MCP tool catalogue while retaining the compatibility bridge as a deterministic fallback.
+- Added a local timestamp to every progress-card message using the message's persisted `at` value. The Agent continues to write untemplated natural language; the floating UI adds `[YYYY-MM-DD HH:mm]` automatically.
+- Added regression gates for the bridge, official Blender MCP port environment, per-conversation ownership, public package/bin inclusion, serialized progress writes, per-message timestamps, and no runtime termination.
+- Kept Goal Recovery and Auto Compact disabled by default; this patch changes neither safety gate nor navigation behavior.
+
 ## 0.5.2 — 2026-09-09
 
 - Stabilized the Local Gateway/Core lifecycle with system-managed heap sizing, zero-listener cold start, degraded-listener recovery, bounded client-session descriptors, lazy transport resurrection, no arbitrary work/startup deadlines, retryable Windows atomic writes, and bounded runtime logs.
