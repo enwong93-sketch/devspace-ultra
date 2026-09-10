@@ -748,11 +748,6 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
     const resolveConversationAuthority = async (extra) => {
         await conversationAuthorityReady;
         const requestContext = requestConversationContext?.current?.() || null;
-        if (requestContext?.authorityPromise) {
-            const exactAuthority = await requestContext.authorityPromise;
-            if (exactAuthority?.conversationId)
-                return exactAuthority;
-        }
         if (requestContext?.authority?.conversationId)
             return requestContext.authority;
         const requestFingerprint = requestContext?.sessionFingerprint || null;
@@ -760,12 +755,21 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
             const requestAuthority = conversationAuthority.resolveFingerprint(requestFingerprint);
             if (requestAuthority?.conversationId)
                 return requestAuthority;
-            return await conversationAuthority.waitForFingerprint(requestFingerprint, { signal: extra?.signal });
         }
         const immediate = conversationAuthority.resolveMcpExtra(extra);
         if (immediate?.conversationId)
             return immediate;
-        const fingerprint = sessionFingerprintFromMcpExtra(extra);
+        if (requestContext?.authorityPromise) {
+            const exactAuthority = await requestContext.authorityPromise;
+            if (exactAuthority?.conversationId)
+                return exactAuthority;
+            if (requestFingerprint) {
+                const reboundAuthority = conversationAuthority.resolveFingerprint(requestFingerprint);
+                if (reboundAuthority?.conversationId)
+                    return reboundAuthority;
+            }
+        }
+        const fingerprint = requestFingerprint || sessionFingerprintFromMcpExtra(extra);
         if (!fingerprint)
             return null;
         return await conversationAuthority.waitForFingerprint(fingerprint, { signal: extra?.signal });
@@ -1926,7 +1930,7 @@ export function createServer(config = loadConfig(), options = {}) {
         });
     };
     const resolveAndBindMcpConversation = async (req) => {
-        const sessionFingerprint = sessionFingerprintFromClassicRequest({ headers: req?.headers || {} });
+        const sessionFingerprint = coreClientSessionFingerprint(req);
         if (!sessionFingerprint) return { conversationId: null, sessionFingerprint: null, runtimeKey: null };
         const callFingerprint = fingerprintMcpToolCall(req?.body);
         const toolName = String(req?.body?.params?.name || "").trim() || null;
@@ -2873,7 +2877,7 @@ export function createServer(config = loadConfig(), options = {}) {
             const requestConversation = mcpMethod === "tools/call"
                 ? await resolveAndBindMcpConversation(req).catch(() => ({
                     conversationId: null,
-                    sessionFingerprint: sessionFingerprintFromClassicRequest({ headers: req?.headers || {} }),
+                    sessionFingerprint: coreClientSessionFingerprint(req),
                     runtimeKey: null,
                 }))
                 : null;
@@ -2881,7 +2885,7 @@ export function createServer(config = loadConfig(), options = {}) {
                 authority: requestConversation?.conversationId ? requestConversation : null,
                 authorityPromise: requestConversation?.authorityPromise || null,
                 sessionFingerprint: requestConversation?.sessionFingerprint
-                    || sessionFingerprintFromClassicRequest({ headers: req?.headers || {} }),
+                    || coreClientSessionFingerprint(req),
                 mcpSessionId: sessionId || trackedSessionId || null,
             }, () => transport.handleRequest(req, res, req.body));
             if (mcpEventStreamRequest && trackedSessionId) {

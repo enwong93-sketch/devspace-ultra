@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import {
+  ClassicActiveTurnRegistry,
   ClassicMcpCallCorrelator,
   fingerprintMcpToolCall,
   isNativeCallMcpRequest,
@@ -114,6 +115,71 @@ concurrent.prune();
 assert.equal(concurrent.diagnostics().nativePending, 0);
 assert.equal(concurrent.diagnostics().gatewayPending, 0);
 
+const activeTurns = new ClassicActiveTurnRegistry({
+  now: () => now,
+  activeTtlMs: 60_000,
+  maxActive: 8,
+  maxWaiters: 8,
+});
+activeTurns.noteTurn({
+  kind: "started",
+  requestId: "turn-main-01",
+  runtimeKey: "main-01",
+  conversationId: "conversation-main-01",
+  localFunctionNames: ["blender_runtime", "blender_mcp"],
+  turnTraceFingerprint: "1".repeat(64),
+  observedAtMs: now,
+});
+activeTurns.noteTurn({
+  kind: "started",
+  requestId: "turn-main-02",
+  runtimeKey: "main-02",
+  conversationId: "conversation-main-02",
+  localFunctionNames: ["blender_runtime", "devspace_progress_report"],
+  turnTraceFingerprint: "2".repeat(64),
+  observedAtMs: now + 1,
+});
+const tracedTurn = activeTurns.resolveGatewayCall({
+  toolName: "blender_runtime",
+  turnTraceFingerprint: "1".repeat(64),
+});
+assert.equal(tracedTurn?.conversationId, "conversation-main-01");
+assert.equal(tracedTurn?.runtimeKey, "main-01");
+assert.equal(tracedTurn?.source, "classic-active-turn-trace-correlation");
+assert.equal(
+  activeTurns.resolveGatewayCall({ toolName: "blender_runtime" }),
+  null,
+  "two active conversations exposing the same direct tool must fail closed when no trace distinguishes them",
+);
+assert.equal(activeTurns.diagnostics().ambiguousMatches > 0, true);
+const uniqueTurn = activeTurns.resolveGatewayCall({ toolName: "blender_mcp" });
+assert.equal(uniqueTurn?.conversationId, "conversation-main-01");
+assert.equal(uniqueTurn?.source, "classic-active-turn-unique-tool-correlation");
+
+const deferredTurns = new ClassicActiveTurnRegistry({ now: () => now, activeTtlMs: 60_000 });
+const deferredIdentity = deferredTurns.waitForIdentity({ toolName: "devspace_progress_report" });
+deferredTurns.noteTurn({
+  kind: "started",
+  requestId: "turn-progress",
+  runtimeKey: "main-01",
+  conversationId: "conversation-main-01",
+  localFunctionNames: ["devspace_progress_report"],
+  observedAtMs: now,
+});
+assert.equal((await deferredIdentity)?.conversationId, "conversation-main-01");
+deferredTurns.noteTurn({
+  kind: "finished",
+  requestId: "turn-progress",
+  runtimeKey: "main-01",
+  conversationId: "conversation-main-01",
+  observedAtMs: now + 10,
+});
+assert.equal(
+  deferredTurns.resolveGatewayCall({ toolName: "devspace_progress_report" }),
+  null,
+  "a finished ChatGPT turn must stop authorizing later unrelated direct calls",
+);
+
 console.log(JSON.stringify({
   ok: true,
   gate: "classic-mcp-call-correlation",
@@ -125,4 +191,8 @@ console.log(JSON.stringify({
   trueTieFailsClosed: true,
   sharedBoundedWaiters: true,
   boundedTemporalJoin: true,
+  activeTurnTraceMatch: true,
+  activeTurnUniqueToolMatch: true,
+  activeTurnAmbiguityFailsClosed: true,
+  finishedTurnRevokesCorrelation: true,
 }));

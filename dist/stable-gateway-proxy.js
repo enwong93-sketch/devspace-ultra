@@ -436,8 +436,11 @@ export function createStableGatewayProxy({
       // host does not forward the original OpenAI session header consistently.
       // Always overwrite/remove a caller-supplied value; this is internal
       // lifecycle metadata, never an external authority credential.
-      if (requestClientSessionFingerprint) {
-        headers["x-devspace-client-session-fingerprint"] = requestClientSessionFingerprint;
+      const boundClientSessionFingerprint = requestClientSessionFingerprint
+        || mapping?.clientSessionFingerprint
+        || null;
+      if (boundClientSessionFingerprint) {
+        headers["x-devspace-client-session-fingerprint"] = boundClientSessionFingerprint;
       } else {
         delete headers["x-devspace-client-session-fingerprint"];
       }

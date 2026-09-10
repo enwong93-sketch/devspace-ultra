@@ -20,23 +20,27 @@ import { fingerprintClassicSession } from "./classic-conversation-authority.js";
   const parsed = parseClassicTurnRequest({
     url: "https://chatgpt.com/backend-api/f/conversation",
     method: "POST",
-    headers: { authorization: "Bearer SECRET", cookie: "SECRET", "x-openai-session": "native-session-value" },
+    headers: { authorization: "Bearer SECRET", cookie: "SECRET", "x-openai-session": "native-session-value", "x-oai-turn-trace-id": "turn-trace-secret" },
     postData: JSON.stringify({
       model: "gpt-5-6-thinking",
       thinking_effort: "max",
       conversation_id: "conv-12345678",
       parent_message_id: "parent-secret-ish-id",
       messages: [{ author: { role: "user" }, content: { content_type: "text", parts: ["private prompt body"] } }],
+      local_function_names: ["blender_runtime", "blender_mcp", "blender_runtime", "invalid tool name"],
     }),
   });
   assert.equal(parsed.modelSlug, "gpt-5-6-thinking");
   assert.equal(parsed.thinkingEffort, "max");
   assert.equal(parsed.conversationId, "conv-12345678");
   assert.equal(parsed.sessionFingerprint, fingerprintClassicSession("native-session-value"));
+  assert.equal(parsed.turnTraceFingerprint, fingerprintClassicSession("turn-trace-secret"));
+  assert.deepEqual(parsed.localFunctionNames, ["blender_runtime", "blender_mcp"]);
   assert.ok(Number.isInteger(parsed.estimatedInputTokens));
   assert.ok(parsed.estimatedInputTokens > 0);
   assert.equal(JSON.stringify(parsed).includes("private prompt body"), false);
   assert.equal(JSON.stringify(parsed).includes("SECRET"), false);
+  assert.equal(JSON.stringify(parsed).includes("turn-trace-secret"), false);
   assert.equal(parseClassicTurnRequest({ url: "https://chatgpt.com/backend-api/other", method: "POST", postData: "{}" }), null);
 }
 

@@ -265,6 +265,55 @@ async function testGatewayForwardsOnlyDerivedClientSessionFingerprint() {
   }
 }
 
+async function testReplayedSessionCarriesBoundFingerprintWithoutHostSessionHeader() {
+  const core = await createFakeCore("core-replayed-main01");
+  const registry = new StableGatewaySessionRegistry();
+  const gateway = createStableGatewayProxy({
+    activeCore: { id: core.id, baseUrl: core.baseUrl },
+    publicBaseUrl: "https://devspace-gateway.example.test",
+    registry,
+  });
+  const gatewayServer = createServer(gateway.handler);
+  const gatewayBaseUrl = await listen(gatewayServer);
+  try {
+    const initialize = await postJson(gatewayBaseUrl, {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { protocolVersion: "2025-11-25" },
+    }, {
+      authorization: "Bearer replayed-main01-secret",
+      "oai-session-id": "main-01-original-openai-session",
+    });
+    const publicSessionId = initialize.headers["mcp-session-id"];
+    await waitUntil(() => Boolean(registry.lookup(publicSessionId)?.schemaFingerprint));
+    const expectedFingerprint = registry.lookup(publicSessionId)?.clientSessionFingerprint;
+    assert.match(expectedFingerprint, /^[a-f0-9]{64}$/);
+
+    registry.invalidateMapping(publicSessionId);
+    const replayed = await postJson(gatewayBaseUrl, {
+      jsonrpc: "2.0",
+      id: 2,
+      method: "tools/call",
+      params: { name: "blender_runtime", arguments: { action: "status", runtimeId: "rosa-main-01-existing" } },
+    }, {
+      authorization: "Bearer replayed-main01-secret",
+      "mcp-session-id": publicSessionId,
+    });
+
+    assert.equal(replayed.status, 200);
+    const directCall = core.observed.find((entry) => entry.id === 2);
+    assert.equal(
+      directCall?.clientSessionFingerprint,
+      expectedFingerprint,
+      "a replayed Main-01 direct tool call must carry the public session's verified client fingerprint even when the host omits its transient session header",
+    );
+  } finally {
+    await close(gatewayServer);
+    await close(core.server);
+  }
+}
+
 async function testSessionBoundRequestTranslation() {
   const core = await createFakeCore("core-a");
   const registry = new StableGatewaySessionRegistry();
@@ -838,6 +887,8 @@ async function testLegacyDescriptorWithoutSchemaRequiresFreshInitialize() {
 }
 
 await testInitializeAndStablePublicSession();
+await testGatewayForwardsOnlyDerivedClientSessionFingerprint();
+await testReplayedSessionCarriesBoundFingerprintWithoutHostSessionHeader();
 await testSessionBoundRequestTranslation();
 await testLongLivedMcpGetDoesNotBlockDrainAccounting();
 await testDownstreamSseDisconnectDestroysUpstream();
@@ -855,4 +906,4 @@ await testReplayDropsSessionWhenToolSchemaChanges();
 await testReplayDropsSessionWhenRoutingDescriptionChanges();
 await testLegacyDescriptorWithoutSchemaRequiresFreshInitialize();
 
-console.log(JSON.stringify({ ok: true, gate: "stable-gateway-proxy", lazyResurrection: true, idleAgeNeverDuplicatesHealthySession: true, downstreamSseDisconnectClosesUpstream: true, resurrectionSingleFlight: true, exact404RetryOnce: true, no5xxReplay: true, schemaFingerprintCaptured: true, routingDescriptionDriftForcesFreshInitialize: true, staleSchemaForcesFreshInitialize: true }));
+console.log(JSON.stringify({ ok: true, gate: "stable-gateway-proxy", lazyResurrection: true, replayedMain01FingerprintPreserved: true, idleAgeNeverDuplicatesHealthySession: true, downstreamSseDisconnectClosesUpstream: true, resurrectionSingleFlight: true, exact404RetryOnce: true, no5xxReplay: true, schemaFingerprintCaptured: true, routingDescriptionDriftForcesFreshInitialize: true, staleSchemaForcesFreshInitialize: true }));

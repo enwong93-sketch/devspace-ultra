@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { createServer, request as httpRequest } from "node:http";
-import { mkdir } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -121,7 +122,7 @@ function parseMcpBody(response) {
   return null;
 }
 
-async function postMcp(baseUrl, body, { accessToken, sessionId, protocolVersion } = {}) {
+async function postMcp(baseUrl, body, { accessToken, sessionId, protocolVersion, openAiSessionId } = {}) {
   return await httpRequestBuffer(baseUrl, "/mcp", {
     method: "POST",
     headers: {
@@ -130,6 +131,7 @@ async function postMcp(baseUrl, body, { accessToken, sessionId, protocolVersion 
       ...(accessToken ? { authorization: `Bearer ${accessToken}` } : {}),
       ...(sessionId ? { "mcp-session-id": sessionId } : {}),
       ...(protocolVersion ? { "mcp-protocol-version": protocolVersion } : {}),
+      ...(openAiSessionId ? { "oai-session-id": openAiSessionId } : {}),
     },
     body: JSON.stringify(body),
   });
@@ -285,8 +287,49 @@ let runtime = null;
 let oauth = null;
 try {
   oauth = await mintInitialOAuthState({ configEnv: canaryEnv, stateDir, ownerToken: sourceFiles.auth.ownerToken });
-  const [coreAPort, coreBPort] = await Promise.all([freePort(), freePort()]);
-  assert.notEqual(coreAPort, coreBPort);
+  const usedPorts = new Set();
+  const nextDistinctPort = async () => {
+    while (true) {
+      const port = await freePort();
+      if (usedPorts.has(port)) continue;
+      usedPorts.add(port);
+      return port;
+    }
+  };
+  const offlineBlenderPort = await nextDistinctPort();
+  const coreAPort = await nextDistinctPort();
+  const coreBPort = await nextDistinctPort();
+  const replayConversationId = "canary-main-01-conversation";
+  const replayRuntimeId = "rosa-main-01-existing";
+  const replayOpenAiSessionId = "stable-gateway-replayed-main01-session";
+  const replaySessionFingerprint = createHash("sha256").update(replayOpenAiSessionId).digest("hex");
+  await writeFile(join(stateDir, "classic-conversation-authority.json"), `${JSON.stringify({
+    version: 1,
+    sessions: [{
+      fingerprint: replaySessionFingerprint,
+      conversationIds: [replayConversationId],
+      runtimeKeys: ["main-01"],
+      ambiguous: false,
+      updatedAt: new Date().toISOString(),
+    }],
+  }, null, 2)}\n`, "utf8");
+  await writeFile(join(stateDir, "blender-runtimes.json"), `${JSON.stringify({
+    version: 2,
+    updatedAt: new Date().toISOString(),
+    runtimes: [{
+      runtimeId: replayRuntimeId,
+      ownerConversationId: replayConversationId,
+      ownerLabel: "replayed Main-01 canary",
+      port: offlineBlenderPort,
+      processId: null,
+      managedProcess: false,
+      defaultForOwner: true,
+      blendFile: null,
+      executable: null,
+      createdAt: new Date().toISOString(),
+      connectedAt: null,
+    }],
+  }, null, 2)}\n`, "utf8");
 
   const canaryRuntimeEnvOverrides = {
     DEVSPACE_PASSIVE_CORE: canaryEnv.DEVSPACE_PASSIVE_CORE,
@@ -358,7 +401,7 @@ try {
       capabilities: {},
       clientInfo: { name: "stable-gateway-real-core-canary", version: "0.5.0" },
     },
-  }, { accessToken: refreshA.access_token });
+  }, { accessToken: refreshA.access_token, openAiSessionId: replayOpenAiSessionId });
   assert.equal(initialize.status, 200);
   const initializePayload = parseMcpBody(initialize);
   const protocolVersion = initializePayload?.result?.protocolVersion;
@@ -493,6 +536,36 @@ try {
   const toolsAfterPayload = parseMcpBody(toolsAfter);
   const toolCountAfter = toolsAfterPayload?.result?.tools?.length;
   assert.equal(toolCountAfter, toolCountBefore);
+
+  const replayedDirectStatus = await postMcp(gatewayBaseUrl, {
+    jsonrpc: "2.0",
+    id: 4,
+    method: "tools/call",
+    params: {
+      name: "blender_runtime",
+      arguments: { action: "status", runtimeId: replayRuntimeId },
+    },
+  }, { accessToken: refreshA.access_token, sessionId: publicSessionId, protocolVersion });
+  assert.equal(
+    replayedDirectStatus.status,
+    200,
+    "replayed Main-01 direct blender_runtime call must return without waiting for a fresh native-call correlation",
+  );
+  const replayedDirectPayload = parseMcpBody(replayedDirectStatus);
+  const replayedDirectResult = replayedDirectPayload?.result?.structuredContent;
+  assert.equal(
+    replayedDirectPayload?.result?.isError === true,
+    false,
+    "replayed Main-01 direct blender_runtime call must not return a tool error",
+  );
+  assert.equal(replayedDirectResult?.ok, true);
+  assert.equal(replayedDirectResult?.runtime?.runtimeId, replayRuntimeId);
+  assert.equal(replayedDirectResult?.runtime?.ownerConversationId, replayConversationId);
+  assert.equal(
+    replayedDirectResult?.runtime?.state,
+    "offline",
+    "the canary Blender runtime is deliberately offline; success proves replayed authority/ownership resolution without touching a live Blender process",
+  );
 
   const refreshB = await refreshThroughGateway(gatewayBaseUrl, {
     clientId: oauth.clientId,
@@ -681,6 +754,7 @@ try {
     backgroundProfile: [...backgroundProfile].sort(),
     gatewayPortStable: runtime.gatewayPort === gatewayPortBefore,
     publicSessionStable: toolsAfter.headers["mcp-session-id"] === publicSessionId,
+    replayedMain01DirectTool: true,
     oauthRefreshBeforeHandover: true,
     oauthRefreshAfterHandover: true,
     refreshTokenRotatedTwice: true,
