@@ -68,7 +68,9 @@ assert.doesNotMatch(stableGateway, /console\.log\([^\n]*(controlToken|authorizat
 assert.match(backendReload, /__devspace\/gateway\/handover/, "reload helper must ask the stable Gateway to hand over Core slots");
 assert.match(backendReload, /waitForStableGatewayQuiet/, "reload worker must wait for a real quiet boundary before requesting handover");
 assert.match(backendReload, /__devspace\/gateway\/status/, "quiet-boundary probe must use the authenticated loopback Gateway status endpoint");
-assert.match(gatewayQuiet, /admission[\s\S]*activeRequests[\s\S]*sessions[\s\S]*totalActiveRequests/, "quiet-boundary helper must consume both Gateway HTTP and MCP-session request counters");
+assert.match(gatewayQuiet, /admission[\s\S]*activeRequests/, "quiet-boundary helper must consume the Gateway HTTP request counter");
+assert.match(gatewayQuiet, /sessions[\s\S]*totalActiveRequests/, "quiet-boundary helper must consume the MCP-session request counter");
+assert.match(gatewayQuiet, /eventStreams[\s\S]*sessionActive\s*-\s*eventStreams/, "persistent replayable event streams must be excluded from the non-stream quiet-boundary counter");
 assert.doesNotMatch(backendReload, /await delay\(2_000\)/, "reload worker must not rely on a fixed two-second delay before handover");
 assert.doesNotMatch(backendReload, /AbortSignal\.timeout|quiet-timeout|timeoutMs/, "reload and handover must not fail because a quiet boundary or Core operation takes longer than a clock deadline");
 assert.match(backendReload, /--worker/, "reload helper must detach before replacing the Core that served the triggering command");

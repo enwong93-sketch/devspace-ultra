@@ -7,9 +7,17 @@ function boundedPositive(value, fallback, label) {
 }
 
 function activeCounts(status) {
+  const sessionActive = Math.max(0, Number(status?.sessions?.totalActiveRequests || 0));
+  const eventStreams = Array.isArray(status?.sessions?.sessions)
+    ? status.sessions.sessions.reduce((total, session) => total + Math.max(0, Number(session?.eventStreams || 0)), 0)
+    : 0;
   return {
     admissionActive: Math.max(0, Number(status?.admission?.activeRequests || 0)),
-    sessionActive: Math.max(0, Number(status?.sessions?.totalActiveRequests || 0)),
+    // Long-lived replayable MCP event streams must survive a Core handover and
+    // therefore cannot permanently block the quiet boundary. Only non-stream
+    // session requests represent in-flight work that must finish first.
+    sessionActive: Math.max(0, sessionActive - eventStreams),
+    eventStreams,
   };
 }
 
