@@ -1933,22 +1933,28 @@ export function createServer(config = loadConfig(), options = {}) {
         const turnTraceFingerprint = turnTraceFingerprintFromClassicRequest({ headers: req?.headers || {} });
         let correlatedAuthority = null;
         let authorityPromise = null;
+        const persistActiveTurnCorrelation = async (identity) => {
+            if (!identity)
+                return null;
+            const persisted = await persistConversationIdentity({
+                ...identity,
+                sessionFingerprint,
+                authoritativeCurrent: true,
+            });
+            logEvent(config.logging, "info", "classic_active_turn_mcp_correlated", {
+                toolName,
+                runtimeKey: identity.runtimeKey,
+                source: identity.source,
+                traceMatched: identity.source === "classic-active-turn-trace-correlation",
+                rawTracePersisted: false,
+            });
+            return persisted;
+        };
         const activeTurn = toolName
             ? activeTurnRegistry.resolveGatewayCall({ toolName, turnTraceFingerprint })
             : null;
         if (activeTurn) {
-            correlatedAuthority = await persistConversationIdentity({
-                ...activeTurn,
-                sessionFingerprint,
-                authoritativeCurrent: true,
-            });
-            logEvent(config.logging, "debug", "classic_active_turn_mcp_correlated", {
-                toolName,
-                runtimeKey: activeTurn.runtimeKey,
-                source: activeTurn.source,
-                traceMatched: activeTurn.source === "classic-active-turn-trace-correlation",
-                rawTracePersisted: false,
-            });
+            correlatedAuthority = await persistActiveTurnCorrelation(activeTurn);
         }
         if (callFingerprint) {
             const correlated = mcpCallCorrelator.noteGateway({
@@ -1970,11 +1976,7 @@ export function createServer(config = loadConfig(), options = {}) {
                     toolName,
                     turnTraceFingerprint,
                     signal: req?.signal,
-                }).then((identity) => identity ? persistConversationIdentity({
-                    ...identity,
-                    sessionFingerprint,
-                    authoritativeCurrent: true,
-                }) : null));
+                }).then((identity) => persistActiveTurnCorrelation(identity)));
             }
             if (callFingerprint) {
                 correlationWaits.push(mcpCallCorrelator.waitForIdentity({
