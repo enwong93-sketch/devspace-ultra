@@ -46,7 +46,9 @@ const runtime = await startStableGatewayRuntime({
   stateDir: temp,
   controller,
   controlToken: "degraded-startup-control-token-local-only",
-  coreStartRetryMs: 20,
+  // Keep the first retry outside the initial HTTP assertion window so the
+  // gate validates the degraded listener deterministically on slower hosts.
+  coreStartRetryMs: 500,
 });
 
 try {

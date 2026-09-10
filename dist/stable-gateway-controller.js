@@ -117,10 +117,53 @@ export function createStableGatewayController({
     if (result?.stopped !== true) throw new Error(`${label} did not stop safely.`);
   };
 
-  const chooseBaselineSession = () => {
+  const baselineSessionCandidates = () => {
     const sessions = registry.entriesForReplay();
     if (!sessions.length) throw new Error("Stable Gateway handover requires at least one live MCP session for continuity verification.");
-    return sessions.find((entry) => entry.initialized) ?? sessions[0];
+    return sessions
+      .map((entry, index) => ({
+        entry,
+        index,
+        priority:
+          (entry.initialized ? 16 : 0)
+          + (entry.eventStreams > 0 ? 8 : 0)
+          + (entry.activeRequests > 0 ? 4 : 0)
+          + (entry.clientSessionFingerprint ? 2 : 0),
+      }))
+      .sort((left, right) => (
+        right.priority - left.priority
+        || Number(right.entry.lastActivityAt || 0) - Number(left.entry.lastActivityAt || 0)
+        || left.index - right.index
+      ))
+      .map((item) => item.entry);
+  };
+
+  const resolveBaselineSchema = async (coreBaseUrl) => {
+    const candidates = baselineSessionCandidates();
+    const rejectedAuthorizations = [];
+    for (const baseline of candidates.slice(0, 64)) {
+      try {
+        const schema = await readCoreSchemaFingerprint({
+          coreBaseUrl,
+          bearerToken: baseline.authorization,
+        });
+        return { baseline, schema };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (!/status\s+(?:401|403)\b/i.test(message)) throw error;
+        rejectedAuthorizations.push({
+          publicSessionId: baseline.publicSessionId,
+          initialized: baseline.initialized === true,
+          identified: Boolean(baseline.clientSessionFingerprint),
+          activeRequests: Number(baseline.activeRequests || 0),
+          eventStreams: Number(baseline.eventStreams || 0),
+        });
+      }
+    }
+    const error = new Error(`Stable Gateway handover could not find a currently authorized MCP session after ${rejectedAuthorizations.length} bounded schema probes.`);
+    error.code = "STABLE_GATEWAY_AUTHORIZATION_UNAVAILABLE";
+    error.rejectedSessions = rejectedAuthorizations;
+    throw error;
   };
 
   const verifyCore = async (handle, baseline, expectedSchemaFingerprint) => {
@@ -283,7 +326,7 @@ export function createStableGatewayController({
     const oldSlot = activeSlot;
     const nextSlot = oldSlot === "a" ? "b" : "a";
     const oldHandle = activeHandle;
-    const baseline = chooseBaselineSession();
+    let baseline = null;
     let snapshot = null;
     let candidateHandle = null;
     let replacementHandle = null;
@@ -294,10 +337,9 @@ export function createStableGatewayController({
     const startedAt = Date.now();
 
     try {
-      const baselineSchema = await readCoreSchemaFingerprint({
-        coreBaseUrl: oldHandle.baseUrl,
-        bearerToken: baseline.authorization,
-      });
+      const resolvedBaseline = await resolveBaselineSchema(oldHandle.baseUrl);
+      baseline = resolvedBaseline.baseline;
+      const baselineSchema = resolvedBaseline.schema;
       baselineFingerprint = baselineSchema.schemaFingerprint;
 
       snapshot = await createCandidateSnapshot({ sourceStateDir: statePath });

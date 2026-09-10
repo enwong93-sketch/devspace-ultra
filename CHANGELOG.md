@@ -7,6 +7,8 @@
 - Prioritized `devspace_progress_report`, `blender_runtime`, and `blender_mcp` at the front of the MCP tool catalogue while retaining the compatibility bridge as a deterministic fallback.
 - Added a local timestamp to every progress-card message using the message's persisted `at` value. The Agent continues to write untemplated natural language; the floating UI adds `[YYYY-MM-DD HH:mm]` automatically.
 - Added regression gates for the bridge, official Blender MCP port environment, per-conversation ownership, public package/bin inclusion, serialized progress writes, per-message timestamps, and no runtime termination.
+- Made Stable Gateway handover rank identified/active MCP sessions first and boundedly skip expired 401/403 bearer snapshots instead of letting one stale session block a safe Core upgrade. The old Core remains active until a currently authorized baseline passes schema verification.
+- Removed a timing race from the degraded-startup gate so the initial 503 listener state and later automatic Core recovery are tested deterministically on slower Windows hosts.
 - Kept Goal Recovery and Auto Compact disabled by default; this patch changes neither safety gate nor navigation behavior.
 
 ## 0.5.2 — 2026-09-09

@@ -103,11 +103,13 @@ function postJson(baseUrl, body, headers = {}) {
   });
 }
 
-async function createHarness({ failActiveB = false, failCandidate = false } = {}) {
+async function createHarness({ failActiveB = false, failCandidate = false, rejectedBaselineAuthorizations = [] } = {}) {
   const temp = await mkdtemp(join(tmpdir(), "stable-gateway-controller-test-"));
   const initial = await createFakeCore("core-a");
   const starts = [];
   const stops = [];
+  const baselineAuthorizations = [];
+  const candidateAuthorizations = [];
   let activeBStarted = false;
   const dependencies = {
     async createCandidateSnapshot() {
@@ -129,10 +131,15 @@ async function createHarness({ failActiveB = false, failCandidate = false } = {}
       await closeServer(handle.server);
       return { stopped: true };
     },
-    async probeCandidate() {
+    async probeCandidate(input) {
+      candidateAuthorizations.push(input?.bearerToken);
       return failCandidate ? { ok: false, stage: "schema" } : { ok: true, stage: "compatible" };
     },
-    async readCoreSchemaFingerprint() {
+    async readCoreSchemaFingerprint(input) {
+      baselineAuthorizations.push(input?.bearerToken);
+      if (rejectedBaselineAuthorizations.includes(input?.bearerToken)) {
+        throw new Error("Unable to initialize fresh active Core schema probe (status 401).");
+      }
       return { schemaFingerprint: "a".repeat(64), toolCount: 2 };
     },
   };
@@ -152,6 +159,8 @@ async function createHarness({ failActiveB = false, failCandidate = false } = {}
   const gatewayBaseUrl = await listen(gatewayServer);
   return {
     temp, initial, starts, stops, dependencies, controller, gatewayServer, gatewayBaseUrl,
+    baselineAuthorizations,
+    candidateAuthorizations,
     activeBStarted: () => activeBStarted,
     async close() {
       await closeServer(gatewayServer);
@@ -196,19 +205,38 @@ async function waitUntil(predicate, timeoutMs = 500) {
 }
 
 async function initializeSession(harness) {
-  const init = await postJson(harness.gatewayBaseUrl, { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-11-25" } }, { authorization: "Bearer replay-secret" });
+  return await initializeSessionWithAuthorization(harness, "Bearer replay-secret");
+}
+
+async function initializeSessionWithAuthorization(harness, authorization) {
+  const init = await postJson(harness.gatewayBaseUrl, { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-11-25" } }, { authorization });
   const publicSessionId = init.headers["mcp-session-id"];
   await postJson(harness.gatewayBaseUrl, { jsonrpc: "2.0", method: "notifications/initialized" }, {
-    authorization: "Bearer replay-secret",
+    authorization,
     "mcp-session-id": publicSessionId,
   });
   const tools = await postJson(harness.gatewayBaseUrl, { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }, {
-    authorization: "Bearer replay-secret",
+    authorization,
     "mcp-session-id": publicSessionId,
   });
   assert.equal(tools.status, 200);
   assert.deepEqual(JSON.parse(tools.body).result.tools, FAKE_TOOLS);
   return publicSessionId;
+}
+
+async function testExpiredNewestAuthorizationFallsBackToLiveSession() {
+  const h = await createHarness({ rejectedBaselineAuthorizations: ["Bearer stale-session"] });
+  try {
+    await initializeSessionWithAuthorization(h, "Bearer live-session");
+    await initializeSessionWithAuthorization(h, "Bearer stale-session");
+    const result = await h.controller.handover();
+    assert.equal(result.ok, true);
+    assert.deepEqual(h.baselineAuthorizations, ["Bearer stale-session", "Bearer live-session"]);
+    assert.equal(h.candidateAuthorizations.every((value) => value === "Bearer live-session"), true);
+    assert.equal(h.stops.includes("core-a"), true);
+  } finally {
+    await h.close();
+  }
 }
 
 async function testLongLivedEventStreamDoesNotBlockHandoverDrain() {
@@ -311,5 +339,6 @@ await testLongLivedEventStreamDoesNotBlockHandoverDrain();
 await testSuccessfulHandover();
 await testReplayFailureDropsStaleSessionButKeepsHealthyCoreB();
 await testCandidateFailureNeverStopsA();
+await testExpiredNewestAuthorizationFallsBackToLiveSession();
 
 console.log(JSON.stringify({ ok: true, gate: "stable-gateway-controller" }));
