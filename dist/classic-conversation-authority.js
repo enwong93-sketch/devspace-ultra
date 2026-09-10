@@ -41,6 +41,14 @@ export function sessionFingerprintFromClassicRequest(request = {}) {
   return fingerprintClassicSession(firstSessionHeader(headers));
 }
 
+export function turnTraceFingerprintFromClassicRequest(request = {}) {
+  const headers = normalizedHeaders(request?.headers);
+  const value = Array.isArray(headers["x-oai-turn-trace-id"])
+    ? headers["x-oai-turn-trace-id"][0]
+    : headers["x-oai-turn-trace-id"];
+  return fingerprintClassicSession(value);
+}
+
 async function atomicWrite(path, value) {
   await atomicWriteJson(path, value);
 }

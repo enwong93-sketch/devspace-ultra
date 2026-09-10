@@ -40,6 +40,7 @@ export class ClassicTurnTransportTracker {
     onConversationIdentity,
     onTurnTransportEvent,
     onNativeMcpCall,
+    onActiveTurn,
   } = {}) {
     this.now = now;
     this.pendingTtlMs = Math.max(1_000, Number(pendingTtlMs) || DEFAULT_PENDING_TTL_MS);
@@ -49,6 +50,7 @@ export class ClassicTurnTransportTracker {
     this.onConversationIdentity = typeof onConversationIdentity === "function" ? onConversationIdentity : null;
     this.onTurnTransportEvent = typeof onTurnTransportEvent === "function" ? onTurnTransportEvent : null;
     this.onNativeMcpCall = typeof onNativeMcpCall === "function" ? onNativeMcpCall : null;
+    this.onActiveTurn = typeof onActiveTurn === "function" ? onActiveTurn : null;
   }
 
   get pendingSize() { return this.pending.size; }
@@ -65,8 +67,22 @@ export class ClassicTurnTransportTracker {
     if (!requestId) return null;
     this.prune();
     const firstSeenAt = this.now();
-    this.pending.set(requestId, { conversationId: metadata.conversationId, firstSeenAt });
+    this.pending.set(requestId, {
+      conversationId: metadata.conversationId,
+      firstSeenAt,
+      localFunctionNames: metadata.localFunctionNames || [],
+      turnTraceFingerprint: metadata.turnTraceFingerprint || null,
+    });
     this.#enforceCap();
+    this.#emitActiveTurn({
+      kind: "started",
+      requestId,
+      conversationId: metadata.conversationId,
+      localFunctionNames: metadata.localFunctionNames || [],
+      turnTraceFingerprint: metadata.turnTraceFingerprint || null,
+      observedAt: observedAt(firstSeenAt),
+      observedAtMs: firstSeenAt,
+    });
     this.#emitTransport({ conversationId: metadata.conversationId, kind: "request", observedAt: observedAt(firstSeenAt) });
     this.#emitIdentity(this.identity.noteRequest(params));
     return metadata;
@@ -92,13 +108,21 @@ export class ClassicTurnTransportTracker {
     const requestId = String(params?.requestId || "").trim();
     const entry = requestId ? this.pending.get(requestId) : null;
     if (entry) {
+      const atMs = this.now();
       this.#emitTransport({
         conversationId: entry.conversationId,
         kind: "failed",
         errorText: String(params?.errorText || "").slice(0, 180),
         canceled: params?.canceled === true,
         blockedReason: params?.blockedReason ? String(params.blockedReason).slice(0, 120) : null,
-        observedAt: observedAt(this.now()),
+        observedAt: observedAt(atMs),
+      });
+      this.#emitActiveTurn({
+        kind: "failed",
+        requestId,
+        conversationId: entry.conversationId,
+        observedAt: observedAt(atMs),
+        observedAtMs: atMs,
       });
       this.pending.delete(requestId);
     }
@@ -109,7 +133,15 @@ export class ClassicTurnTransportTracker {
     const requestId = String(params?.requestId || "").trim();
     const entry = requestId ? this.pending.get(requestId) : null;
     if (entry) {
-      this.#emitTransport({ conversationId: entry.conversationId, kind: "finished", observedAt: observedAt(this.now()) });
+      const atMs = this.now();
+      this.#emitTransport({ conversationId: entry.conversationId, kind: "finished", observedAt: observedAt(atMs) });
+      this.#emitActiveTurn({
+        kind: "finished",
+        requestId,
+        conversationId: entry.conversationId,
+        observedAt: observedAt(atMs),
+        observedAtMs: atMs,
+      });
       this.pending.delete(requestId);
     }
     if (requestId) this.identity.forget(requestId);
@@ -119,6 +151,14 @@ export class ClassicTurnTransportTracker {
     const cutoff = this.now() - this.pendingTtlMs;
     for (const [requestId, entry] of this.pending) {
       if (Number(entry?.firstSeenAt || 0) < cutoff) {
+        const atMs = this.now();
+        this.#emitActiveTurn({
+          kind: "expired",
+          requestId,
+          conversationId: entry.conversationId,
+          observedAt: observedAt(atMs),
+          observedAtMs: atMs,
+        });
         this.pending.delete(requestId);
         this.identity.forget(requestId);
       }
@@ -129,8 +169,16 @@ export class ClassicTurnTransportTracker {
   #enforceCap() {
     if (this.pending.size <= this.maxPending) return;
     const oldest = [...this.pending.entries()].sort((a, b) => Number(a[1]?.firstSeenAt || 0) - Number(b[1]?.firstSeenAt || 0));
-    for (const [requestId] of oldest) {
+    for (const [requestId, entry] of oldest) {
       if (this.pending.size <= this.maxPending) break;
+      const atMs = this.now();
+      this.#emitActiveTurn({
+        kind: "evicted",
+        requestId,
+        conversationId: entry?.conversationId || null,
+        observedAt: observedAt(atMs),
+        observedAtMs: atMs,
+      });
       this.pending.delete(requestId);
       this.identity.forget(requestId);
     }
@@ -150,6 +198,11 @@ export class ClassicTurnTransportTracker {
     if (!this.onNativeMcpCall) return;
     try { this.onNativeMcpCall(event); } catch {}
   }
+
+  #emitActiveTurn(event) {
+    if (!this.onActiveTurn) return;
+    try { this.onActiveTurn(event); } catch {}
+  }
 }
 
 export async function connectClassicTurnTransportPort(port, {
@@ -159,6 +212,7 @@ export async function connectClassicTurnTransportPort(port, {
   onConversationIdentity,
   onTurnTransportEvent,
   onNativeMcpCall,
+  onActiveTurn,
   onDisconnected,
 } = {}) {
   let targets;
@@ -177,6 +231,7 @@ export async function connectClassicTurnTransportPort(port, {
     onConversationIdentity: (identity) => onConversationIdentity?.({ runtimeKey, port, ...identity, observedAt: observedAt() }),
     onTurnTransportEvent: (event) => onTurnTransportEvent?.({ runtimeKey, port, ...event }),
     onNativeMcpCall: (event) => onNativeMcpCall?.({ runtimeKey, port, ...event }),
+    onActiveTurn: (event) => onActiveTurn?.({ runtimeKey, port, ...event }),
   });
   const disposers = [
     client.on("Network.requestWillBeSent", (params) => {
@@ -231,8 +286,8 @@ export class ClassicTurnTransportObserver {
     this.closed = false;
   }
 
-  setHandlers({ onConversationIdentity, onTurnTransportEvent, onNativeMcpCall } = {}) {
-    this.handlers = { onConversationIdentity, onTurnTransportEvent, onNativeMcpCall };
+  setHandlers({ onConversationIdentity, onTurnTransportEvent, onNativeMcpCall, onActiveTurn } = {}) {
+    this.handlers = { onConversationIdentity, onTurnTransportEvent, onNativeMcpCall, onActiveTurn };
   }
 
   async start({ schedule = true } = {}) {

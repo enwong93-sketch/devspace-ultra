@@ -57,8 +57,8 @@ import { ClassicProgressNarrationOverlay } from "./classic-progress-narration-ov
 import { ContextGuardianRuntime, registerContextGuardianTools } from "./context-guardian.js";
 import { ClassicContextMetadataCdpAdapter } from "./context-guardian-cdp.js";
 import { ContextGuardianRolloverCoordinator } from "./context-guardian-rollover.js";
-import { ClassicConversationAuthorityRegistry, sessionFingerprintFromClassicRequest, sessionFingerprintFromMcpExtra } from "./classic-conversation-authority.js";
-import { ClassicMcpCallCorrelator, fingerprintMcpToolCall } from "./classic-mcp-call-correlation.js";
+import { ClassicConversationAuthorityRegistry, sessionFingerprintFromClassicRequest, sessionFingerprintFromMcpExtra, turnTraceFingerprintFromClassicRequest } from "./classic-conversation-authority.js";
+import { ClassicActiveTurnRegistry, ClassicMcpCallCorrelator, fingerprintMcpToolCall } from "./classic-mcp-call-correlation.js";
 import { ClassicTurnTransportObserver } from "./classic-turn-transport-observer.js";
 import { ClassicNativeUsageEvidenceStore } from "./classic-native-usage-evidence.js";
 import { ClassicExactUsageAuthority } from "./classic-exact-usage-authority.js";
@@ -1910,6 +1910,7 @@ export function createServer(config = loadConfig(), options = {}) {
     });
     const conversationAuthorityReady = conversationAuthority.load().catch(() => conversationAuthority.snapshot());
     const mcpCallCorrelator = new ClassicMcpCallCorrelator();
+    const activeTurnRegistry = new ClassicActiveTurnRegistry();
     const requestConversationContext = new McpConversationRequestContext();
     const persistConversationIdentity = async (event) => {
         if (!event?.sessionFingerprint || !event?.conversationId || !event?.runtimeKey) return null;
@@ -1919,34 +1920,73 @@ export function createServer(config = loadConfig(), options = {}) {
             conversationId: event.conversationId,
             runtimeKey: event.runtimeKey,
             observedAt: event.observedAt,
-            authoritativeCurrent: event.source === "classic-native-call-mcp",
+            authoritativeCurrent: event.authoritativeCurrent === true
+                || event.source === "classic-native-call-mcp"
+                || String(event.source || "").startsWith("classic-active-turn-"),
         });
     };
     const resolveAndBindMcpConversation = async (req) => {
         const sessionFingerprint = sessionFingerprintFromClassicRequest({ headers: req?.headers || {} });
         if (!sessionFingerprint) return { conversationId: null, sessionFingerprint: null, runtimeKey: null };
         const callFingerprint = fingerprintMcpToolCall(req?.body);
+        const toolName = String(req?.body?.params?.name || "").trim() || null;
+        const turnTraceFingerprint = turnTraceFingerprintFromClassicRequest({ headers: req?.headers || {} });
         let correlatedAuthority = null;
         let authorityPromise = null;
+        const activeTurn = toolName
+            ? activeTurnRegistry.resolveGatewayCall({ toolName, turnTraceFingerprint })
+            : null;
+        if (activeTurn) {
+            correlatedAuthority = await persistConversationIdentity({
+                ...activeTurn,
+                sessionFingerprint,
+                authoritativeCurrent: true,
+            });
+            logEvent(config.logging, "debug", "classic_active_turn_mcp_correlated", {
+                toolName,
+                runtimeKey: activeTurn.runtimeKey,
+                source: activeTurn.source,
+                traceMatched: activeTurn.source === "classic-active-turn-trace-correlation",
+                rawTracePersisted: false,
+            });
+        }
         if (callFingerprint) {
             const correlated = mcpCallCorrelator.noteGateway({
                 callFingerprint,
                 sessionFingerprint,
-                toolName: req?.body?.params?.name,
+                toolName,
                 observedAtMs: Date.now(),
             });
-            if (correlated) {
+            if (!correlatedAuthority && correlated) {
                 correlatedAuthority = await persistConversationIdentity(correlated);
             }
         }
         await conversationAuthorityReady;
         const authority = correlatedAuthority || conversationAuthority.resolveFingerprint(sessionFingerprint);
-        if (!authority?.conversationId && callFingerprint) {
-            authorityPromise = mcpCallCorrelator.waitForIdentity({
-                callFingerprint,
-                sessionFingerprint,
-                signal: req?.signal,
-            }).then((identity) => identity ? persistConversationIdentity(identity) : null);
+        if (!authority?.conversationId) {
+            const correlationWaits = [];
+            if (toolName) {
+                correlationWaits.push(activeTurnRegistry.waitForIdentity({
+                    toolName,
+                    turnTraceFingerprint,
+                    signal: req?.signal,
+                }).then((identity) => identity ? persistConversationIdentity({
+                    ...identity,
+                    sessionFingerprint,
+                    authoritativeCurrent: true,
+                }) : null));
+            }
+            if (callFingerprint) {
+                correlationWaits.push(mcpCallCorrelator.waitForIdentity({
+                    callFingerprint,
+                    sessionFingerprint,
+                    signal: req?.signal,
+                }).then((identity) => identity ? persistConversationIdentity(identity) : null));
+            }
+            if (correlationWaits.length === 1)
+                authorityPromise = correlationWaits[0];
+            else if (correlationWaits.length > 1)
+                authorityPromise = Promise.race(correlationWaits);
         }
         if (!authority?.conversationId) {
             return { conversationId: null, sessionFingerprint, runtimeKey: null, authorityPromise };
@@ -1978,6 +2018,9 @@ export function createServer(config = loadConfig(), options = {}) {
                     error: error instanceof Error ? error.message : String(error),
                 });
             });
+        },
+        onActiveTurn: (event) => {
+            activeTurnRegistry.noteTurn(event);
         },
         onNativeMcpCall: (event) => {
             if (event?.sessionFingerprint) {

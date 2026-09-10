@@ -89,6 +89,198 @@ function boundedRecord(input, side, now) {
   return { side, callFingerprint, sessionFingerprint, toolName: cleanText(input?.toolName, 220), atMs };
 }
 
+function cleanToolNames(values) {
+  return [...new Set(
+    (Array.isArray(values) ? values : [])
+      .map((value) => cleanText(value, 220))
+      .filter(Boolean),
+  )].slice(0, 256);
+}
+
+function cleanTraceFingerprint(value) {
+  const text = cleanText(value, 64)?.toLowerCase();
+  return text && /^[a-f0-9]{64}$/.test(text) ? text : null;
+}
+
+function cleanRuntimeKey(value) {
+  return cleanText(value, 80);
+}
+
+function activeTurnIdentity(entry, source) {
+  return {
+    conversationId: entry.conversationId,
+    runtimeKey: entry.runtimeKey,
+    toolName: null,
+    turnTraceFingerprint: entry.turnTraceFingerprint,
+    observedAt: new Date(entry.startedAtMs).toISOString(),
+    source,
+  };
+}
+
+export class ClassicActiveTurnRegistry {
+  constructor({
+    now = () => Date.now(),
+    activeTtlMs = 10 * 60_000,
+    maxActive = 64,
+    maxWaiters = 128,
+  } = {}) {
+    this.now = now;
+    this.activeTtlMs = Math.max(30_000, Number(activeTtlMs) || 10 * 60_000);
+    this.maxActive = Math.max(4, Number(maxActive) || 64);
+    this.maxWaiters = Math.max(4, Number(maxWaiters) || 128);
+    this.active = new Map();
+    this.waiters = new Map();
+    this.nextWaiterId = 1;
+    this.recentResolved = [];
+    this.ambiguousMatches = 0;
+  }
+
+  noteTurn(input = {}) {
+    const kind = String(input?.kind || "").trim().toLowerCase();
+    const runtimeKey = cleanRuntimeKey(input?.runtimeKey);
+    const requestId = cleanText(input?.requestId, 240);
+    if (!runtimeKey || !requestId) return null;
+    const key = `${runtimeKey}:${requestId}`;
+    if (kind === "finished" || kind === "failed" || kind === "expired" || kind === "evicted") {
+      const removed = this.active.delete(key);
+      if (removed) this.#attemptWaiters();
+      return removed;
+    }
+    if (kind !== "started") return null;
+    const conversationId = cleanConversationId(input?.conversationId);
+    if (!conversationId) return null;
+    const entry = {
+      key,
+      requestId,
+      runtimeKey,
+      conversationId,
+      localFunctionNames: cleanToolNames(input?.localFunctionNames),
+      turnTraceFingerprint: cleanTraceFingerprint(input?.turnTraceFingerprint),
+      startedAtMs: Number.isFinite(Number(input?.observedAtMs))
+        ? Number(input.observedAtMs)
+        : this.now(),
+    };
+    this.prune();
+    this.active.set(key, entry);
+    this.#enforceActiveCap();
+    this.#attemptWaiters();
+    return activeTurnIdentity(entry, "classic-active-turn-start");
+  }
+
+  resolveGatewayCall({ toolName, turnTraceFingerprint = null } = {}) {
+    this.prune();
+    const tool = cleanText(toolName, 220);
+    if (!tool) return null;
+    const trace = cleanTraceFingerprint(turnTraceFingerprint);
+    const candidates = [...this.active.values()].filter((entry) => (
+      entry.localFunctionNames.includes(tool)
+      && (!trace || entry.turnTraceFingerprint === trace)
+    ));
+    const unique = new Map();
+    for (const entry of candidates) {
+      unique.set(`${entry.runtimeKey}:${entry.conversationId}`, entry);
+    }
+    if (unique.size !== 1) {
+      if (unique.size > 1) this.ambiguousMatches += 1;
+      return null;
+    }
+    const [entry] = unique.values();
+    const identity = {
+      ...activeTurnIdentity(entry, trace
+        ? "classic-active-turn-trace-correlation"
+        : "classic-active-turn-unique-tool-correlation"),
+      toolName: tool,
+    };
+    this.recentResolved.unshift(identity);
+    this.recentResolved = this.recentResolved.slice(0, this.maxActive);
+    return identity;
+  }
+
+  waitForIdentity({ toolName, turnTraceFingerprint = null, signal } = {}) {
+    const immediate = this.resolveGatewayCall({ toolName, turnTraceFingerprint });
+    if (immediate) return Promise.resolve(immediate);
+    const tool = cleanText(toolName, 220);
+    if (!tool) return Promise.resolve(null);
+    if (signal?.aborted) return Promise.reject(new Error("Active-turn conversation correlation was cancelled."));
+    const waiterId = this.nextWaiterId++;
+    let resolveWaiter;
+    let rejectWaiter;
+    const promise = new Promise((resolvePromise, rejectPromise) => {
+      resolveWaiter = resolvePromise;
+      rejectWaiter = rejectPromise;
+    });
+    const onAbort = () => {
+      if (!this.waiters.delete(waiterId)) return;
+      rejectWaiter(new Error("Active-turn conversation correlation was cancelled."));
+    };
+    if (signal) signal.addEventListener("abort", onAbort, { once: true });
+    this.waiters.set(waiterId, {
+      toolName: tool,
+      turnTraceFingerprint: cleanTraceFingerprint(turnTraceFingerprint),
+      createdAtMs: this.now(),
+      resolve: (value) => {
+        if (signal) signal.removeEventListener("abort", onAbort);
+        resolveWaiter(value);
+      },
+    });
+    while (this.waiters.size > this.maxWaiters) {
+      const oldest = [...this.waiters.entries()]
+        .sort((a, b) => Number(a[1].createdAtMs || 0) - Number(b[1].createdAtMs || 0))[0];
+      if (!oldest) break;
+      this.waiters.delete(oldest[0]);
+      oldest[1].resolve(null);
+    }
+    return promise;
+  }
+
+  prune() {
+    const cutoff = this.now() - this.activeTtlMs;
+    let changed = false;
+    for (const [key, entry] of this.active) {
+      if (entry.startedAtMs >= cutoff) continue;
+      this.active.delete(key);
+      changed = true;
+    }
+    this.#enforceActiveCap();
+    if (changed) this.#attemptWaiters();
+  }
+
+  #enforceActiveCap() {
+    if (this.active.size <= this.maxActive) return;
+    const oldest = [...this.active.entries()]
+      .sort((a, b) => Number(a[1].startedAtMs || 0) - Number(b[1].startedAtMs || 0));
+    for (const [key] of oldest) {
+      if (this.active.size <= this.maxActive) break;
+      this.active.delete(key);
+    }
+  }
+
+  #attemptWaiters() {
+    for (const [id, waiter] of [...this.waiters]) {
+      const identity = this.resolveGatewayCall(waiter);
+      if (!identity) continue;
+      this.waiters.delete(id);
+      waiter.resolve(identity);
+    }
+  }
+
+  diagnostics() {
+    this.prune();
+    return {
+      activeTurns: this.active.size,
+      waiters: this.waiters.size,
+      recentResolved: this.recentResolved.length,
+      ambiguousMatches: this.ambiguousMatches,
+      activeTtlMs: this.activeTtlMs,
+      maxActive: this.maxActive,
+      maxWaiters: this.maxWaiters,
+      rawPromptsPersisted: false,
+      rawTraceIdsPersisted: false,
+      rawSessionPersisted: false,
+    };
+  }
+}
+
 export class ClassicMcpCallCorrelator {
   constructor({
     now = () => Date.now(),

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { ClassicCdpClient } from "./classic-cdp-client.js";
-import { sessionFingerprintFromClassicRequest } from "./classic-conversation-authority.js";
+import { sessionFingerprintFromClassicRequest, turnTraceFingerprintFromClassicRequest } from "./classic-conversation-authority.js";
 import { extractClassicNativeUsageEvidence } from "./classic-native-usage-evidence.js";
 import { defaultMainDebugPorts } from "./goal-host-bridge.js";
 import { runtimeKeyForPort } from "./classic-stream-recovery-cdp.js";
@@ -629,6 +629,12 @@ export function parseClassicTurnRequest(request = {}) {
   try { body = JSON.parse(String(request.postData || "{}")); } catch { return null; }
   const modelSlug = typeof body?.model === "string" ? body.model.trim() : "";
   if (!modelSlug) return null;
+  const localFunctionNames = [...new Set(
+    (Array.isArray(body?.local_function_names) ? body.local_function_names : [])
+      .map((value) => String(value ?? "").trim())
+      .filter((value) => /^[A-Za-z0-9_.:-]{1,220}$/.test(value))
+      .slice(0, 256),
+  )];
   return {
     modelSlug,
     thinkingEffort: typeof body?.thinking_effort === "string"
@@ -636,6 +642,8 @@ export function parseClassicTurnRequest(request = {}) {
       : typeof body?.thinkingEffort === "string" ? body.thinkingEffort : null,
     conversationId: typeof body?.conversation_id === "string" ? body.conversation_id : null,
     sessionFingerprint: sessionFingerprintFromClassicRequest(request),
+    turnTraceFingerprint: turnTraceFingerprintFromClassicRequest(request),
+    localFunctionNames,
     estimatedInputTokens: estimateMessageTokens(body?.messages),
   };
 }
