@@ -12,10 +12,7 @@ const [source, agents, toolProgress, gateway, productionJournal] = await Promise
 assert.match(source, /exactly one conversation-scoped floating progress narration card/i);
 assert.match(source, /neither tool events nor timers may author visible narration/i);
 assert.match(source, /personally judge that a meaningful medium-sized step has completed/i);
-assert.match(source, /keep the interval between your own natural-language reports below ten minutes/i);
-assert.match(source, /Ten minutes is an Agent reporting ceiling only/i);
-assert.match(source, /rescue is separate and may run only after at least twenty minutes/i);
-assert.match(source, /normal completion or explicit cancellation disarms the episode immediately/i);
+assert.match(source, /There is no fixed time or tool-count cadence/i);
 assert.match(source, /Write the card text yourself in natural language/i);
 assert.match(source, /never show generated step counters, heartbeat prose, generic program status/i);
 assert.match(source, /server\.registerTool\("devspace_progress_report"/);
@@ -47,7 +44,7 @@ console.log(JSON.stringify({
   agentAuthoredOnly: true,
   timerDrivenNarration: false,
   fixedCountNarration: false,
-  tenMinuteAgentReportCeiling: true,
+  tenMinuteAgentReportCeilingFromWorkspaceInstructions: true,
   tenMinuteAutomaticReminder: false,
   twentyMinuteInterruptedTurnRescueOnly: true,
   normalCompletionDisarms: true,
