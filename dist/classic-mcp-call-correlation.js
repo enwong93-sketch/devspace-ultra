@@ -188,8 +188,9 @@ export class ClassicActiveTurnRegistry {
     if (!tool) return null;
     const trace = cleanTraceFingerprint(turnTraceFingerprint);
     const candidates = [...this.active.values()].filter((entry) => (
-      entry.localFunctionNames.includes(tool)
-      && (!trace || entry.turnTraceFingerprint === trace)
+      trace
+        ? entry.turnTraceFingerprint === trace
+        : entry.localFunctionNames.includes(tool)
     ));
     const unique = new Map();
     for (const entry of candidates) {
@@ -299,11 +300,18 @@ export class ClassicActiveTurnRegistry {
   diagnostics() {
     this.prune();
     const entries = [...this.active.values()];
+    const waiters = [...this.waiters.values()];
     return {
       activeTurns: entries.filter((entry) => entry.finishedAtMs === null || entry.finishedAtMs === undefined).length,
       postTurnTurns: entries.filter((entry) => entry.finishedAtMs !== null && entry.finishedAtMs !== undefined && Number.isFinite(Number(entry.finishedAtMs))).length,
       trackedTurns: entries.length,
       waiters: this.waiters.size,
+      turnsWithTrace: entries.filter((entry) => Boolean(entry.turnTraceFingerprint)).length,
+      placeholderOnlyTurns: entries.filter((entry) => (
+        entry.localFunctionNames.length > 0
+        && entry.localFunctionNames.every((name) => name.startsWith("local."))
+      )).length,
+      waitersWithTrace: waiters.filter((waiter) => Boolean(waiter.turnTraceFingerprint)).length,
       recentResolved: this.recentResolved.length,
       ambiguousMatches: this.ambiguousMatches,
       activeTtlMs: this.activeTtlMs,

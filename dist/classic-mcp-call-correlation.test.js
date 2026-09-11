@@ -156,6 +156,48 @@ const uniqueTurn = activeTurns.resolveGatewayCall({ toolName: "blender_mcp" });
 assert.equal(uniqueTurn?.conversationId, "conversation-main-01");
 assert.equal(uniqueTurn?.source, "classic-active-turn-unique-tool-correlation");
 
+const deferredTraceTurns = new ClassicActiveTurnRegistry({
+  now: () => now,
+  activeTtlMs: 60_000,
+  postTurnGraceMs: 1_000,
+});
+deferredTraceTurns.noteTurn({
+  kind: "started",
+  requestId: "turn-deferred-trace",
+  runtimeKey: "main-01",
+  conversationId: "conversation-deferred-trace",
+  localFunctionNames: ["local.continue_in_work"],
+  turnTraceFingerprint: "3".repeat(64),
+  observedAtMs: now,
+});
+deferredTraceTurns.noteTurn({
+  kind: "finished",
+  requestId: "turn-deferred-trace",
+  runtimeKey: "main-01",
+  conversationId: "conversation-deferred-trace",
+  observedAtMs: now + 10,
+});
+const dynamicallyDisclosedTool = deferredTraceTurns.resolveGatewayCall({
+  toolName: "devspace_progress_report",
+  turnTraceFingerprint: "3".repeat(64),
+});
+assert.equal(
+  dynamicallyDisclosedTool?.conversationId,
+  "conversation-deferred-trace",
+  "an exact hashed turn trace must authorize a tool disclosed after the initial local_function_names snapshot",
+);
+assert.equal(dynamicallyDisclosedTool?.source, "classic-active-turn-post-finish-trace-correlation");
+assert.equal(
+  deferredTraceTurns.resolveGatewayCall({
+    toolName: "devspace_progress_report",
+    turnTraceFingerprint: "4".repeat(64),
+  }),
+  null,
+  "a mismatched trace must fail closed even when only one deferred turn is recent",
+);
+assert.equal(deferredTraceTurns.diagnostics().turnsWithTrace, 1);
+assert.equal(deferredTraceTurns.diagnostics().placeholderOnlyTurns, 1);
+
 const deferredTurns = new ClassicActiveTurnRegistry({
   now: () => now,
   activeTtlMs: 60_000,
@@ -260,6 +302,8 @@ console.log(JSON.stringify({
   boundedTemporalJoin: true,
   activeTurnTraceMatch: true,
   activeTurnUniqueToolMatch: true,
+  deferredToolExactTraceMatch: true,
+  deferredToolWrongTraceFailsClosed: true,
   activeTurnAmbiguityFailsClosed: true,
   delayedPostFinishCorrelation: true,
   completedTurnAmbiguityFailsClosed: true,

@@ -44,9 +44,10 @@ assert.match(callCorrelation, /entry\.localFunctionNames\.includes\(tool\)/, "ac
 assert.match(callCorrelation, /unique\.size !== 1/, "active-turn routing must fail closed when more than one conversation is eligible");
 assert.match(callCorrelation, /postTurnGraceMs/, "server-side MCP calls that arrive after browser transport completion require a bounded post-turn grace");
 assert.match(callCorrelation, /classic-active-turn-post-finish-unique-tool-correlation/, "post-finish correlation must remain explicit and diagnosable");
+assert.match(callCorrelation, /trace\s*\?\s*entry\.turnTraceFingerprint\s*===\s*trace\s*:\s*entry\.localFunctionNames\.includes\(tool\)/, "an exact hashed turn trace must support tools disclosed after the initial local function snapshot");
 assert.match(requestContext, /AsyncLocalStorage/, "request-scoped identity propagation must be concurrency-safe and must not use globals");
 assert.match(requestContext, /cross|current\(\)/i, "request context must expose only the active asynchronous call scope");
 assert.doesNotMatch(callCorrelation, /localStorage|querySelector|document\.|location\./, "call correlation must remain transport-only");
 assert.doesNotMatch(authority, /querySelector|document\.|location\.|Page\.reload|Page\.navigate/, "conversation authority registry must never depend on renderer state");
 
-console.log(JSON.stringify({ ok: true, gate: "classic-conversation-authority-static", nativeTransportOnly: true, nativeCallMcpCorrelation: true, activeTurnCorrelation: true, delayedPostTurnCorrelation: true, hashedTurnTraceOnly: true, canonicalArgumentsHashedOnly: true, ambiguityFailsClosed: true, persisted: true }));
+console.log(JSON.stringify({ ok: true, gate: "classic-conversation-authority-static", nativeTransportOnly: true, nativeCallMcpCorrelation: true, activeTurnCorrelation: true, delayedPostTurnCorrelation: true, deferredToolExactTraceCorrelation: true, hashedTurnTraceOnly: true, canonicalArgumentsHashedOnly: true, ambiguityFailsClosed: true, persisted: true }));
