@@ -98,6 +98,12 @@ function cleanToolNames(values) {
   )].slice(0, 256);
 }
 
+function isDeferredPlaceholderTurn(entry) {
+  const names = Array.isArray(entry?.localFunctionNames) ? entry.localFunctionNames : [];
+  return names.includes("local.continue_in_work")
+    && names.every((name) => name.startsWith("local."));
+}
+
 function cleanTraceFingerprint(value) {
   const text = cleanText(value, 64)?.toLowerCase();
   return text && /^[a-f0-9]{64}$/.test(text) ? text : null;
@@ -187,11 +193,17 @@ export class ClassicActiveTurnRegistry {
     const tool = cleanText(toolName, 220);
     if (!tool) return null;
     const trace = cleanTraceFingerprint(turnTraceFingerprint);
-    const candidates = [...this.active.values()].filter((entry) => (
+    const entries = [...this.active.values()];
+    let candidates = entries.filter((entry) => (
       trace
         ? entry.turnTraceFingerprint === trace
         : entry.localFunctionNames.includes(tool)
     ));
+    let deferredPlaceholder = false;
+    if (!trace && candidates.length === 0) {
+      candidates = entries.filter((entry) => isDeferredPlaceholderTurn(entry));
+      deferredPlaceholder = candidates.length > 0;
+    }
     const unique = new Map();
     for (const entry of candidates) {
       const ownerKey = `${entry.runtimeKey}:${entry.conversationId}`;
@@ -212,6 +224,10 @@ export class ClassicActiveTurnRegistry {
         ? postTurn
           ? "classic-active-turn-post-finish-trace-correlation"
           : "classic-active-turn-trace-correlation"
+        : deferredPlaceholder
+          ? postTurn
+            ? "classic-active-turn-post-finish-deferred-placeholder-correlation"
+            : "classic-active-turn-deferred-placeholder-correlation"
         : postTurn
           ? "classic-active-turn-post-finish-unique-tool-correlation"
           : "classic-active-turn-unique-tool-correlation"),
@@ -307,10 +323,7 @@ export class ClassicActiveTurnRegistry {
       trackedTurns: entries.length,
       waiters: this.waiters.size,
       turnsWithTrace: entries.filter((entry) => Boolean(entry.turnTraceFingerprint)).length,
-      placeholderOnlyTurns: entries.filter((entry) => (
-        entry.localFunctionNames.length > 0
-        && entry.localFunctionNames.every((name) => name.startsWith("local."))
-      )).length,
+      placeholderOnlyTurns: entries.filter((entry) => isDeferredPlaceholderTurn(entry)).length,
       waitersWithTrace: waiters.filter((waiter) => Boolean(waiter.turnTraceFingerprint)).length,
       recentResolved: this.recentResolved.length,
       ambiguousMatches: this.ambiguousMatches,

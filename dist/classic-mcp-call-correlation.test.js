@@ -198,6 +198,71 @@ assert.equal(
 assert.equal(deferredTraceTurns.diagnostics().turnsWithTrace, 1);
 assert.equal(deferredTraceTurns.diagnostics().placeholderOnlyTurns, 1);
 
+const deferredPlaceholderTurns = new ClassicActiveTurnRegistry({
+  now: () => now,
+  activeTtlMs: 60_000,
+  postTurnGraceMs: 1_000,
+});
+deferredPlaceholderTurns.noteTurn({
+  kind: "started",
+  requestId: "turn-deferred-placeholder",
+  runtimeKey: "main-01",
+  conversationId: "conversation-deferred-placeholder",
+  localFunctionNames: ["local.continue_in_work"],
+  observedAtMs: now,
+});
+deferredPlaceholderTurns.noteTurn({
+  kind: "finished",
+  requestId: "turn-deferred-placeholder",
+  runtimeKey: "main-01",
+  conversationId: "conversation-deferred-placeholder",
+  observedAtMs: now + 10,
+});
+const dynamicallyDisclosedWithoutTrace = deferredPlaceholderTurns.resolveGatewayCall({
+  toolName: "devspace_progress_report",
+});
+assert.equal(
+  dynamicallyDisclosedWithoutTrace?.conversationId,
+  "conversation-deferred-placeholder",
+  "a unique recent local.continue_in_work turn must own a later dynamically disclosed MCP call when the host omits turn trace headers",
+);
+assert.equal(
+  dynamicallyDisclosedWithoutTrace?.source,
+  "classic-active-turn-post-finish-deferred-placeholder-correlation",
+);
+
+const ambiguousDeferredPlaceholders = new ClassicActiveTurnRegistry({
+  now: () => now,
+  activeTtlMs: 60_000,
+  postTurnGraceMs: 1_000,
+});
+for (const [runtimeKey, conversationId, requestId, offset] of [
+  ["main-01", "conversation-placeholder-left", "placeholder-left", 0],
+  ["main-02", "conversation-placeholder-right", "placeholder-right", 1],
+]) {
+  ambiguousDeferredPlaceholders.noteTurn({
+    kind: "started",
+    requestId,
+    runtimeKey,
+    conversationId,
+    localFunctionNames: ["local.continue_in_work"],
+    observedAtMs: now + offset,
+  });
+  ambiguousDeferredPlaceholders.noteTurn({
+    kind: "finished",
+    requestId,
+    runtimeKey,
+    conversationId,
+    observedAtMs: now + 10 + offset,
+  });
+}
+assert.equal(
+  ambiguousDeferredPlaceholders.resolveGatewayCall({ toolName: "devspace_progress_report" }),
+  null,
+  "two deferred placeholder conversations must fail closed when neither trace nor offered tool name distinguishes them",
+);
+assert.equal(ambiguousDeferredPlaceholders.diagnostics().ambiguousMatches > 0, true);
+
 const deferredTurns = new ClassicActiveTurnRegistry({
   now: () => now,
   activeTtlMs: 60_000,
@@ -304,6 +369,8 @@ console.log(JSON.stringify({
   activeTurnUniqueToolMatch: true,
   deferredToolExactTraceMatch: true,
   deferredToolWrongTraceFailsClosed: true,
+  deferredPlaceholderUniqueOwnerMatch: true,
+  deferredPlaceholderAmbiguityFailsClosed: true,
   activeTurnAmbiguityFailsClosed: true,
   delayedPostFinishCorrelation: true,
   completedTurnAmbiguityFailsClosed: true,
