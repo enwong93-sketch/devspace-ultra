@@ -61,10 +61,17 @@ tracker.noteRequest({
     headers: {
       "x-oai-turn-trace-id": "turn-trace-secret-a",
       "x-openai-session": "session-secret-a",
+      traceparent: "00-0123456789abcdef000000000000002a-1111111111111111-01",
     },
   },
 });
-tracker.noteExtraInfo({ requestId: "r1", headers: { "x-openai-session": "session-secret-a" } });
+tracker.noteExtraInfo({
+  requestId: "r1",
+  headers: {
+    "x-openai-session": "session-secret-a",
+    "x-datadog-trace-id": "42",
+  },
+});
 assert.equal(identities.length, 1);
 assert.equal(identities[0].conversationId, "conversation-a");
 assert.match(identities[0].sessionFingerprint, /^[a-f0-9]{64}$/);
@@ -76,13 +83,18 @@ assert.equal(activeTurns[0].conversationId, "conversation-a");
 assert.deepEqual(activeTurns[0].localFunctionNames, ["blender_runtime", "blender_mcp"]);
 assert.match(activeTurns[0].turnTraceFingerprint, /^[a-f0-9]{64}$/);
 assert.match(activeTurns[0].sessionFingerprint, /^[a-f0-9]{64}$/);
+assert.equal(activeTurns[0].traceCorrelationFingerprints.length, 2);
+assert.equal(activeTurns[1].kind, "metadata");
+assert.deepEqual(activeTurns[1].traceCorrelationFingerprints, activeTurns[0].traceCorrelationFingerprints);
 assert.equal(JSON.stringify(activeTurns[0]).includes("turn-trace-secret-a"), false, "raw turn trace ids must never leave the parser");
 assert.equal(JSON.stringify(activeTurns[0]).includes("session-secret-a"), false, "raw session ids must never leave the active-turn parser");
+assert.equal(JSON.stringify(activeTurns).includes("0123456789abcdef000000000000002a"), false, "raw distributed trace ids must never leave the active-turn parser");
 
 tracker.noteResponse({ requestId: "r1", response: { url: "https://chatgpt.com/backend-api/f/conversation", status: 200 } });
 tracker.noteFinished({ requestId: "r1" });
 assert.deepEqual(events.slice(-2).map((item) => item.kind), ["response", "finished"]);
 assert.equal(activeTurns.at(-1).kind, "finished");
+assert.equal(activeTurns.at(-1).transportOnly, true);
 assert.equal(activeTurns.at(-1).requestId, "r1");
 assert.equal(tracker.pendingSize, 0, "finished native turn must leave no pending transport record");
 const delayedGatewayIdentity = delayedGatewayTurns.resolveGatewayCall({
@@ -94,12 +106,21 @@ assert.equal(
   "conversation-a",
   "the correlation layer must retain a finished browser turn long enough for the later server-side MCP call",
 );
-assert.equal(delayedGatewayIdentity?.source, "classic-active-turn-post-finish-session-correlation");
+assert.equal(delayedGatewayIdentity?.source, "classic-active-turn-post-transport-session-correlation");
 now += 1_100;
 assert.equal(delayedGatewayTurns.resolveGatewayCall({
   toolName: "blender_mcp",
   sessionFingerprintHint: activeTurns[0].sessionFingerprint,
 }), null);
+assert.equal(
+  delayedGatewayTurns.resolveGatewayCall({
+    toolName: "blender_mcp",
+    traceCorrelationFingerprints: activeTurns[0].traceCorrelationFingerprints,
+    sessionFingerprintHint: "f".repeat(64),
+  })?.conversationId,
+  "conversation-a",
+  "the exact distributed trace must survive the short legacy post-transport grace",
+);
 
 tracker.noteRequest({ requestId: "r2", request: { url: "https://chatgpt.com/backend-api/f/conversation", method: "POST", postData: JSON.stringify({ conversation_id: "conversation-b", model: "gpt-test" }), headers: {} } });
 tracker.noteFailure({ requestId: "r2", errorText: "net::ERR_FAILED", canceled: true, blockedReason: "other" });

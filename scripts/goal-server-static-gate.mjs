@@ -15,7 +15,9 @@ assert.match(source, /registerAppResource\(server, "DevSpace Goal Dock", GOAL_DO
 assert.match(source, /new URL\("\.\/ui\/goal-dock\.html", import\.meta\.url\)/);
 assert.match(source, /registerAppResource\(server, "DevSpace Goal Continuation Relay", GOAL_RELAY_URI,/);
 assert.match(source, /new URL\("\.\/ui\/goal-continuation-relay\.html", import\.meta\.url\)/);
-assert.match(source, /const resolveCapabilityConversationAuthority = async \(extra\) => \{[\s\S]*conversationAuthority\.resolveMcpExtra\(extra\)/, "production Goal and capability tools must resolve conversation identity only through the native authority registry");
+assert.match(source, /const resolveCapabilityConversationAuthority = async \(extra\) => \{[\s\S]*requestContext\?\.capabilityAuthority/, "production Goal and capability tools must consume only request-scoped verified conversation authority");
+assert.doesNotMatch(source, /const resolveCapabilityConversationAuthority = async \(extra\) => \{[\s\S]*conversationAuthority\.resolveMcpExtra\(extra\)/, "Goal tools must not revive stale durable session authority inside the handler");
+assert.match(source, /const traceCorrelationFingerprints = requestTraceCorrelationFingerprints\(req\?\.headers \|\| \{\}\)/, "the Core HTTP request must establish exact distributed-trace authority before entering Goal tools");
 const progressResolverStart = source.indexOf("const resolveProgressConversationAuthority = async (extra) =>");
 const progressResolverEnd = source.indexOf("const resolveConversationAuthority = resolveCapabilityConversationAuthority", progressResolverStart);
 assert.ok(progressResolverStart >= 0 && progressResolverEnd > progressResolverStart, "progress authority resolver must exist");

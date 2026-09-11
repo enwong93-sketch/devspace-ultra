@@ -17,6 +17,7 @@ const planStatePath = join(dir, "plans.json");
 const progressStatePath = join(dir, "progress.json");
 let now = Date.parse("2026-09-11T06:00:00.000Z");
 const calls = [];
+const settled = [];
 
 const pages = new Map([
   ["conversation-running", {
@@ -224,6 +225,7 @@ const supervisor = new ConversationProgressLivenessSupervisor({
   continueMs: 20 * 60_000,
   pollMs: 1_000,
   now: () => now,
+  onConversationSettled: (event) => settled.push(event),
 });
 await supervisor.start({ schedule: false });
 
@@ -283,6 +285,8 @@ assert.equal(finishPendingRecord.armed, true,
 assert.equal(finishPendingRecord.turnState, "completion-pending");
 assert.equal(cancelledRecord.armed, false, "an explicit user cancellation must not be auto-rescued");
 assert.equal(cancelledRecord.turnState, "cancelled");
+assert.equal(settled.some((event) => event.conversationId === "conversation-complete" && event.turnState === "completed"), true);
+assert.equal(settled.some((event) => event.conversationId === "conversation-cancelled" && event.turnState === "cancelled"), true);
 
 now += 10 * 60_000 + 3_000;
 await supervisor.tick();
@@ -566,6 +570,19 @@ assert.equal(locatedOnRuntime03.locatorOnly, true);
 assert.equal(locatedOnRuntime03.runtimeBinding, false);
 assert.equal(locatedOnRuntime03.normalCompletion, false);
 assert.equal(locatedOnRuntime03.incompleteUserTurn, true);
+const exactRuntime03 = await runtime03Adapter.findAtRuntime({
+  conversationId: "conversation-a",
+  runtimeKey: "main-03",
+});
+assert.equal(exactRuntime03.exact, true);
+assert.equal(exactRuntime03.locatedRuntimeKey, "main-03");
+assert.equal(exactRuntime03.runtimeBinding, false);
+const wrongRuntime = await runtime03Adapter.findAtRuntime({
+  conversationId: "conversation-a",
+  runtimeKey: "main-02",
+});
+assert.equal(wrongRuntime.exact, false);
+assert.equal(wrongRuntime.state, "conversation-not-in-runtime");
 assert.equal(typeof runtime03Adapter.sendReminder, "undefined", "the ten-minute reminder API must not exist");
 assert.equal(typeof runtime03Adapter.projectReminder, "undefined", "the ten-minute reminder banner API must not exist");
 
@@ -584,6 +601,7 @@ console.log(JSON.stringify({
   tenMinuteSyntheticUserTurn: false,
   twentyMinuteInterruptedTurnRescueOnly: true,
   normalCompletionDisarms: true,
+  completionRevokesActiveTurnAuthority: true,
   transportFinishRequiresPageCompletion: true,
   cancelledTurnDisarms: true,
   oneRescuePerInterruptionEpisode: true,

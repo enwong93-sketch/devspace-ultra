@@ -11,6 +11,8 @@ const summary = summarizeMcpCorrelationRequest({
     "mcp-session-id": "backend-session-a",
     "x-devspace-client-session-fingerprint": "a".repeat(64),
     "x-oai-turn-trace-id": "opaque-turn-trace",
+    traceparent: "00-0123456789abcdef000000000000002a-1111111111111111-01",
+    "x-datadog-trace-id": "42",
   },
   body: {
     jsonrpc: "2.0",
@@ -35,6 +37,8 @@ assert.equal(summary.method, "tools/call");
 assert.equal(summary.toolName, "devspace_progress_report");
 assert.equal(summary.clientSessionFingerprint, "a".repeat(64));
 assert.equal(summary.turnTraceFingerprint, "b".repeat(64));
+assert.equal(summary.traceCorrelationFingerprints.length, 2);
+assert.equal(summary.traceCorrelationFingerprints.every((value) => /^[a-f0-9]{64}$/.test(value)), true);
 assert.deepEqual(summary.argumentKeys, ["message", "nested"]);
 assert.deepEqual(summary.metaKeys.sort(), ["openai/session", "request_id", "turn_id"].sort());
 assert.equal(summary.correlationScalarPaths.some((item) => item.path === "body.params._meta.request_id"), true);
@@ -46,6 +50,7 @@ for (const forbidden of [
   "opaque-openai-session",
   "opaque-turn-trace",
   "backend-session-a",
+  "0123456789abcdef000000000000002a",
 ]) {
   assert.equal(encoded.includes(forbidden), false, `diagnostics must not persist ${forbidden}`);
 }

@@ -4,6 +4,7 @@ import { sessionFingerprintFromClassicRequest, turnTraceFingerprintFromClassicRe
 import { extractClassicNativeUsageEvidence } from "./classic-native-usage-evidence.js";
 import { defaultMainDebugPorts } from "./goal-host-bridge.js";
 import { runtimeKeyForPort } from "./classic-stream-recovery-cdp.js";
+import { requestTraceCorrelationFingerprints } from "./request-trace-correlation.js";
 
 const DEFAULT_CONNECTION_POLL_MS = 15_000;
 const DEFAULT_PROBE_TIMEOUT_MS = 700;
@@ -643,6 +644,7 @@ export function parseClassicTurnRequest(request = {}) {
     conversationId: typeof body?.conversation_id === "string" ? body.conversation_id : null,
     sessionFingerprint: sessionFingerprintFromClassicRequest(request),
     turnTraceFingerprint: turnTraceFingerprintFromClassicRequest(request),
+    traceCorrelationFingerprints: requestTraceCorrelationFingerprints(request?.headers || {}),
     localFunctionNames,
     estimatedInputTokens: estimateMessageTokens(body?.messages),
   };

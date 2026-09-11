@@ -210,6 +210,45 @@ export class ConversationProgressLivenessCdpAdapter {
     return await this.#inspectMatch(matches[0], id);
   }
 
+  async findAtRuntime({ conversationId, runtimeKey } = {}) {
+    const id = cleanConversationId(conversationId);
+    const key = cleanRuntimeKey(runtimeKey);
+    if (!id || !key) return { exact: false, state: "invalid-conversation-or-runtime" };
+    const port = runtimePort(key);
+    try {
+      const targets = await this.listTargets(port);
+      const matches = (Array.isArray(targets) ? targets : []).filter((target) => (
+        target?.type === "page"
+        && target?.webSocketDebuggerUrl
+        && conversationIdFromUrl(target.url) === id
+      ));
+      if (matches.length !== 1) {
+        return {
+          exact: false,
+          ambiguous: matches.length > 1,
+          state: matches.length > 1 ? "duplicate-conversation-pages-in-runtime" : "conversation-not-in-runtime",
+          conversationId: id,
+          runtimeKey: key,
+          port,
+          matchCount: matches.length,
+          locatorOnly: true,
+          runtimeBinding: false,
+        };
+      }
+      return await this.#inspectMatch({ runtimeKey: key, port, target: matches[0] }, id);
+    } catch {
+      return {
+        exact: false,
+        state: "runtime-unavailable",
+        conversationId: id,
+        runtimeKey: key,
+        port,
+        locatorOnly: true,
+        runtimeBinding: false,
+      };
+    }
+  }
+
   // Compatibility alias. runtimeKey is deliberately ignored: Runtime is a
   // locator, never the durable progress identity or authorization key.
   async inspect({ conversationId } = {}) {

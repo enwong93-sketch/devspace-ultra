@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { createConnection, createServer as createNetServer } from "node:net";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -144,8 +145,21 @@ try {
     windowsHide: true,
     env: {
       ...process.env,
+      HOST: "127.0.0.1",
+      PORT: String(port),
       DEVSPACE_CONFIG_DIR: configDir,
       DEVSPACE_STATE_DIR: stateDir,
+      DEVSPACE_PUBLIC_BASE_URL: `http://127.0.0.1:${port}`,
+      DEVSPACE_OAUTH_OWNER_TOKEN: String(files.auth?.ownerToken || randomUUID()),
+      DEVSPACE_ALLOWED_ROOTS: (Array.isArray(config.allowedRoots) && config.allowedRoots.length
+        ? config.allowedRoots
+        : [root]).join(","),
+      DEVSPACE_ALLOWED_HOSTS: "127.0.0.1,localhost,::1",
+      DEVSPACE_PASSIVE_CORE: "true",
+      DEVSPACE_AUTO_COMPACT: "false",
+      DEVSPACE_GOAL_ROUND_RECOVERY: "false",
+      DEVSPACE_CLASSIC_HOST_OVERLAY: "false",
+      DEVSPACE_CONTEXT_GUARDIAN: "false",
     },
     stdio: ["ignore", "pipe", "pipe"],
   });

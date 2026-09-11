@@ -48,58 +48,57 @@ function walkObjects(value, visit, seen = new Set()) {
   for (const item of Object.values(value)) walkObjects(item, visit, seen);
 }
 
-function unique(values) {
-  return [...new Set(values.filter(Boolean))];
+function runtimePort(runtimeKey) {
+  const match = String(runtimeKey || "").trim().toLowerCase().match(/^main-(\d{2})$/);
+  if (!match) fail(`Invalid Main runtime key: ${runtimeKey}`);
+  const number = Number(match[1]);
+  if (!Number.isInteger(number) || number < 1 || number > 99) fail(`Invalid Main runtime key: ${runtimeKey}`);
+  return number === 1 ? 9721 : 9730 + number;
 }
 
-function resolveConversationId(authorityState, runtimeKey) {
+async function resolveLiveConversation(runtimeKey, expectedConversationId = null) {
+  const port = runtimePort(runtimeKey);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 2_000);
+  timer.unref?.();
+  let targets;
+  try {
+    const response = await fetch(`http://127.0.0.1:${port}/json/list`, { cache: "no-store", signal: controller.signal });
+    if (!response.ok) fail(`${runtimeKey} DevTools endpoint returned HTTP ${response.status}.`);
+    targets = await response.json();
+  } finally {
+    clearTimeout(timer);
+  }
+  const pages = (Array.isArray(targets) ? targets : [])
+    .filter((target) => target?.type === "page" && /chatgpt\.com/i.test(String(target?.url || "")));
+  if (pages.length !== 1) fail(`${runtimeKey} must expose exactly one ChatGPT page; observed ${pages.length}.`);
+  const url = String(pages[0].url || "");
+  const conversationId = new URL(url).pathname.match(/\/c\/([^/?#]+)/)?.[1] || null;
+  if (!conversationId) fail(`${runtimeKey} is not displaying a ChatGPT conversation.`);
+  const expected = String(expectedConversationId || "").trim();
+  if (expected && expected !== conversationId) {
+    fail(`${runtimeKey} displays conversation ${conversationId}, not the expected conversation ${expected}.`);
+  }
+  return { conversationId, runtimeKey, port, url };
+}
+
+function authorityMentionsConversation(authorityState, runtimeKey, conversationId) {
   const requestedKey = runtimeKey.toLowerCase();
   const sessions = Array.isArray(authorityState?.sessions) ? authorityState.sessions : [];
-  const candidates = sessions
-    .filter((entry) => entry?.ambiguous !== true)
-    .filter((entry) => {
-      const runtimeKeys = Array.isArray(entry?.runtimeKeys)
-        ? entry.runtimeKeys
-        : entry?.runtimeKey != null
-          ? [entry.runtimeKey]
-          : [];
-      return runtimeKeys.some((value) => String(value || "").toLowerCase() === requestedKey);
-    })
-    .map((entry) => ({
-      conversationIds: unique((Array.isArray(entry?.conversationIds)
-        ? entry.conversationIds
-        : entry?.conversationId != null
-          ? [entry.conversationId]
-          : []).map((value) => String(value || "").trim())),
-      updatedAtMs: Date.parse(entry?.updatedAt || "") || 0,
-    }))
-    .filter((entry) => entry.conversationIds.length === 1)
-    .sort((a, b) => b.updatedAtMs - a.updatedAtMs);
-  if (candidates.length) return candidates[0].conversationIds[0];
-
-  const fallbackMatches = [];
-  walkObjects(authorityState, (entry) => {
-    const runtimeKeys = Array.isArray(entry.runtimeKeys)
+  return sessions.some((entry) => {
+    const runtimeKeys = Array.isArray(entry?.runtimeKeys)
       ? entry.runtimeKeys
-      : entry.runtimeKey != null
+      : entry?.runtimeKey != null
         ? [entry.runtimeKey]
         : [];
-    if (!runtimeKeys.some((value) => String(value || "").toLowerCase() === requestedKey)) return;
+    if (!runtimeKeys.some((value) => String(value || "").toLowerCase() === requestedKey)) return false;
     const conversationIds = Array.isArray(entry.conversationIds)
       ? entry.conversationIds
       : entry.conversationId != null
         ? [entry.conversationId]
         : [];
-    for (const value of conversationIds) {
-      const conversationId = String(value || "").trim();
-      if (conversationId) fallbackMatches.push(conversationId);
-    }
+    return conversationIds.some((value) => String(value || "").trim() === conversationId);
   });
-  const ids = unique(fallbackMatches);
-  if (ids.length !== 1) {
-    fail(`Expected exactly one authoritative conversation for ${runtimeKey}; observed ${ids.length}.`);
-  }
-  return ids[0];
 }
 
 function resolveRuntime(runtimeState, runtimeId) {
@@ -222,7 +221,9 @@ const files = loadDevspaceFiles();
 const stateDir = String(files.config?.stableGatewayStateDir || files.config?.stateDir || "").trim();
 if (!stateDir) fail("DevSpace state directory is unavailable.");
 const authorityState = await readJson(join(stateDir, "classic-conversation-authority.json"));
-const conversationId = resolveConversationId(authorityState, runtimeKey);
+const liveConversation = await resolveLiveConversation(runtimeKey, flags["expected-conversation-id"]);
+const conversationId = liveConversation.conversationId;
+const authorityStateCurrent = authorityMentionsConversation(authorityState, runtimeKey, conversationId);
 
 if (command === "progress") {
   const message = flags["message-file"]
@@ -246,93 +247,100 @@ if (command === "progress") {
     action: "progress",
     runtimeKey,
     conversationId,
+    locatedPort: liveConversation.port,
+    authorityStateCurrent,
     message: cleanMessage,
     messageCount: messages.filter((item) => item?.conversationId === conversationId).length,
     updatedAt: snapshot.updatedAt || accepted?.at || null,
   }));
-  process.exit(0);
-}
+} else {
+  if (!runtimeId) fail(`${command} requires --runtime-id.`);
+  const runtimeState = await readJson(join(stateDir, "blender-runtimes.json"));
+  const runtime = resolveRuntime(runtimeState, runtimeId);
+  if (String(runtime.ownerConversationId || "") !== conversationId) {
+    fail(`Blender runtime ${runtimeId} belongs to a different ChatGPT conversation.`);
+  }
+  const online = await portOnline(runtime.port);
+  if (!online) fail(`Blender runtime ${runtimeId} is not listening on 127.0.0.1:${runtime.port}.`);
 
-if (!runtimeId) fail(`${command} requires --runtime-id.`);
-const runtimeState = await readJson(join(stateDir, "blender-runtimes.json"));
-const runtime = resolveRuntime(runtimeState, runtimeId);
-if (String(runtime.ownerConversationId || "") !== conversationId) {
-  fail(`Blender runtime ${runtimeId} belongs to a different ChatGPT conversation.`);
-}
-const online = await portOnline(runtime.port);
-if (!online) fail(`Blender runtime ${runtimeId} is not listening on 127.0.0.1:${runtime.port}.`);
-
-const connection = await connectBlenderRuntime(runtime, conversationId);
-try {
-  if (command === "status") {
-    const alive = processAlive(runtime.processId);
-    console.log(JSON.stringify({
-      ok: alive,
-      action: "status",
-      runtimeKey,
-      conversationId,
-      runtime: connection.status?.runtime || publicRuntime(runtime, true),
-    }));
-    process.exit(alive ? 0 : 2);
-  }
-  const listed = await connection.capabilityRuntime.listMcpTools(
-    "blender-local",
-    "blender",
-    connection.instanceToken,
-    conversationId,
-  );
-  const tools = Array.isArray(listed?.tools) ? listed.tools : [];
-  if (command === "list") {
-    console.log(JSON.stringify({
-      ok: true,
-      action: "list",
-      runtimeKey,
-      conversationId,
-      runtime: publicRuntime(runtime, true),
-      executionBoundary: "DevSpace CapabilityRuntime",
-      toolCount: tools.length,
-      tools,
-    }));
-  }
-  else {
-    if (command !== "call") fail(`Unsupported command: ${command}`);
-    const toolName = String(flags.tool || "").trim();
-    if (!toolName) fail("call requires --tool.");
-    if (!tools.some((tool) => tool?.name === toolName)) {
-      fail(`Blender MCP tool ${toolName} is not present in the live ${tools.length}-tool catalog.`);
+  const connection = await connectBlenderRuntime(runtime, conversationId);
+  try {
+    if (command === "status") {
+      const alive = processAlive(runtime.processId);
+      console.log(JSON.stringify({
+        ok: alive,
+        action: "status",
+        runtimeKey,
+        conversationId,
+        locatedPort: liveConversation.port,
+        authorityStateCurrent,
+        runtime: connection.status?.runtime || publicRuntime(runtime, true),
+      }));
+      process.exitCode = alive ? 0 : 2;
+    } else {
+      const listed = await connection.capabilityRuntime.listMcpTools(
+        "blender-local",
+        "blender",
+        connection.instanceToken,
+        conversationId,
+      );
+      const tools = Array.isArray(listed?.tools) ? listed.tools : [];
+      if (command === "list") {
+        console.log(JSON.stringify({
+          ok: true,
+          action: "list",
+          runtimeKey,
+          conversationId,
+          locatedPort: liveConversation.port,
+          authorityStateCurrent,
+          runtime: publicRuntime(runtime, true),
+          executionBoundary: "DevSpace CapabilityRuntime",
+          toolCount: tools.length,
+          tools,
+        }));
+      } else {
+        if (command !== "call") fail(`Unsupported command: ${command}`);
+        const toolName = String(flags.tool || "").trim();
+        if (!toolName) fail("call requires --tool.");
+        if (!tools.some((tool) => tool?.name === toolName)) {
+          fail(`Blender MCP tool ${toolName} is not present in the live ${tools.length}-tool catalog.`);
+        }
+        let toolArguments = {};
+        if (flags["args-file"]) toolArguments = await readJson(String(flags["args-file"]));
+        else if (flags["args-json"]) toolArguments = JSON.parse(String(flags["args-json"]));
+        const result = await connection.capabilityRuntime.call({
+          pluginId: "blender-local",
+          kind: "mcp",
+          serverId: "blender",
+          toolName,
+          arguments: toolArguments,
+          instanceToken: connection.instanceToken,
+        }, { ownerConversationId: conversationId });
+        if (mcpToolFailed(result)) {
+          const content = Array.isArray(result?.result?.content) ? result.result.content : [];
+          const detail = content.map((item) => item?.text).filter(Boolean).join("\n").slice(0, 4000);
+          fail(`Blender MCP tool ${toolName} returned an error.${detail ? ` ${detail}` : ""}`);
+        }
+        await connection.blenderRuntimeManager.observeMcpResult(
+          runtimeId,
+          conversationId,
+          result,
+        ).catch(() => null);
+        console.log(JSON.stringify({
+          ok: true,
+          action: "call",
+          runtimeKey,
+          conversationId,
+          locatedPort: liveConversation.port,
+          authorityStateCurrent,
+          runtime: publicRuntime(runtime, true),
+          toolName,
+          result,
+        }));
+      }
     }
-    let toolArguments = {};
-    if (flags["args-file"]) toolArguments = await readJson(String(flags["args-file"]));
-    else if (flags["args-json"]) toolArguments = JSON.parse(String(flags["args-json"]));
-    const result = await connection.capabilityRuntime.call({
-      pluginId: "blender-local",
-      kind: "mcp",
-      serverId: "blender",
-      toolName,
-      arguments: toolArguments,
-      instanceToken: connection.instanceToken,
-    }, { ownerConversationId: conversationId });
-    if (mcpToolFailed(result)) {
-      const content = Array.isArray(result?.result?.content) ? result.result.content : [];
-      const detail = content.map((item) => item?.text).filter(Boolean).join("\n").slice(0, 4000);
-      fail(`Blender MCP tool ${toolName} returned an error.${detail ? ` ${detail}` : ""}`);
-    }
-    await connection.blenderRuntimeManager.observeMcpResult(
-      runtimeId,
-      conversationId,
-      result,
-    ).catch(() => null);
-    console.log(JSON.stringify({
-      ok: true,
-      action: "call",
-      runtimeKey,
-      conversationId,
-      runtime: publicRuntime(runtime, true),
-      toolName,
-      result,
-    }));
+  } finally {
+    await connection.blenderRuntimeManager.close().catch(() => {});
+    await connection.capabilityRuntime.close().catch(() => {});
   }
-} finally {
-  await connection.blenderRuntimeManager.close().catch(() => {});
-  await connection.capabilityRuntime.close().catch(() => {});
 }

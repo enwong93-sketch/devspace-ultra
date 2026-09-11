@@ -167,6 +167,22 @@ const uniqueTurn = activeTurns.resolveGatewayCall({ toolName: "blender_mcp", run
 assert.equal(uniqueTurn?.conversationId, "conversation-main-01");
 assert.equal(uniqueTurn?.source, "classic-active-turn-unique-tool-correlation");
 
+assert.equal(activeTurns.completeConversation("conversation-main-01"), 1);
+assert.equal(
+  activeTurns.resolveGatewayCall({ toolName: "blender_mcp", runtimeKeyHint: "main-01" }),
+  null,
+  "normal completion must revoke every active-turn authority entry for that exact conversation",
+);
+assert.equal(
+  activeTurns.resolveGatewayCall({
+    toolName: "devspace_progress_report",
+    sessionFingerprintHint: "b".repeat(64),
+  })?.conversationId,
+  "conversation-main-02",
+  "revoking one conversation must not remove another conversation's authority",
+);
+assert.equal(activeTurns.completeConversation("conversation-not-present"), 0);
+
 const sessionScopedProgress = activeTurns.resolveGatewayCall({
   toolName: "devspace_progress_report",
   sessionFingerprintHint: "b".repeat(64),
@@ -181,6 +197,91 @@ assert.equal(
   null,
   "a request-owned MCP session fingerprint may not match another conversation",
 );
+
+const distributedTraceTurns = new ClassicActiveTurnRegistry({
+  now: () => now,
+  activeTtlMs: 60_000,
+  postTurnGraceMs: 1_000,
+});
+distributedTraceTurns.noteTurn({
+  kind: "started",
+  requestId: "trace-left",
+  runtimeKey: "main-01",
+  conversationId: "conversation-trace-left",
+  localFunctionNames: ["local.continue_in_work"],
+  sessionFingerprint: "1".repeat(64),
+  traceCorrelationFingerprints: ["e".repeat(64)],
+  observedAtMs: now,
+});
+distributedTraceTurns.noteTurn({
+  kind: "started",
+  requestId: "trace-right",
+  runtimeKey: "main-02",
+  conversationId: "conversation-trace-right",
+  localFunctionNames: ["local.continue_in_work"],
+  sessionFingerprint: "2".repeat(64),
+  traceCorrelationFingerprints: ["f".repeat(64)],
+  observedAtMs: now + 1,
+});
+const requestTraceMatch = distributedTraceTurns.resolveGatewayCall({
+  toolName: "devspace_progress_report",
+  traceCorrelationFingerprints: ["e".repeat(64)],
+  sessionFingerprintHint: "9".repeat(64),
+});
+assert.equal(requestTraceMatch?.conversationId, "conversation-trace-left");
+assert.equal(requestTraceMatch?.source, "classic-active-turn-request-trace-correlation");
+distributedTraceTurns.noteTurn({
+  kind: "finished",
+  transportOnly: true,
+  requestId: "trace-left",
+  runtimeKey: "main-01",
+  conversationId: "conversation-trace-left",
+  observedAtMs: now + 10,
+});
+now += 2_000;
+assert.equal(
+  distributedTraceTurns.resolveGatewayCall({
+    toolName: "devspace_progress_report",
+    traceCorrelationFingerprints: ["e".repeat(64)],
+  })?.conversationId,
+  "conversation-trace-left",
+  "an exact distributed trace remains valid after the upload transport finishes",
+);
+assert.equal(
+  distributedTraceTurns.resolveGatewayCall({
+    toolName: "devspace_progress_report",
+    runtimeKeyHint: "main-01",
+  }),
+  null,
+  "legacy runtime/tool fallback must expire shortly after transport finish",
+);
+assert.equal(distributedTraceTurns.diagnostics().transportFinishedTurns, 1);
+assert.equal(distributedTraceTurns.diagnostics().turnsWithRequestTrace, 2);
+
+const ambiguousDistributedTrace = new ClassicActiveTurnRegistry({ now: () => now });
+for (const [runtimeKey, conversationId, requestId] of [
+  ["main-01", "conversation-trace-a", "trace-a"],
+  ["main-02", "conversation-trace-b", "trace-b"],
+]) {
+  ambiguousDistributedTrace.noteTurn({
+    kind: "started",
+    runtimeKey,
+    conversationId,
+    requestId,
+    localFunctionNames: ["devspace_progress_report"],
+    traceCorrelationFingerprints: ["a".repeat(64)],
+    observedAtMs: now,
+  });
+}
+assert.equal(
+  ambiguousDistributedTrace.resolveGatewayCall({
+    toolName: "devspace_progress_report",
+    traceCorrelationFingerprints: ["a".repeat(64)],
+  }),
+  null,
+  "a distributed trace observed in two conversations must fail closed",
+);
+assert.equal(ambiguousDistributedTrace.diagnostics().ambiguousMatches > 0, true);
 
 const reusedSessionTurns = new ClassicActiveTurnRegistry({ now: () => now });
 for (const [runtimeKey, conversationId, requestId, offset] of [
@@ -467,5 +568,6 @@ console.log(JSON.stringify({
   delayedPostFinishCorrelation: true,
   completedTurnAmbiguityFailsClosed: true,
   failedTurnRevokesCorrelation: true,
+  completedConversationRevokesAllAuthority: true,
   postTurnGraceExpires: true,
 }));

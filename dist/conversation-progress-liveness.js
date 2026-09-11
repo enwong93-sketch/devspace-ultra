@@ -148,6 +148,7 @@ export class ConversationProgressLivenessSupervisor {
     pollMs = DEFAULT_PROGRESS_POLL_MS,
     armWindowMs = DEFAULT_PROGRESS_ARM_WINDOW_MS,
     maxContinueAttempts = DEFAULT_PROGRESS_MAX_CONTINUES,
+    onConversationSettled = null,
     now = () => Date.now(),
     setTimer = setTimeout,
     clearTimer = clearTimeout,
@@ -173,6 +174,7 @@ export class ConversationProgressLivenessSupervisor {
     this.maxContinueAttempts = 1;
     if (Number(maxContinueAttempts) === 0) this.maxContinueAttempts = 0;
     this.now = now;
+    this.onConversationSettled = typeof onConversationSettled === "function" ? onConversationSettled : null;
     this.setTimer = setTimer;
     this.clearTimer = clearTimer;
     this.records = new Map();
@@ -561,6 +563,14 @@ export class ConversationProgressLivenessSupervisor {
     record.uiCleanupPending = true;
     record.lastDispatchState = dispatchState;
     record.updatedAt = new Date(this.now()).toISOString();
+    try {
+      this.onConversationSettled?.({
+        conversationId: record.conversationId,
+        turnState,
+        observedAt: at,
+        dispatchState,
+      });
+    } catch {}
   }
 
   async #persist() {

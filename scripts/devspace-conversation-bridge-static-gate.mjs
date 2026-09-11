@@ -10,6 +10,9 @@ const [bridge, blenderRuntime, agents, packageText] = await Promise.all([
 const packageJson = JSON.parse(packageText);
 
 assert.match(bridge, /classic-conversation-authority\.json/);
+assert.match(bridge, /\/json\/list/);
+assert.match(bridge, /expected-conversation-id/);
+assert.match(bridge, /resolveLiveConversation/);
 assert.match(bridge, /runtimeKeys/);
 assert.match(bridge, /conversationIds/);
 assert.match(bridge, /belongs to a different ChatGPT conversation/);
@@ -22,6 +25,8 @@ assert.doesNotMatch(bridge, /createStableGatewayHumanProgress/);
 assert.match(bridge, /mcpToolFailed/);
 assert.doesNotMatch(bridge, /process\.kill\([^,]+,\s*["']SIG(?:TERM|KILL|INT)/i);
 assert.doesNotMatch(bridge, /spawn\s*\(/);
+assert.doesNotMatch(bridge, /\.sort\(\(a, b\) => b\.updatedAtMs - a\.updatedAtMs\)/,
+  "the compatibility bridge must never select a stale conversation merely because it is the newest authority row for a Runtime");
 
 assert.match(blenderRuntime, /instanceId:\s*runtime\.runtimeId/);
 assert.match(blenderRuntime, /BLENDER_MCP_HOST:\s*LOOPBACK/);

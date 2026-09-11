@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { requestTraceCorrelationFingerprints } from "./request-trace-correlation.js";
 
 const DEFAULT_MAX_RECORDS = 24;
 const MAX_NAMES = 120;
@@ -122,6 +123,7 @@ export function summarizeMcpCorrelationRequest({
     mcpSessionIdHash: digest(mcpSessionId),
     clientSessionFingerprint: cleanFingerprint(clientSessionFingerprint),
     turnTraceFingerprint: cleanFingerprint(turnTraceFingerprint),
+    traceCorrelationFingerprints: requestTraceCorrelationFingerprints(normalized),
     headerNames,
     correlationHeaders,
     bodyKeys: safeKeys(body),
