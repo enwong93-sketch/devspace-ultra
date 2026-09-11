@@ -109,6 +109,10 @@ function cleanTraceFingerprint(value) {
   return text && /^[a-f0-9]{64}$/.test(text) ? text : null;
 }
 
+function cleanSessionFingerprint(value) {
+  return cleanTraceFingerprint(value);
+}
+
 function cleanRuntimeKey(value) {
   return cleanText(value, 80);
 }
@@ -176,6 +180,7 @@ export class ClassicActiveTurnRegistry {
       conversationId,
       localFunctionNames: cleanToolNames(input?.localFunctionNames),
       turnTraceFingerprint: cleanTraceFingerprint(input?.turnTraceFingerprint),
+      sessionFingerprint: cleanSessionFingerprint(input?.sessionFingerprint),
       startedAtMs: Number.isFinite(Number(input?.observedAtMs))
         ? Number(input.observedAtMs)
         : this.now(),
@@ -188,19 +193,21 @@ export class ClassicActiveTurnRegistry {
     return activeTurnIdentity(entry, "classic-active-turn-start");
   }
 
-  resolveGatewayCall({ toolName, turnTraceFingerprint = null, runtimeKeyHint = null } = {}) {
+  resolveGatewayCall({ toolName, turnTraceFingerprint = null, sessionFingerprintHint = null, runtimeKeyHint = null } = {}) {
     this.prune();
     const tool = cleanText(toolName, 220);
     if (!tool) return null;
     const trace = cleanTraceFingerprint(turnTraceFingerprint);
+    const sessionHint = cleanSessionFingerprint(sessionFingerprintHint);
     const runtimeHint = cleanRuntimeKey(runtimeKeyHint);
     // Tool-name uniqueness across browser windows is not conversation
     // authority. Without an exact hashed turn trace or a runtime key already
     // derived from the request's own session, fail closed rather than allowing
     // one Main's deferred tool call to claim another Main's conversation.
-    if (!trace && !runtimeHint) return null;
+    if (!trace && !sessionHint && !runtimeHint) return null;
     const entries = [...this.active.values()].filter((entry) => (
-      !runtimeHint || entry.runtimeKey === runtimeHint
+      (!runtimeHint || entry.runtimeKey === runtimeHint)
+      && (!sessionHint || entry.sessionFingerprint === sessionHint)
     ));
     let candidates = entries.filter((entry) => (
       trace
@@ -208,7 +215,7 @@ export class ClassicActiveTurnRegistry {
         : entry.localFunctionNames.includes(tool)
     ));
     let deferredPlaceholder = false;
-    if (!trace && runtimeHint && candidates.length === 0) {
+    if (!trace && (sessionHint || runtimeHint) && candidates.length === 0) {
       candidates = entries.filter((entry) => isDeferredPlaceholderTurn(entry));
       deferredPlaceholder = candidates.length > 0;
     }
@@ -232,6 +239,10 @@ export class ClassicActiveTurnRegistry {
         ? postTurn
           ? "classic-active-turn-post-finish-trace-correlation"
           : "classic-active-turn-trace-correlation"
+        : sessionHint
+          ? postTurn
+            ? "classic-active-turn-post-finish-session-correlation"
+            : "classic-active-turn-session-correlation"
         : deferredPlaceholder
           ? postTurn
             ? "classic-active-turn-post-finish-deferred-placeholder-correlation"
@@ -246,8 +257,8 @@ export class ClassicActiveTurnRegistry {
     return identity;
   }
 
-  waitForIdentity({ toolName, turnTraceFingerprint = null, runtimeKeyHint = null, signal } = {}) {
-    const immediate = this.resolveGatewayCall({ toolName, turnTraceFingerprint, runtimeKeyHint });
+  waitForIdentity({ toolName, turnTraceFingerprint = null, sessionFingerprintHint = null, runtimeKeyHint = null, signal } = {}) {
+    const immediate = this.resolveGatewayCall({ toolName, turnTraceFingerprint, sessionFingerprintHint, runtimeKeyHint });
     if (immediate) return Promise.resolve(immediate);
     const tool = cleanText(toolName, 220);
     if (!tool) return Promise.resolve(null);
@@ -267,6 +278,7 @@ export class ClassicActiveTurnRegistry {
     this.waiters.set(waiterId, {
       toolName: tool,
       turnTraceFingerprint: cleanTraceFingerprint(turnTraceFingerprint),
+      sessionFingerprintHint: cleanSessionFingerprint(sessionFingerprintHint),
       runtimeKeyHint: cleanRuntimeKey(runtimeKeyHint),
       createdAtMs: this.now(),
       resolve: (value) => {
@@ -332,8 +344,10 @@ export class ClassicActiveTurnRegistry {
       trackedTurns: entries.length,
       waiters: this.waiters.size,
       turnsWithTrace: entries.filter((entry) => Boolean(entry.turnTraceFingerprint)).length,
+      turnsWithSession: entries.filter((entry) => Boolean(entry.sessionFingerprint)).length,
       placeholderOnlyTurns: entries.filter((entry) => isDeferredPlaceholderTurn(entry)).length,
       waitersWithTrace: waiters.filter((waiter) => Boolean(waiter.turnTraceFingerprint)).length,
+      waitersWithSession: waiters.filter((waiter) => Boolean(waiter.sessionFingerprintHint)).length,
       recentResolved: this.recentResolved.length,
       ambiguousMatches: this.ambiguousMatches,
       activeTtlMs: this.activeTtlMs,

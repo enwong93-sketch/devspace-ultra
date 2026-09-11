@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 const server = await readFile(new URL("../dist/server.js", import.meta.url), "utf8");
 const requestContext = await readFile(new URL("../dist/mcp-conversation-request-context.js", import.meta.url), "utf8");
 const correlation = await readFile(new URL("../dist/classic-mcp-call-correlation.js", import.meta.url), "utf8");
+const progressAuthority = await readFile(new URL("../dist/progress-conversation-authority.js", import.meta.url), "utf8");
 const liveness = await readFile(new URL("../dist/conversation-progress-liveness.js", import.meta.url), "utf8");
 const livenessCdp = await readFile(new URL("../dist/conversation-progress-liveness-cdp.js", import.meta.url), "utf8");
 
@@ -35,9 +36,18 @@ assert.match(server, /active-turn evidence authorizes this one tool request only
 assert.match(requestContext, /capabilityAuthority/);
 assert.match(requestContext, /progressAuthority/);
 assert.match(requestContext, /progressAuthorityPromise/);
-assert.match(correlation, /if \(!trace && !runtimeHint\) return null;/,
+assert.match(correlation, /if \(!trace && !sessionHint && !runtimeHint\) return null;/,
   "an unscoped tool name may never select another Main conversation");
+assert.match(correlation, /entry\.sessionFingerprint === sessionHint/,
+  "a request-owned hashed MCP session may confirm the current browser turn without binding narration to a Runtime");
 assert.match(correlation, /entry\.runtimeKey === runtimeHint/);
+assert.match(server, /sessionFingerprintHint:\s*sessionFingerprint/);
+assert.match(server, /verifyProgressConversationAuthority\(\{/);
+assert.match(progressAuthority, /page\.progressConversationId !== conversationId/);
+assert.match(progressAuthority, /page\.generating !== true && !activeTransport/,
+  "session fallback requires one exact active conversation page rather than a Runtime owner");
+assert.doesNotMatch(progressAuthority, /runtimeKey\s*:/,
+  "verified progress authority must not contain Runtime ownership");
 assert.doesNotMatch(liveness, /runtime-owner-conflict|record\.runtimeKey|runtimeKey:\s*record\.runtimeKey/,
   "liveness ownership must be conversation-only even when a chat moves to Runtime 03");
 assert.match(liveness, /authorityKey:\s*"conversationId"/);
@@ -61,4 +71,6 @@ console.log(JSON.stringify({
   narrationAuthorityKey: "conversationId",
   narrationRuntimeBinding: false,
   runtime03DiscoverySupported: true,
+  exactSessionTurnCorrelation: true,
+  restartFallbackPageVerified: true,
 }));

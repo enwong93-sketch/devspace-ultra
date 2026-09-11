@@ -56,6 +56,21 @@ try {
   assert.equal(registry.resolveMcpExtra({ _meta: { "openai/session": rawSession } })?.conversationId, "6a9c696c-9630-83e8-a70f-4bbe4b59e5d1");
   assert.equal(registry.snapshot().sessions[0].ambiguous, false);
 
+  const freshWait = registry.waitForFingerprint(fp, {
+    minimumObservedAt: "2026-09-06T03:50:30.000Z",
+  });
+  let freshSettled = false;
+  freshWait.then(() => { freshSettled = true; });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(freshSettled, false, "an old session mapping must not satisfy a request waiting for current-turn evidence");
+  await registry.observeNativeTurn({
+    sessionFingerprint: fp,
+    conversationId: "6a9c696c-9630-83e8-a70f-4bbe4b59e5d1",
+    runtimeKey: "Main-02",
+    observedAt: "2026-09-06T03:50:31.000Z",
+  });
+  assert.equal((await freshWait)?.conversationId, "6a9c696c-9630-83e8-a70f-4bbe4b59e5d1");
+
   const persistedText = await readFile(statePath, "utf8");
   assert.doesNotMatch(persistedText, /opaque-openai-session-value/, "raw OpenAI session value must never be persisted");
   assert.match(persistedText, new RegExp(fp));

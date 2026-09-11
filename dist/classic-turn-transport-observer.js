@@ -72,6 +72,7 @@ export class ClassicTurnTransportTracker {
       firstSeenAt,
       localFunctionNames: metadata.localFunctionNames || [],
       turnTraceFingerprint: metadata.turnTraceFingerprint || null,
+      sessionFingerprint: metadata.sessionFingerprint || null,
     });
     this.#enforceCap();
     this.#emitActiveTurn({
@@ -80,6 +81,7 @@ export class ClassicTurnTransportTracker {
       conversationId: metadata.conversationId,
       localFunctionNames: metadata.localFunctionNames || [],
       turnTraceFingerprint: metadata.turnTraceFingerprint || null,
+      sessionFingerprint: metadata.sessionFingerprint || null,
       observedAt: observedAt(firstSeenAt),
       observedAtMs: firstSeenAt,
     });

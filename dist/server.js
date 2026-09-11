@@ -56,6 +56,7 @@ import { ClassicHostOverlayContextAdapter, ClassicHostOverlayProjection, createC
 import { ClassicProgressNarrationOverlay } from "./classic-progress-narration-overlay.js";
 import { ConversationProgressLivenessSupervisor } from "./conversation-progress-liveness.js";
 import { ConversationProgressLivenessCdpAdapter } from "./conversation-progress-liveness-cdp.js";
+import { verifyProgressConversationAuthority, DEFAULT_PROGRESS_AUTHORITY_MAX_AGE_MS } from "./progress-conversation-authority.js";
 import { ContextGuardianRuntime, registerContextGuardianTools } from "./context-guardian.js";
 import { ClassicContextMetadataCdpAdapter } from "./context-guardian-cdp.js";
 import { ContextGuardianRolloverCoordinator } from "./context-guardian-rollover.js";
@@ -1871,6 +1872,10 @@ export function createServer(config = loadConfig(), options = {}) {
         ...classicCdpOptions,
         beforeDispatch: config.passiveCore ? undefined : () => primaryDebugGuard.pollOnce(),
     });
+    const progressLivenessAdapter = new ConversationProgressLivenessCdpAdapter({
+        ...classicCdpOptions,
+        hostBridge: goalHostBridge,
+    });
     const goalRoundCompletionGuard = new ClassicGoalRoundCompletionGuard({
         goalRuntime,
         inspect: async (goal) => {
@@ -1995,6 +2000,7 @@ export function createServer(config = loadConfig(), options = {}) {
             ? activeTurnRegistry.resolveGatewayCall({
                 toolName,
                 turnTraceFingerprint,
+                sessionFingerprintHint: sessionFingerprint,
                 runtimeKeyHint: progressOnlyTool ? null : persistedRuntimeKey,
               })
             : null;
@@ -2052,10 +2058,11 @@ export function createServer(config = loadConfig(), options = {}) {
         }
         if (progressOnlyTool && !progressAuthority?.conversationId) {
             const progressWaits = [];
-            if (toolName && turnTraceFingerprint) {
+            if (toolName && (turnTraceFingerprint || sessionFingerprint)) {
                 progressWaits.push(activeTurnRegistry.waitForIdentity({
                     toolName,
                     turnTraceFingerprint,
+                    sessionFingerprintHint: sessionFingerprint,
                     runtimeKeyHint: null,
                     signal: req?.signal,
                 }).then((identity) => ephemeralProgressAuthority(identity)));
@@ -2067,6 +2074,26 @@ export function createServer(config = loadConfig(), options = {}) {
                     signal: req?.signal,
                 }).then((identity) => ephemeralProgressAuthority(identity)));
             }
+            progressWaits.push((async () => {
+                const minimumObservedAt = new Date(Date.now() - DEFAULT_PROGRESS_AUTHORITY_MAX_AGE_MS).toISOString();
+                let candidate = persistedSessionAuthority;
+                const candidateObservedAtMs = Date.parse(String(candidate?.observedAt || ""));
+                if (!candidate?.conversationId
+                    || !Number.isFinite(candidateObservedAtMs)
+                    || candidateObservedAtMs < Date.parse(minimumObservedAt)) {
+                    candidate = await conversationAuthority.waitForFingerprint(sessionFingerprint, {
+                        signal: req?.signal,
+                        minimumObservedAt,
+                    });
+                }
+                await turnDeliveryEvidenceReady;
+                return await verifyProgressConversationAuthority({
+                    candidate,
+                    sessionFingerprint,
+                    adapter: progressLivenessAdapter,
+                    deliveryEvidence: turnDeliveryEvidence,
+                });
+            })());
             if (progressWaits.length === 1)
                 progressAuthorityPromise = progressWaits[0];
             else if (progressWaits.length > 1)
@@ -2173,9 +2200,6 @@ export function createServer(config = loadConfig(), options = {}) {
         goalProgressStatePath: join(config.stateDir, "devspace-goal-run-live.json"),
         planStatePath: join(config.stateDir, "plan-state.json"),
         goalStatePath: join(config.stateDir, "goal-state.json"),
-    });
-    const progressLivenessAdapter = new ConversationProgressLivenessCdpAdapter({
-        hostBridge: goalHostBridge,
     });
     conversationProgressLiveness = new ConversationProgressLivenessSupervisor({
         statePath: join(config.stateDir, "conversation-progress-liveness.json"),

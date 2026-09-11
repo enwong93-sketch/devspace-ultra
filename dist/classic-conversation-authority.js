@@ -159,11 +159,20 @@ export class ClassicConversationAuthorityRegistry {
     return this.resolveFingerprint(fingerprint);
   }
 
-  async waitForFingerprint(value, { signal } = {}) {
+  async waitForFingerprint(value, { signal, minimumObservedAt = null } = {}) {
     const fingerprint = String(value || "").trim().toLowerCase();
     if (!/^[a-f0-9]{64}$/.test(fingerprint)) return null;
+    const minimumObservedAtMs = minimumObservedAt == null
+      ? null
+      : Date.parse(String(minimumObservedAt));
+    const freshEnough = (resolved) => {
+      if (!resolved) return false;
+      if (!Number.isFinite(minimumObservedAtMs)) return true;
+      const observedAtMs = Date.parse(String(resolved.observedAt || ""));
+      return Number.isFinite(observedAtMs) && observedAtMs >= minimumObservedAtMs;
+    };
     const immediate = this.resolveFingerprint(fingerprint);
-    if (immediate) return immediate;
+    if (freshEnough(immediate)) return immediate;
     const current = this.waiters.get(fingerprint);
     let sharedPromise = current?.promise;
     if (!sharedPromise) {
@@ -171,12 +180,17 @@ export class ClassicConversationAuthorityRegistry {
       sharedPromise = new Promise((resolvePromise) => { resolveWaiter = resolvePromise; });
       this.waiters.set(fingerprint, { resolve: resolveWaiter, promise: sharedPromise });
     }
-    if (!signal) return await sharedPromise;
+    const awaitFresh = async () => {
+      const resolved = await sharedPromise;
+      if (freshEnough(resolved)) return resolved;
+      return await this.waitForFingerprint(fingerprint, { signal, minimumObservedAt });
+    };
+    if (!signal) return await awaitFresh();
     if (signal.aborted) throw new Error("Conversation identity wait was cancelled.");
     return await new Promise((resolvePromise, rejectPromise) => {
       const onAbort = () => rejectPromise(new Error("Conversation identity wait was cancelled."));
       signal.addEventListener("abort", onAbort, { once: true });
-      sharedPromise.then(resolvePromise, rejectPromise).finally(() => {
+      awaitFresh().then(resolvePromise, rejectPromise).finally(() => {
         signal.removeEventListener("abort", onAbort);
       });
     });

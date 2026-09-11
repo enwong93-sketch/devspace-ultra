@@ -128,6 +128,7 @@ activeTurns.noteTurn({
   conversationId: "conversation-main-01",
   localFunctionNames: ["blender_runtime", "blender_mcp"],
   turnTraceFingerprint: "1".repeat(64),
+  sessionFingerprint: "a".repeat(64),
   observedAtMs: now,
 });
 activeTurns.noteTurn({
@@ -137,6 +138,7 @@ activeTurns.noteTurn({
   conversationId: "conversation-main-02",
   localFunctionNames: ["blender_runtime", "devspace_progress_report"],
   turnTraceFingerprint: "2".repeat(64),
+  sessionFingerprint: "b".repeat(64),
   observedAtMs: now + 1,
 });
 const tracedTurn = activeTurns.resolveGatewayCall({
@@ -160,6 +162,45 @@ assert.equal(
 const uniqueTurn = activeTurns.resolveGatewayCall({ toolName: "blender_mcp", runtimeKeyHint: "main-01" });
 assert.equal(uniqueTurn?.conversationId, "conversation-main-01");
 assert.equal(uniqueTurn?.source, "classic-active-turn-unique-tool-correlation");
+
+const sessionScopedProgress = activeTurns.resolveGatewayCall({
+  toolName: "devspace_progress_report",
+  sessionFingerprintHint: "b".repeat(64),
+});
+assert.equal(sessionScopedProgress?.conversationId, "conversation-main-02");
+assert.equal(sessionScopedProgress?.source, "classic-active-turn-session-correlation");
+assert.equal(
+  activeTurns.resolveGatewayCall({
+    toolName: "devspace_progress_report",
+    sessionFingerprintHint: "c".repeat(64),
+  }),
+  null,
+  "a request-owned MCP session fingerprint may not match another conversation",
+);
+
+const reusedSessionTurns = new ClassicActiveTurnRegistry({ now: () => now });
+for (const [runtimeKey, conversationId, requestId, offset] of [
+  ["main-01", "conversation-session-left", "session-left", 0],
+  ["main-03", "conversation-session-right", "session-right", 1],
+]) {
+  reusedSessionTurns.noteTurn({
+    kind: "started",
+    requestId,
+    runtimeKey,
+    conversationId,
+    localFunctionNames: ["devspace_progress_report"],
+    sessionFingerprint: "d".repeat(64),
+    observedAtMs: now + offset,
+  });
+}
+assert.equal(
+  reusedSessionTurns.resolveGatewayCall({
+    toolName: "devspace_progress_report",
+    sessionFingerprintHint: "d".repeat(64),
+  }),
+  null,
+  "one session fingerprint observed in two conversations must fail closed",
+);
 
 const deferredTraceTurns = new ClassicActiveTurnRegistry({
   now: () => now,
