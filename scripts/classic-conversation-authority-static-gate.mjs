@@ -21,7 +21,7 @@ assert.match(server, /const sessionFingerprint = coreClientSessionFingerprint\(r
 assert.match(server, /const requestAuthority = conversationAuthority\.resolveFingerprint\(requestFingerprint\)/, "conversation-bound tools must resolve a replayed request's persisted fingerprint before entering any correlation waiter");
 assert.match(server, /if \(requestContext\?\.authorityPromise\)[\s\S]*const exactAuthority = await requestContext\.authorityPromise/, "an unresolved first-call correlation may remain pending without an arbitrary wall-clock timeout");
 assert.match(server, /const fingerprint = requestFingerprint \|\| sessionFingerprintFromMcpExtra\(extra\)/, "fallback authority wait must stay bound to the exact request fingerprint rather than runtimeId or another conversation");
-assert.match(server, /new ClassicActiveTurnRegistry\(\)/, "server-side MCP calls must correlate against the exact active ChatGPT turn when the host does not use the legacy call_mcp route");
+assert.match(server, /new ClassicActiveTurnRegistry\(\)/, "server-side MCP calls must correlate against the exact active or just-finished ChatGPT turn when the host does not use the legacy call_mcp route");
 assert.match(server, /activeTurnRegistry\.resolveGatewayCall\(\{\s*toolName,\s*turnTraceFingerprint\s*\}\)/, "active-turn correlation must prefer the tool name plus hashed turn trace when available");
 assert.match(server, /classic_active_turn_mcp_correlated/, "successful active-turn correlation must emit non-secret production evidence for live acceptance");
 assert.match(server, /onNativeMcpCall/, "always-on Classic observer must feed native call_mcp evidence into the correlator");
@@ -42,9 +42,11 @@ assert.match(callCorrelation, /candidatePairs\[0\]\.skewMs === candidatePairs\[1
 assert.match(callCorrelation, /class ClassicActiveTurnRegistry/, "server-side direct tool routing requires a bounded active-turn registry");
 assert.match(callCorrelation, /entry\.localFunctionNames\.includes\(tool\)/, "active-turn routing must accept only tools that the exact model turn was actually offered");
 assert.match(callCorrelation, /unique\.size !== 1/, "active-turn routing must fail closed when more than one conversation is eligible");
+assert.match(callCorrelation, /postTurnGraceMs/, "server-side MCP calls that arrive after browser transport completion require a bounded post-turn grace");
+assert.match(callCorrelation, /classic-active-turn-post-finish-unique-tool-correlation/, "post-finish correlation must remain explicit and diagnosable");
 assert.match(requestContext, /AsyncLocalStorage/, "request-scoped identity propagation must be concurrency-safe and must not use globals");
 assert.match(requestContext, /cross|current\(\)/i, "request context must expose only the active asynchronous call scope");
 assert.doesNotMatch(callCorrelation, /localStorage|querySelector|document\.|location\./, "call correlation must remain transport-only");
 assert.doesNotMatch(authority, /querySelector|document\.|location\.|Page\.reload|Page\.navigate/, "conversation authority registry must never depend on renderer state");
 
-console.log(JSON.stringify({ ok: true, gate: "classic-conversation-authority-static", nativeTransportOnly: true, nativeCallMcpCorrelation: true, activeTurnCorrelation: true, hashedTurnTraceOnly: true, canonicalArgumentsHashedOnly: true, ambiguityFailsClosed: true, persisted: true }));
+console.log(JSON.stringify({ ok: true, gate: "classic-conversation-authority-static", nativeTransportOnly: true, nativeCallMcpCorrelation: true, activeTurnCorrelation: true, delayedPostTurnCorrelation: true, hashedTurnTraceOnly: true, canonicalArgumentsHashedOnly: true, ambiguityFailsClosed: true, persisted: true }));

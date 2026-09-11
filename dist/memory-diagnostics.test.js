@@ -43,6 +43,19 @@ const snapshot = createMemoryDiagnostics({
       };
     },
   },
+  activeTurnRegistry: {
+    diagnostics() {
+      return {
+        activeTurns: 1,
+        postTurnTurns: 2,
+        trackedTurns: 3,
+        waiters: 4,
+        recentResolved: 5,
+        ambiguousMatches: 6,
+        postTurnGraceMs: 120000,
+      };
+    },
+  },
   contextMetadataAdapter: {
     status() {
       return {
@@ -96,6 +109,13 @@ assert.equal(snapshot.registries.gatewayMcpCallsPending, 4);
 assert.equal(snapshot.registries.mcpCallCorrelationsResolved, 5);
 assert.equal(snapshot.registries.mcpCallCorrelationWaiters, 1);
 assert.equal(snapshot.registries.mcpCallCorrelationAmbiguities, 2);
+assert.equal(snapshot.registries.classicActiveTurns, 1);
+assert.equal(snapshot.registries.classicPostTurnTurns, 2);
+assert.equal(snapshot.registries.classicTrackedTurns, 3);
+assert.equal(snapshot.registries.classicActiveTurnWaiters, 4);
+assert.equal(snapshot.registries.classicActiveTurnCorrelationsResolved, 5);
+assert.equal(snapshot.registries.classicActiveTurnAmbiguities, 6);
+assert.equal(snapshot.registries.classicPostTurnGraceMs, 120000);
 assert.equal(snapshot.capabilities.enabled, true);
 assert.equal(snapshot.capabilities.mcpClients, 1);
 assert.equal(snapshot.turnTransportCdp.connected, 1);
@@ -150,4 +170,5 @@ console.log(JSON.stringify({
   capabilityLifecycleVisible: true,
   allClassicObserversVisible: true,
   nativeMcpCallCorrelationVisible: true,
+  delayedPostTurnCorrelationVisible: true,
 }));

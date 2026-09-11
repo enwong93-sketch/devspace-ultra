@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { ClassicActiveTurnRegistry } from "./classic-mcp-call-correlation.js";
 import { ClassicTurnTransportTracker } from "./classic-turn-transport-observer.js";
 
 let now = 1_000;
@@ -6,6 +7,11 @@ const identities = [];
 const events = [];
 const nativeMcpCalls = [];
 const activeTurns = [];
+const delayedGatewayTurns = new ClassicActiveTurnRegistry({
+  now: () => now,
+  activeTtlMs: 60_000,
+  postTurnGraceMs: 1_000,
+});
 const tracker = new ClassicTurnTransportTracker({
   now: () => now,
   maxPending: 2,
@@ -13,7 +19,10 @@ const tracker = new ClassicTurnTransportTracker({
   onConversationIdentity: (value) => identities.push(value),
   onTurnTransportEvent: (value) => events.push(value),
   onNativeMcpCall: (value) => nativeMcpCalls.push(value),
-  onActiveTurn: (value) => activeTurns.push(value),
+  onActiveTurn: (value) => {
+    activeTurns.push(value);
+    delayedGatewayTurns.noteTurn({ runtimeKey: "main-01", ...value });
+  },
 });
 
 tracker.noteRequest({
@@ -71,6 +80,15 @@ assert.deepEqual(events.slice(-2).map((item) => item.kind), ["response", "finish
 assert.equal(activeTurns.at(-1).kind, "finished");
 assert.equal(activeTurns.at(-1).requestId, "r1");
 assert.equal(tracker.pendingSize, 0, "finished native turn must leave no pending transport record");
+const delayedGatewayIdentity = delayedGatewayTurns.resolveGatewayCall({ toolName: "blender_mcp" });
+assert.equal(
+  delayedGatewayIdentity?.conversationId,
+  "conversation-a",
+  "the correlation layer must retain a finished browser turn long enough for the later server-side MCP call",
+);
+assert.equal(delayedGatewayIdentity?.source, "classic-active-turn-post-finish-unique-tool-correlation");
+now += 1_100;
+assert.equal(delayedGatewayTurns.resolveGatewayCall({ toolName: "blender_mcp" }), null);
 
 tracker.noteRequest({ requestId: "r2", request: { url: "https://chatgpt.com/backend-api/f/conversation", method: "POST", postData: JSON.stringify({ conversation_id: "conversation-b", model: "gpt-test" }), headers: {} } });
 tracker.noteFailure({ requestId: "r2", errorText: "net::ERR_FAILED", canceled: true, blockedReason: "other" });
@@ -93,4 +111,4 @@ tracker.noteRequest({ requestId: "r5", request: { url: "https://chatgpt.com/back
 tracker.noteRequest({ requestId: "r6", request: { url: "https://chatgpt.com/backend-api/f/conversation", method: "POST", postData: JSON.stringify({ conversation_id: "conversation-f", model: "gpt-test" }), headers: {} } });
 assert.equal(tracker.pendingSize, 2, "native transport tracking must have a hard cap");
 
-console.log(JSON.stringify({ ok: true, gate: "classic-turn-transport-observer", networkOnly: true, nativeIdentity: true, nativeCallMcpCorrelation: true, activeTurnLifecycle: true, localFunctionNamesObserved: true, hashedTurnTraceOnly: true, deliveryLifecycle: true, bounded: true, rawSessionPersisted: false, rawToolArgumentsPersisted: false }));
+console.log(JSON.stringify({ ok: true, gate: "classic-turn-transport-observer", networkOnly: true, nativeIdentity: true, nativeCallMcpCorrelation: true, activeTurnLifecycle: true, delayedServerSideMcpAfterTransportFinish: true, localFunctionNamesObserved: true, hashedTurnTraceOnly: true, deliveryLifecycle: true, bounded: true, rawSessionPersisted: false, rawToolArgumentsPersisted: false }));

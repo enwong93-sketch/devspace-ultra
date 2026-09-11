@@ -1949,7 +1949,8 @@ export function createServer(config = loadConfig(), options = {}) {
                 toolName,
                 runtimeKey: identity.runtimeKey,
                 source: identity.source,
-                traceMatched: identity.source === "classic-active-turn-trace-correlation",
+                traceMatched: String(identity.source || "").includes("trace-correlation"),
+                postTurnMatched: String(identity.source || "").includes("post-finish"),
                 rawTracePersisted: false,
             });
             return persisted;
@@ -2371,6 +2372,7 @@ export function createServer(config = loadConfig(), options = {}) {
             blenderRuntimeManager,
             turnTransportObserver,
             mcpCallCorrelator,
+            activeTurnRegistry,
             contextMetadataAdapter,
             streamRecoveryAdapter,
             config,

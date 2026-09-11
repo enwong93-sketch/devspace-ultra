@@ -156,7 +156,11 @@ const uniqueTurn = activeTurns.resolveGatewayCall({ toolName: "blender_mcp" });
 assert.equal(uniqueTurn?.conversationId, "conversation-main-01");
 assert.equal(uniqueTurn?.source, "classic-active-turn-unique-tool-correlation");
 
-const deferredTurns = new ClassicActiveTurnRegistry({ now: () => now, activeTtlMs: 60_000 });
+const deferredTurns = new ClassicActiveTurnRegistry({
+  now: () => now,
+  activeTtlMs: 60_000,
+  postTurnGraceMs: 1_000,
+});
 const deferredIdentity = deferredTurns.waitForIdentity({ toolName: "devspace_progress_report" });
 deferredTurns.noteTurn({
   kind: "started",
@@ -174,10 +178,73 @@ deferredTurns.noteTurn({
   conversationId: "conversation-main-01",
   observedAtMs: now + 10,
 });
+now += 20;
+const delayedAfterFinished = deferredTurns.resolveGatewayCall({ toolName: "devspace_progress_report" });
+assert.equal(
+  delayedAfterFinished?.conversationId,
+  "conversation-main-01",
+  "server-side MCP calls may arrive after the browser turn transport has already finished",
+);
+assert.equal(delayedAfterFinished?.source, "classic-active-turn-post-finish-unique-tool-correlation");
+assert.equal(deferredTurns.diagnostics().activeTurns, 0);
+assert.equal(deferredTurns.diagnostics().postTurnTurns, 1);
+
+const completedAmbiguity = new ClassicActiveTurnRegistry({
+  now: () => now,
+  activeTtlMs: 60_000,
+  postTurnGraceMs: 1_000,
+});
+for (const [runtimeKey, conversationId, requestId, offset] of [
+  ["main-01", "conversation-completed-left", "completed-left", 0],
+  ["main-02", "conversation-completed-right", "completed-right", 1],
+]) {
+  completedAmbiguity.noteTurn({
+    kind: "started",
+    requestId,
+    runtimeKey,
+    conversationId,
+    localFunctionNames: ["devspace_progress_report"],
+    observedAtMs: now + offset,
+  });
+  completedAmbiguity.noteTurn({
+    kind: "finished",
+    requestId,
+    runtimeKey,
+    conversationId,
+    observedAtMs: now + 10 + offset,
+  });
+}
+assert.equal(
+  completedAmbiguity.resolveGatewayCall({ toolName: "devspace_progress_report" }),
+  null,
+  "two recently completed conversations offering the same tool must remain fail-closed",
+);
+assert.equal(completedAmbiguity.diagnostics().ambiguousMatches > 0, true);
+
+const failedTurn = new ClassicActiveTurnRegistry({ now: () => now, postTurnGraceMs: 1_000 });
+failedTurn.noteTurn({
+  kind: "started",
+  requestId: "failed-turn",
+  runtimeKey: "main-01",
+  conversationId: "conversation-failed",
+  localFunctionNames: ["devspace_progress_report"],
+  observedAtMs: now,
+});
+failedTurn.noteTurn({
+  kind: "failed",
+  requestId: "failed-turn",
+  runtimeKey: "main-01",
+  conversationId: "conversation-failed",
+  observedAtMs: now + 1,
+});
+assert.equal(failedTurn.resolveGatewayCall({ toolName: "devspace_progress_report" }), null);
+
+now += 1_100;
+deferredTurns.prune();
 assert.equal(
   deferredTurns.resolveGatewayCall({ toolName: "devspace_progress_report" }),
   null,
-  "a finished ChatGPT turn must stop authorizing later unrelated direct calls",
+  "completed-turn authority must expire after the bounded post-turn grace",
 );
 
 console.log(JSON.stringify({
@@ -194,5 +261,8 @@ console.log(JSON.stringify({
   activeTurnTraceMatch: true,
   activeTurnUniqueToolMatch: true,
   activeTurnAmbiguityFailsClosed: true,
-  finishedTurnRevokesCorrelation: true,
+  delayedPostFinishCorrelation: true,
+  completedTurnAmbiguityFailsClosed: true,
+  failedTurnRevokesCorrelation: true,
+  postTurnGraceExpires: true,
 }));

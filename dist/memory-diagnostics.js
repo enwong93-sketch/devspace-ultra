@@ -38,6 +38,7 @@ export function createMemoryDiagnostics({
   blenderRuntimeManager,
   turnTransportObserver,
   mcpCallCorrelator,
+  activeTurnRegistry,
   contextMetadataAdapter,
   streamRecoveryAdapter,
   config = {},
@@ -53,6 +54,7 @@ export function createMemoryDiagnostics({
   const blenderRuntimes = safeDiagnostics(blenderRuntimeManager);
   const turn = safeStatus(turnTransportObserver);
   const callCorrelation = safeDiagnostics(mcpCallCorrelator);
+  const activeTurnCorrelation = safeDiagnostics(activeTurnRegistry);
   const context = safeStatus(contextMetadataAdapter);
   const stream = safeStatus(streamRecoveryAdapter);
   const contextRuntimes = Array.isArray(context?.runtimes) ? context.runtimes : [];
@@ -92,6 +94,13 @@ export function createMemoryDiagnostics({
       mcpCallCorrelationsResolved: finiteNumber(callCorrelation?.recentResolved),
       mcpCallCorrelationWaiters: finiteNumber(callCorrelation?.waiters),
       mcpCallCorrelationAmbiguities: finiteNumber(callCorrelation?.ambiguousMatches),
+      classicActiveTurns: finiteNumber(activeTurnCorrelation?.activeTurns),
+      classicPostTurnTurns: finiteNumber(activeTurnCorrelation?.postTurnTurns),
+      classicTrackedTurns: finiteNumber(activeTurnCorrelation?.trackedTurns),
+      classicActiveTurnWaiters: finiteNumber(activeTurnCorrelation?.waiters),
+      classicActiveTurnCorrelationsResolved: finiteNumber(activeTurnCorrelation?.recentResolved),
+      classicActiveTurnAmbiguities: finiteNumber(activeTurnCorrelation?.ambiguousMatches),
+      classicPostTurnGraceMs: finiteNumber(activeTurnCorrelation?.postTurnGraceMs),
     },
     capabilities: {
       enabled: capabilities?.enabled === true,

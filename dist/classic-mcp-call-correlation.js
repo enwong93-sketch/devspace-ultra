@@ -4,6 +4,7 @@ import { sessionFingerprintFromClassicRequest } from "./classic-conversation-aut
 const DEFAULT_TTL_MS = 30_000;
 const DEFAULT_MAX_PENDING = 128;
 const DEFAULT_MAX_SKEW_MS = 8_000;
+const DEFAULT_POST_TURN_GRACE_MS = 2 * 60_000;
 const CALL_MCP_PATH = "/backend-api/ecosystem/call_mcp";
 
 function cleanText(value, max = 240) {
@@ -121,11 +122,13 @@ export class ClassicActiveTurnRegistry {
   constructor({
     now = () => Date.now(),
     activeTtlMs = 10 * 60_000,
+    postTurnGraceMs = DEFAULT_POST_TURN_GRACE_MS,
     maxActive = 64,
     maxWaiters = 128,
   } = {}) {
     this.now = now;
     this.activeTtlMs = Math.max(30_000, Number(activeTtlMs) || 10 * 60_000);
+    this.postTurnGraceMs = Math.max(1_000, Number(postTurnGraceMs) || DEFAULT_POST_TURN_GRACE_MS);
     this.maxActive = Math.max(4, Number(maxActive) || 64);
     this.maxWaiters = Math.max(4, Number(maxWaiters) || 128);
     this.active = new Map();
@@ -141,7 +144,18 @@ export class ClassicActiveTurnRegistry {
     const requestId = cleanText(input?.requestId, 240);
     if (!runtimeKey || !requestId) return null;
     const key = `${runtimeKey}:${requestId}`;
-    if (kind === "finished" || kind === "failed" || kind === "expired" || kind === "evicted") {
+    if (kind === "finished") {
+      const entry = this.active.get(key);
+      if (!entry) return false;
+      entry.finishedAtMs = Number.isFinite(Number(input?.observedAtMs))
+        ? Number(input.observedAtMs)
+        : this.now();
+      this.active.set(key, entry);
+      this.prune();
+      this.#attemptWaiters();
+      return true;
+    }
+    if (kind === "failed" || kind === "expired" || kind === "evicted") {
       const removed = this.active.delete(key);
       if (removed) this.#attemptWaiters();
       return removed;
@@ -159,6 +173,7 @@ export class ClassicActiveTurnRegistry {
       startedAtMs: Number.isFinite(Number(input?.observedAtMs))
         ? Number(input.observedAtMs)
         : this.now(),
+      finishedAtMs: null,
     };
     this.prune();
     this.active.set(key, entry);
@@ -178,17 +193,27 @@ export class ClassicActiveTurnRegistry {
     ));
     const unique = new Map();
     for (const entry of candidates) {
-      unique.set(`${entry.runtimeKey}:${entry.conversationId}`, entry);
+      const ownerKey = `${entry.runtimeKey}:${entry.conversationId}`;
+      const previous = unique.get(ownerKey);
+      const entryAt = Number(entry.finishedAtMs ?? entry.startedAtMs ?? 0);
+      const previousAt = Number(previous?.finishedAtMs ?? previous?.startedAtMs ?? 0);
+      if (!previous || entryAt >= previousAt) unique.set(ownerKey, entry);
     }
     if (unique.size !== 1) {
       if (unique.size > 1) this.ambiguousMatches += 1;
       return null;
     }
     const [entry] = unique.values();
+    const postTurn = entry.finishedAtMs !== null && entry.finishedAtMs !== undefined
+      && Number.isFinite(Number(entry.finishedAtMs));
     const identity = {
       ...activeTurnIdentity(entry, trace
-        ? "classic-active-turn-trace-correlation"
-        : "classic-active-turn-unique-tool-correlation"),
+        ? postTurn
+          ? "classic-active-turn-post-finish-trace-correlation"
+          : "classic-active-turn-trace-correlation"
+        : postTurn
+          ? "classic-active-turn-post-finish-unique-tool-correlation"
+          : "classic-active-turn-unique-tool-correlation"),
       toolName: tool,
     };
     this.recentResolved.unshift(identity);
@@ -234,10 +259,17 @@ export class ClassicActiveTurnRegistry {
   }
 
   prune() {
-    const cutoff = this.now() - this.activeTtlMs;
+    const now = this.now();
+    const activeCutoff = now - this.activeTtlMs;
+    const finishedCutoff = now - this.postTurnGraceMs;
     let changed = false;
     for (const [key, entry] of this.active) {
-      if (entry.startedAtMs >= cutoff) continue;
+      const finished = entry.finishedAtMs !== null && entry.finishedAtMs !== undefined
+        && Number.isFinite(Number(entry.finishedAtMs));
+      const keep = finished
+        ? Number(entry.finishedAtMs) >= finishedCutoff
+        : Number(entry.startedAtMs) >= activeCutoff;
+      if (keep) continue;
       this.active.delete(key);
       changed = true;
     }
@@ -248,7 +280,7 @@ export class ClassicActiveTurnRegistry {
   #enforceActiveCap() {
     if (this.active.size <= this.maxActive) return;
     const oldest = [...this.active.entries()]
-      .sort((a, b) => Number(a[1].startedAtMs || 0) - Number(b[1].startedAtMs || 0));
+      .sort((a, b) => Number(a[1].finishedAtMs ?? a[1].startedAtMs ?? 0) - Number(b[1].finishedAtMs ?? b[1].startedAtMs ?? 0));
     for (const [key] of oldest) {
       if (this.active.size <= this.maxActive) break;
       this.active.delete(key);
@@ -266,12 +298,16 @@ export class ClassicActiveTurnRegistry {
 
   diagnostics() {
     this.prune();
+    const entries = [...this.active.values()];
     return {
-      activeTurns: this.active.size,
+      activeTurns: entries.filter((entry) => entry.finishedAtMs === null || entry.finishedAtMs === undefined).length,
+      postTurnTurns: entries.filter((entry) => entry.finishedAtMs !== null && entry.finishedAtMs !== undefined && Number.isFinite(Number(entry.finishedAtMs))).length,
+      trackedTurns: entries.length,
       waiters: this.waiters.size,
       recentResolved: this.recentResolved.length,
       ambiguousMatches: this.ambiguousMatches,
       activeTtlMs: this.activeTtlMs,
+      postTurnGraceMs: this.postTurnGraceMs,
       maxActive: this.maxActive,
       maxWaiters: this.maxWaiters,
       rawPromptsPersisted: false,
