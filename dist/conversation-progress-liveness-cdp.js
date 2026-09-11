@@ -19,14 +19,6 @@ function runtimePort(runtimeKey) {
   return null;
 }
 
-function conversationIdFromUrl(url) {
-  try {
-    return new URL(String(url || "")).pathname.match(/\/c\/([^/?#]+)/)?.[1] || null;
-  } catch {
-    return null;
-  }
-}
-
 function markerFor(conversationId, attempt) {
   return createHash("sha256")
     .update(`${conversationId}:${attempt}`)
@@ -45,6 +37,14 @@ function localMinute(value = Date.now()) {
     minute: "2-digit",
     hour12: false,
   }).format(date).replace(",", "");
+}
+
+function conversationIdFromUrl(url) {
+  try {
+    return new URL(String(url || "")).pathname.match(/\/c\/([^/?#]+)/)?.[1] || null;
+  } catch {
+    return null;
+  }
 }
 
 async function targetsForPort(port) {
@@ -150,7 +150,12 @@ function exactConversationExpression(conversationId) {
 }
 
 export class ConversationProgressLivenessCdpAdapter {
-  constructor({ runtimeKeys = null, hostBridge = null, listTargets = targetsForPort, connect = connectTarget } = {}) {
+  constructor({
+    runtimeKeys = null,
+    hostBridge = null,
+    listTargets = targetsForPort,
+    connect = connectTarget,
+  } = {}) {
     this.runtimeKeys = Array.isArray(runtimeKeys) && runtimeKeys.length
       ? [...new Set(runtimeKeys.map(cleanRuntimeKey).filter(Boolean))]
       : Array.from({ length: 32 }, (_, index) => `main-${String(index + 1).padStart(2, "0")}`);
@@ -162,12 +167,25 @@ export class ConversationProgressLivenessCdpAdapter {
   async find({ conversationId } = {}) {
     const id = cleanConversationId(conversationId);
     if (!id) return { exact: false, state: "invalid-conversation" };
-    const matches = await this.#conversationTargets(id);
+    const matches = [];
+    for (const runtimeKey of this.runtimeKeys) {
+      const port = runtimePort(runtimeKey);
+      try {
+        const targets = await this.listTargets(port);
+        for (const target of targets) {
+          if (target?.type !== "page" || !target?.webSocketDebuggerUrl) continue;
+          if (conversationIdFromUrl(target.url) !== id) continue;
+          matches.push({ runtimeKey, port, target });
+        }
+      } catch {
+        // One offline Runtime cannot invalidate a conversation found elsewhere.
+      }
+    }
     if (matches.length !== 1) {
       return {
         exact: false,
         ambiguous: matches.length > 1,
-        state: matches.length > 1 ? "multiple-runtime-pages" : "page-not-open",
+        state: matches.length > 1 ? "duplicate-conversation-pages" : "conversation-page-not-open",
         conversationId: id,
         matchCount: matches.length,
       };
@@ -175,21 +193,25 @@ export class ConversationProgressLivenessCdpAdapter {
     return await this.#inspectMatch(matches[0], id);
   }
 
+  // Compatibility alias. runtimeKey is deliberately ignored: Runtime is a
+  // locator, never the durable progress identity or authorization key.
   async inspect({ conversationId } = {}) {
     return await this.find({ conversationId });
   }
 
-  async projectReminder({ conversationId, reminderAt, silenceMs } = {}) {
-    const target = await this.#exactTarget(conversationId);
-    if (!target.ok) return target;
-    const page = await this.connect(target.target);
+  async projectReminder({ conversationId, target = null, reminderAt, silenceMs } = {}) {
+    const resolved = await this.#resolveExactTarget(conversationId, target);
+    if (!resolved.ok) return resolved;
+    const page = await this.connect(resolved.target);
     try {
       const result = await page.evaluate(`(() => {
-        const expected = ${JSON.stringify(conversationId)};
+        const expected = ${JSON.stringify(resolved.conversationId)};
         const actual = location.pathname.match(/\\/c\\/([^/?#]+)/)?.[1] || null;
         if (actual !== expected) return { ok:false, state:'route-changed' };
         const root = document.getElementById('devspace-progress-narration-root');
         if (!root) return { ok:false, state:'progress-card-not-mounted' };
+        const cardConversation = root.dataset?.conversationId || actual;
+        if (cardConversation !== expected) return { ok:false, state:'progress-card-conversation-mismatch' };
         let node = root.querySelector('.devspace-progress-liveness-reminder');
         if (!node) {
           node = document.createElement('div');
@@ -200,62 +222,81 @@ export class ConversationProgressLivenessCdpAdapter {
         }
         node.dataset.conversationId = expected;
         node.dataset.reminderAt = ${JSON.stringify(String(reminderAt || ""))};
-        node.textContent = ${JSON.stringify(`[${localMinute(Date.parse(reminderAt || new Date().toISOString()))}] 生存檢查：已提醒 Agent 更新進度；下一個工具回合必須由 Agent 自行匯報。`)};
+        node.textContent = ${JSON.stringify(`[${localMinute(Date.parse(reminderAt || new Date().toISOString()))}] 生存檢查：已提醒目前呢個 conversation 嘅 Agent 更新進度；其他 conversation 同工具唔受影響。`)};
         return { ok:true, conversationId:actual };
       })()`);
-      return result?.ok ? { ok: true, locatedRuntimeKey: target.runtimeKey, silenceMs } : result;
+      return result?.ok
+        ? { ok: true, conversationId: resolved.conversationId, locatedRuntimeKey: resolved.runtimeKey, locatedPort: resolved.port, silenceMs }
+        : result;
     } finally {
       page.close();
     }
   }
 
-  async clearReminder({ conversationId } = {}) {
-    const target = await this.#exactTarget(conversationId);
-    if (!target.ok) return target;
-    const page = await this.connect(target.target);
+  async clearReminder({ conversationId, target = null } = {}) {
+    const resolved = await this.#resolveExactTarget(conversationId, target);
+    if (!resolved.ok) return resolved;
+    const page = await this.connect(resolved.target);
     try {
       return await page.evaluate(`(() => {
-        const expected = ${JSON.stringify(conversationId)};
+        const expected = ${JSON.stringify(resolved.conversationId)};
         const actual = location.pathname.match(/\\/c\\/([^/?#]+)/)?.[1] || null;
         if (actual !== expected) return { ok:false, state:'route-changed' };
         const node = document.querySelector('#devspace-progress-narration-root .devspace-progress-liveness-reminder');
         if (node?.dataset?.conversationId === expected) node.remove();
-        return { ok:true };
+        return { ok:true, conversationId:actual };
       })()`);
     } finally {
       page.close();
     }
   }
 
-  async sendReminder({ conversationId, silenceMs = 0 } = {}) {
-    const prompt = "進度旁白提醒：呢個 conversation 已經接近十分鐘未有新匯報。請完成目前不可分割嘅安全原子步驟後，立即用 devspace_progress_report，以你自己嘅自然語言講清楚而家做緊乜、已核實到乜同下一步，然後繼續原任務。唔好重啟、接管或改動其他 conversation 嘅工具或 Runtime。";
-    const hostResult = await this.#sendHostFollowUp({
-      conversationId,
-      prompt,
-      purpose: "progress-reminder",
-    });
-    if (hostResult?.ok) return { ...hostResult, silenceMs };
-    if (hostResult?.ambiguous) return hostResult;
-    return await this.#sendComposerMessage({
-      conversationId,
-      text: prompt,
+  async sendReminder({ conversationId, target = null, reminderAt, silenceMs = 0 } = {}) {
+    const resolved = await this.#resolveExactTarget(conversationId, target);
+    if (!resolved.ok) return resolved;
+    const minutes = Math.max(10, Math.floor(Number(silenceMs || 0) / 60_000));
+    const text = `進度旁白提醒：呢個 conversation 已經約 ${minutes} 分鐘未有新匯報。請完成目前不可分割嘅安全原子步驟後，立即用 devspace_progress_report，以你自己嘅自然語言講清楚而家做緊乜、已核實到乜同下一步，然後繼續原任務。唔好重啟、接管或改動其他 conversation 嘅工具或 Runtime。`;
+
+    if (this.hostBridge && typeof this.hostBridge.dispatchConversationFollowUp === "function") {
+      const hostResult = await this.hostBridge.dispatchConversationFollowUp({
+        conversationId: resolved.conversationId,
+        prompt: text,
+        purpose: "progress-reminder",
+      }).catch((error) => ({
+        ok: false,
+        definiteFailure: false,
+        error: error instanceof Error ? error.message : String(error),
+      }));
+      if (hostResult?.ok) {
+        return {
+          ok: true,
+          conversationId: resolved.conversationId,
+          locatedRuntimeKey: resolved.runtimeKey,
+          locatedPort: resolved.port,
+          reminderAt: reminderAt || null,
+          silenceMs,
+          runtimeBinding: false,
+          transport: hostResult.transport || "classic-raw-host-rpc",
+        };
+      }
+      if (hostResult?.ambiguous) return hostResult;
+    }
+
+    return await this.#sendConversationMessage({
+      resolved,
+      text,
       expectedPrefix: "進度旁白提醒：",
       purpose: "progress-reminder",
       attempt: 1,
     });
   }
 
-  async sendContinue({ conversationId, attempt = 1 } = {}) {
-    const text = "繼續。你已經超過二十分鐘未更新進度；請先用進度旁白卡，以你自己嘅自然語言講清楚目前做緊乜、已完成乜同下一步，再由原工作斷點繼續。唔好重啟、接管或改動其他 conversation 嘅工具或 Runtime。";
-    const hostResult = await this.#sendHostFollowUp({
-      conversationId,
-      prompt: text,
-      purpose: "progress-continue",
-    });
-    if (hostResult?.ok) return { ...hostResult, attempt };
-    if (hostResult?.ambiguous) return hostResult;
-    return await this.#sendComposerMessage({
-      conversationId,
+  async sendContinue({ conversationId, target = null, attempt = 1 } = {}) {
+    const resolved = await this.#resolveExactTarget(conversationId, target);
+    if (!resolved.ok) return resolved;
+    const text = "繼續。你已經超過二十分鐘未更新進度；請先用進度旁白卡，以你自己嘅自然語言講清楚目前做緊乜、已完成乜同下一步，再由原工作斷點繼續。唔好接管、重啟或改動其他 conversation 嘅工具或 Runtime。";
+    return await this.#sendConversationMessage({
+      resolved,
       text,
       expectedPrefix: "繼續。你已經超過二十分鐘未更新進度",
       purpose: "progress-continue",
@@ -263,25 +304,12 @@ export class ConversationProgressLivenessCdpAdapter {
     });
   }
 
-  async #sendHostFollowUp({ conversationId, prompt, purpose }) {
-    if (!this.hostBridge || typeof this.hostBridge.dispatchConversationFollowUp !== "function") {
-      return { ok: false, definiteFailure: true, state: "host-relay-unavailable" };
-    }
-    return await this.hostBridge.dispatchConversationFollowUp({
-      conversationId,
-      prompt,
-      purpose,
-    });
-  }
-
-  async #sendComposerMessage({ conversationId, text, expectedPrefix, purpose, attempt = 1 } = {}) {
-    const target = await this.#exactTarget(conversationId);
-    if (!target.ok) return target;
-    const page = await this.connect(target.target);
-    const marker = markerFor(conversationId, `${purpose || "message"}:${attempt}`);
+  async #sendConversationMessage({ resolved, text, expectedPrefix, purpose, attempt }) {
+    const page = await this.connect(resolved.target);
+    const marker = markerFor(resolved.conversationId, `${purpose}:${attempt}`);
     try {
       const preflight = await page.evaluate(`(() => {
-        const expected = ${JSON.stringify(conversationId)};
+        const expected = ${JSON.stringify(resolved.conversationId)};
         const actual = location.pathname.match(/\\/c\\/([^/?#]+)/)?.[1] || null;
         const visible = (element) => {
           if (!(element instanceof HTMLElement)) return false;
@@ -316,8 +344,8 @@ export class ConversationProgressLivenessCdpAdapter {
         };
         const editor = document.querySelector('[data-devspace-liveness-send="' + marker + '"]');
         if (!editor) return { ok:false, state:'composer-lost' };
-        const text = String(editor instanceof HTMLTextAreaElement ? editor.value : editor.innerText || editor.textContent || '').trim();
-        if (!text) return { ok:false, state:'text-not-inserted' };
+        const inserted = String(editor instanceof HTMLTextAreaElement ? editor.value : editor.innerText || editor.textContent || '').trim();
+        if (!inserted) return { ok:false, state:'text-not-inserted' };
         const buttons = [...document.querySelectorAll('button')].filter(visible);
         const send = buttons.find((button) => button.matches('[data-testid="send-button"]'))
           || buttons.find((button) => /send|傳送|发送|送出/i.test(String(button.getAttribute('aria-label') || button.title || '')));
@@ -329,8 +357,8 @@ export class ConversationProgressLivenessCdpAdapter {
       if (!submitted?.ok) return submitted;
       await new Promise((resolve) => setTimeout(resolve, 1_000));
       const verified = await page.evaluate(`(() => {
-        const expected = ${JSON.stringify(conversationId)};
-        const expectedPrefix = ${JSON.stringify(String(expectedPrefix || ""))};
+        const expected = ${JSON.stringify(resolved.conversationId)};
+        const expectedPrefix = ${JSON.stringify(expectedPrefix)};
         const actual = location.pathname.match(/\\/c\\/([^/?#]+)/)?.[1] || null;
         if (actual !== expected) return { ok:false, state:'route-changed-after-send' };
         const users = [...document.querySelectorAll('[data-message-author-role="user"]')];
@@ -338,7 +366,17 @@ export class ConversationProgressLivenessCdpAdapter {
         return { ok: latest.startsWith(expectedPrefix), state: latest ? 'visible' : 'missing' };
       })()`);
       return verified?.ok
-        ? { ok: true, locatedRuntimeKey: target.runtimeKey, conversationId, purpose, attempt, transport: "classic-exact-composer", markerPersisted: false, rawMessagePersisted: false }
+        ? {
+            ok: true,
+            conversationId: resolved.conversationId,
+            locatedRuntimeKey: resolved.runtimeKey,
+            locatedPort: resolved.port,
+            attempt,
+            purpose,
+            runtimeBinding: false,
+            markerPersisted: false,
+            rawMessagePersisted: false,
+          }
         : verified;
     } finally {
       page.close();
@@ -353,53 +391,80 @@ export class ConversationProgressLivenessCdpAdapter {
       const result = await page.evaluate(exactConversationExpression(conversationId));
       return {
         ...result,
-        locatedRuntimeKey: match.runtimeKey,
+        // Runtime identifies only the physical window where this exact
+        // conversation is currently open.  It is never persisted or used as
+        // narration ownership.  Keep the legacy aliases for callers that
+        // still display the locator, but expose the semantic names explicitly.
+        runtimeKey: match.runtimeKey,
         port: match.port,
+        locatedRuntimeKey: match.runtimeKey,
+        locatedPort: match.port,
         exact: result?.exact === true,
+        runtimeBinding: false,
+        locatorOnly: true,
+        target: {
+          runtimeKey: match.runtimeKey,
+          port: match.port,
+          targetId: match.target.id,
+          url: match.target.url,
+          webSocketDebuggerUrl: match.target.webSocketDebuggerUrl,
+        },
       };
     } finally {
       page.close();
     }
   }
 
-  async #conversationTargets(conversationId) {
-    const id = cleanConversationId(conversationId);
-    if (!id) return [];
-    const matches = [];
-    for (const runtimeKey of this.runtimeKeys) {
-      const port = runtimePort(runtimeKey);
-      if (!port) continue;
-      let targets;
-      try { targets = await this.listTargets(port); }
-      catch { continue; }
-      for (const target of targets || []) {
-        if (target?.type !== "page" || !target?.webSocketDebuggerUrl) continue;
-        if (conversationIdFromUrl(target.url) !== id) continue;
-        matches.push({ runtimeKey, port, target });
-      }
-    }
-    return matches;
-  }
-
-  async #exactTarget(conversationId) {
+  async #resolveExactTarget(conversationId, supplied = null) {
     const id = cleanConversationId(conversationId);
     if (!id) return { ok: false, state: "invalid-conversation" };
-    const matches = await this.#conversationTargets(id);
-    if (matches.length !== 1) {
+
+    if (supplied?.exact === true && supplied?.conversationId === id && supplied?.target?.webSocketDebuggerUrl) {
+      const runtimeKey = cleanRuntimeKey(supplied.target.runtimeKey || supplied.runtimeKey);
+      const port = Number(supplied.target.port || supplied.port);
+      if (runtimeKey && runtimePort(runtimeKey) === port && conversationIdFromUrl(supplied.target.url) === id) {
+        try {
+          const targets = await this.listTargets(port);
+          const exact = targets.filter((target) => (
+            target?.type === "page"
+            && target?.webSocketDebuggerUrl
+            && target.id === supplied.target.targetId
+            && conversationIdFromUrl(target.url) === id
+          ));
+          if (exact.length === 1) {
+            return { ok: true, conversationId: id, runtimeKey, port, target: exact[0] };
+          }
+        } catch {}
+      }
+    }
+
+    const found = await this.find({ conversationId: id });
+    if (!found?.exact || !found?.target?.webSocketDebuggerUrl) {
       return {
         ok: false,
-        ambiguous: matches.length > 1,
-        matchCount: matches.length,
-        state: matches.length > 1 ? "conversation-open-in-multiple-runtimes" : "conversation-not-open",
+        state: found?.state || "conversation-page-not-open",
+        ambiguous: found?.ambiguous === true,
+        conversationId: id,
       };
     }
-    return { ok: true, ...matches[0] };
+    return {
+      ok: true,
+      conversationId: id,
+      runtimeKey: found.runtimeKey,
+      port: found.port,
+      target: {
+        id: found.target.targetId,
+        type: "page",
+        url: found.target.url,
+        webSocketDebuggerUrl: found.target.webSocketDebuggerUrl,
+      },
+    };
   }
 }
 
 export const _test = {
   runtimePort,
-  conversationIdFromUrl,
   markerFor,
   localMinute,
+  conversationIdFromUrl,
 };

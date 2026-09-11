@@ -107,13 +107,26 @@ const staleCandidate = {
   ...candidateA,
   observedAt: new Date(now - DEFAULT_PROGRESS_AUTHORITY_MAX_AGE_MS - 1).toISOString(),
 };
+const restartRecovered = await verifyProgressConversationAuthority({
+  candidate: staleCandidate,
+  sessionFingerprint: sessionA,
+  adapter,
+  deliveryEvidence,
+  now: () => now,
+});
+assert.equal(restartRecovered?.conversationId, "conversation-a",
+  "a Core restarted mid-turn may recover the exact session only while its one matching page is still generating");
+assert.equal(restartRecovered?.source, "classic-progress-session-page-restart-verified");
+assert.equal(Object.hasOwn(restartRecovered, "runtimeKey"), false);
+
+page = { ...page, generating: false };
 assert.equal(await verifyProgressConversationAuthority({
   candidate: staleCandidate,
   sessionFingerprint: sessionA,
   adapter,
   deliveryEvidence,
   now: () => now,
-}), null, "stale session authority must wait for current-turn evidence");
+}), null, "an idle page may never revive stale session authority after a Core restart");
 
 console.log(JSON.stringify({
   ok: true,
@@ -123,7 +136,8 @@ console.log(JSON.stringify({
   sessionExact: true,
   duplicatePageFailsClosed: true,
   mismatchedCardFailsClosed: true,
-  staleSessionFailsClosed: true,
+  midTurnCoreRestartRecovered: true,
+  staleIdleSessionFailsClosed: true,
   idlePageFailsClosed: true,
   capabilityAuthorityTouched: false,
 }));

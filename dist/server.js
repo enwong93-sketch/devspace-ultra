@@ -2076,17 +2076,19 @@ export function createServer(config = loadConfig(), options = {}) {
             }
             progressWaits.push((async () => {
                 const minimumObservedAt = new Date(Date.now() - DEFAULT_PROGRESS_AUTHORITY_MAX_AGE_MS).toISOString();
-                let candidate = persistedSessionAuthority;
-                const candidateObservedAtMs = Date.parse(String(candidate?.observedAt || ""));
-                if (!candidate?.conversationId
-                    || !Number.isFinite(candidateObservedAtMs)
-                    || candidateObservedAtMs < Date.parse(minimumObservedAt)) {
-                    candidate = await conversationAuthority.waitForFingerprint(sessionFingerprint, {
-                        signal: req?.signal,
-                        minimumObservedAt,
-                    });
-                }
                 await turnDeliveryEvidenceReady;
+                const immediate = await verifyProgressConversationAuthority({
+                    candidate: persistedSessionAuthority,
+                    sessionFingerprint,
+                    adapter: progressLivenessAdapter,
+                    deliveryEvidence: turnDeliveryEvidence,
+                });
+                if (immediate?.conversationId)
+                    return immediate;
+                const candidate = await conversationAuthority.waitForFingerprint(sessionFingerprint, {
+                    signal: req?.signal,
+                    minimumObservedAt,
+                });
                 return await verifyProgressConversationAuthority({
                     candidate,
                     sessionFingerprint,

@@ -30,6 +30,8 @@ assert.match(server, /registerPlanTools\(server, planRuntime, \{[\s\S]*resolveCo
 assert.match(server, /registerGoalTools\(server, goalRuntime, \{[\s\S]*resolveConversation,/);
 assert.doesNotMatch(server, /conversationProgressLiveness\.noteToolActivity|consumeToolReminder/,
   "liveness may not wrap, delay, or mutate arbitrary tool handlers");
+assert.doesNotMatch(liveness, /noteToolActivity|consumeToolReminder|lastToolReminderAt/,
+  "the liveness subsystem must not inject reminders through another tool's execution path");
 assert.doesNotMatch(server, /String\(event\.source \|\| ""\)\.startsWith\("classic-active-turn-"\)/,
   "active-turn fallback may not rewrite durable session authority");
 assert.match(server, /active-turn evidence authorizes this one tool request only/i);
@@ -56,8 +58,12 @@ assert.match(liveness, /adapter\?\.find\?\.\(\{ conversationId \}\)/);
 assert.doesNotMatch(livenessCdp, /#exactTarget\(conversationId, runtimeKey\)|dispatchConversationFollowUp\(\{[\s\S]{0,160}runtimePort/,
   "liveness must discover the current page from conversationId instead of binding reminders to one Runtime");
 assert.match(livenessCdp, /for \(const runtimeKey of this\.runtimeKeys\)/);
-assert.match(livenessCdp, /conversation-open-in-multiple-runtimes/,
+assert.match(livenessCdp, /duplicate-conversation-pages/,
   "the same conversation open in more than one Runtime must fail closed rather than guess");
+assert.match(livenessCdp, /dispatchConversationFollowUp\(\{\s*conversationId:\s*resolved\.conversationId,/s,
+  "the ten-minute Agent reminder must be dispatched by exact conversationId");
+assert.doesNotMatch(livenessCdp, /dispatchConversationFollowUp\(\{[\s\S]{0,220}runtimePort:/,
+  "progress reminders may never pin their owner to the Runtime where the page happens to be open");
 
 console.log(JSON.stringify({
   ok: true,
@@ -66,11 +72,13 @@ console.log(JSON.stringify({
   capabilityAuthorityIsolated: true,
   blenderUnaffectedByProgressFailure: true,
   arbitraryToolWrapping: false,
+  toolResultReminderCoupling: false,
   unscopedCrossMainGuessing: false,
   activeTurnDurableRewrite: false,
   narrationAuthorityKey: "conversationId",
   narrationRuntimeBinding: false,
   runtime03DiscoverySupported: true,
+  tenMinuteAgentReminderConversationBound: true,
   exactSessionTurnCorrelation: true,
   restartFallbackPageVerified: true,
 }));
