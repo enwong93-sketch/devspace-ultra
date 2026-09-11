@@ -54,6 +54,8 @@ import { ClassicStreamRecoveryGuard } from "./classic-stream-recovery-guard.js";
 import { ClassicStreamRecoveryCdpAdapter, runtimeKeyForPort } from "./classic-stream-recovery-cdp.js";
 import { ClassicHostOverlayContextAdapter, ClassicHostOverlayProjection, createClassicHostOverlayOwnerStore, resolveClassicHostOverlayOwner } from "./classic-host-overlay.js";
 import { ClassicProgressNarrationOverlay } from "./classic-progress-narration-overlay.js";
+import { ConversationProgressLivenessSupervisor } from "./conversation-progress-liveness.js";
+import { ConversationProgressLivenessCdpAdapter } from "./conversation-progress-liveness-cdp.js";
 import { ContextGuardianRuntime, registerContextGuardianTools } from "./context-guardian.js";
 import { ClassicContextMetadataCdpAdapter } from "./context-guardian-cdp.js";
 import { ContextGuardianRolloverCoordinator } from "./context-guardian-rollover.js";
@@ -730,7 +732,7 @@ function registerCodexProcessTools(server, config, workspaces, processSessions) 
         });
     });
 }
-function createMcpServer(config, workspaces, reviewCheckpoints, processSessions, localAgentProviders, incomingArtifactAdapters, chatSwarm, browserControl, capabilityRuntime, blenderRuntimeManager, codexMcpBridge, conversationContinuity, contextGuardian, exactUsageAuthority, codexContextBridge, planRuntime, goalRuntime, goalHostBridge, hostOverlayProjection, conversationAuthority, conversationAuthorityReady, goalRunProgress, requestConversationContext) {
+function createMcpServer(config, workspaces, reviewCheckpoints, processSessions, localAgentProviders, incomingArtifactAdapters, chatSwarm, browserControl, capabilityRuntime, blenderRuntimeManager, codexMcpBridge, conversationContinuity, contextGuardian, exactUsageAuthority, codexContextBridge, planRuntime, goalRuntime, goalHostBridge, hostOverlayProjection, conversationAuthority, conversationAuthorityReady, goalRunProgress, requestConversationContext, conversationProgressLiveness = null) {
     const toolSurface = toolModeCapabilities(config.toolMode);
     const modelInstructions = serverInstructions(config);
     const modelInstructionsFingerprint = createHash("sha256").update(modelInstructions).digest("hex");
@@ -745,11 +747,12 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
     });
     const toolCatalog = new ToolCatalogRegistry();
     instrumentToolRegistration(server, toolCatalog);
-    const resolveConversationAuthority = async (extra) => {
+    const resolveCapabilityConversationAuthority = async (extra) => {
         await conversationAuthorityReady;
         const requestContext = requestConversationContext?.current?.() || null;
-        if (requestContext?.authority?.conversationId)
-            return requestContext.authority;
+        const scopedAuthority = requestContext?.capabilityAuthority || requestContext?.authority || null;
+        if (scopedAuthority?.conversationId)
+            return scopedAuthority;
         const requestFingerprint = requestContext?.sessionFingerprint || null;
         if (requestFingerprint) {
             const requestAuthority = conversationAuthority.resolveFingerprint(requestFingerprint);
@@ -774,6 +777,22 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
             return null;
         return await conversationAuthority.waitForFingerprint(fingerprint, { signal: extra?.signal });
     };
+    const resolveProgressConversationAuthority = async (extra) => {
+        await conversationAuthorityReady;
+        const requestContext = requestConversationContext?.current?.() || null;
+        if (requestContext?.progressAuthority?.conversationId)
+            return requestContext.progressAuthority;
+        if (requestContext?.progressAuthorityPromise) {
+            const progressAuthority = await requestContext.progressAuthorityPromise;
+            if (progressAuthority?.conversationId)
+                return progressAuthority;
+        }
+        // Progress narration has its own request-scoped authority domain.
+        // Never fall back to capability/session ownership: a stale Blender or
+        // MCP runtime binding must not be able to select another chat's card.
+        return null;
+    };
+    const resolveConversationAuthority = resolveCapabilityConversationAuthority;
     // User-visible narration is explicit and agent-authored through
     // devspace_progress_report. Low-level tool boundaries remain in request
     // logs/diagnostics and are never converted into narration-card prose.
@@ -917,7 +936,8 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
     registerConversationContinuityTools(server, conversationContinuity);
     registerContextGuardianTools(server, contextGuardian);
     registerCodexContextBridgeTools(server, codexContextBridge);
-    const resolveConversation = resolveConversationAuthority;
+    const resolveConversation = resolveCapabilityConversationAuthority;
+    const resolveProgressConversation = resolveProgressConversationAuthority;
     server.registerTool("devspace_progress_report", {
         title: "Report Conversation Progress",
         description: "Write one concise, conversation-bound update to the floating DEV Space progress narration card in your own natural language. Write after each meaningful medium-sized step, important verification, material direction change, or genuine blocker: not after every tool call, not on a timer or fixed tool count, and not only after several large phases have accumulated. Keep the wording completely free-form and specific to what just became true. Do not mirror low-level tools, counters, heartbeats, templates, or program status. The tool waits for the current ChatGPT Classic conversation identity instead of failing on a short correlation deadline; it never accepts another conversation id and cannot write across chats.",
@@ -933,7 +953,7 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
         },
     }, async ({ message, kind }, extra) => {
         try {
-            const resolved = await resolveConversation(extra);
+            const resolved = await resolveProgressConversation(extra);
             const conversationId = String(resolved?.conversationId || "").trim();
             if (!conversationId)
                 throw new Error("ChatGPT Classic conversation identity is unavailable for this MCP session.");
@@ -953,6 +973,10 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
             const snapshot = await response.json().catch(() => null);
             if (!response.ok)
                 throw new Error(`Progress narration endpoint returned HTTP ${response.status}${snapshot?.error ? ` (${snapshot.error})` : ""}.`);
+            await conversationProgressLiveness?.noteReport?.({
+                conversationId,
+                observedAtMs: Date.parse(snapshot?.updatedAt || "") || Date.now(),
+            }).catch(() => null);
             return {
                 content: [{ type: "text", text: `Progress narration updated for the current conversation: ${message}` }],
                 structuredContent: {
@@ -1916,6 +1940,7 @@ export function createServer(config = loadConfig(), options = {}) {
     const mcpCallCorrelator = new ClassicMcpCallCorrelator();
     const activeTurnRegistry = new ClassicActiveTurnRegistry();
     const requestConversationContext = new McpConversationRequestContext();
+    let conversationProgressLiveness = null;
     const persistConversationIdentity = async (event) => {
         if (!event?.sessionFingerprint || !event?.conversationId || !event?.runtimeKey) return null;
         await conversationAuthorityReady;
@@ -1925,8 +1950,7 @@ export function createServer(config = loadConfig(), options = {}) {
             runtimeKey: event.runtimeKey,
             observedAt: event.observedAt,
             authoritativeCurrent: event.authoritativeCurrent === true
-                || event.source === "classic-native-call-mcp"
-                || String(event.source || "").startsWith("classic-active-turn-"),
+                || event.source === "classic-native-call-mcp",
         });
     };
     const resolveAndBindMcpConversation = async (req) => {
@@ -1935,31 +1959,56 @@ export function createServer(config = loadConfig(), options = {}) {
         const callFingerprint = fingerprintMcpToolCall(req?.body);
         const toolName = String(req?.body?.params?.name || "").trim() || null;
         const turnTraceFingerprint = turnTraceFingerprintFromClassicRequest({ headers: req?.headers || {} });
-        let correlatedAuthority = null;
+        await conversationAuthorityReady;
+        const persistedSessionAuthority = conversationAuthority.resolveFingerprint(sessionFingerprint);
+        const persistedRuntimeKey = Array.isArray(persistedSessionAuthority?.runtimeKeys)
+            && persistedSessionAuthority.runtimeKeys.length === 1
+            ? persistedSessionAuthority.runtimeKeys[0]
+            : null;
+        const progressOnlyTool = toolName === "devspace_progress_report";
+        let capabilityAuthority = persistedSessionAuthority || null;
+        let progressAuthority = null;
         let authorityPromise = null;
-        const persistActiveTurnCorrelation = async (identity) => {
-            if (!identity)
-                return null;
-            const persisted = await persistConversationIdentity({
-                ...identity,
+        let progressAuthorityPromise = null;
+        const ephemeralTurnAuthority = (identity) => identity?.conversationId
+            ? {
+                conversationId: identity.conversationId,
                 sessionFingerprint,
-                authoritativeCurrent: true,
-            });
-            logEvent(config.logging, "info", "classic_active_turn_mcp_correlated", {
-                toolName,
-                runtimeKey: identity.runtimeKey,
-                source: identity.source,
-                traceMatched: String(identity.source || "").includes("trace-correlation"),
-                postTurnMatched: String(identity.source || "").includes("post-finish"),
-                rawTracePersisted: false,
-            });
-            return persisted;
-        };
+                runtimeKeys: identity.runtimeKey ? [identity.runtimeKey] : [],
+                runtimeKey: identity.runtimeKey || null,
+                observedAt: identity.observedAt || new Date().toISOString(),
+                source: identity.source || "classic-active-turn-ephemeral",
+                ephemeral: true,
+              }
+            : null;
+        const ephemeralProgressAuthority = (identity) => identity?.conversationId
+            ? {
+                conversationId: identity.conversationId,
+                sessionFingerprint,
+                observedAt: identity.observedAt || new Date().toISOString(),
+                source: identity.source || "classic-progress-request-correlation",
+                ephemeral: true,
+                authorityDomain: "progress",
+              }
+            : null;
         const activeTurn = toolName
-            ? activeTurnRegistry.resolveGatewayCall({ toolName, turnTraceFingerprint })
+            ? activeTurnRegistry.resolveGatewayCall({
+                toolName,
+                turnTraceFingerprint,
+                runtimeKeyHint: progressOnlyTool ? null : persistedRuntimeKey,
+              })
             : null;
         if (activeTurn) {
-            correlatedAuthority = await persistActiveTurnCorrelation(activeTurn);
+            const scopedTurnAuthority = ephemeralTurnAuthority(activeTurn);
+            if (progressOnlyTool) {
+                progressAuthority = ephemeralProgressAuthority(activeTurn);
+            }
+            else if (!capabilityAuthority) {
+                // Active-turn evidence authorizes this one tool request only.
+                // It must never rewrite the durable session authority used by
+                // another tool domain such as Blender or narration.
+                capabilityAuthority = scopedTurnAuthority;
+            }
         }
         if (callFingerprint) {
             const correlated = mcpCallCorrelator.noteGateway({
@@ -1968,20 +2017,26 @@ export function createServer(config = loadConfig(), options = {}) {
                 toolName,
                 observedAtMs: Date.now(),
             });
-            if (!correlatedAuthority && correlated) {
-                correlatedAuthority = await persistConversationIdentity(correlated);
+            if (correlated) {
+                if (progressOnlyTool) {
+                    progressAuthority = ephemeralProgressAuthority(correlated);
+                }
+                else {
+                    const exactNativeAuthority = await persistConversationIdentity(correlated);
+                    if (exactNativeAuthority?.conversationId)
+                        capabilityAuthority = exactNativeAuthority;
+                }
             }
         }
-        await conversationAuthorityReady;
-        const authority = correlatedAuthority || conversationAuthority.resolveFingerprint(sessionFingerprint);
-        if (!authority?.conversationId) {
+        if (!capabilityAuthority?.conversationId && !progressOnlyTool) {
             const correlationWaits = [];
-            if (toolName) {
+            if (toolName && (turnTraceFingerprint || persistedRuntimeKey)) {
                 correlationWaits.push(activeTurnRegistry.waitForIdentity({
                     toolName,
                     turnTraceFingerprint,
+                    runtimeKeyHint: persistedRuntimeKey,
                     signal: req?.signal,
-                }).then((identity) => persistActiveTurnCorrelation(identity)));
+                }).then((identity) => ephemeralTurnAuthority(identity)));
             }
             if (callFingerprint) {
                 correlationWaits.push(mcpCallCorrelator.waitForIdentity({
@@ -1995,22 +2050,62 @@ export function createServer(config = loadConfig(), options = {}) {
             else if (correlationWaits.length > 1)
                 authorityPromise = Promise.race(correlationWaits);
         }
-        if (!authority?.conversationId) {
-            return { conversationId: null, sessionFingerprint, runtimeKey: null, authorityPromise };
+        if (progressOnlyTool && !progressAuthority?.conversationId) {
+            const progressWaits = [];
+            if (toolName && turnTraceFingerprint) {
+                progressWaits.push(activeTurnRegistry.waitForIdentity({
+                    toolName,
+                    turnTraceFingerprint,
+                    runtimeKeyHint: null,
+                    signal: req?.signal,
+                }).then((identity) => ephemeralProgressAuthority(identity)));
+            }
+            if (callFingerprint) {
+                progressWaits.push(mcpCallCorrelator.waitForIdentity({
+                    callFingerprint,
+                    sessionFingerprint,
+                    signal: req?.signal,
+                }).then((identity) => ephemeralProgressAuthority(identity)));
+            }
+            if (progressWaits.length === 1)
+                progressAuthorityPromise = progressWaits[0];
+            else if (progressWaits.length > 1)
+                progressAuthorityPromise = Promise.any(progressWaits.map((pending) => Promise.resolve(pending).then((resolved) => {
+                    if (!resolved?.conversationId)
+                        throw new Error("Progress conversation authority remained unresolved.");
+                    return resolved;
+                }))).catch(() => null);
         }
-        const goals = await goalRuntime.activeGoals({ limit: 20 });
-        const alreadyBound = goals.filter((goal) => goal.conversationId === authority.conversationId);
-        if (alreadyBound.length === 0) {
-            const unbound = goals.filter((goal) => !goal.conversationId);
-            if (unbound.length === 1) {
-                await goalRuntime.bindConversation({ goalId: unbound[0].id, conversationId: authority.conversationId });
+        const authority = capabilityAuthority;
+        if (!authority?.conversationId && !progressAuthority?.conversationId) {
+            return {
+                conversationId: null,
+                sessionFingerprint,
+                runtimeKey: null,
+                authorityPromise,
+                progressAuthorityPromise,
+            };
+        }
+        if (!progressOnlyTool && authority?.conversationId) {
+            const goals = await goalRuntime.activeGoals({ limit: 20 });
+            const alreadyBound = goals.filter((goal) => goal.conversationId === authority.conversationId);
+            if (alreadyBound.length === 0) {
+                const unbound = goals.filter((goal) => !goal.conversationId);
+                if (unbound.length === 1) {
+                    await goalRuntime.bindConversation({ goalId: unbound[0].id, conversationId: authority.conversationId });
+                }
             }
         }
         return {
-            conversationId: authority.conversationId,
-            sessionFingerprint: authority.sessionFingerprint,
-            runtimeKey: authority.runtimeKeys.length === 1 ? authority.runtimeKeys[0] : null,
+            conversationId: authority?.conversationId || null,
+            sessionFingerprint: authority?.sessionFingerprint || sessionFingerprint,
+            runtimeKey: Array.isArray(authority?.runtimeKeys) && authority.runtimeKeys.length === 1
+                ? authority.runtimeKeys[0]
+                : authority?.runtimeKey || null,
+            capabilityAuthority: authority?.conversationId ? authority : null,
+            progressAuthority: progressAuthority?.conversationId ? progressAuthority : null,
             authorityPromise,
+            progressAuthorityPromise,
         };
     };
     const nativeUsageEvidence = new ClassicNativeUsageEvidenceStore({
@@ -2028,9 +2123,11 @@ export function createServer(config = loadConfig(), options = {}) {
         },
         onActiveTurn: (event) => {
             activeTurnRegistry.noteTurn(event);
+            void conversationProgressLiveness?.noteTurn?.(event).catch(() => null);
         },
         onNativeMcpCall: (event) => {
-            if (event?.sessionFingerprint) {
+            const progressOnlyCall = event?.toolName === "devspace_progress_report";
+            if (event?.sessionFingerprint && !progressOnlyCall) {
                 void persistConversationIdentity(event).catch((error) => {
                     logEvent(config.logging, "debug", "classic_native_mcp_identity_persist_failed", {
                         error: error instanceof Error ? error.message : String(error),
@@ -2039,6 +2136,7 @@ export function createServer(config = loadConfig(), options = {}) {
             }
             const correlated = mcpCallCorrelator.noteNative(event);
             if (!correlated) return;
+            if (progressOnlyCall) return;
             void persistConversationIdentity(correlated).catch((error) => {
                 logEvent(config.logging, "debug", "classic_mcp_call_identity_persist_failed", {
                     error: error instanceof Error ? error.message : String(error),
@@ -2076,6 +2174,19 @@ export function createServer(config = loadConfig(), options = {}) {
         planStatePath: join(config.stateDir, "plan-state.json"),
         goalStatePath: join(config.stateDir, "goal-state.json"),
     });
+    const progressLivenessAdapter = new ConversationProgressLivenessCdpAdapter({
+        hostBridge: goalHostBridge,
+    });
+    conversationProgressLiveness = new ConversationProgressLivenessSupervisor({
+        statePath: join(config.stateDir, "conversation-progress-liveness.json"),
+        planStatePath: join(config.stateDir, "plan-state.json"),
+        progressStatePath: join(config.stateDir, "devspace-live-progress.json"),
+        adapter: progressLivenessAdapter,
+        enabled: !config.passiveCore && config.conversationProgressLivenessEnabled !== false,
+        reminderMs: Number(config.conversationProgressReminderSeconds || 600) * 1_000,
+        continueMs: Number(config.conversationProgressContinueSeconds || 1_200) * 1_000,
+        pollMs: Number(config.conversationProgressPollSeconds || 15) * 1_000,
+    });
     contextMetadataAdapter.setHandlers({
         onCatalog: (event) => contextGuardian.observeNativeModelCatalog(event),
         onUsageEvidence: async (event) => {
@@ -2102,6 +2213,11 @@ export function createServer(config = loadConfig(), options = {}) {
         onUserTurnRollover: (event) => contextRollover?.noteUserTurnRollover(event),
     });
     if (!config.passiveCore) {
+        void conversationProgressLiveness.start().catch((error) => {
+            logEvent(config.logging, "warn", "conversation_progress_liveness_start_failed", {
+                error: error instanceof Error ? error.message : String(error),
+            });
+        });
         void primaryDebugGuard.start().catch((error) => {
             logEvent(config.logging, "warn", "primary_debug_guard_start_failed", {
                 error: error instanceof Error ? error.message : String(error),
@@ -2280,7 +2396,7 @@ export function createServer(config = loadConfig(), options = {}) {
     const localAgentProviders = config.subagents
         ? getLocalAgentProviderAvailabilitySnapshot()
         : [];
-    const mcpServerTemplate = createMcpServer(config, workspaces, reviewCheckpoints, processSessions, localAgentProviders, incomingArtifactAdapters, chatSwarm, browserControl, capabilityRuntime, blenderRuntimeManager, codexMcpBridge, conversationContinuity, contextGuardian, exactUsageAuthority, codexContextBridge, planRuntime, goalRuntime, goalHostBridge, hostOverlayProjection, conversationAuthority, conversationAuthorityReady, goalRunProgress, requestConversationContext);
+    const mcpServerTemplate = createMcpServer(config, workspaces, reviewCheckpoints, processSessions, localAgentProviders, incomingArtifactAdapters, chatSwarm, browserControl, capabilityRuntime, blenderRuntimeManager, codexMcpBridge, conversationContinuity, contextGuardian, exactUsageAuthority, codexContextBridge, planRuntime, goalRuntime, goalHostBridge, hostOverlayProjection, conversationAuthority, conversationAuthorityReady, goalRunProgress, requestConversationContext, conversationProgressLiveness);
     const mcpTemplateDiagnostics = mcpServerTemplateDiagnostics(mcpServerTemplate);
     logEvent(config.logging, "info", "mcp_server_template_ready", mcpTemplateDiagnostics);
     const createSessionMcpServer = () => createMcpSessionServerFromTemplate(mcpServerTemplate);
@@ -2884,8 +3000,11 @@ export function createServer(config = loadConfig(), options = {}) {
                 }))
                 : null;
             const handled = requestConversationContext.run({
-                authority: requestConversation?.conversationId ? requestConversation : null,
+                capabilityAuthority: requestConversation?.capabilityAuthority
+                    || (requestConversation?.conversationId ? requestConversation : null),
+                progressAuthority: requestConversation?.progressAuthority || null,
                 authorityPromise: requestConversation?.authorityPromise || null,
+                progressAuthorityPromise: requestConversation?.progressAuthorityPromise || null,
                 sessionFingerprint: requestConversation?.sessionFingerprint
                     || coreClientSessionFingerprint(req),
                 mcpSessionId: sessionId || trackedSessionId || null,
@@ -2973,6 +3092,8 @@ export function createServer(config = loadConfig(), options = {}) {
                 await chatSwarm.close();
                 await browserControl.close();
                 await conversationContinuity.close();
+                await conversationProgressLiveness?.close?.();
+                conversationProgressLiveness = null;
                 await progressNarrationOverlay.close();
                 await hostOverlayProjection.close();
                 await planRuntime.close();

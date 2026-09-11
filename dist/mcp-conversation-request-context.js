@@ -21,21 +21,48 @@ export class McpConversationRequestContext {
     this.storage = new AsyncLocalStorage();
   }
 
-  run({ authority = null, authorityPromise = null, sessionFingerprint = null, mcpSessionId = null } = {}, operation) {
+  run({
+    authority = null,
+    capabilityAuthority = null,
+    progressAuthority = null,
+    authorityPromise = null,
+    progressAuthorityPromise = null,
+    sessionFingerprint = null,
+    mcpSessionId = null,
+  } = {}, operation) {
     if (typeof operation !== "function") throw new Error("operation is required.");
-    const conversationId = cleanConversation(authority?.conversationId);
+    const selectedCapabilityAuthority = capabilityAuthority || authority;
+    const capabilityConversationId = cleanConversation(selectedCapabilityAuthority?.conversationId);
+    const progressConversationId = cleanConversation(progressAuthority?.conversationId);
     const context = {
-      authority: conversationId
+      authority: capabilityConversationId
         ? {
-            ...authority,
-            conversationId,
-            sessionFingerprint: cleanFingerprint(authority?.sessionFingerprint) || cleanFingerprint(sessionFingerprint),
+            ...selectedCapabilityAuthority,
+            conversationId: capabilityConversationId,
+            sessionFingerprint: cleanFingerprint(selectedCapabilityAuthority?.sessionFingerprint) || cleanFingerprint(sessionFingerprint),
           }
         : null,
-      sessionFingerprint: cleanFingerprint(sessionFingerprint) || cleanFingerprint(authority?.sessionFingerprint),
+      capabilityAuthority: capabilityConversationId
+        ? {
+            ...selectedCapabilityAuthority,
+            conversationId: capabilityConversationId,
+            sessionFingerprint: cleanFingerprint(selectedCapabilityAuthority?.sessionFingerprint) || cleanFingerprint(sessionFingerprint),
+          }
+        : null,
+      progressAuthority: progressConversationId
+        ? {
+            ...progressAuthority,
+            conversationId: progressConversationId,
+            sessionFingerprint: cleanFingerprint(progressAuthority?.sessionFingerprint) || cleanFingerprint(sessionFingerprint),
+          }
+        : null,
+      sessionFingerprint: cleanFingerprint(sessionFingerprint) || cleanFingerprint(selectedCapabilityAuthority?.sessionFingerprint) || cleanFingerprint(progressAuthority?.sessionFingerprint),
       mcpSessionId: cleanConversation(mcpSessionId),
       authorityPromise: authorityPromise && typeof authorityPromise.then === "function"
         ? Promise.resolve(authorityPromise)
+        : null,
+      progressAuthorityPromise: progressAuthorityPromise && typeof progressAuthorityPromise.then === "function"
+        ? Promise.resolve(progressAuthorityPromise)
         : null,
     };
     return this.storage.run(context, operation);
@@ -46,9 +73,12 @@ export class McpConversationRequestContext {
     if (!value) return null;
     return {
       authority: value.authority ? structuredClone(value.authority) : null,
+      capabilityAuthority: value.capabilityAuthority ? structuredClone(value.capabilityAuthority) : null,
+      progressAuthority: value.progressAuthority ? structuredClone(value.progressAuthority) : null,
       sessionFingerprint: value.sessionFingerprint,
       mcpSessionId: value.mcpSessionId,
       ...(value.authorityPromise ? { authorityPromise: value.authorityPromise } : {}),
+      ...(value.progressAuthorityPromise ? { progressAuthorityPromise: value.progressAuthorityPromise } : {}),
     };
   }
 }

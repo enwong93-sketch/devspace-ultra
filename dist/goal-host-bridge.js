@@ -573,6 +573,80 @@ export class ClassicGoalHostBridge {
     return null;
   }
 
+  async findExactConversationRelay(conversationId, { runtimePort = null } = {}) {
+    const expectedConversationId = String(conversationId || "").trim();
+    if (!expectedConversationId) {
+      return { candidate: null, ambiguous: false, matchCount: 0, error: "conversationId is required." };
+    }
+    const ports = Number.isInteger(runtimePort) ? [runtimePort] : this.ports;
+    const matches = [];
+    for (const port of ports) {
+      let candidates = [];
+      try {
+        candidates = await this.probeRelayPort(port, expectedConversationId);
+      } catch {
+        continue;
+      }
+      for (const candidate of candidates || []) {
+        if (candidate?.chatMode !== true) continue;
+        if (candidate?.conversationId !== expectedConversationId) continue;
+        matches.push(candidate);
+      }
+    }
+    if (matches.length !== 1) {
+      return {
+        candidate: null,
+        ambiguous: matches.length > 1,
+        matchCount: matches.length,
+        error: matches.length > 1
+          ? `Conversation ${expectedConversationId} is open in more than one ChatGPT Main runtime.`
+          : `No exact Chat-mode relay is open for conversation ${expectedConversationId}.`,
+      };
+    }
+    return { candidate: matches[0], ambiguous: false, matchCount: 1, error: null };
+  }
+
+  async dispatchConversationFollowUp({ conversationId, prompt, runtimePort = null, purpose = "conversation-liveness" } = {}) {
+    const expectedConversationId = String(conversationId || "").trim();
+    if (!expectedConversationId) throw new Error("Conversation follow-up dispatch requires conversationId.");
+    if (typeof prompt !== "string" || !prompt.trim()) throw new Error("Conversation follow-up dispatch requires prompt.");
+    const resolved = await this.findExactConversationRelay(expectedConversationId, { runtimePort });
+    if (!resolved.candidate) {
+      return {
+        ok: false,
+        definiteFailure: true,
+        ambiguous: resolved.ambiguous,
+        matchCount: resolved.matchCount,
+        error: resolved.error,
+      };
+    }
+    try {
+      const sent = await this.sendRaw(resolved.candidate, {
+        prompt,
+        scrollToBottom: false,
+        purpose: String(purpose || "conversation-liveness").slice(0, 80),
+      });
+      if (sent?.ok !== true) {
+        return {
+          ok: false,
+          definiteFailure: sent?.definiteFailure === true,
+          error: sent?.error || "Raw ChatGPT Classic conversation follow-up RPC did not confirm dispatch.",
+        };
+      }
+      return {
+        ok: true,
+        transport: "classic-raw-host-rpc",
+        conversationId: expectedConversationId,
+        runtimeLabel: resolved.candidate.runtimeLabel,
+        runtimePort: resolved.candidate.runtimePort,
+        targetId: resolved.candidate.targetId,
+        purpose: String(purpose || "conversation-liveness").slice(0, 80),
+      };
+    } catch (error) {
+      return { ok: false, definiteFailure: false, error: errorMessage(error) };
+    }
+  }
+
   async resolveRecoveryCandidate({ goalId, conversationId = null, runtimePort = null } = {}) {
     const conversation = String(conversationId || "").trim() || null;
     const exactGoal = await this.findMatchingCandidate(goalId, {

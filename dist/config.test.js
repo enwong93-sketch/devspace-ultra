@@ -17,6 +17,13 @@ try {
   assert.equal(loadConfig(baseEnv).classicStreamRecoveryEnabled, true, "Classic Stream Recovery should be safe-on by default");
   assert.equal(loadConfig(baseEnv).contextGuardianEnabled, true, "Context Guardian should be safe-on by default");
   assert.equal(loadConfig(baseEnv).classicHostOverlayEnabled, true, "Classic Host Overlay should be safe-on by default");
+  assert.equal(loadConfig(baseEnv).conversationProgressLivenessEnabled, true, "conversation-scoped progress liveness should be safe-on by default");
+  assert.equal(loadConfig(baseEnv).conversationProgressReminderSeconds, 600);
+  assert.equal(loadConfig(baseEnv).conversationProgressContinueSeconds, 1200);
+  assert.equal(loadConfig(baseEnv).conversationProgressPollSeconds, 15);
+  assert.equal(loadConfig({ ...baseEnv, DEVSPACE_PROGRESS_LIVENESS: "false" }).conversationProgressLivenessEnabled, false);
+  assert.equal(loadConfig({ ...baseEnv, DEVSPACE_PROGRESS_REMINDER_SECONDS: "30" }).conversationProgressReminderSeconds, 30);
+  assert.equal(loadConfig({ ...baseEnv, DEVSPACE_PROGRESS_CONTINUE_SECONDS: "60" }).conversationProgressContinueSeconds, 60);
   assert.equal(loadConfig(baseEnv).goalRoundRecoveryEnabled, true, "same-round Goal recovery should be enabled by default");
   assert.equal(loadConfig({ ...baseEnv, DEVSPACE_GOAL_ROUND_RECOVERY: "false" }).goalRoundRecoveryEnabled, false, "operators must be able to pause automatic Goal re-entry without pausing the Goal itself");
   assert.equal(loadConfig({ ...baseEnv, DEVSPACE_CLASSIC_STREAM_RECOVERY: "false" }).classicStreamRecoveryEnabled, false);
@@ -53,7 +60,7 @@ try {
   writeFileSync(join(configDir, "config.json"), `\uFEFF${JSON.stringify({ classicHostOverlayEnabled: false })}\n`, "utf8");
   assert.equal(loadConfig(baseEnv).classicHostOverlayEnabled, false, "UTF-8 BOM config files should parse normally");
 
-  console.log(JSON.stringify({ ok: true, defaultWidgets: "off", optInModes: ["changes", "full"], classicStreamRecoveryDefault: true, contextGuardianDefault: true, classicHostOverlayDefault: true, utf8BomConfig: true }));
+  console.log(JSON.stringify({ ok: true, defaultWidgets: "off", optInModes: ["changes", "full"], classicStreamRecoveryDefault: true, contextGuardianDefault: true, classicHostOverlayDefault: true, progressLivenessDefault: true, utf8BomConfig: true }));
 } finally {
   rmSync(configDir, { recursive: true, force: true });
 }

@@ -22,8 +22,9 @@ assert.match(server, /const requestAuthority = conversationAuthority\.resolveFin
 assert.match(server, /if \(requestContext\?\.authorityPromise\)[\s\S]*const exactAuthority = await requestContext\.authorityPromise/, "an unresolved first-call correlation may remain pending without an arbitrary wall-clock timeout");
 assert.match(server, /const fingerprint = requestFingerprint \|\| sessionFingerprintFromMcpExtra\(extra\)/, "fallback authority wait must stay bound to the exact request fingerprint rather than runtimeId or another conversation");
 assert.match(server, /new ClassicActiveTurnRegistry\(\)/, "server-side MCP calls must correlate against the exact active or just-finished ChatGPT turn when the host does not use the legacy call_mcp route");
-assert.match(server, /activeTurnRegistry\.resolveGatewayCall\(\{\s*toolName,\s*turnTraceFingerprint\s*\}\)/, "active-turn correlation must prefer the tool name plus hashed turn trace when available");
-assert.match(server, /classic_active_turn_mcp_correlated/, "successful active-turn correlation must emit non-secret production evidence for live acceptance");
+assert.match(server, /activeTurnRegistry\.resolveGatewayCall\(\{\s*toolName,\s*turnTraceFingerprint,\s*runtimeKeyHint:\s*progressOnlyTool\s*\?\s*null\s*:\s*persistedRuntimeKey/, "active-turn correlation must prefer the tool name plus hashed turn trace while keeping progress independent of Runtime ownership");
+assert.match(server, /const ephemeralProgressAuthority = \(identity\)/, "progress narration must use a request-scoped conversation-only authority object");
+assert.match(server, /const progressOnlyCall = event\?\.toolName === "devspace_progress_report";[\s\S]*if \(progressOnlyCall\) return;/, "progress-only native calls must not rewrite durable capability authority");
 assert.match(server, /onNativeMcpCall/, "always-on Classic observer must feed native call_mcp evidence into the correlator");
 assert.match(server, /onActiveTurn/, "always-on Classic observer must feed active turn lifecycle evidence into the server-side correlator");
 assert.match(server, /event\?\.sessionFingerprint[\s\S]*persistConversationIdentity\(event\)/, "a native call_mcp request carrying oai-session-id must bind its own conversation directly without temporal guessing");

@@ -188,19 +188,27 @@ export class ClassicActiveTurnRegistry {
     return activeTurnIdentity(entry, "classic-active-turn-start");
   }
 
-  resolveGatewayCall({ toolName, turnTraceFingerprint = null } = {}) {
+  resolveGatewayCall({ toolName, turnTraceFingerprint = null, runtimeKeyHint = null } = {}) {
     this.prune();
     const tool = cleanText(toolName, 220);
     if (!tool) return null;
     const trace = cleanTraceFingerprint(turnTraceFingerprint);
-    const entries = [...this.active.values()];
+    const runtimeHint = cleanRuntimeKey(runtimeKeyHint);
+    // Tool-name uniqueness across browser windows is not conversation
+    // authority. Without an exact hashed turn trace or a runtime key already
+    // derived from the request's own session, fail closed rather than allowing
+    // one Main's deferred tool call to claim another Main's conversation.
+    if (!trace && !runtimeHint) return null;
+    const entries = [...this.active.values()].filter((entry) => (
+      !runtimeHint || entry.runtimeKey === runtimeHint
+    ));
     let candidates = entries.filter((entry) => (
       trace
         ? entry.turnTraceFingerprint === trace
         : entry.localFunctionNames.includes(tool)
     ));
     let deferredPlaceholder = false;
-    if (!trace && candidates.length === 0) {
+    if (!trace && runtimeHint && candidates.length === 0) {
       candidates = entries.filter((entry) => isDeferredPlaceholderTurn(entry));
       deferredPlaceholder = candidates.length > 0;
     }
@@ -238,8 +246,8 @@ export class ClassicActiveTurnRegistry {
     return identity;
   }
 
-  waitForIdentity({ toolName, turnTraceFingerprint = null, signal } = {}) {
-    const immediate = this.resolveGatewayCall({ toolName, turnTraceFingerprint });
+  waitForIdentity({ toolName, turnTraceFingerprint = null, runtimeKeyHint = null, signal } = {}) {
+    const immediate = this.resolveGatewayCall({ toolName, turnTraceFingerprint, runtimeKeyHint });
     if (immediate) return Promise.resolve(immediate);
     const tool = cleanText(toolName, 220);
     if (!tool) return Promise.resolve(null);
@@ -259,6 +267,7 @@ export class ClassicActiveTurnRegistry {
     this.waiters.set(waiterId, {
       toolName: tool,
       turnTraceFingerprint: cleanTraceFingerprint(turnTraceFingerprint),
+      runtimeKeyHint: cleanRuntimeKey(runtimeKeyHint),
       createdAtMs: this.now(),
       resolve: (value) => {
         if (signal) signal.removeEventListener("abort", onAbort);

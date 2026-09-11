@@ -297,6 +297,66 @@ assert.equal(relayFallbackCalls.length, 1);
 assert.equal(relayFallbackCalls[0].candidate.targetId, "generic-devspace-relay");
 assert.equal(relayFallbackCalls[0].payload.goalId, "goal_bound_recovery");
 
+const livenessFollowUps = [];
+const livenessBridge = new moduleUnderTest.ClassicGoalHostBridge({
+  ports: [9721, 9732],
+  async probeRelayPort(port, conversationId) {
+    if (port !== 9732 || conversationId !== "conversation_liveness") return [];
+    return [{
+      runtimePort: 9732,
+      runtimeLabel: "Main-02",
+      targetId: "liveness-relay",
+      chatMode: true,
+      conversationId,
+      webSocketDebuggerUrl: "ws://relay-liveness",
+      relayOnly: true,
+    }];
+  },
+  async sendRaw(candidate, payload) {
+    livenessFollowUps.push({ candidate, payload });
+    return { ok: true };
+  },
+});
+const livenessDispatch = await livenessBridge.dispatchConversationFollowUp({
+  conversationId: "conversation_liveness",
+  runtimePort: 9732,
+  prompt: "progress reminder",
+  purpose: "progress-reminder",
+});
+assert.equal(livenessDispatch.ok, true);
+assert.equal(livenessDispatch.conversationId, "conversation_liveness");
+assert.equal(livenessDispatch.runtimePort, 9732);
+assert.equal(livenessFollowUps.length, 1);
+assert.equal(livenessFollowUps[0].candidate.targetId, "liveness-relay");
+
+let ambiguousLivenessSends = 0;
+const ambiguousLivenessBridge = new moduleUnderTest.ClassicGoalHostBridge({
+  ports: [9721, 9732],
+  async probeRelayPort(port, conversationId) {
+    return [{
+      runtimePort: port,
+      runtimeLabel: port === 9721 ? "Main-01" : "Main-02",
+      targetId: `duplicate-${port}`,
+      chatMode: true,
+      conversationId,
+      webSocketDebuggerUrl: `ws://duplicate-${port}`,
+      relayOnly: true,
+    }];
+  },
+  async sendRaw() {
+    ambiguousLivenessSends += 1;
+    return { ok: true };
+  },
+});
+const ambiguousLiveness = await ambiguousLivenessBridge.dispatchConversationFollowUp({
+  conversationId: "conversation_duplicate",
+  prompt: "must fail closed",
+});
+assert.equal(ambiguousLiveness.ok, false);
+assert.equal(ambiguousLiveness.ambiguous, true);
+assert.equal(ambiguousLiveness.matchCount, 2);
+assert.equal(ambiguousLivenessSends, 0, "a duplicated conversation route must never receive a follow-up on either Main");
+
 const staleWidgetDispatches = [];
 const conversationSafeBridge = new moduleUnderTest.ClassicGoalHostBridge({
   ports: [9732, 9733],

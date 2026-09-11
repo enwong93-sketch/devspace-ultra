@@ -21,6 +21,12 @@ const result = await context.run({
       sessionFingerprint: fingerprint,
       runtimeKeys: ["main-01"],
     },
+    capabilityAuthority: {
+      conversationId: "conversation-a",
+      sessionFingerprint: fingerprint,
+      runtimeKeys: ["main-01"],
+    },
+    progressAuthority: null,
     sessionFingerprint: fingerprint,
     mcpSessionId: "backend-session-a",
   });
@@ -47,12 +53,32 @@ const deferredAuthority = Promise.resolve({
 });
 await context.run({
   authorityPromise: deferredAuthority,
+  progressAuthority: {
+    conversationId: "conversation-progress-only",
+    runtimeKeys: ["main-05"],
+  },
   sessionFingerprint: "d".repeat(64),
 }, async () => {
   const current = context.current();
   assert.equal(current.authority, null);
+  assert.equal(current.capabilityAuthority, null);
+  assert.equal(current.progressAuthority.conversationId, "conversation-progress-only");
   assert.equal(current.authorityPromise, deferredAuthority, "conversation-bound tools must receive the exact in-flight correlation promise without a global mutable slot");
   assert.equal((await current.authorityPromise).conversationId, "conversation-deferred");
+});
+
+const progressDeferred = Promise.resolve({
+  conversationId: "conversation-progress-deferred",
+  runtimeKeys: ["main-06"],
+});
+await context.run({
+  capabilityAuthority: { conversationId: "conversation-capability", runtimeKeys: ["main-01"] },
+  progressAuthorityPromise: progressDeferred,
+}, async () => {
+  const current = context.current();
+  assert.equal(current.capabilityAuthority.conversationId, "conversation-capability");
+  assert.equal(current.progressAuthority, null);
+  assert.equal((await current.progressAuthorityPromise).conversationId, "conversation-progress-deferred");
 });
 
 console.log(JSON.stringify({
@@ -61,5 +87,6 @@ console.log(JSON.stringify({
   asyncPropagation: true,
   concurrentIsolation: true,
   deferredAuthorityPropagation: true,
+  authorityDomainsSeparated: true,
   crossRequestLeakage: false,
 }));

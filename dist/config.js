@@ -228,6 +228,27 @@ export function loadConfig(env = process.env) {
         classicHostOverlayEnabled: env.DEVSPACE_CLASSIC_HOST_OVERLAY === undefined
             ? files.config.classicHostOverlayEnabled !== false
             : parseBoolean(env.DEVSPACE_CLASSIC_HOST_OVERLAY),
+        conversationProgressLivenessEnabled: env.DEVSPACE_PROGRESS_LIVENESS === undefined
+            ? files.config.conversationProgressLivenessEnabled !== false
+            : parseBoolean(env.DEVSPACE_PROGRESS_LIVENESS),
+        conversationProgressReminderSeconds: parsePositiveInteger(
+            env.DEVSPACE_PROGRESS_REMINDER_SECONDS ?? numberConfigValue(files.config.conversationProgressReminderSeconds),
+            10 * 60,
+            "DEVSPACE_PROGRESS_REMINDER_SECONDS",
+            24 * 60 * 60,
+        ),
+        conversationProgressContinueSeconds: parsePositiveInteger(
+            env.DEVSPACE_PROGRESS_CONTINUE_SECONDS ?? numberConfigValue(files.config.conversationProgressContinueSeconds),
+            20 * 60,
+            "DEVSPACE_PROGRESS_CONTINUE_SECONDS",
+            24 * 60 * 60,
+        ),
+        conversationProgressPollSeconds: parsePositiveInteger(
+            env.DEVSPACE_PROGRESS_POLL_SECONDS ?? numberConfigValue(files.config.conversationProgressPollSeconds),
+            15,
+            "DEVSPACE_PROGRESS_POLL_SECONDS",
+            60 * 60,
+        ),
         contextGuardianEnabled: env.DEVSPACE_CONTEXT_GUARDIAN === undefined
             ? files.config.contextGuardianEnabled !== false
             : parseBoolean(env.DEVSPACE_CONTEXT_GUARDIAN),

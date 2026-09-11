@@ -7,8 +7,9 @@ assert.match(source, /import \{ PlanRuntime \} from "\.\/plan-runtime\.js";/);
 assert.match(source, /import \{ registerPlanTools \} from "\.\/plan-tools\.js";/);
 assert.match(source, /const PLAN_CARD_URI = "ui:\/\/devspace\/plan-card\.html";/);
 assert.match(source, /new PlanRuntime\(\{\s*stateDir: config\.stateDir,?\s*\}\)/s);
-assert.match(source, /const resolveConversationAuthority = async \(extra\) => \{[\s\S]*conversationAuthority\.resolveMcpExtra\(extra\)/, "production MCP tools must resolve conversation identity only through the native authority registry");
-assert.match(source, /const resolveConversation = resolveConversationAuthority;/, "Plan tools must receive the request-scoped native authority resolver");
+assert.match(source, /const resolveCapabilityConversationAuthority = async \(extra\) => \{[\s\S]*conversationAuthority\.resolveMcpExtra\(extra\)/, "production MCP tools must resolve conversation identity only through the native authority registry");
+assert.match(source, /const resolveConversation = resolveCapabilityConversationAuthority;/, "Plan tools must receive the capability/control authority, never the progress-only authority");
+assert.doesNotMatch(source, /const resolveConversation = resolveProgressConversationAuthority;/, "a progress-card identity must never own Plan execution state");
 assert.match(source, /registerPlanTools\(server, planRuntime, \{\s*resourceUri: PLAN_CARD_URI,\s*resolveConversation,?\s*\}\)/s, "Plan tools must receive the native conversation resolver so new Plans cannot become global unbound state");
 assert.match(source, /await planRuntime\.close\(\)/);
 

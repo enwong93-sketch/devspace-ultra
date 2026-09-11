@@ -80,7 +80,10 @@ assert.deepEqual(events.slice(-2).map((item) => item.kind), ["response", "finish
 assert.equal(activeTurns.at(-1).kind, "finished");
 assert.equal(activeTurns.at(-1).requestId, "r1");
 assert.equal(tracker.pendingSize, 0, "finished native turn must leave no pending transport record");
-const delayedGatewayIdentity = delayedGatewayTurns.resolveGatewayCall({ toolName: "blender_mcp" });
+const delayedGatewayIdentity = delayedGatewayTurns.resolveGatewayCall({
+  toolName: "blender_mcp",
+  runtimeKeyHint: "main-01",
+});
 assert.equal(
   delayedGatewayIdentity?.conversationId,
   "conversation-a",
@@ -88,7 +91,10 @@ assert.equal(
 );
 assert.equal(delayedGatewayIdentity?.source, "classic-active-turn-post-finish-unique-tool-correlation");
 now += 1_100;
-assert.equal(delayedGatewayTurns.resolveGatewayCall({ toolName: "blender_mcp" }), null);
+assert.equal(delayedGatewayTurns.resolveGatewayCall({
+  toolName: "blender_mcp",
+  runtimeKeyHint: "main-01",
+}), null);
 
 tracker.noteRequest({ requestId: "r2", request: { url: "https://chatgpt.com/backend-api/f/conversation", method: "POST", postData: JSON.stringify({ conversation_id: "conversation-b", model: "gpt-test" }), headers: {} } });
 tracker.noteFailure({ requestId: "r2", errorText: "net::ERR_FAILED", canceled: true, blockedReason: "other" });

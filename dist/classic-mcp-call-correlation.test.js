@@ -151,8 +151,13 @@ assert.equal(
   null,
   "two active conversations exposing the same direct tool must fail closed when no trace distinguishes them",
 );
-assert.equal(activeTurns.diagnostics().ambiguousMatches > 0, true);
-const uniqueTurn = activeTurns.resolveGatewayCall({ toolName: "blender_mcp" });
+assert.equal(activeTurns.diagnostics().ambiguousMatches, 0, "unscoped calls fail before any cross-runtime candidate comparison");
+assert.equal(
+  activeTurns.resolveGatewayCall({ toolName: "blender_mcp" }),
+  null,
+  "even a unique tool name must not become cross-window authority without a request-owned runtime hint",
+);
+const uniqueTurn = activeTurns.resolveGatewayCall({ toolName: "blender_mcp", runtimeKeyHint: "main-01" });
 assert.equal(uniqueTurn?.conversationId, "conversation-main-01");
 assert.equal(uniqueTurn?.source, "classic-active-turn-unique-tool-correlation");
 
@@ -198,6 +203,21 @@ assert.equal(
 assert.equal(deferredTraceTurns.diagnostics().turnsWithTrace, 1);
 assert.equal(deferredTraceTurns.diagnostics().placeholderOnlyTurns, 1);
 
+assert.equal(
+  deferredTraceTurns.resolveGatewayCall({ toolName: "devspace_progress_report" }),
+  null,
+  "a deferred placeholder must never claim an unscoped MCP call merely because it is the only recent Main turn",
+);
+const runtimeScopedDeferredTool = deferredTraceTurns.resolveGatewayCall({
+  toolName: "devspace_progress_report",
+  runtimeKeyHint: "main-01",
+});
+assert.equal(runtimeScopedDeferredTool?.conversationId, "conversation-deferred-trace");
+assert.equal(
+  runtimeScopedDeferredTool?.source,
+  "classic-active-turn-post-finish-deferred-placeholder-correlation",
+);
+
 const deferredPlaceholderTurns = new ClassicActiveTurnRegistry({
   now: () => now,
   activeTtlMs: 60_000,
@@ -222,12 +242,20 @@ const dynamicallyDisclosedWithoutTrace = deferredPlaceholderTurns.resolveGateway
   toolName: "devspace_progress_report",
 });
 assert.equal(
-  dynamicallyDisclosedWithoutTrace?.conversationId,
+  dynamicallyDisclosedWithoutTrace,
+  null,
+  "a deferred tool call without trace or request-owned runtime scope must never claim another Main",
+);
+const runtimeScopedWithoutTrace = deferredPlaceholderTurns.resolveGatewayCall({
+  toolName: "devspace_progress_report",
+  runtimeKeyHint: "main-01",
+});
+assert.equal(
+  runtimeScopedWithoutTrace?.conversationId,
   "conversation-deferred-placeholder",
-  "a unique recent local.continue_in_work turn must own a later dynamically disclosed MCP call when the host omits turn trace headers",
 );
 assert.equal(
-  dynamicallyDisclosedWithoutTrace?.source,
+  runtimeScopedWithoutTrace?.source,
   "classic-active-turn-post-finish-deferred-placeholder-correlation",
 );
 
@@ -261,14 +289,24 @@ assert.equal(
   null,
   "two deferred placeholder conversations must fail closed when neither trace nor offered tool name distinguishes them",
 );
-assert.equal(ambiguousDeferredPlaceholders.diagnostics().ambiguousMatches > 0, true);
+assert.equal(
+  ambiguousDeferredPlaceholders.resolveGatewayCall({
+    toolName: "devspace_progress_report",
+    runtimeKeyHint: "main-02",
+  })?.conversationId,
+  "conversation-placeholder-right",
+  "runtime-scoped deferred correlation must stay inside its exact Main",
+);
 
 const deferredTurns = new ClassicActiveTurnRegistry({
   now: () => now,
   activeTtlMs: 60_000,
   postTurnGraceMs: 1_000,
 });
-const deferredIdentity = deferredTurns.waitForIdentity({ toolName: "devspace_progress_report" });
+const deferredIdentity = deferredTurns.waitForIdentity({
+  toolName: "devspace_progress_report",
+  runtimeKeyHint: "main-01",
+});
 deferredTurns.noteTurn({
   kind: "started",
   requestId: "turn-progress",
@@ -286,7 +324,10 @@ deferredTurns.noteTurn({
   observedAtMs: now + 10,
 });
 now += 20;
-const delayedAfterFinished = deferredTurns.resolveGatewayCall({ toolName: "devspace_progress_report" });
+const delayedAfterFinished = deferredTurns.resolveGatewayCall({
+  toolName: "devspace_progress_report",
+  runtimeKeyHint: "main-01",
+});
 assert.equal(
   delayedAfterFinished?.conversationId,
   "conversation-main-01",
@@ -326,7 +367,13 @@ assert.equal(
   null,
   "two recently completed conversations offering the same tool must remain fail-closed",
 );
-assert.equal(completedAmbiguity.diagnostics().ambiguousMatches > 0, true);
+assert.equal(
+  completedAmbiguity.resolveGatewayCall({
+    toolName: "devspace_progress_report",
+    runtimeKeyHint: "main-01",
+  })?.conversationId,
+  "conversation-completed-left",
+);
 
 const failedTurn = new ClassicActiveTurnRegistry({ now: () => now, postTurnGraceMs: 1_000 });
 failedTurn.noteTurn({
@@ -344,12 +391,12 @@ failedTurn.noteTurn({
   conversationId: "conversation-failed",
   observedAtMs: now + 1,
 });
-assert.equal(failedTurn.resolveGatewayCall({ toolName: "devspace_progress_report" }), null);
+assert.equal(failedTurn.resolveGatewayCall({ toolName: "devspace_progress_report", runtimeKeyHint: "main-01" }), null);
 
 now += 1_100;
 deferredTurns.prune();
 assert.equal(
-  deferredTurns.resolveGatewayCall({ toolName: "devspace_progress_report" }),
+  deferredTurns.resolveGatewayCall({ toolName: "devspace_progress_report", runtimeKeyHint: "main-01" }),
   null,
   "completed-turn authority must expire after the bounded post-turn grace",
 );
