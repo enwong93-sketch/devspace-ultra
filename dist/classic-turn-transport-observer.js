@@ -123,6 +123,9 @@ export class ClassicTurnTransportTracker {
         kind: "failed",
         requestId,
         conversationId: entry.conversationId,
+        errorText: String(params?.errorText || "").slice(0, 180),
+        canceled: params?.canceled === true,
+        blockedReason: params?.blockedReason ? String(params.blockedReason).slice(0, 120) : null,
         observedAt: observedAt(atMs),
         observedAtMs: atMs,
       });

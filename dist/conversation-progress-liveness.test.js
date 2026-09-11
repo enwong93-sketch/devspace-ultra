@@ -17,21 +17,116 @@ const planStatePath = join(dir, "plans.json");
 const progressStatePath = join(dir, "progress.json");
 let now = Date.parse("2026-09-11T06:00:00.000Z");
 const calls = [];
+
 const pages = new Map([
-  ["conversation-a", { runtimeKey: "main-01", port: 9721, hydrated: true, generating: true, composerEmpty: true }],
-  ["conversation-b", { runtimeKey: "main-02", port: 9732, hydrated: true, generating: false, composerEmpty: true }],
+  ["conversation-running", {
+    runtimeKey: "main-01",
+    port: 9721,
+    hydrated: true,
+    generating: true,
+    composerEmpty: true,
+    latestMessageRole: "user",
+    hasTurnError: false,
+    normalCompletion: false,
+    incompleteUserTurn: false,
+  }],
+  ["conversation-complete", {
+    runtimeKey: "main-02",
+    port: 9732,
+    hydrated: true,
+    generating: false,
+    composerEmpty: true,
+    latestMessageRole: "assistant",
+    hasTurnError: false,
+    normalCompletion: true,
+    incompleteUserTurn: false,
+  }],
+  ["conversation-finish-pending", {
+    runtimeKey: "main-02",
+    port: 9732,
+    hydrated: true,
+    generating: true,
+    composerEmpty: true,
+    latestMessageRole: "user",
+    hasTurnError: false,
+    normalCompletion: false,
+    incompleteUserTurn: false,
+  }],
+  ["conversation-failed", {
+    runtimeKey: "main-03",
+    port: 9733,
+    hydrated: true,
+    generating: false,
+    composerEmpty: true,
+    latestMessageRole: "user",
+    hasTurnError: false,
+    normalCompletion: false,
+    incompleteUserTurn: true,
+  }],
+  ["conversation-uncertain", {
+    runtimeKey: "main-03",
+    port: 9733,
+    hydrated: true,
+    generating: false,
+    composerEmpty: true,
+    latestMessageRole: "assistant",
+    hasTurnError: false,
+    normalCompletion: true,
+    incompleteUserTurn: false,
+  }],
+  ["conversation-duplicate", {
+    runtimeKey: "main-04",
+    port: 9734,
+    hydrated: true,
+    generating: false,
+    composerEmpty: true,
+    latestMessageRole: "user",
+    hasTurnError: true,
+    normalCompletion: false,
+    incompleteUserTurn: true,
+  }],
+  ["conversation-rescue-race", {
+    runtimeKey: "main-03",
+    port: 9733,
+    hydrated: true,
+    generating: false,
+    composerEmpty: true,
+    latestMessageRole: "user",
+    hasTurnError: true,
+    normalCompletion: false,
+    incompleteUserTurn: true,
+  }],
+  ["conversation-restart-interrupted", {
+    runtimeKey: "main-03",
+    port: 9733,
+    hydrated: true,
+    generating: false,
+    composerEmpty: true,
+    latestMessageRole: "user",
+    hasTurnError: true,
+    normalCompletion: false,
+    incompleteUserTurn: true,
+  }],
+  ["conversation-restart-complete", {
+    runtimeKey: "main-02",
+    port: 9732,
+    hydrated: true,
+    generating: false,
+    composerEmpty: true,
+    latestMessageRole: "assistant",
+    hasTurnError: false,
+    normalCompletion: true,
+    incompleteUserTurn: false,
+  }],
 ]);
 const duplicateConversations = new Set();
+const rescueHooks = new Map();
 
 function locatedPage(conversationId, page) {
   return {
     exact: true,
     conversationId,
-    runtimeKey: page.runtimeKey,
-    port: page.port,
-    hydrated: page.hydrated,
-    generating: page.generating,
-    composerEmpty: page.composerEmpty,
+    ...page,
     target: {
       runtimeKey: page.runtimeKey,
       port: page.port,
@@ -58,15 +153,6 @@ const adapter = {
       ? locatedPage(conversationId, page)
       : { exact: false, state: "conversation-page-not-open", conversationId };
   },
-  async projectReminder(input) {
-    calls.push({
-      action: "projectReminder",
-      conversationId: input.conversationId,
-      locatedRuntimeKey: input.target?.runtimeKey || null,
-      locatedPort: input.target?.port || null,
-    });
-    return { ok: true };
-  },
   async clearReminder(input) {
     calls.push({
       action: "clearReminder",
@@ -75,15 +161,6 @@ const adapter = {
     });
     return { ok: true };
   },
-  async sendReminder(input) {
-    calls.push({
-      action: "sendReminder",
-      conversationId: input.conversationId,
-      locatedRuntimeKey: input.target?.runtimeKey || null,
-      locatedPort: input.target?.port || null,
-    });
-    return { ok: true, runtimeBinding: false };
-  },
   async sendContinue(input) {
     calls.push({
       action: "sendContinue",
@@ -91,46 +168,51 @@ const adapter = {
       locatedRuntimeKey: input.target?.runtimeKey || null,
       locatedPort: input.target?.port || null,
       attempt: input.attempt,
+      rescueEvidence: input.rescueEvidence,
     });
+    const hook = rescueHooks.get(input.conversationId);
+    if (hook) await hook(input);
     return { ok: true };
   },
 };
 
+// Old persisted episodes must never restart an automatic rescue loop after a
+// Core reload. The fresh native turn observer is the only arming authority.
+await writeFile(statePath, JSON.stringify({
+  version: 2,
+  records: {
+    "conversation-old": {
+      conversationId: "conversation-old",
+      armed: true,
+      lastReportAt: new Date(now - 60 * 60_000).toISOString(),
+      lastReminderAt: new Date(now - 50 * 60_000).toISOString(),
+      lastContinueAt: new Date(now - 40 * 60_000).toISOString(),
+      continueAttempts: 3,
+    },
+  },
+}), "utf8");
+
+// Active Plan/progress rows are metadata only. They cannot arm rescue on an
+// idle or already completed conversation.
 await writeFile(planStatePath, JSON.stringify({
   plans: {
-    planA: {
-      id: "plan-a",
+    planOnly: {
+      id: "plan-only",
       status: "active",
-      revision: 1,
+      revision: 8,
       updatedAt: new Date(now).toISOString(),
-      conversationId: "conversation-a",
-    },
-    planB: {
-      id: "plan-b",
-      status: "active",
-      revision: 1,
-      updatedAt: new Date(now).toISOString(),
-      conversationId: "conversation-b",
+      conversationId: "conversation-plan-only",
     },
   },
 }), "utf8");
 await writeFile(progressStatePath, JSON.stringify({
-  messages: [
-    {
-      text: "A report",
-      at: new Date(now).toISOString(),
-      conversationId: "conversation-a",
-      source: "agent-progress-tool",
-      kind: "progress",
-    },
-    {
-      text: "B report",
-      at: new Date(now).toISOString(),
-      conversationId: "conversation-b",
-      source: "agent-progress-tool",
-      kind: "progress",
-    },
-  ],
+  messages: [{
+    text: "historic progress",
+    at: new Date(now).toISOString(),
+    conversationId: "conversation-plan-only",
+    source: "agent-progress-tool",
+    kind: "progress",
+  }],
 }), "utf8");
 
 const supervisor = new ConversationProgressLivenessSupervisor({
@@ -138,137 +220,302 @@ const supervisor = new ConversationProgressLivenessSupervisor({
   planStatePath,
   progressStatePath,
   adapter,
-  reminderMs: 10 * 60_000,
+  reportIntervalMs: 10 * 60_000,
   continueMs: 20 * 60_000,
   pollMs: 1_000,
   now: () => now,
 });
 await supervisor.start({ schedule: false });
-assert.equal(supervisor.status().records.length, 2);
-assert.equal(supervisor.status().stateKey, "conversationId");
-assert.equal(supervisor.status().runtimeBinding, false);
-assert.equal(supervisor.status().runtimeUsedOnlyAsEphemeralLocator, true);
-assert.equal(supervisor.status().supportsRuntime03AndLater, true);
-for (const record of supervisor.status().records) {
-  assert.equal(Object.hasOwn(record, "runtimeKey"), false, "runtimeKey must never be a persisted liveness owner");
-  assert.equal(Object.hasOwn(record, "lastObservedRuntimeKey"), false, "even diagnostic Runtime observations must not become durable identity");
-}
-assert.equal(calls.filter((row) => row.action === "sendContinue").length, 0);
+
+const boundedPolicy = new ConversationProgressLivenessSupervisor({
+  enabled: false,
+  reportIntervalMs: 6 * 60 * 60_000,
+  continueMs: 60_000,
+});
+assert.equal(boundedPolicy.status().reportIntervalMs, 10 * 60_000,
+  "configuration may request more frequent reporting but may not relax the ten-minute ceiling");
+assert.equal(boundedPolicy.status().continueMs, 20 * 60_000,
+  "rescue may never run earlier than twenty minutes");
+await boundedPolicy.close();
+
+let oldRecord = supervisor.status().records.find((row) => row.conversationId === "conversation-old");
+assert.equal(oldRecord.armed, false);
+assert.equal(oldRecord.turnState, "startup-disarmed");
+assert.equal(supervisor.status().records.some((row) => row.conversationId === "conversation-plan-only"), false,
+  "Plan or progress history alone must not create a rescue episode");
+assert.equal(supervisor.status().tenMinuteAutomaticReminder, false);
+assert.equal(supervisor.status().tenMinuteSyntheticUserTurn, false);
+assert.equal(supervisor.status().tenMinuteAgentReportSloOnly, true);
+assert.equal(supervisor.status().twentyMinuteInterruptedTurnRescueOnly, true);
+assert.equal(supervisor.status().normalCompletionDisarms, true);
+assert.equal(supervisor.status().maxContinueAttempts, 1);
+
+await supervisor.noteTurn({ kind: "started", conversationId: "conversation-running", runtimeKey: "main-01", observedAtMs: now });
+await supervisor.noteTurn({ kind: "started", conversationId: "conversation-complete", runtimeKey: "main-02", observedAtMs: now });
+await supervisor.noteTurn({ kind: "finished", conversationId: "conversation-complete", runtimeKey: "main-02", observedAtMs: now + 1_000 });
+await supervisor.noteTurn({ kind: "started", conversationId: "conversation-finish-pending", runtimeKey: "main-02", observedAtMs: now });
+await supervisor.noteTurn({ kind: "finished", conversationId: "conversation-finish-pending", runtimeKey: "main-02", observedAtMs: now + 1_500 });
+await supervisor.noteTurn({ kind: "started", conversationId: "conversation-failed", runtimeKey: "main-03", observedAtMs: now });
+await supervisor.noteTurn({
+  kind: "failed",
+  conversationId: "conversation-failed",
+  runtimeKey: "main-03",
+  canceled: false,
+  errorText: "net::ERR_CONNECTION_RESET",
+  observedAtMs: now + 2_000,
+});
+await supervisor.noteTurn({ kind: "started", conversationId: "conversation-cancelled", runtimeKey: "main-04", observedAtMs: now });
+await supervisor.noteTurn({
+  kind: "failed",
+  conversationId: "conversation-cancelled",
+  runtimeKey: "main-04",
+  canceled: true,
+  observedAtMs: now + 3_000,
+});
+
+let completeRecord = supervisor.status().records.find((row) => row.conversationId === "conversation-complete");
+let finishPendingRecord = supervisor.status().records.find((row) => row.conversationId === "conversation-finish-pending");
+let cancelledRecord = supervisor.status().records.find((row) => row.conversationId === "conversation-cancelled");
+assert.equal(completeRecord.armed, false, "normal native completion must immediately disarm rescue");
+assert.equal(completeRecord.turnState, "completed");
+assert.equal(finishPendingRecord.armed, true,
+  "a transport boundary may not claim normal completion while the exact page is still generating");
+assert.equal(finishPendingRecord.turnState, "completion-pending");
+assert.equal(cancelledRecord.armed, false, "an explicit user cancellation must not be auto-rescued");
+assert.equal(cancelledRecord.turnState, "cancelled");
+
+now += 10 * 60_000 + 3_000;
+await supervisor.tick();
+let runningRecord = supervisor.status().records.find((row) => row.conversationId === "conversation-running");
+let failedRecord = supervisor.status().records.find((row) => row.conversationId === "conversation-failed");
+assert.equal(runningRecord.reportOverdue, true);
+assert.equal(failedRecord.reportOverdue, true);
+assert.equal(Object.hasOwn(runningRecord, "reminderPending"), false);
+assert.equal(Object.hasOwn(failedRecord, "reminderPending"), false);
+assert.equal(calls.some((row) => row.action === "sendReminder" || row.action === "projectReminder"), false,
+  "ten minutes must never send or project a reminder");
+assert.equal(calls.filter((row) => row.action === "sendContinue").length, 0,
+  "ten minutes is never a rescue boundary");
+
+pages.set("conversation-finish-pending", {
+  ...pages.get("conversation-finish-pending"),
+  generating: false,
+  latestMessageRole: "assistant",
+  normalCompletion: true,
+});
+await supervisor.tick();
+finishPendingRecord = supervisor.status().records.find((row) => row.conversationId === "conversation-finish-pending");
+assert.equal(finishPendingRecord.armed, false);
+assert.equal(finishPendingRecord.turnState, "completed");
+assert.equal(finishPendingRecord.lastDispatchState, "normal-completion-observed-on-page");
+
+await supervisor.noteReport({ conversationId: "conversation-running", runtimeKey: "main-03", observedAtMs: now });
+runningRecord = supervisor.status().records.find((row) => row.conversationId === "conversation-running");
+assert.equal(runningRecord.armed, true);
+assert.equal(runningRecord.reportOverdue, false);
+assert.equal(Object.hasOwn(runningRecord, "runtimeKey"), false,
+  "moving a page to Main-03 cannot turn Runtime into narration ownership");
 
 now += 10 * 60_000;
 await supervisor.tick();
-const reminderCalls = calls.filter((row) => row.action === "projectReminder");
-assert.deepEqual(
-  reminderCalls.map((row) => `${row.conversationId}:${row.locatedRuntimeKey}`).sort(),
-  ["conversation-a:main-01", "conversation-b:main-02"],
-  "each reminder must locate the exact conversation independently",
-);
-const sentReminderCalls = calls.filter((row) => row.action === "sendReminder");
-assert.deepEqual(
-  sentReminderCalls.map((row) => `${row.conversationId}:${row.locatedRuntimeKey}`).sort(),
-  ["conversation-a:main-01", "conversation-b:main-02"],
-  "the ten-minute Agent reminder must be dispatched to each exact conversation independently",
-);
-assert.equal(
-  sentReminderCalls.some((row) => Object.hasOwn(row, "runtimeBinding")),
-  false,
-  "test transport observations must not become persisted narration ownership",
-);
-
-now += 10 * 60_000;
-await supervisor.tick();
-assert.equal(
-  calls.filter((row) => row.action === "sendContinue").length,
-  0,
-  "a generating conversation and each conversation's first idle observation must not auto-send",
-);
+assert.equal(calls.filter((row) => row.action === "sendContinue").length, 0,
+  "the first interrupted-turn idle observation must not send immediately");
+failedRecord = supervisor.status().records.find((row) => row.conversationId === "conversation-failed");
+assert.equal(failedRecord.rescuePending, true);
+assert.equal(failedRecord.rescueEvidence, "transport-failure");
+assert.equal(failedRecord.lastDispatchState, "interrupted-turn-idle-confirmation-armed");
 
 now += 30_000;
 await supervisor.tick();
-let continues = calls.filter((row) => row.action === "sendContinue");
-assert.equal(continues.length, 1);
-assert.deepEqual(
-  continues[0],
-  {
-    action: "sendContinue",
-    conversationId: "conversation-b",
-    locatedRuntimeKey: "main-02",
-    locatedPort: 9732,
-    attempt: 1,
-  },
-);
-assert.equal(
-  continues.some((row) => row.conversationId === "conversation-a"),
-  false,
-  "conversation-a may not receive a continuation while its own turn is still generating",
-);
+let rescueCalls = calls.filter((row) => row.action === "sendContinue");
+assert.deepEqual(rescueCalls, [{
+  action: "sendContinue",
+  conversationId: "conversation-failed",
+  locatedRuntimeKey: "main-03",
+  locatedPort: 9733,
+  attempt: 1,
+  rescueEvidence: "transport-failure",
+}]);
+failedRecord = supervisor.status().records.find((row) => row.conversationId === "conversation-failed");
+assert.equal(failedRecord.armed, false, "successful rescue must close the old episode");
+assert.equal(failedRecord.turnState, "rescue-dispatched");
+assert.equal(failedRecord.continueAttempts, 1);
 
-// The same conversation moves from Runtime 02 to Runtime 03. The durable
-// record and silence window must follow the conversation, not the window.
-pages.set("conversation-b", {
-  ...pages.get("conversation-b"),
+now += 60 * 60_000;
+await supervisor.tick();
+rescueCalls = calls.filter((row) => row.action === "sendContinue");
+assert.equal(rescueCalls.length, 1, "one interruption episode may never emit repeated rescue turns");
+completeRecord = supervisor.status().records.find((row) => row.conversationId === "conversation-complete");
+cancelledRecord = supervisor.status().records.find((row) => row.conversationId === "conversation-cancelled");
+assert.equal(completeRecord.armed, false);
+assert.equal(cancelledRecord.armed, false);
+
+// If the transport observer expires a long turn, page evidence still protects a
+// normally completed assistant response from rescue.
+await supervisor.noteTurn({ kind: "started", conversationId: "conversation-uncertain", runtimeKey: "main-03", observedAtMs: now });
+await supervisor.noteTurn({ kind: "expired", conversationId: "conversation-uncertain", runtimeKey: "main-03", observedAtMs: now + 10 * 60_000 });
+now += 21 * 60_000;
+await supervisor.tick();
+const uncertainRecord = supervisor.status().records.find((row) => row.conversationId === "conversation-uncertain");
+assert.equal(uncertainRecord.armed, false);
+assert.equal(uncertainRecord.turnState, "completed");
+assert.equal(uncertainRecord.lastDispatchState, "normal-completion-observed-on-page");
+assert.equal(calls.filter((row) => row.action === "sendContinue" && row.conversationId === "conversation-uncertain").length, 0);
+
+// Duplicate pages fail closed for only that conversation.
+await supervisor.noteTurn({ kind: "started", conversationId: "conversation-duplicate", runtimeKey: "main-04", observedAtMs: now });
+await supervisor.noteTurn({ kind: "failed", conversationId: "conversation-duplicate", runtimeKey: "main-04", observedAtMs: now + 1_000 });
+duplicateConversations.add("conversation-duplicate");
+now += 21 * 60_000;
+await supervisor.tick();
+const duplicateRecord = supervisor.status().records.find((row) => row.conversationId === "conversation-duplicate");
+assert.equal(duplicateRecord.duplicatePageObserved, true);
+assert.equal(duplicateRecord.lastDispatchState, "duplicate-conversation-pages");
+assert.equal(calls.filter((row) => row.action === "sendContinue" && row.conversationId === "conversation-duplicate").length, 0);
+
+// A successful rescue creates a new ChatGPT turn. If the native started event
+// arrives before sendContinue returns, the old episode must not disarm the new
+// one. This is the exact race that otherwise makes recovery self-cancel.
+await supervisor.noteTurn({
+  kind: "started",
+  conversationId: "conversation-rescue-race",
   runtimeKey: "main-03",
-  port: 9733,
+  observedAtMs: now,
 });
 await supervisor.noteTurn({
-  kind: "finished",
-  conversationId: "conversation-b",
+  kind: "failed",
+  conversationId: "conversation-rescue-race",
   runtimeKey: "main-03",
-  observedAtMs: now,
+  canceled: false,
+  observedAtMs: now + 1_000,
 });
-let recordB = supervisor.status().records.find((row) => row.conversationId === "conversation-b");
-assert.equal(Object.hasOwn(recordB, "runtimeKey"), false);
-assert.equal(recordB.continueAttempts, 1, "moving windows must not reset the conversation's continuation history");
-
-now += 20 * 60_000;
+rescueHooks.set("conversation-rescue-race", async () => {
+  pages.set("conversation-rescue-race", {
+    ...pages.get("conversation-rescue-race"),
+    generating: true,
+    hasTurnError: false,
+    incompleteUserTurn: false,
+  });
+  await supervisor.noteTurn({
+    kind: "started",
+    conversationId: "conversation-rescue-race",
+    runtimeKey: "main-03",
+    observedAtMs: now,
+  });
+});
+now += 21 * 60_000;
 await supervisor.tick();
 now += 30_000;
 await supervisor.tick();
-continues = calls.filter((row) => row.action === "sendContinue" && row.conversationId === "conversation-b");
-assert.equal(continues.length, 2);
-assert.equal(continues.at(-1).locatedRuntimeKey, "main-03");
-assert.equal(continues.at(-1).locatedPort, 9733);
-
-// A report from A may arrive after that same conversation appears on Runtime
-// 03. The runtime observation is irrelevant and must not cause a conflict.
-await supervisor.noteReport({
-  conversationId: "conversation-a",
-  runtimeKey: "main-03",
-  observedAtMs: now,
-});
-const stateAfterA = supervisor.status().records.find((row) => row.conversationId === "conversation-a");
-recordB = supervisor.status().records.find((row) => row.conversationId === "conversation-b");
-assert.equal(stateAfterA.reminderPending, false);
-assert.equal(stateAfterA.continueAttempts, 0);
-assert.equal(recordB.continueAttempts, 2, "reporting in A must not reset B");
-assert.notEqual(stateAfterA.lastDispatchState, "runtime-owner-conflict");
-
-// Two visible pages for the same conversation are ambiguous. The supervisor
-// fails closed for that conversation only; it does not touch another record.
-duplicateConversations.add("conversation-a");
-now += 20 * 60_000;
-await supervisor.tick();
-const ambiguousA = supervisor.status().records.find((row) => row.conversationId === "conversation-a");
-recordB = supervisor.status().records.find((row) => row.conversationId === "conversation-b");
-assert.equal(ambiguousA.duplicatePageObserved, true);
-assert.equal(ambiguousA.lastDispatchState, "duplicate-conversation-pages");
-assert.equal(recordB.duplicatePageObserved, false);
+const raceRecord = supervisor.status().records.find((row) => row.conversationId === "conversation-rescue-race");
+assert.equal(raceRecord.armed, true, "the rescue-created native turn must remain armed as a new episode");
+assert.equal(raceRecord.turnState, "running");
+assert.equal(raceRecord.episodeRevision, 2);
 assert.equal(
-  calls.filter((row) => row.action === "sendContinue" && row.conversationId === "conversation-a").length,
-  0,
-  "duplicate pages must never receive an guessed continuation",
+  calls.filter((row) => row.action === "sendContinue" && row.conversationId === "conversation-rescue-race").length,
+  1,
 );
 
+// Version-3 interrupted episodes may survive a Core restart, but only behind
+// a fresh exact-page verification. Normal completion and already-rescued
+// episodes remain disarmed, preventing the old repeated-message loop.
+const restartDir = await mkdtemp(join(tmpdir(), "devspace-liveness-restart-test-"));
+const restartStatePath = join(restartDir, "liveness.json");
+const restartPlanStatePath = join(restartDir, "plans.json");
+const restartProgressStatePath = join(restartDir, "progress.json");
+await writeFile(restartStatePath, JSON.stringify({
+  version: 3,
+  records: {
+    "conversation-restart-interrupted": {
+      conversationId: "conversation-restart-interrupted",
+      armed: true,
+      turnState: "interrupted",
+      episodeRevision: 4,
+      startedAt: new Date(now - 40 * 60_000).toISOString(),
+      interruptedAt: new Date(now - 21 * 60_000).toISOString(),
+      lastActivityAt: new Date(now - 21 * 60_000).toISOString(),
+      lastReportAt: new Date(now - 30 * 60_000).toISOString(),
+      continueAttempts: 0,
+      rescueEvidence: "transport-failure",
+    },
+    "conversation-restart-complete": {
+      conversationId: "conversation-restart-complete",
+      armed: true,
+      turnState: "running",
+      episodeRevision: 2,
+      startedAt: new Date(now - 21 * 60_000).toISOString(),
+      lastActivityAt: new Date(now - 21 * 60_000).toISOString(),
+      continueAttempts: 0,
+    },
+    "conversation-restart-rescued": {
+      conversationId: "conversation-restart-rescued",
+      armed: true,
+      turnState: "interrupted",
+      episodeRevision: 5,
+      startedAt: new Date(now - 40 * 60_000).toISOString(),
+      interruptedAt: new Date(now - 21 * 60_000).toISOString(),
+      continueAttempts: 1,
+    },
+    "conversation-restart-future": {
+      conversationId: "conversation-restart-future",
+      armed: true,
+      turnState: "interrupted",
+      episodeRevision: 1,
+      startedAt: new Date(now + 60 * 60_000).toISOString(),
+      interruptedAt: new Date(now + 60 * 60_000).toISOString(),
+      continueAttempts: 0,
+    },
+  },
+}), "utf8");
+await writeFile(restartPlanStatePath, JSON.stringify({ plans: {} }), "utf8");
+await writeFile(restartProgressStatePath, JSON.stringify({ messages: [] }), "utf8");
+const restartSupervisor = new ConversationProgressLivenessSupervisor({
+  statePath: restartStatePath,
+  planStatePath: restartPlanStatePath,
+  progressStatePath: restartProgressStatePath,
+  adapter,
+  reportIntervalMs: 10 * 60_000,
+  continueMs: 20 * 60_000,
+  pollMs: 1_000,
+  now: () => now,
+});
+await restartSupervisor.start({ schedule: false });
+let restartInterrupted = restartSupervisor.status().records.find((row) => row.conversationId === "conversation-restart-interrupted");
+const restartComplete = restartSupervisor.status().records.find((row) => row.conversationId === "conversation-restart-complete");
+const restartRescued = restartSupervisor.status().records.find((row) => row.conversationId === "conversation-restart-rescued");
+const restartFuture = restartSupervisor.status().records.find((row) => row.conversationId === "conversation-restart-future");
+assert.equal(restartInterrupted.armed, true);
+assert.equal(restartInterrupted.lastDispatchState, "interrupted-turn-idle-confirmation-armed");
+assert.equal(restartComplete.armed, false);
+assert.equal(restartComplete.turnState, "completed");
+assert.equal(restartRescued.armed, false);
+assert.equal(restartRescued.turnState, "startup-disarmed");
+assert.equal(restartFuture.armed, false, "future-dated state must never arm rescue after restart");
+now += 30_000;
+await restartSupervisor.tick();
+restartInterrupted = restartSupervisor.status().records.find((row) => row.conversationId === "conversation-restart-interrupted");
+assert.equal(restartInterrupted.armed, false);
+assert.equal(restartInterrupted.turnState, "rescue-dispatched");
+assert.equal(
+  calls.filter((row) => row.action === "sendContinue" && row.conversationId === "conversation-restart-interrupted").length,
+  1,
+);
+await restartSupervisor.close();
+await rm(restartDir, { recursive: true, force: true });
+
 const persisted = JSON.parse(await readFile(statePath, "utf8"));
-assert.equal(persisted.version, 2);
+assert.equal(persisted.version, 3);
 assert.equal(persisted.identityKey, "conversationId");
 assert.equal(persisted.runtimeBinding, false);
-assert.equal(Object.hasOwn(persisted.records["conversation-a"], "runtimeKey"), false);
-assert.equal(Object.hasOwn(persisted.records["conversation-b"], "runtimeKey"), false);
-assert.equal(JSON.stringify(persisted).includes("A report"), false, "raw narration text must not be copied into liveness state");
-assert.equal(supervisor.status().crossConversationSharing, false);
-assert.equal(supervisor.status().goalRecoveryDependency, false);
-assert.equal(supervisor.status().autoCompactDependency, false);
+assert.equal(persisted.tenMinuteAutomaticReminder, false);
+assert.equal(persisted.tenMinuteAgentReportSloOnly, true);
+assert.equal(persisted.twentyMinuteInterruptedTurnRescueOnly, true);
+assert.equal(persisted.normalCompletionDisarms, true);
+assert.equal(JSON.stringify(persisted).includes("lastReminderAt"), false);
+assert.equal(JSON.stringify(persisted).includes("lastReminderProjectedAt"), false);
+assert.equal(JSON.stringify(persisted).includes("reminderPending"), false);
+assert.equal(JSON.stringify(persisted).includes("runtimeKey"), false);
+assert.equal(JSON.stringify(persisted).includes("historic progress"), false);
 
 assert.equal(cdpTest.runtimePort("main-01"), 9721);
 assert.equal(cdpTest.runtimePort("main-02"), 9732);
@@ -276,10 +523,11 @@ assert.equal(cdpTest.runtimePort("main-03"), 9733);
 assert.equal(cdpTest.runtimePort("main-32"), 9762);
 assert.equal(cdpTest.runtimePort("worker-01"), null);
 assert.equal(cdpTest.conversationIdFromUrl("https://chatgpt.com/c/conversation-a"), "conversation-a");
-assert.match(cdpTest.localMinute(Date.parse("2026-09-11T06:27:00Z")), /^2026-09-11 14:27$/);
 assert.notEqual(cdpTest.markerFor("conversation-a", 1), cdpTest.markerFor("conversation-b", 1));
-assert.match(_test.reminderInstruction(10 * 60_000), /devspace_progress_report/);
+assert.match(_test.progressReportingPolicy(), /No timer may send a reminder message/);
 
+// Live adapter discovery may find an incomplete conversation on Main-03, but
+// Runtime 03 remains a locator only.
 const targetsByPort = new Map([
   [9721, []],
   [9732, []],
@@ -292,14 +540,17 @@ const targetsByPort = new Map([
       exact: true,
       conversationId: "conversation-a",
       hydrated: true,
-      generating: true,
+      generating: false,
       composerEmpty: true,
+      latestMessageRole: "user",
+      hasTurnError: true,
+      normalCompletion: false,
+      incompleteUserTurn: true,
       progressCardMounted: true,
       progressConversationId: "conversation-a",
     },
   }]],
 ]);
-const hostReminderCalls = [];
 const runtime03Adapter = new ConversationProgressLivenessCdpAdapter({
   runtimeKeys: ["main-01", "main-02", "main-03"],
   listTargets: async (port) => targetsByPort.get(port) || [],
@@ -307,53 +558,19 @@ const runtime03Adapter = new ConversationProgressLivenessCdpAdapter({
     evaluate: async () => ({ ...target.snapshot }),
     close() {},
   }),
-  hostBridge: {
-    async dispatchConversationFollowUp(input) {
-      hostReminderCalls.push(input);
-      return { ok: true, transport: "test-exact-conversation-relay" };
-    },
-  },
 });
 const locatedOnRuntime03 = await runtime03Adapter.find({ conversationId: "conversation-a" });
 assert.equal(locatedOnRuntime03.exact, true);
 assert.equal(locatedOnRuntime03.locatedRuntimeKey, "main-03");
 assert.equal(locatedOnRuntime03.locatorOnly, true);
 assert.equal(locatedOnRuntime03.runtimeBinding, false);
-const reminderOnRuntime03 = await runtime03Adapter.sendReminder({
-  conversationId: "conversation-a",
-  target: locatedOnRuntime03,
-  silenceMs: 10 * 60_000,
-});
-assert.equal(reminderOnRuntime03.ok, true);
-assert.equal(reminderOnRuntime03.conversationId, "conversation-a");
-assert.equal(reminderOnRuntime03.locatedRuntimeKey, "main-03");
-assert.equal(reminderOnRuntime03.runtimeBinding, false);
-assert.deepEqual(hostReminderCalls, [{
-  conversationId: "conversation-a",
-  prompt: hostReminderCalls[0].prompt,
-  purpose: "progress-reminder",
-}]);
-assert.match(hostReminderCalls[0].prompt, /devspace_progress_report/);
-assert.equal(Object.hasOwn(hostReminderCalls[0], "runtimePort"), false,
-  "the ten-minute reminder transport must search by exact conversationId rather than bind to Runtime 03");
-
-targetsByPort.get(9732).push({
-  id: "main-02-duplicate-conversation-a",
-  type: "page",
-  url: "https://chatgpt.com/c/conversation-a",
-  webSocketDebuggerUrl: "ws://main-02-duplicate-conversation-a",
-});
-const duplicateConversation = await runtime03Adapter.find({ conversationId: "conversation-a" });
-assert.equal(duplicateConversation.exact, false);
-assert.equal(duplicateConversation.ambiguous, true);
-assert.equal(duplicateConversation.state, "duplicate-conversation-pages");
-const duplicateReminder = await runtime03Adapter.sendReminder({ conversationId: "conversation-a" });
-assert.equal(duplicateReminder.ok, false);
-assert.equal(duplicateReminder.ambiguous, true);
-assert.equal(hostReminderCalls.length, 1,
-  "an ambiguous duplicate page must fail before any reminder dispatch");
+assert.equal(locatedOnRuntime03.normalCompletion, false);
+assert.equal(locatedOnRuntime03.incompleteUserTurn, true);
+assert.equal(typeof runtime03Adapter.sendReminder, "undefined", "the ten-minute reminder API must not exist");
+assert.equal(typeof runtime03Adapter.projectReminder, "undefined", "the ten-minute reminder banner API must not exist");
 
 await supervisor.close();
+await runtime03Adapter.close();
 await rm(dir, { recursive: true, force: true });
 
 console.log(JSON.stringify({
@@ -361,18 +578,24 @@ console.log(JSON.stringify({
   gate: "conversation-progress-liveness",
   identityKey: "conversationId",
   runtimeBinding: false,
-  runtime03Relocation: true,
-  exactConversationIsolation: true,
+  runtime03LocatorOnly: true,
+  tenMinuteAgentReportSloOnly: true,
+  tenMinuteAutomaticReminder: false,
+  tenMinuteSyntheticUserTurn: false,
+  twentyMinuteInterruptedTurnRescueOnly: true,
+  normalCompletionDisarms: true,
+  transportFinishRequiresPageCompletion: true,
+  cancelledTurnDisarms: true,
+  oneRescuePerInterruptionEpisode: true,
+  rescueStartRaceProtected: true,
+  persistedOldEpisodeDisarmed: true,
+  interruptedEpisodeRestartRecoveredByPageEvidence: true,
+  completedEpisodeRestartDisarmed: true,
+  rescuedEpisodeRestartDisarmed: true,
+  futureTimestampRestartDisarmed: true,
+  planAndReportHistoryCannotArm: true,
   duplicateConversationFailsClosed: true,
-  tenMinuteReminder: true,
-  tenMinuteAgentReminder: true,
-  runtime03ReminderUsesConversationId: true,
-  duplicateReminderFailsClosed: true,
-  twentyMinuteContinue: true,
-  generatingTurnProtected: true,
-  unsentComposerProtectedByAdapter: true,
-  reportResetsOnlyConversation: true,
-  rawNarrationCopiedToWatchdogState: false,
+  progressFailureCannotGateOtherTools: true,
   goalRecoveryDependency: false,
   autoCompactDependency: false,
 }));

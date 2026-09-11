@@ -133,12 +133,31 @@ function exactConversationExpression(conversationId) {
     const composerText = editor
       ? String(editor instanceof HTMLTextAreaElement ? editor.value : editor.innerText || editor.textContent || '').replace(/\\u2060/g, '').trim()
       : null;
+    const messageNodes = [...document.querySelectorAll('[data-message-author-role]')].filter(visible);
+    const latestMessage = messageNodes.at(-1) || null;
+    const latestMessageRole = latestMessage?.getAttribute('data-message-author-role') || null;
+    const latestMessageText = String(latestMessage?.innerText || latestMessage?.textContent || '').trim();
+    const latestTurnContainer = latestMessage?.closest('article') || latestMessage;
+    const errorNodes = latestTurnContainer
+      ? [...latestTurnContainer.querySelectorAll('[role="alert"],[data-testid*="error" i],[data-testid*="retry" i]')].filter(visible)
+      : [];
+    const hasTurnError = errorNodes.some((node) => /something went wrong|error generating|network error|發生錯誤|出現問題|網絡錯誤|再試一次/i.test(String(node.innerText || node.textContent || '')))
+      || buttons.some((button) => (
+        /retry|try again|重試|再試/i.test(String(button.getAttribute('aria-label') || button.title || button.textContent || ''))
+        && latestTurnContainer
+        && (button.closest('article') || button.parentElement)?.contains(latestTurnContainer)
+      ));
     const root = document.getElementById('devspace-progress-narration-root');
     return {
       exact: actual === expected,
       conversationId: actual,
       hydrated: document.readyState === 'complete' && Boolean(editor),
       generating,
+      latestMessageRole,
+      latestMessageTextLength: latestMessageText.length,
+      hasTurnError,
+      normalCompletion: !generating && latestMessageRole === 'assistant' && latestMessageText.length > 0 && !hasTurnError,
+      incompleteUserTurn: !generating && latestMessageRole === 'user',
       composerFound: Boolean(editor),
       composerEmpty: composerText === '',
       composerLength: composerText == null ? null : composerText.length,
@@ -152,14 +171,12 @@ function exactConversationExpression(conversationId) {
 export class ConversationProgressLivenessCdpAdapter {
   constructor({
     runtimeKeys = null,
-    hostBridge = null,
     listTargets = targetsForPort,
     connect = connectTarget,
   } = {}) {
     this.runtimeKeys = Array.isArray(runtimeKeys) && runtimeKeys.length
       ? [...new Set(runtimeKeys.map(cleanRuntimeKey).filter(Boolean))]
       : Array.from({ length: 32 }, (_, index) => `main-${String(index + 1).padStart(2, "0")}`);
-    this.hostBridge = hostBridge;
     this.listTargets = listTargets;
     this.connect = connect;
   }
@@ -199,40 +216,6 @@ export class ConversationProgressLivenessCdpAdapter {
     return await this.find({ conversationId });
   }
 
-  async projectReminder({ conversationId, target = null, reminderAt, silenceMs } = {}) {
-    const resolved = await this.#resolveExactTarget(conversationId, target);
-    if (!resolved.ok) return resolved;
-    const page = await this.connect(resolved.target);
-    try {
-      const result = await page.evaluate(`(() => {
-        const expected = ${JSON.stringify(resolved.conversationId)};
-        const actual = location.pathname.match(/\\/c\\/([^/?#]+)/)?.[1] || null;
-        if (actual !== expected) return { ok:false, state:'route-changed' };
-        const root = document.getElementById('devspace-progress-narration-root');
-        if (!root) return { ok:false, state:'progress-card-not-mounted' };
-        const cardConversation = root.dataset?.conversationId || actual;
-        if (cardConversation !== expected) return { ok:false, state:'progress-card-conversation-mismatch' };
-        let node = root.querySelector('.devspace-progress-liveness-reminder');
-        if (!node) {
-          node = document.createElement('div');
-          node.className = 'devspace-progress-liveness-reminder';
-          node.style.cssText = 'margin:6px 8px 2px;padding:5px 7px;border-radius:7px;background:rgba(180,120,0,.10);font-size:11px;line-height:1.35;white-space:normal;';
-          const body = root.querySelector('.devspace-progress-body') || root;
-          body.prepend(node);
-        }
-        node.dataset.conversationId = expected;
-        node.dataset.reminderAt = ${JSON.stringify(String(reminderAt || ""))};
-        node.textContent = ${JSON.stringify(`[${localMinute(Date.parse(reminderAt || new Date().toISOString()))}] 生存檢查：已提醒目前呢個 conversation 嘅 Agent 更新進度；其他 conversation 同工具唔受影響。`)};
-        return { ok:true, conversationId:actual };
-      })()`);
-      return result?.ok
-        ? { ok: true, conversationId: resolved.conversationId, locatedRuntimeKey: resolved.runtimeKey, locatedPort: resolved.port, silenceMs }
-        : result;
-    } finally {
-      page.close();
-    }
-  }
-
   async clearReminder({ conversationId, target = null } = {}) {
     const resolved = await this.#resolveExactTarget(conversationId, target);
     if (!resolved.ok) return resolved;
@@ -251,55 +234,15 @@ export class ConversationProgressLivenessCdpAdapter {
     }
   }
 
-  async sendReminder({ conversationId, target = null, reminderAt, silenceMs = 0 } = {}) {
-    const resolved = await this.#resolveExactTarget(conversationId, target);
-    if (!resolved.ok) return resolved;
-    const minutes = Math.max(10, Math.floor(Number(silenceMs || 0) / 60_000));
-    const text = `進度旁白提醒：呢個 conversation 已經約 ${minutes} 分鐘未有新匯報。請完成目前不可分割嘅安全原子步驟後，立即用 devspace_progress_report，以你自己嘅自然語言講清楚而家做緊乜、已核實到乜同下一步，然後繼續原任務。唔好重啟、接管或改動其他 conversation 嘅工具或 Runtime。`;
-
-    if (this.hostBridge && typeof this.hostBridge.dispatchConversationFollowUp === "function") {
-      const hostResult = await this.hostBridge.dispatchConversationFollowUp({
-        conversationId: resolved.conversationId,
-        prompt: text,
-        purpose: "progress-reminder",
-      }).catch((error) => ({
-        ok: false,
-        definiteFailure: false,
-        error: error instanceof Error ? error.message : String(error),
-      }));
-      if (hostResult?.ok) {
-        return {
-          ok: true,
-          conversationId: resolved.conversationId,
-          locatedRuntimeKey: resolved.runtimeKey,
-          locatedPort: resolved.port,
-          reminderAt: reminderAt || null,
-          silenceMs,
-          runtimeBinding: false,
-          transport: hostResult.transport || "classic-raw-host-rpc",
-        };
-      }
-      if (hostResult?.ambiguous) return hostResult;
-    }
-
-    return await this.#sendConversationMessage({
-      resolved,
-      text,
-      expectedPrefix: "進度旁白提醒：",
-      purpose: "progress-reminder",
-      attempt: 1,
-    });
-  }
-
   async sendContinue({ conversationId, target = null, attempt = 1 } = {}) {
     const resolved = await this.#resolveExactTarget(conversationId, target);
     if (!resolved.ok) return resolved;
-    const text = "繼續。你已經超過二十分鐘未更新進度；請先用進度旁白卡，以你自己嘅自然語言講清楚目前做緊乜、已完成乜同下一步，再由原工作斷點繼續。唔好接管、重啟或改動其他 conversation 嘅工具或 Runtime。";
+    const text = "工作中斷補救：系統確認呢個 conversation 上一輪工作未正常完成，而且已相隔至少二十分鐘。請先用 devspace_progress_report 以你自己嘅自然語言交代斷點、已核實內容同下一步，然後只由原工作斷點繼續。唔好重啟、接管或改動其他 conversation 嘅工具或 Runtime。";
     return await this.#sendConversationMessage({
       resolved,
       text,
-      expectedPrefix: "繼續。你已經超過二十分鐘未更新進度",
-      purpose: "progress-continue",
+      expectedPrefix: "工作中斷補救：",
+      purpose: "interrupted-turn-rescue",
       attempt,
     });
   }
@@ -321,6 +264,26 @@ export class ConversationProgressLivenessCdpAdapter {
         const buttons = [...document.querySelectorAll('button')].filter(visible);
         if (buttons.some((button) => button.matches('[data-testid="stop-button"]') || /stop|停止|中止/i.test(String(button.getAttribute('aria-label') || '')))) {
           return { ok:false, state:'still-generating' };
+        }
+        const messageNodes = [...document.querySelectorAll('[data-message-author-role]')].filter(visible);
+        const latestMessage = messageNodes.at(-1) || null;
+        const latestMessageRole = latestMessage?.getAttribute('data-message-author-role') || null;
+        const latestMessageText = String(latestMessage?.innerText || latestMessage?.textContent || '').trim();
+        const latestTurnContainer = latestMessage?.closest('article') || latestMessage;
+        const errorNodes = latestTurnContainer
+          ? [...latestTurnContainer.querySelectorAll('[role="alert"],[data-testid*="error" i],[data-testid*="retry" i]')].filter(visible)
+          : [];
+        const hasTurnError = errorNodes.some((node) => /something went wrong|error generating|network error|發生錯誤|出現問題|網絡錯誤|再試一次/i.test(String(node.innerText || node.textContent || '')))
+          || buttons.some((button) => (
+            /retry|try again|重試|再試/i.test(String(button.getAttribute('aria-label') || button.title || button.textContent || ''))
+            && latestTurnContainer
+            && (button.closest('article') || button.parentElement)?.contains(latestTurnContainer)
+          ));
+        if (latestMessageRole === 'assistant' && latestMessageText.length > 0 && !hasTurnError) {
+          return { ok:false, state:'normal-completion-observed' };
+        }
+        if (latestMessageRole !== 'user' && !hasTurnError) {
+          return { ok:false, state:'no-interruption-evidence' };
         }
         const editors = [...document.querySelectorAll('#prompt-textarea,textarea,div.ProseMirror[contenteditable="true"],[data-lexical-editor="true"][contenteditable="true"],[contenteditable="true"][role="textbox"]')].filter(visible);
         const editor = editors.find((node) => node.closest('form')) || editors.at(-1);

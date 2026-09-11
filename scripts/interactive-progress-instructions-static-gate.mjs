@@ -12,6 +12,10 @@ const [source, agents, toolProgress, gateway, productionJournal] = await Promise
 assert.match(source, /exactly one conversation-scoped floating progress narration card/i);
 assert.match(source, /neither tool events nor timers may author visible narration/i);
 assert.match(source, /personally judge that a meaningful medium-sized step has completed/i);
+assert.match(source, /keep the interval between your own natural-language reports below ten minutes/i);
+assert.match(source, /Ten minutes is an Agent reporting ceiling only/i);
+assert.match(source, /rescue is separate and may run only after at least twenty minutes/i);
+assert.match(source, /normal completion or explicit cancellation disarms the episode immediately/i);
 assert.match(source, /Write the card text yourself in natural language/i);
 assert.match(source, /never show generated step counters, heartbeat prose, generic program status/i);
 assert.match(source, /server\.registerTool\("devspace_progress_report"/);
@@ -19,8 +23,11 @@ assert.match(source, /conversation-bound update to the floating DEV Space progre
 assert.match(source, /waits for the current ChatGPT Classic conversation identity instead of failing on a short correlation deadline/i);
 assert.doesNotMatch(source, /after roughly ten substantive tool operations/i);
 
-assert.match(agents, /There is no fixed time or tool-count cadence/i);
 assert.match(agents, /Call `devspace_progress_report` when a meaningful medium-sized step has completed/i);
+assert.match(agents, /ten minutes is an Agent reporting ceiling only/i);
+assert.match(agents, /No timer, supervisor, overlay, or hidden relay may send a ten-minute reminder/i);
+assert.match(agents, /only after at least twenty minutes/i);
+assert.match(agents, /normally completed or explicitly cancelled turn must disarm rescue immediately/i);
 assert.match(agents, /Write the update yourself in natural language/i);
 assert.doesNotMatch(agents, /batches of roughly ten steps/i);
 
@@ -40,6 +47,10 @@ console.log(JSON.stringify({
   agentAuthoredOnly: true,
   timerDrivenNarration: false,
   fixedCountNarration: false,
+  tenMinuteAgentReportCeiling: true,
+  tenMinuteAutomaticReminder: false,
+  twentyMinuteInterruptedTurnRescueOnly: true,
+  normalCompletionDisarms: true,
   rawToolNarration: false,
   noCorrelationDeadline: true,
 }));

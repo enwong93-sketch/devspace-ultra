@@ -180,6 +180,15 @@ export function loadConfig(env = process.env) {
     const host = env.HOST ?? files.config.host ?? "127.0.0.1";
     const port = parsePort(env.PORT ?? files.config.port);
     const publicBaseUrl = parsePublicBaseUrl(env.DEVSPACE_PUBLIC_BASE_URL ?? files.config.publicBaseUrl ?? localPublicBaseUrl(host, port));
+    const conversationProgressReportSeconds = parsePositiveInteger(
+        env.DEVSPACE_PROGRESS_REPORT_SECONDS
+            ?? numberConfigValue(files.config.conversationProgressReportSeconds)
+            ?? env.DEVSPACE_PROGRESS_REMINDER_SECONDS
+            ?? numberConfigValue(files.config.conversationProgressReminderSeconds),
+        10 * 60,
+        "DEVSPACE_PROGRESS_REPORT_SECONDS",
+        24 * 60 * 60,
+    );
     const derivedAllowedHosts = [
         "localhost",
         "127.0.0.1",
@@ -231,12 +240,9 @@ export function loadConfig(env = process.env) {
         conversationProgressLivenessEnabled: env.DEVSPACE_PROGRESS_LIVENESS === undefined
             ? files.config.conversationProgressLivenessEnabled !== false
             : parseBoolean(env.DEVSPACE_PROGRESS_LIVENESS),
-        conversationProgressReminderSeconds: parsePositiveInteger(
-            env.DEVSPACE_PROGRESS_REMINDER_SECONDS ?? numberConfigValue(files.config.conversationProgressReminderSeconds),
-            10 * 60,
-            "DEVSPACE_PROGRESS_REMINDER_SECONDS",
-            24 * 60 * 60,
-        ),
+        conversationProgressReportSeconds,
+        // Compatibility alias only. No ten-minute reminder is sent.
+        conversationProgressReminderSeconds: conversationProgressReportSeconds,
         conversationProgressContinueSeconds: parsePositiveInteger(
             env.DEVSPACE_PROGRESS_CONTINUE_SECONDS ?? numberConfigValue(files.config.conversationProgressContinueSeconds),
             20 * 60,

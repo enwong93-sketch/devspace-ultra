@@ -108,6 +108,10 @@ assert.equal(events.at(-1).conversationId, "conversation-b");
 assert.equal(events.at(-1).errorText, "net::ERR_FAILED");
 assert.equal(activeTurns.at(-1).kind, "failed");
 assert.equal(activeTurns.at(-1).requestId, "r2");
+assert.equal(activeTurns.at(-1).errorText, "net::ERR_FAILED");
+assert.equal(activeTurns.at(-1).canceled, true,
+  "liveness must distinguish explicit cancellation from an interruption eligible for rescue");
+assert.equal(activeTurns.at(-1).blockedReason, "other");
 assert.equal(tracker.pendingSize, 0);
 
 tracker.noteRequest({ requestId: "r3", request: { url: "https://chatgpt.com/backend-api/f/conversation", method: "POST", postData: JSON.stringify({ conversation_id: "conversation-c", model: "gpt-test" }), headers: {} } });
@@ -122,4 +126,4 @@ tracker.noteRequest({ requestId: "r5", request: { url: "https://chatgpt.com/back
 tracker.noteRequest({ requestId: "r6", request: { url: "https://chatgpt.com/backend-api/f/conversation", method: "POST", postData: JSON.stringify({ conversation_id: "conversation-f", model: "gpt-test" }), headers: {} } });
 assert.equal(tracker.pendingSize, 2, "native transport tracking must have a hard cap");
 
-console.log(JSON.stringify({ ok: true, gate: "classic-turn-transport-observer", networkOnly: true, nativeIdentity: true, nativeCallMcpCorrelation: true, activeTurnLifecycle: true, delayedServerSideMcpAfterTransportFinish: true, localFunctionNamesObserved: true, hashedTurnTraceOnly: true, deliveryLifecycle: true, bounded: true, rawSessionPersisted: false, rawToolArgumentsPersisted: false }));
+console.log(JSON.stringify({ ok: true, gate: "classic-turn-transport-observer", networkOnly: true, nativeIdentity: true, nativeCallMcpCorrelation: true, activeTurnLifecycle: true, failureCancellationPropagated: true, delayedServerSideMcpAfterTransportFinish: true, localFunctionNamesObserved: true, hashedTurnTraceOnly: true, deliveryLifecycle: true, bounded: true, rawSessionPersisted: false, rawToolArgumentsPersisted: false }));

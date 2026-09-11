@@ -7,6 +7,7 @@ const correlation = await readFile(new URL("../dist/classic-mcp-call-correlation
 const progressAuthority = await readFile(new URL("../dist/progress-conversation-authority.js", import.meta.url), "utf8");
 const liveness = await readFile(new URL("../dist/conversation-progress-liveness.js", import.meta.url), "utf8");
 const livenessCdp = await readFile(new URL("../dist/conversation-progress-liveness-cdp.js", import.meta.url), "utf8");
+const transportObserver = await readFile(new URL("../dist/classic-turn-transport-observer.js", import.meta.url), "utf8");
 
 assert.match(server, /const resolveCapabilityConversationAuthority = async \(extra\) =>/);
 assert.match(server, /const resolveProgressConversationAuthority = async \(extra\) =>/);
@@ -60,10 +61,27 @@ assert.doesNotMatch(livenessCdp, /#exactTarget\(conversationId, runtimeKey\)|dis
 assert.match(livenessCdp, /for \(const runtimeKey of this\.runtimeKeys\)/);
 assert.match(livenessCdp, /duplicate-conversation-pages/,
   "the same conversation open in more than one Runtime must fail closed rather than guess");
-assert.match(livenessCdp, /dispatchConversationFollowUp\(\{\s*conversationId:\s*resolved\.conversationId,/s,
-  "the ten-minute Agent reminder must be dispatched by exact conversationId");
-assert.doesNotMatch(livenessCdp, /dispatchConversationFollowUp\(\{[\s\S]{0,220}runtimePort:/,
-  "progress reminders may never pin their owner to the Runtime where the page happens to be open");
+assert.doesNotMatch(liveness, /adapter\?\.sendReminder|adapter\?\.projectReminder|conversation-reminder-sent|conversation-reminder-projected/,
+  "ten minutes is an Agent-authored reporting ceiling and may not dispatch or project a reminder");
+assert.doesNotMatch(livenessCdp, /async sendReminder\(|async projectReminder\(|purpose:\s*"progress-reminder"|進度旁白提醒/,
+  "the ten-minute reminder transport and visible banner APIs must not exist");
+assert.doesNotMatch(livenessCdp, /dispatchConversationFollowUp\(/,
+  "progress liveness may not use a hidden host relay to create reminder turns");
+assert.doesNotMatch(livenessCdp, /hostBridge/,
+  "the liveness adapter must not retain any hidden conversation follow-up relay");
+assert.doesNotMatch(server, /new ConversationProgressLivenessCdpAdapter\(\{[\s\S]{0,240}hostBridge:/,
+  "the Core must not wire Goal recovery dispatch into progress liveness");
+assert.match(liveness, /tenMinuteAutomaticReminder:\s*false/);
+assert.match(liveness, /tenMinuteSyntheticUserTurn:\s*false/);
+assert.match(liveness, /twentyMinuteInterruptedTurnRescueOnly:\s*true/);
+assert.match(liveness, /normalCompletionDisarms:\s*true/);
+assert.match(liveness, /kind === "finished"/);
+assert.match(liveness, /event\?\.canceled === true/);
+assert.match(livenessCdp, /normalCompletion:/);
+assert.match(livenessCdp, /incompleteUserTurn:/);
+assert.match(livenessCdp, /state:'normal-completion-observed'/);
+assert.match(transportObserver, /kind:\s*"failed"[\s\S]{0,300}canceled:\s*params\?\.canceled === true/,
+  "the supervisor must distinguish a real transport interruption from user cancellation");
 
 console.log(JSON.stringify({
   ok: true,
@@ -78,7 +96,10 @@ console.log(JSON.stringify({
   narrationAuthorityKey: "conversationId",
   narrationRuntimeBinding: false,
   runtime03DiscoverySupported: true,
-  tenMinuteAgentReminderConversationBound: true,
+  tenMinuteAgentReportSloOnly: true,
+  tenMinuteAutomaticReminder: false,
+  twentyMinuteInterruptedTurnRescueOnly: true,
+  normalCompletionDisarms: true,
   exactSessionTurnCorrelation: true,
   restartFallbackPageVerified: true,
 }));

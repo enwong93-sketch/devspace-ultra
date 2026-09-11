@@ -84,6 +84,9 @@ const snapshot = createMemoryDiagnostics({
     contextGuardianEnabled: true,
     classicHostOverlayEnabled: true,
     classicStreamRecoveryEnabled: true,
+    conversationProgressLivenessEnabled: true,
+    conversationProgressReportSeconds: 600,
+    conversationProgressContinueSeconds: 1200,
     autoCompactEnabled: false,
     classicMainDebugPorts: [19001],
   },
@@ -134,6 +137,11 @@ assert.equal(snapshot.streamRecoveryCdp.trackedRequestUrls, 6);
 assert.deepEqual(snapshot.features.classicMainDebugPorts, [19001]);
 assert.equal(snapshot.features.passiveCore, true);
 assert.equal(snapshot.features.goalRoundRecoveryEnabled, false);
+assert.equal(snapshot.features.conversationProgressLivenessEnabled, true);
+assert.equal(snapshot.features.conversationProgressReportSeconds, 600);
+assert.equal(snapshot.features.conversationProgressRescueSeconds, 1200);
+assert.equal(snapshot.features.tenMinuteAutomaticReminder, false);
+assert.equal(snapshot.features.twentyMinuteInterruptedTurnRescueOnly, true);
 assert.equal(snapshot.features.autoCompactEnabled, false);
 
 const empty = createMemoryDiagnostics({

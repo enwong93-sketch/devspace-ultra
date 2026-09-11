@@ -18,11 +18,17 @@ try {
   assert.equal(loadConfig(baseEnv).contextGuardianEnabled, true, "Context Guardian should be safe-on by default");
   assert.equal(loadConfig(baseEnv).classicHostOverlayEnabled, true, "Classic Host Overlay should be safe-on by default");
   assert.equal(loadConfig(baseEnv).conversationProgressLivenessEnabled, true, "conversation-scoped progress liveness should be safe-on by default");
+  assert.equal(loadConfig(baseEnv).conversationProgressReportSeconds, 600);
   assert.equal(loadConfig(baseEnv).conversationProgressReminderSeconds, 600);
   assert.equal(loadConfig(baseEnv).conversationProgressContinueSeconds, 1200);
   assert.equal(loadConfig(baseEnv).conversationProgressPollSeconds, 15);
   assert.equal(loadConfig({ ...baseEnv, DEVSPACE_PROGRESS_LIVENESS: "false" }).conversationProgressLivenessEnabled, false);
+  assert.equal(loadConfig({ ...baseEnv, DEVSPACE_PROGRESS_REPORT_SECONDS: "45" }).conversationProgressReportSeconds, 45);
+  assert.equal(loadConfig({ ...baseEnv, DEVSPACE_PROGRESS_REPORT_SECONDS: "45" }).conversationProgressReminderSeconds, 45,
+    "the retired reminder field remains a read-only compatibility alias for the Agent reporting interval");
   assert.equal(loadConfig({ ...baseEnv, DEVSPACE_PROGRESS_REMINDER_SECONDS: "30" }).conversationProgressReminderSeconds, 30);
+  assert.equal(loadConfig({ ...baseEnv, DEVSPACE_PROGRESS_REMINDER_SECONDS: "30" }).conversationProgressReportSeconds, 30,
+    "legacy configuration must change the report SLO only and must not restore automatic reminders");
   assert.equal(loadConfig({ ...baseEnv, DEVSPACE_PROGRESS_CONTINUE_SECONDS: "60" }).conversationProgressContinueSeconds, 60);
   assert.equal(loadConfig(baseEnv).goalRoundRecoveryEnabled, true, "same-round Goal recovery should be enabled by default");
   assert.equal(loadConfig({ ...baseEnv, DEVSPACE_GOAL_ROUND_RECOVERY: "false" }).goalRoundRecoveryEnabled, false, "operators must be able to pause automatic Goal re-entry without pausing the Goal itself");

@@ -31,6 +31,7 @@ const port = await resolveCorePort();
 const coreBase = `http://127.0.0.1:${port}`;
 const base = process.env.DEVSPACE_PROBE_BASE_URL || coreBase;
 const resource = new URL(process.env.DEVSPACE_PROBE_RESOURCE_URL || `${base}/mcp`);
+const holdSeconds = Math.max(0, Math.min(300, Math.floor(Number(process.env.DEVSPACE_PROBE_HOLD_SECONDS || 0))));
 
 async function issueLocalAccessToken() {
   const loaded = loadConfig();
@@ -138,6 +139,21 @@ const blenderMcp = (listed.body?.result?.tools || []).find((tool) => tool.name =
 assert.ok(blenderRuntime?.inputSchema?.properties?.runtimeId, "blender_runtime must expose runtimeId ownership routing.");
 assert.ok(blenderMcp?.inputSchema?.properties?.runtimeId, "blender_mcp must expose runtimeId so one Agent cannot fall back to another Agent's Blender.");
 
+if (holdSeconds > 0) {
+  console.log(JSON.stringify({
+    ok: true,
+    gate: "v05-core-tool-surface-live",
+    state: "authorized-session-held-for-safe-handover",
+    toolCount: names.size,
+    corePort: port,
+    requestBase: base,
+    throughGateway: base !== coreBase,
+    holdSeconds,
+    secretsLogged: false,
+  }));
+  await new Promise((resolvePromise) => setTimeout(resolvePromise, holdSeconds * 1_000));
+}
+
 await fetch(`${base}/mcp`, {
   method: "DELETE",
   headers: {
@@ -156,5 +172,6 @@ console.log(JSON.stringify({
   corePort: port,
   requestBase: base,
   throughGateway: base !== coreBase,
+  heldSeconds: holdSeconds,
   secretsLogged: false,
 }));
