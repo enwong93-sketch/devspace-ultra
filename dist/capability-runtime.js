@@ -3285,8 +3285,15 @@ export function registerCapabilityTools(server, runtime, {
     annotations: CALLING,
   }, async (input, extra) => {
     try {
-      const ownerConversationId = await currentConversation(extra);
+      // Declared command adapters do not open/reuse an MCP client or a stateful
+      // application connection. Their auth boundary is the authenticated
+      // Gateway plus the enabled/trusted command manifest (and any adapter's
+      // own scoped credential). Do not wait indefinitely for unrelated browser
+      // session correlation before running a stateless command adapter.
+      // MCP transports still require exact per-conversation authority below.
+      const ownerConversationId = input.kind === "tool" ? null : await currentConversation(extra);
       if (input.instanceToken && input.runtimeId) throw new Error("Pass either runtimeId or instanceToken, not both.");
+      if (input.kind === "tool" && (input.instanceToken || input.runtimeId)) throw new Error("Command adapters do not accept MCP runtime or instance identity.");
       let instanceToken = input.runtimeId
         ? runtime.connectionManager.tokenForRuntime(input.runtimeId, {
             pluginId: input.pluginId,

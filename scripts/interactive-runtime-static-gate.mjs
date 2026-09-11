@@ -41,6 +41,8 @@ assert.match(interactiveManager, /chat-classic-runtime-provision\.ps1/, "interac
 assert.match(interactiveManager, /chat-classic-session-source\.ps1/, "interactive manager must use generalized zero-login session source discovery");
 assert.match(interactiveManager, /chat-swarm-classic-session-seed\.mjs/, "interactive manager must prefer the existing in-memory CDP Session Seed path");
 assert.match(interactiveManager, /chat-classic-primary-snapshot\.ps1/, "interactive manager must have a controlled Primary snapshot fallback");
+assert.match(interactiveManager, /\[switch\]\$NoPrimaryFallback/, "interactive setup must expose an explicit fail-closed mode that never restarts or snapshots Main-01");
+assert.match(interactiveManager, /if \(\$NoPrimaryFallback -or \$primarySource\.Count -eq 0\)/, "NoPrimaryFallback must stop at the explicit interactive-auth-required boundary instead of silently using Primary");
 assert.match(interactiveManager, /cdp-session-seed/, "interactive manager must record CDP source provisioning separately");
 assert.match(interactiveManager, /primary-controlled-snapshot/, "interactive manager must record controlled Primary fallback separately");
 assert.match(interactiveManager, /-Role\s+interactive/, "interactive manager must select interactive role explicitly");

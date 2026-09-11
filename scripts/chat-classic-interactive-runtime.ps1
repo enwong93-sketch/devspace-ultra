@@ -11,6 +11,8 @@ param(
 
     [switch]$ReseedSession,
 
+    [switch]$NoPrimaryFallback,
+
     [ValidateRange(5, 60)]
     [int]$VerifyTimeoutSeconds = 30
 )
@@ -465,7 +467,7 @@ switch ($Action) {
             }
             else {
                 $primarySource = @($sources | Where-Object { $_.Role -eq "primary" } | Select-Object -First 1)
-                if ($primarySource.Count -eq 0) {
+                if ($NoPrimaryFallback -or $primarySource.Count -eq 0) {
                     $authRequired = $true
                 }
                 else {
