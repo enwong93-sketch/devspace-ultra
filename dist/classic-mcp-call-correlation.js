@@ -135,17 +135,21 @@ export class ClassicActiveTurnRegistry {
     postTurnGraceMs = DEFAULT_POST_TURN_GRACE_MS,
     maxActive = 64,
     maxWaiters = 128,
+    waitTimeoutMs = DEFAULT_TTL_MS,
   } = {}) {
     this.now = now;
     this.activeTtlMs = Math.max(30_000, Number(activeTtlMs) || 10 * 60_000);
     this.postTurnGraceMs = Math.max(1_000, Number(postTurnGraceMs) || DEFAULT_POST_TURN_GRACE_MS);
     this.maxActive = Math.max(4, Number(maxActive) || 64);
     this.maxWaiters = Math.max(4, Number(maxWaiters) || 128);
+    this.waitTimeoutMs = Math.max(100, Number(waitTimeoutMs) || DEFAULT_TTL_MS);
     this.active = new Map();
     this.waiters = new Map();
     this.nextWaiterId = 1;
     this.recentResolved = [];
     this.ambiguousMatches = 0;
+    this.timedOutWaiters = 0;
+    this.cancelledWaiters = 0;
   }
 
   noteTurn(input = {}) {
@@ -257,22 +261,41 @@ export class ClassicActiveTurnRegistry {
     return identity;
   }
 
-  waitForIdentity({ toolName, turnTraceFingerprint = null, sessionFingerprintHint = null, runtimeKeyHint = null, signal } = {}) {
+  waitForIdentity({
+    toolName,
+    turnTraceFingerprint = null,
+    sessionFingerprintHint = null,
+    runtimeKeyHint = null,
+    signal,
+    timeoutMs = this.waitTimeoutMs,
+  } = {}) {
     const immediate = this.resolveGatewayCall({ toolName, turnTraceFingerprint, sessionFingerprintHint, runtimeKeyHint });
     if (immediate) return Promise.resolve(immediate);
     const tool = cleanText(toolName, 220);
     if (!tool) return Promise.resolve(null);
     if (signal?.aborted) return Promise.reject(new Error("Active-turn conversation correlation was cancelled."));
     const waiterId = this.nextWaiterId++;
+    const boundedTimeoutMs = Math.max(100, Number(timeoutMs) || this.waitTimeoutMs);
     let resolveWaiter;
     let rejectWaiter;
     const promise = new Promise((resolvePromise, rejectPromise) => {
       resolveWaiter = resolvePromise;
       rejectWaiter = rejectPromise;
     });
+    let settled = false;
+    let timer = null;
+    const finish = ({ value = null, error = null } = {}) => {
+      if (settled) return;
+      settled = true;
+      this.waiters.delete(waiterId);
+      if (timer) clearTimeout(timer);
+      if (signal) signal.removeEventListener("abort", onAbort);
+      if (error) rejectWaiter(error);
+      else resolveWaiter(value);
+    };
     const onAbort = () => {
-      if (!this.waiters.delete(waiterId)) return;
-      rejectWaiter(new Error("Active-turn conversation correlation was cancelled."));
+      this.cancelledWaiters += 1;
+      finish({ error: new Error("Active-turn conversation correlation was cancelled.") });
     };
     if (signal) signal.addEventListener("abort", onAbort, { once: true });
     this.waiters.set(waiterId, {
@@ -281,11 +304,14 @@ export class ClassicActiveTurnRegistry {
       sessionFingerprintHint: cleanSessionFingerprint(sessionFingerprintHint),
       runtimeKeyHint: cleanRuntimeKey(runtimeKeyHint),
       createdAtMs: this.now(),
-      resolve: (value) => {
-        if (signal) signal.removeEventListener("abort", onAbort);
-        resolveWaiter(value);
-      },
+      timeoutMs: boundedTimeoutMs,
+      resolve: (value) => finish({ value }),
     });
+    timer = setTimeout(() => {
+      if (!this.waiters.has(waiterId)) return;
+      this.timedOutWaiters += 1;
+      finish({ value: null });
+    }, boundedTimeoutMs);
     while (this.waiters.size > this.maxWaiters) {
       const oldest = [...this.waiters.entries()]
         .sort((a, b) => Number(a[1].createdAtMs || 0) - Number(b[1].createdAtMs || 0))[0];
@@ -312,6 +338,14 @@ export class ClassicActiveTurnRegistry {
       changed = true;
     }
     this.#enforceActiveCap();
+    for (const [id, waiter] of [...this.waiters]) {
+      const expiresAt = Number(waiter.createdAtMs || 0) + Number(waiter.timeoutMs || this.waitTimeoutMs);
+      if (expiresAt > now) continue;
+      this.waiters.delete(id);
+      this.timedOutWaiters += 1;
+      waiter.resolve(null);
+      changed = true;
+    }
     if (changed) this.#attemptWaiters();
   }
 
@@ -354,6 +388,9 @@ export class ClassicActiveTurnRegistry {
       postTurnGraceMs: this.postTurnGraceMs,
       maxActive: this.maxActive,
       maxWaiters: this.maxWaiters,
+      waitTimeoutMs: this.waitTimeoutMs,
+      timedOutWaiters: this.timedOutWaiters,
+      cancelledWaiters: this.cancelledWaiters,
       rawPromptsPersisted: false,
       rawTraceIdsPersisted: false,
       rawSessionPersisted: false,
@@ -367,16 +404,21 @@ export class ClassicMcpCallCorrelator {
     ttlMs = DEFAULT_TTL_MS,
     maxPending = DEFAULT_MAX_PENDING,
     maxSkewMs = DEFAULT_MAX_SKEW_MS,
+    waitTimeoutMs = ttlMs,
   } = {}) {
     this.now = now;
     this.ttlMs = Math.max(1_000, Number(ttlMs) || DEFAULT_TTL_MS);
     this.maxPending = Math.max(4, Number(maxPending) || DEFAULT_MAX_PENDING);
     this.maxSkewMs = Math.max(100, Number(maxSkewMs) || DEFAULT_MAX_SKEW_MS);
+    this.waitTimeoutMs = Math.max(100, Number(waitTimeoutMs) || this.ttlMs);
     this.native = [];
     this.gateway = [];
     this.resolved = [];
     this.waiters = new Map();
+    this.nextWaiterId = 1;
     this.ambiguousMatches = 0;
+    this.timedOutWaiters = 0;
+    this.cancelledWaiters = 0;
   }
 
   noteNative(input) {
@@ -450,35 +492,62 @@ export class ClassicMcpCallCorrelator {
     return identity;
   }
 
-  waitForIdentity({ callFingerprint, sessionFingerprint = null, signal } = {}) {
+  waitForIdentity({
+    callFingerprint,
+    sessionFingerprint = null,
+    signal,
+    timeoutMs = this.waitTimeoutMs,
+  } = {}) {
     const call = cleanText(callFingerprint, 64)?.toLowerCase();
     const session = cleanText(sessionFingerprint, 64)?.toLowerCase() || null;
     if (!call || !/^[a-f0-9]{64}$/.test(call)) return Promise.resolve(null);
     const existing = this.resolved.find((item) => item.callFingerprint === call && (!session || item.sessionFingerprint === session));
     if (existing) return Promise.resolve(existing);
-    const key = `${call}:${session || "*"}`;
-    const current = this.waiters.get(key);
-    let sharedPromise = current?.promise;
-    if (!sharedPromise) {
-      let resolveWaiter;
-      sharedPromise = new Promise((resolvePromise) => { resolveWaiter = resolvePromise; });
-      this.waiters.set(key, {
-        callFingerprint: call,
-        sessionFingerprint: session,
-        createdAtMs: this.now(),
-        resolve: resolveWaiter,
-        promise: sharedPromise,
-      });
-    }
-    if (!signal) return sharedPromise;
-    if (signal.aborted) return Promise.reject(new Error("MCP conversation correlation was cancelled."));
-    return new Promise((resolvePromise, rejectPromise) => {
-      const onAbort = () => rejectPromise(new Error("MCP conversation correlation was cancelled."));
-      signal.addEventListener("abort", onAbort, { once: true });
-      sharedPromise.then(resolvePromise, rejectPromise).finally(() => {
-        signal.removeEventListener("abort", onAbort);
-      });
+    if (signal?.aborted) return Promise.reject(new Error("MCP conversation correlation was cancelled."));
+    const waiterId = this.nextWaiterId++;
+    const boundedTimeoutMs = Math.max(100, Number(timeoutMs) || this.waitTimeoutMs);
+    let resolveWaiter;
+    let rejectWaiter;
+    const promise = new Promise((resolvePromise, rejectPromise) => {
+      resolveWaiter = resolvePromise;
+      rejectWaiter = rejectPromise;
     });
+    let settled = false;
+    let timer = null;
+    const finish = ({ value = null, error = null } = {}) => {
+      if (settled) return;
+      settled = true;
+      this.waiters.delete(waiterId);
+      if (timer) clearTimeout(timer);
+      if (signal) signal.removeEventListener("abort", onAbort);
+      if (error) rejectWaiter(error);
+      else resolveWaiter(value);
+    };
+    const onAbort = () => {
+      this.cancelledWaiters += 1;
+      finish({ error: new Error("MCP conversation correlation was cancelled.") });
+    };
+    if (signal) signal.addEventListener("abort", onAbort, { once: true });
+    this.waiters.set(waiterId, {
+      callFingerprint: call,
+      sessionFingerprint: session,
+      createdAtMs: this.now(),
+      timeoutMs: boundedTimeoutMs,
+      resolve: (value) => finish({ value }),
+    });
+    timer = setTimeout(() => {
+      if (!this.waiters.has(waiterId)) return;
+      this.timedOutWaiters += 1;
+      finish({ value: null });
+    }, boundedTimeoutMs);
+    while (this.waiters.size > this.maxPending) {
+      const oldest = [...this.waiters.entries()]
+        .sort((a, b) => Number(a[1].createdAtMs || 0) - Number(b[1].createdAtMs || 0))[0];
+      if (!oldest) break;
+      this.waiters.delete(oldest[0]);
+      oldest[1].resolve(null);
+    }
+    return promise;
   }
 
   prune() {
@@ -487,8 +556,13 @@ export class ClassicMcpCallCorrelator {
     this.gateway = this.gateway.filter((item) => item.atMs >= cutoff).slice(-this.maxPending);
     this.resolved = this.resolved.filter((item) => Date.parse(item.observedAt || "") >= cutoff).slice(0, this.maxPending);
     for (const [key, waiter] of this.waiters) {
-      if (Number(waiter.createdAtMs || 0) >= cutoff) continue;
+      const expiresAt = Math.min(
+        Number(waiter.createdAtMs || 0) + Number(waiter.timeoutMs || this.waitTimeoutMs),
+        Number(waiter.createdAtMs || 0) + this.ttlMs,
+      );
+      if (expiresAt > this.now()) continue;
       this.waiters.delete(key);
+      this.timedOutWaiters += 1;
       waiter.resolve(null);
     }
     while (this.waiters.size > this.maxPending) {
@@ -510,6 +584,9 @@ export class ClassicMcpCallCorrelator {
       ttlMs: this.ttlMs,
       maxPending: this.maxPending,
       maxSkewMs: this.maxSkewMs,
+      waitTimeoutMs: this.waitTimeoutMs,
+      timedOutWaiters: this.timedOutWaiters,
+      cancelledWaiters: this.cancelledWaiters,
       rawArgumentsPersisted: false,
       rawSessionPersisted: false,
     };

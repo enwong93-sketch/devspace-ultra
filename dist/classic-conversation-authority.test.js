@@ -30,8 +30,8 @@ try {
   const cancellation = new AbortController();
   const cancelledWait = registry.waitForFingerprint(cancelledFingerprint, { signal: cancellation.signal });
   cancellation.abort();
-  await assert.rejects(cancelledWait, /cancelled/i, "an abandoned MCP request must stop waiting without cancelling the shared authority source");
-  assert.equal(registry.waiters.size, 1, "the shared authority source remains available for a later request or native observation");
+  await assert.rejects(cancelledWait, /cancelled/i, "an abandoned MCP request must remove only its request-scoped authority waiter");
+  assert.equal(registry.waiters.size, 0, "cancelled authority waiters must not survive as zombie promises");
   await registry.observeNativeTurn({
     sessionFingerprint: cancelledFingerprint,
     conversationId: "cccccccc-cccc-cccc-cccc-cccccccccccc",
@@ -42,7 +42,7 @@ try {
 
   const waiterA = registry.waitForFingerprint(fp);
   const waiterB = registry.waitForFingerprint(fp);
-  assert.equal(registry.waiters.size, 1, "all pending tools for one MCP session must share one authority waiter");
+  assert.equal(registry.waiters.size, 2, "each pending tool request must own an independently cancellable authority waiter");
 
   await registry.observeNativeTurn({
     sessionFingerprint: fp,
@@ -70,6 +70,17 @@ try {
     observedAt: "2026-09-06T03:50:31.000Z",
   });
   assert.equal((await freshWait)?.conversationId, "6a9c696c-9630-83e8-a70f-4bbe4b59e5d1");
+
+  const timeoutRegistry = new ClassicConversationAuthorityRegistry({
+    statePath: join(root, "timeout-authority.json"),
+    waitTimeoutMs: 100,
+  });
+  await timeoutRegistry.load();
+  const timeoutStartedAt = Date.now();
+  assert.equal(await timeoutRegistry.waitForFingerprint("d".repeat(64)), null);
+  assert.equal(Date.now() - timeoutStartedAt < 1_500, true, "missing authority must fail closed promptly");
+  assert.equal(timeoutRegistry.waiters.size, 0);
+  assert.equal(timeoutRegistry.diagnostics().timedOutWaiters, 1);
 
   const persistedText = await readFile(statePath, "utf8");
   assert.doesNotMatch(persistedText, /opaque-openai-session-value/, "raw OpenAI session value must never be persisted");

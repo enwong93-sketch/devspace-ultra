@@ -75,6 +75,9 @@ assert.deepEqual(correlator.diagnostics(), {
   ttlMs: 10000,
   maxPending: 8,
   maxSkewMs: 2000,
+  waitTimeoutMs: 10000,
+  timedOutWaiters: 0,
+  cancelledWaiters: 0,
   rawArgumentsPersisted: false,
   rawSessionPersisted: false,
 });
@@ -103,11 +106,12 @@ assert.equal(trulyAmbiguous.diagnostics().ambiguousMatches > 0, true);
 const boundedWaiters = new ClassicMcpCallCorrelator({ now: () => now, ttlMs: 1_000, maxPending: 4 });
 const repeatedWaitA = boundedWaiters.waitForIdentity({ callFingerprint: future, sessionFingerprint: "e".repeat(64) });
 const repeatedWaitB = boundedWaiters.waitForIdentity({ callFingerprint: future, sessionFingerprint: "e".repeat(64) });
-assert.equal(repeatedWaitA, repeatedWaitB, "identical session/call correlation waiters must share one promise");
-assert.equal(boundedWaiters.diagnostics().waiters, 1);
+assert.notEqual(repeatedWaitA, repeatedWaitB, "each MCP request must own a cancellable waiter instead of sharing an unabortable promise");
+assert.equal(boundedWaiters.diagnostics().waiters, 2);
 now += 2_000;
 boundedWaiters.prune();
 assert.equal(await repeatedWaitA, null, "passive correlation cache expiry may release stale observers without terminating user work");
+assert.equal(await repeatedWaitB, null, "every request-scoped waiter must be released independently");
 assert.equal(boundedWaiters.diagnostics().waiters, 0);
 
 now += 60_000;
@@ -451,7 +455,7 @@ console.log(JSON.stringify({
   rawSessionPersisted: false,
   mutualNearestConcurrentMatch: true,
   trueTieFailsClosed: true,
-  sharedBoundedWaiters: true,
+  requestScopedBoundedWaiters: true,
   boundedTemporalJoin: true,
   activeTurnTraceMatch: true,
   activeTurnUniqueToolMatch: true,

@@ -65,10 +65,14 @@ function cleanEntry(fingerprint, input = {}) {
 }
 
 export class ClassicConversationAuthorityRegistry {
-  constructor({ statePath } = {}) {
+  constructor({ statePath, waitTimeoutMs = 30_000 } = {}) {
     this.statePath = requireText(statePath, "statePath");
     this.entries = new Map();
     this.waiters = new Map();
+    this.nextWaiterId = 1;
+    this.waitTimeoutMs = Math.max(100, Number(waitTimeoutMs) || 30_000);
+    this.timedOutWaiters = 0;
+    this.cancelledWaiters = 0;
   }
 
   async load() {
@@ -159,7 +163,11 @@ export class ClassicConversationAuthorityRegistry {
     return this.resolveFingerprint(fingerprint);
   }
 
-  async waitForFingerprint(value, { signal, minimumObservedAt = null } = {}) {
+  async waitForFingerprint(value, {
+    signal,
+    minimumObservedAt = null,
+    timeoutMs = this.waitTimeoutMs,
+  } = {}) {
     const fingerprint = String(value || "").trim().toLowerCase();
     if (!/^[a-f0-9]{64}$/.test(fingerprint)) return null;
     const minimumObservedAtMs = minimumObservedAt == null
@@ -173,34 +181,66 @@ export class ClassicConversationAuthorityRegistry {
     };
     const immediate = this.resolveFingerprint(fingerprint);
     if (freshEnough(immediate)) return immediate;
-    const current = this.waiters.get(fingerprint);
-    let sharedPromise = current?.promise;
-    if (!sharedPromise) {
-      let resolveWaiter;
-      sharedPromise = new Promise((resolvePromise) => { resolveWaiter = resolvePromise; });
-      this.waiters.set(fingerprint, { resolve: resolveWaiter, promise: sharedPromise });
-    }
-    const awaitFresh = async () => {
-      const resolved = await sharedPromise;
-      if (freshEnough(resolved)) return resolved;
-      return await this.waitForFingerprint(fingerprint, { signal, minimumObservedAt });
-    };
-    if (!signal) return await awaitFresh();
-    if (signal.aborted) throw new Error("Conversation identity wait was cancelled.");
-    return await new Promise((resolvePromise, rejectPromise) => {
-      const onAbort = () => rejectPromise(new Error("Conversation identity wait was cancelled."));
-      signal.addEventListener("abort", onAbort, { once: true });
-      awaitFresh().then(resolvePromise, rejectPromise).finally(() => {
-        signal.removeEventListener("abort", onAbort);
-      });
+    if (signal?.aborted) throw new Error("Conversation identity wait was cancelled.");
+    const waiterId = this.nextWaiterId++;
+    const boundedTimeoutMs = Math.max(100, Number(timeoutMs) || this.waitTimeoutMs);
+    let resolveWaiter;
+    let rejectWaiter;
+    const promise = new Promise((resolvePromise, rejectPromise) => {
+      resolveWaiter = resolvePromise;
+      rejectWaiter = rejectPromise;
     });
+    let settled = false;
+    let timer = null;
+    const finish = ({ value = null, error = null } = {}) => {
+      if (settled) return;
+      settled = true;
+      this.waiters.delete(waiterId);
+      if (timer) clearTimeout(timer);
+      if (signal) signal.removeEventListener("abort", onAbort);
+      if (error) rejectWaiter(error);
+      else resolveWaiter(value);
+    };
+    const onAbort = () => {
+      this.cancelledWaiters += 1;
+      finish({ error: new Error("Conversation identity wait was cancelled.") });
+    };
+    if (signal) signal.addEventListener("abort", onAbort, { once: true });
+    this.waiters.set(waiterId, {
+      fingerprint,
+      minimumObservedAtMs: Number.isFinite(minimumObservedAtMs) ? minimumObservedAtMs : null,
+      createdAtMs: Date.now(),
+      timeoutMs: boundedTimeoutMs,
+      resolve: (resolved) => finish({ value: resolved }),
+    });
+    timer = setTimeout(() => {
+      if (!this.waiters.has(waiterId)) return;
+      this.timedOutWaiters += 1;
+      finish({ value: null });
+    }, boundedTimeoutMs);
+    return await promise;
   }
 
   #resolveWaiters(fingerprint, resolved) {
-    const waiter = this.waiters.get(fingerprint);
-    if (!waiter) return;
-    this.waiters.delete(fingerprint);
-    waiter.resolve(structuredClone(resolved));
+    const observedAtMs = Date.parse(String(resolved?.observedAt || ""));
+    for (const [id, waiter] of [...this.waiters]) {
+      if (waiter.fingerprint !== fingerprint) continue;
+      if (Number.isFinite(waiter.minimumObservedAtMs)
+        && (!Number.isFinite(observedAtMs) || observedAtMs < waiter.minimumObservedAtMs)) continue;
+      this.waiters.delete(id);
+      waiter.resolve(structuredClone(resolved));
+    }
+  }
+
+  diagnostics() {
+    return {
+      sessions: this.entries.size,
+      waiters: this.waiters.size,
+      waitTimeoutMs: this.waitTimeoutMs,
+      timedOutWaiters: this.timedOutWaiters,
+      cancelledWaiters: this.cancelledWaiters,
+      rawSessionPersisted: false,
+    };
   }
 
   snapshot() {
