@@ -49,6 +49,14 @@ assert.match(gatewayController, /stopCoreSlot[\s\S]*startCoreSlot/, "handover mu
 assert.match(gatewayController, /commitMappings/, "Gateway must atomically commit replayed backend session mappings");
 assert.match(gatewayController, /rollback/i, "handover must contain an explicit rollback path");
 assert.match(gatewayController, /abortBarrier/, "Gateway must reopen admission after success or rollback");
+assert.match(gatewayController, /handover = async \(\{ allowSchemaChange = false \} = \{\}\)/,
+  "model-surface changes must require an explicit one-handover authorization");
+assert.match(gatewayController, /candidateFingerprint[\s\S]*verifyCore\(replacementHandle, baseline, candidateFingerprint\)/,
+  "the production replacement must exactly match the already-validated schema-changing candidate");
+assert.match(gatewayController, /candidateToolCount !== baselineToolCount/,
+  "a schema-changing handover may not silently add or remove tools under the metadata-only migration flag");
+assert.match(gatewayController, /requiresFreshInitialize:\s*schemaChanged/,
+  "schema-changing handover must declare that stale clients require a fresh initialize");
 assert.match(gatewayRuntime, /updateAuthorization\(/, "Gateway registry must rotate in-memory replay credentials after OAuth access-token refresh");
 assert.match(gatewayRuntime, /markEventStreamOpen[\s\S]*markEventStreamClosed[\s\S]*entry\.coreId = "unmapped"[\s\S]*entry\.backendSessionId = "unmapped"/, "Gateway SSE disconnects must invalidate only the Core mapping while retaining the public conversation descriptor for lazy resurrection");
 assert.doesNotMatch(gatewayRuntime, /#removeDisconnectedIfIdle|this\.sessions\.delete\(entry\.publicSessionId\)/, "A normal ChatGPT SSE reconnect boundary must never revoke the public MCP session descriptor");
@@ -77,6 +85,9 @@ assert.match(backendReload, /--worker/, "reload helper must detach before replac
 assert.match(backendReload, /--status/, "reload helper must expose authoritative last-handover status instead of treating scheduled=true as completion");
 assert.match(backendReload, /handoverId/, "scheduled and terminal handover records must share a unique correlation id");
 assert.match(backendReload, /state:\s*"pending"/, "reload helper must write pending state before detaching");
+assert.match(backendReload, /--allow-schema-change/, "schema-changing deployment must be explicit at the reload command boundary");
+assert.match(backendReload, /JSON\.stringify\(\{ allowSchemaChange \}\)/,
+  "the reload helper must send a bounded boolean authorization rather than bypassing the compatibility gate");
 assert.doesNotMatch(backendReload, /restart-backend|devspace-edge-startup\.ps1|Stop-ScheduledTask/i, "reload helper must never restart the public listener/Scheduled Task boundary");
 
 assert.match(fixedBackend, /--config-dir/, "Stable Gateway launcher must accept one explicit config directory for persistent startup ownership");
@@ -109,5 +120,6 @@ assert.match(packageJson.scripts["verify:ultra"], /verify:stable-gateway/, "full
 
 assert.match(handoverGate, /productionPidsUnchanged|productionPortsUnchanged/, "handover integration gate must explicitly prove production runtimes are untouched");
 assert.match(handoverGate, /rollback/i, "handover integration gate must exercise rollback");
+assert.match(handoverGate, /explicitSchemaChangeControl/i, "handover integration must exercise explicit schema-change control forwarding");
 
 console.log(JSON.stringify({ ok: true, gate: "stable-gateway-static" }));

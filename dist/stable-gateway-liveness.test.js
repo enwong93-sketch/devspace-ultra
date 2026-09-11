@@ -141,8 +141,15 @@ const dependencies = {
     }
     return { stopped: true };
   },
-  async probeCandidate() {
-    return { ok: true, stage: "compatible" };
+  async probeCandidate(input) {
+    return {
+      ok: true,
+      stage: "compatible",
+      schemaFingerprint: input?.expectedSchemaFingerprint,
+      toolCount: 2,
+      schemaChanged: false,
+      requiresFreshInitialize: false,
+    };
   },
   async readCoreSchemaFingerprint() {
     return { schemaFingerprint: "a".repeat(64), toolCount: 2 };

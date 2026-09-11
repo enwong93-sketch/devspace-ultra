@@ -9,6 +9,7 @@ import { readGatewayControlFile } from "./devspace-stable-gateway.mjs";
 
 const isWorker = process.argv.includes("--worker");
 const statusOnly = process.argv.includes("--status");
+const allowSchemaChange = process.argv.includes("--allow-schema-change");
 const handoverIdArgIndex = process.argv.indexOf("--handover-id");
 const suppliedHandoverId = handoverIdArgIndex >= 0 ? String(process.argv[handoverIdArgIndex + 1] || "").trim() : "";
 const scriptPath = fileURLToPath(import.meta.url);
@@ -51,17 +52,20 @@ if (!isWorker) {
     observedAt: new Date().toISOString(),
     handoverId,
     state: "pending",
+    allowSchemaChange,
     httpStatus: null,
     result: null,
     secretValuesLogged: false,
   });
-  const child = spawn(process.execPath, [scriptPath, "--worker", "--handover-id", handoverId], {
+  const workerArgs = [scriptPath, "--worker", "--handover-id", handoverId];
+  if (allowSchemaChange) workerArgs.push("--allow-schema-change");
+  const child = spawn(process.execPath, workerArgs, {
     detached: true,
     windowsHide: true,
     stdio: "ignore",
   });
   child.unref();
-  console.log(JSON.stringify({ ok: true, scheduled: true, state: "pending", handoverId, action: "stable-gateway-handover", quietBoundary: true, statusPath, secretValuesLogged: false }));
+  console.log(JSON.stringify({ ok: true, scheduled: true, state: "pending", handoverId, action: "stable-gateway-handover", quietBoundary: true, allowSchemaChange, statusPath, secretValuesLogged: false }));
   process.exit(0);
 }
 
@@ -98,13 +102,14 @@ try {
       "content-type": "application/json",
       "x-devspace-gateway-control": control.controlToken,
     },
-    body: "{}",
+    body: JSON.stringify({ allowSchemaChange }),
   });
   const result = await response.json().catch(() => ({ ok: false, state: "invalid-response" }));
   await writeLastResult(files.dir, {
     observedAt: new Date().toISOString(),
     handoverId,
     state: response.ok && result?.ok === true ? "completed" : "failed",
+    allowSchemaChange,
     httpStatus: response.status,
     result,
     secretValuesLogged: false,
@@ -115,6 +120,7 @@ try {
     observedAt: new Date().toISOString(),
     handoverId,
     state: "failed",
+    allowSchemaChange,
     httpStatus: null,
     result: {
       ok: false,

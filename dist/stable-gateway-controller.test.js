@@ -10,6 +10,10 @@ const FAKE_TOOLS = Object.freeze([
   { name: "read", description: "Read a workspace file", inputSchema: { type: "object", properties: { path: { type: "string" } }, required: ["path"] } },
   { name: "view_image", description: "Inspect a workspace image", inputSchema: { type: "object", properties: { path: { type: "string" } }, required: ["path"] } },
 ]);
+const CHANGED_TOOLS = Object.freeze([
+  { ...FAKE_TOOLS[0], description: "Read a workspace file with exact conversation isolation" },
+  FAKE_TOOLS[1],
+]);
 
 async function listen(server) {
   await new Promise((resolve, reject) => {
@@ -30,7 +34,7 @@ async function readBody(req) {
   return chunks.length ? JSON.parse(Buffer.concat(chunks).toString("utf8")) : {};
 }
 
-async function createFakeCore(id, { failInitialize = false, failInitializeAt = null } = {}) {
+async function createFakeCore(id, { failInitialize = false, failInitializeAt = null, tools = FAKE_TOOLS } = {}) {
   const observed = [];
   const state = { sseActive: false, releaseSse: null };
   let sessionCounter = 0;
@@ -71,7 +75,7 @@ async function createFakeCore(id, { failInitialize = false, failInitializeAt = n
       res.statusCode = 200;
       res.setHeader("content-type", "application/json");
       res.setHeader("mcp-session-id", req.headers["mcp-session-id"] ?? "");
-      res.end(JSON.stringify({ jsonrpc: "2.0", id: body.id, result: { tools: FAKE_TOOLS } }));
+      res.end(JSON.stringify({ jsonrpc: "2.0", id: body.id, result: { tools } }));
       return;
     }
     res.statusCode = 200;
@@ -103,13 +107,14 @@ function postJson(baseUrl, body, headers = {}) {
   });
 }
 
-async function createHarness({ failActiveB = false, failCandidate = false, rejectedBaselineAuthorizations = [] } = {}) {
+async function createHarness({ failActiveB = false, failCandidate = false, failReplacementProbe = false, schemaChanged = false, rejectedBaselineAuthorizations = [] } = {}) {
   const temp = await mkdtemp(join(tmpdir(), "stable-gateway-controller-test-"));
   const initial = await createFakeCore("core-a");
   const starts = [];
   const stops = [];
   const baselineAuthorizations = [];
   const candidateAuthorizations = [];
+  const candidateProbes = [];
   let activeBStarted = false;
   const dependencies = {
     async createCandidateSnapshot() {
@@ -118,10 +123,15 @@ async function createHarness({ failActiveB = false, failCandidate = false, rejec
     },
     async startCoreSlot(options) {
       starts.push({ id: options.id, candidate: options.candidate });
-      if (options.id === "core-b" && options.candidate) return createFakeCore("core-b-candidate");
+      if (options.id === "core-b" && options.candidate) {
+        return createFakeCore("core-b-candidate", { tools: schemaChanged ? CHANGED_TOOLS : FAKE_TOOLS });
+      }
       if (options.id === "core-b") {
         activeBStarted = true;
-        return createFakeCore("core-b", { failInitializeAt: failActiveB ? 1 : null });
+        return createFakeCore("core-b", {
+          failInitializeAt: failActiveB ? 1 : null,
+          tools: schemaChanged ? CHANGED_TOOLS : FAKE_TOOLS,
+        });
       }
       return createFakeCore("core-a-restarted");
     },
@@ -133,7 +143,45 @@ async function createHarness({ failActiveB = false, failCandidate = false, rejec
     },
     async probeCandidate(input) {
       candidateAuthorizations.push(input?.bearerToken);
-      return failCandidate ? { ok: false, stage: "schema" } : { ok: true, stage: "compatible" };
+      candidateProbes.push({
+        expectedSchemaFingerprint: input?.expectedSchemaFingerprint,
+        allowSchemaChange: input?.allowSchemaChange === true,
+      });
+      if (failCandidate) return { ok: false, stage: "schema" };
+      if (failReplacementProbe && candidateProbes.length === 2) {
+        return { ok: false, stage: "schema", schemaFingerprint: "c".repeat(64) };
+      }
+      if (schemaChanged && input?.expectedSchemaFingerprint === "a".repeat(64)) {
+        if (input?.allowSchemaChange === true) {
+          return {
+            ok: true,
+            stage: "schema-change-compatible",
+            schemaChanged: true,
+          requiresFreshInitialize: true,
+          schemaFingerprint: "b".repeat(64),
+          toolCount: CHANGED_TOOLS.length,
+        };
+        }
+        if (candidateProbes.length === 1) {
+          return { ok: false, stage: "schema", schemaFingerprint: "b".repeat(64) };
+        }
+        return {
+          ok: true,
+          stage: "compatible",
+          schemaChanged: false,
+          requiresFreshInitialize: false,
+          schemaFingerprint: "a".repeat(64),
+          toolCount: FAKE_TOOLS.length,
+        };
+      }
+      return {
+        ok: true,
+        stage: "compatible",
+        schemaChanged: false,
+        requiresFreshInitialize: false,
+        schemaFingerprint: input?.expectedSchemaFingerprint || "a".repeat(64),
+        toolCount: schemaChanged ? CHANGED_TOOLS.length : FAKE_TOOLS.length,
+      };
     },
     async readCoreSchemaFingerprint(input) {
       baselineAuthorizations.push(input?.bearerToken);
@@ -160,7 +208,7 @@ async function createHarness({ failActiveB = false, failCandidate = false, rejec
   return {
     temp, initial, starts, stops, dependencies, controller, gatewayServer, gatewayBaseUrl,
     baselineAuthorizations,
-    candidateAuthorizations,
+    candidateAuthorizations, candidateProbes,
     activeBStarted: () => activeBStarted,
     async close() {
       await closeServer(gatewayServer);
@@ -356,11 +404,99 @@ async function testCandidateFailureNeverStopsA() {
   }
 }
 
+async function testSchemaChangeRequiresExplicitAuthorization() {
+  const h = await createHarness({ schemaChanged: true });
+  try {
+    await initializeSession(h);
+    await assert.rejects(h.controller.handover(), /compatibility gate failed at schema/i);
+    assert.equal(h.stops.includes("core-a"), false,
+      "an unapproved model-surface change must never stop the active Core");
+    assert.equal(h.controller.status().activeSlot, "a");
+    assert.equal(h.candidateProbes[0].allowSchemaChange, false);
+  } finally {
+    await h.close();
+  }
+}
+
+async function testExplicitSchemaChangeDropsOldSessionsAndPromotesValidatedCore() {
+  const h = await createHarness({ schemaChanged: true });
+  try {
+    const publicSessionId = await initializeSession(h);
+    const result = await h.controller.handover({ allowSchemaChange: true });
+    assert.equal(result.ok, true);
+    assert.equal(result.activeSlot, "b");
+    assert.equal(result.rollback, false);
+    assert.equal(result.schemaChanged, true);
+    assert.equal(result.requiresFreshInitialize, true);
+    assert.equal(result.previousSchemaFingerprint, "a".repeat(64));
+    assert.equal(result.schemaFingerprint, "b".repeat(64));
+    assert.equal(result.replayedSessions, 0);
+    assert.equal(result.droppedSessions, 1,
+      "initialized sessions carrying the old model surface must be removed instead of replayed across a schema change");
+    assert.deepEqual(h.candidateProbes, [
+      { expectedSchemaFingerprint: "a".repeat(64), allowSchemaChange: true },
+      { expectedSchemaFingerprint: "b".repeat(64), allowSchemaChange: false },
+    ], "the production replacement must exactly match the already-validated candidate fingerprint");
+    assert.equal(h.stops.includes("core-a"), true);
+
+    const stale = await postJson(h.gatewayBaseUrl, { jsonrpc: "2.0", id: 20, method: "tools/list", params: {} }, {
+      authorization: "Bearer replay-secret",
+      "mcp-session-id": publicSessionId,
+    });
+    assert.equal(stale.status, 404,
+      "a host using the old public session must be told to perform a fresh initialize");
+
+    const fresh = await postJson(h.gatewayBaseUrl, {
+      jsonrpc: "2.0",
+      id: 21,
+      method: "initialize",
+      params: { protocolVersion: "2025-11-25" },
+    }, { authorization: "Bearer replay-secret" });
+    assert.equal(fresh.status, 200);
+    const freshSessionId = fresh.headers["mcp-session-id"];
+    assert.ok(freshSessionId);
+    const tools = await postJson(h.gatewayBaseUrl, { jsonrpc: "2.0", id: 22, method: "tools/list", params: {} }, {
+      authorization: "Bearer replay-secret",
+      "mcp-session-id": freshSessionId,
+    });
+    assert.deepEqual(JSON.parse(tools.body).result.tools, CHANGED_TOOLS);
+  } finally {
+    await h.close();
+  }
+}
+
+async function testSchemaChangeReplacementMismatchRollsBackOldSurface() {
+  const h = await createHarness({ schemaChanged: true, failReplacementProbe: true });
+  try {
+    const publicSessionId = await initializeSession(h);
+    const result = await h.controller.handover({ allowSchemaChange: true });
+    assert.equal(result.ok, false);
+    assert.equal(result.state, "rolled-back");
+    assert.equal(result.rollback, true);
+    assert.equal(result.activeSlot, "a");
+    assert.equal(h.stops.includes("core-a"), true,
+      "rollback is required only after the old Core was safely drained and stopped");
+
+    const after = await postJson(h.gatewayBaseUrl, { jsonrpc: "2.0", id: 30, method: "tools/list", params: {} }, {
+      authorization: "Bearer replay-secret",
+      "mcp-session-id": publicSessionId,
+    });
+    assert.equal(after.status, 200);
+    assert.deepEqual(JSON.parse(after.body).result.tools, FAKE_TOOLS,
+      "a replacement that differs from its candidate may not strand the prior public session");
+  } finally {
+    await h.close();
+  }
+}
+
 await testLongLivedEventStreamDoesNotBlockHandoverDrain();
 await testEventStreamWithoutAcceptHeaderDoesNotBlockHandoverDrain();
 await testSuccessfulHandover();
 await testReplayFailureDropsStaleSessionButKeepsHealthyCoreB();
 await testCandidateFailureNeverStopsA();
+await testSchemaChangeRequiresExplicitAuthorization();
+await testExplicitSchemaChangeDropsOldSessionsAndPromotesValidatedCore();
+await testSchemaChangeReplacementMismatchRollsBackOldSurface();
 await testExpiredNewestAuthorizationFallsBackToLiveSession();
 
-console.log(JSON.stringify({ ok: true, gate: "stable-gateway-controller" }));
+console.log(JSON.stringify({ ok: true, gate: "stable-gateway-controller", schemaChangeOptIn: true, schemaChangeDropsOldSessions: true, replacementMatchesValidatedCandidate: true, schemaChangeMismatchRollsBack: true }));

@@ -117,6 +117,7 @@ async function createRuntimeHarness({ staleReplay = false, failReplacementProbe 
   const temp = await mkdtemp(join(tmpdir(), "stable-gateway-handover-gate-"));
   const initial = await createFakeCore("core-a");
   let probeCount = 0;
+  const handoverOptions = [];
   const dependencies = {
     async createCandidateSnapshot() {
       const stateDir = await mkdtemp(join(temp, "candidate-"));
@@ -131,10 +132,17 @@ async function createRuntimeHarness({ staleReplay = false, failReplacementProbe 
       await closeServer(handle.server);
       return { stopped: true };
     },
-    async probeCandidate() {
+    async probeCandidate(input) {
       probeCount += 1;
       if (failReplacementProbe && probeCount === 2) return { ok: false, stage: "schema" };
-      return { ok: true, stage: "compatible" };
+      return {
+        ok: true,
+        stage: "compatible",
+        schemaFingerprint: input?.expectedSchemaFingerprint,
+        toolCount: FAKE_TOOLS.length,
+        schemaChanged: false,
+        requiresFreshInitialize: false,
+      };
     },
     async readCoreSchemaFingerprint() {
       return { schemaFingerprint: "b".repeat(64), toolCount: 2 };
@@ -151,6 +159,11 @@ async function createRuntimeHarness({ staleReplay = false, failReplacementProbe 
     drainTimeoutMs: 500,
     requestTimeoutMs: 500,
   });
+  const controllerHandover = controller.handover.bind(controller);
+  controller.handover = async (options = {}) => {
+    handoverOptions.push({ allowSchemaChange: options?.allowSchemaChange === true });
+    return await controllerHandover(options);
+  };
   const runtime = await startStableGatewayRuntime({
     gatewayPort: 0,
     configDir: temp,
@@ -163,6 +176,7 @@ async function createRuntimeHarness({ staleReplay = false, failReplacementProbe 
     controller,
     runtime,
     baseUrl,
+    handoverOptions,
     async close() {
       await runtime.close();
       await rm(temp, { recursive: true, force: true });
@@ -208,6 +222,7 @@ async function runSuccessGate() {
     assert.equal(handover.json?.ok, true);
     assert.equal(handover.json?.activeSlot, "b");
     assert.equal(handover.json?.rollback, false);
+    assert.deepEqual(harness.handoverOptions, [{ allowSchemaChange: false }]);
     assert.equal(harness.runtime.gatewayPort, gatewayPortBefore, "public listener port must stay unchanged across Core handover");
 
     const after = await requestJson(harness.baseUrl, "/mcp", {
@@ -216,6 +231,23 @@ async function runSuccessGate() {
     });
     assert.equal(after.headers["mcp-session-id"], publicSessionId);
     assert.equal(after.json?.result?.core, "core-b");
+  } finally {
+    await harness.close();
+  }
+}
+
+async function runExplicitSchemaChangeControlGate() {
+  const harness = await createRuntimeHarness();
+  try {
+    await initializePublicSession(harness);
+    const handover = await requestJson(harness.baseUrl, "/__devspace/gateway/handover", {
+      body: { allowSchemaChange: true },
+      headers: { "x-devspace-gateway-control": CONTROL_TOKEN },
+    });
+    assert.equal(handover.status, 200);
+    assert.equal(handover.json?.ok, true);
+    assert.deepEqual(harness.handoverOptions, [{ allowSchemaChange: true }],
+      "the loopback control endpoint must forward schema-change authorization only when the JSON boolean is explicitly true");
   } finally {
     await harness.close();
   }
@@ -275,6 +307,7 @@ async function runRollbackGate() {
 
 const productionBefore = await productionPortSnapshot();
 await runSuccessGate();
+await runExplicitSchemaChangeControlGate();
 await runStaleReplayIsolationGate();
 await runRollbackGate();
 const productionAfter = await productionPortSnapshot();
@@ -287,6 +320,7 @@ console.log(JSON.stringify({
   gate: "stable-gateway-handover",
   rollback: true,
   staleReplayIsolation: true,
+  explicitSchemaChangeControl: true,
   productionPidsUnchanged,
   productionPortsUnchanged,
 }));

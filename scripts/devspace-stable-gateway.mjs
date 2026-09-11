@@ -41,12 +41,22 @@ function safeTokenEquals(leftValue, rightValue) {
   return timingSafeEqual(left, right);
 }
 
-async function drainRequest(req, maxBytes = 64 * 1024) {
+async function readControlRequest(req, maxBytes = 64 * 1024) {
+  const chunks = [];
   let total = 0;
   for await (const chunk of req) {
     total += chunk.length;
     if (total > maxBytes) throw new Error("Gateway control request is too large.");
+    chunks.push(Buffer.from(chunk));
   }
+  if (!chunks.length) return {};
+  const text = Buffer.concat(chunks).toString("utf8").trim();
+  if (!text) return {};
+  const parsed = JSON.parse(text);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("Gateway control request must be a JSON object.");
+  }
+  return parsed;
 }
 
 function sendJson(res, statusCode, payload) {
@@ -206,8 +216,10 @@ export async function startStableGatewayRuntime({
         return;
       }
       handoverInProgress = true;
-      void drainRequest(req)
-        .then(() => controller.handover())
+      void readControlRequest(req)
+        .then((body) => controller.handover({
+          allowSchemaChange: body?.allowSchemaChange === true,
+        }))
         .then((result) => sendJson(res, result.ok ? 200 : 409, result))
         .catch((error) => sendJson(res, 500, { ok: false, state: "failed", error: error instanceof Error ? error.message : String(error) }))
         .finally(() => { handoverInProgress = false; });

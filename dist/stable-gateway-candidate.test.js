@@ -256,6 +256,52 @@ async function testSchemaMismatchFails() {
   }
 }
 
+async function testExplicitSchemaChangePassesOnlyAfterFullCandidateValidation() {
+  const changedTools = EXPECTED_TOOLS.slice(0, 1);
+  const core = await createCandidateCore({ tools: changedTools });
+  try {
+    const previousSchemaFingerprint = schemaFingerprint(EXPECTED_TOOLS);
+    const result = await probeCandidate({
+      coreBaseUrl: core.baseUrl,
+      publicBaseUrl: PUBLIC_BASE,
+      bearerToken: "Bearer schema-change-secret",
+      expectedSchemaFingerprint: previousSchemaFingerprint,
+      allowSchemaChange: true,
+    });
+    assert.equal(result.ok, true);
+    assert.equal(result.stage, "schema-change-compatible");
+    assert.equal(result.schemaChanged, true);
+    assert.equal(result.requiresFreshInitialize, true);
+    assert.equal(result.previousSchemaFingerprint, previousSchemaFingerprint);
+    assert.equal(result.schemaFingerprint, schemaFingerprint(changedTools));
+    assert.notEqual(result.schemaFingerprint, previousSchemaFingerprint);
+    assert.equal(result.resource, `${PUBLIC_BASE}/mcp`);
+    assert.equal(result.issuer, `${PUBLIC_BASE}/`);
+    assert.equal(core.observed.some((entry) => entry.url === "/mcp" && entry.authorization === "Bearer schema-change-secret"), true);
+    assert.doesNotMatch(JSON.stringify(result), /schema-change-secret/);
+  } finally {
+    await close(core.server);
+  }
+}
+
+async function testExplicitSchemaChangeRejectsEmptyToolSurface() {
+  const core = await createCandidateCore({ tools: [] });
+  try {
+    const result = await probeCandidate({
+      coreBaseUrl: core.baseUrl,
+      publicBaseUrl: PUBLIC_BASE,
+      bearerToken: "Bearer empty-schema-secret",
+      expectedSchemaFingerprint: schemaFingerprint(EXPECTED_TOOLS),
+      allowSchemaChange: true,
+    });
+    assert.equal(result.ok, false);
+    assert.equal(result.stage, "tools-list");
+    assert.equal(result.emptyToolSurface, true);
+  } finally {
+    await close(core.server);
+  }
+}
+
 await testReadsBaselineSchemaFromExistingSession();
 await testReadsBaselineSchemaFromFreshEphemeralSession();
 await testCompatibleCandidatePasses();
@@ -263,5 +309,7 @@ await testHealthMismatchFailsBeforeMcp();
 await testPublicResourceMismatchFails();
 await testIssuerMismatchFails();
 await testSchemaMismatchFails();
+await testExplicitSchemaChangePassesOnlyAfterFullCandidateValidation();
+await testExplicitSchemaChangeRejectsEmptyToolSurface();
 
-console.log(JSON.stringify({ ok: true, gate: "stable-gateway-candidate" }));
+console.log(JSON.stringify({ ok: true, gate: "stable-gateway-candidate", schemaChangeRequiresExplicitOptIn: true, schemaChangeStillRunsFullCandidateValidation: true, emptyToolSurfaceRejected: true }));

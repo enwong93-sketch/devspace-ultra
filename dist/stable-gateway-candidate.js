@@ -216,6 +216,7 @@ export async function probeCandidate({
   publicBaseUrl,
   bearerToken,
   expectedSchemaFingerprint,
+  allowSchemaChange = false,
 } = {}) {
   const coreBase = requireLoopbackBase(coreBaseUrl);
   const publicBase = normalizeBaseUrl(publicBaseUrl, "publicBaseUrl");
@@ -316,12 +317,30 @@ export async function probeCandidate({
     if (!listed.ok || !Array.isArray(tools)) {
       return { ok: false, stage: "tools-list", status: listed.status };
     }
+    if (tools.length === 0) {
+      return { ok: false, stage: "tools-list", status: listed.status, emptyToolSurface: true };
+    }
   } catch (error) {
     return { ok: false, stage: "tools-list", status: null, ...safeError(error) };
   }
 
   const fingerprint = schemaFingerprint(tools);
   if (fingerprint !== expectedFingerprint) {
+    if (allowSchemaChange === true) {
+      return {
+        ok: true,
+        stage: "schema-change-compatible",
+        schemaChanged: true,
+        resource: expectedResource,
+        issuer: expectedIssuer,
+        scopes: [...authorizationServer.scopes_supported],
+        schemaFingerprint: fingerprint,
+        previousSchemaFingerprint: expectedFingerprint,
+        toolCount: tools.length,
+        protocolVersion: negotiatedProtocol,
+        requiresFreshInitialize: true,
+      };
+    }
     return {
       ok: false,
       stage: "schema",
@@ -340,5 +359,7 @@ export async function probeCandidate({
     schemaFingerprint: fingerprint,
     toolCount: tools.length,
     protocolVersion: negotiatedProtocol,
+    schemaChanged: false,
+    requiresFreshInitialize: false,
   };
 }

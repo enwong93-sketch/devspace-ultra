@@ -168,12 +168,13 @@ export function createStableGatewayController({
     throw error;
   };
 
-  const verifyCore = async (handle, baseline, expectedSchemaFingerprint) => {
+  const verifyCore = async (handle, baseline, expectedSchemaFingerprint, { allowSchemaChange = false } = {}) => {
     const result = await probeCandidate({
       coreBaseUrl: handle.baseUrl,
       publicBaseUrl: publicBase,
       bearerToken: baseline.authorization,
       expectedSchemaFingerprint,
+      allowSchemaChange,
     });
     if (!result?.ok) throw new Error(`Core ${handle.id} compatibility gate failed at ${result?.stage ?? "unknown"}.`);
     return result;
@@ -319,7 +320,7 @@ export function createStableGatewayController({
     };
   };
 
-  const handover = async () => {
+  const handover = async ({ allowSchemaChange = false } = {}) => {
     if (!proxy || !activeHandle) throw new Error("Stable Gateway is not started.");
     if (handoverInProgress) throw new Error("Stable Gateway handover is already in progress.");
     if (coreRecoveryPromise) throw new Error("Stable Gateway Core recovery is in progress.");
@@ -343,10 +344,31 @@ export function createStableGatewayController({
       baseline = resolvedBaseline.baseline;
       const baselineSchema = resolvedBaseline.schema;
       baselineFingerprint = baselineSchema.schemaFingerprint;
+      const baselineToolCount = Number(baselineSchema.toolCount);
+      if (!Number.isInteger(baselineToolCount) || baselineToolCount < 1) {
+        throw new Error("Active Core did not return a valid non-empty model surface.");
+      }
 
       snapshot = await createCandidateSnapshot({ sourceStateDir: statePath });
       candidateHandle = await startCandidate(nextSlot, snapshot.stateDir);
-      candidateResult = await verifyCore(candidateHandle, baseline, baselineFingerprint);
+      candidateResult = await verifyCore(candidateHandle, baseline, baselineFingerprint, {
+        allowSchemaChange: allowSchemaChange === true,
+      });
+      const candidateFingerprint = candidateResult.schemaFingerprint;
+      if (!/^[a-f0-9]{64}$/i.test(String(candidateFingerprint || ""))) {
+        throw new Error("Candidate Core did not return a verified model-surface fingerprint.");
+      }
+      const schemaChanged = candidateFingerprint !== baselineFingerprint;
+      if (schemaChanged && allowSchemaChange !== true) {
+        throw new Error("Candidate Core model surface changed without explicit schema-change authorization.");
+      }
+      const candidateToolCount = Number(candidateResult.toolCount);
+      if (!Number.isInteger(candidateToolCount) || candidateToolCount < 1) {
+        throw new Error("Candidate Core did not return a valid non-empty model surface.");
+      }
+      if (schemaChanged && candidateToolCount !== baselineToolCount) {
+        throw new Error(`Schema-changing handover changed the tool count from ${baselineToolCount} to ${candidateToolCount}; this requires a separate reviewed tool-surface migration.`);
+      }
       await ensureStopped(candidateHandle, "Candidate Core");
       candidateHandle = null;
       await snapshot.cleanup();
@@ -363,7 +385,10 @@ export function createStableGatewayController({
       await ensureStopped(oldHandle, "Active Core");
       oldStopped = true;
       replacementHandle = await startActive(nextSlot);
-      await verifyCore(replacementHandle, baseline, baselineFingerprint);
+      // The production replacement must exactly match the already-validated
+      // candidate.  Even an explicitly authorized schema migration may not
+      // promote a different build between candidate and active startup.
+      await verifyCore(replacementHandle, baseline, candidateFingerprint);
       const replayed = await proxy.replaySessionsToCore({ id: slotId(nextSlot), baseUrl: replacementHandle.baseUrl });
       registry.commitMappings(replayed.mappings);
       proxy.setActiveCore({ id: slotId(nextSlot), baseUrl: replacementHandle.baseUrl });
@@ -379,6 +404,10 @@ export function createStableGatewayController({
         activeSlot,
         activePid: activeHandle.pid ?? null,
         candidateStage: candidateResult?.stage ?? "compatible",
+        schemaChanged,
+        previousSchemaFingerprint: baselineFingerprint,
+        schemaFingerprint: candidateFingerprint,
+        requiresFreshInitialize: schemaChanged,
         replayedSessions: replayed.mappings.length,
         droppedSessions: replayed.droppedPublicSessionIds.length,
         rollback: false,
