@@ -39,11 +39,14 @@ assert.match(server, /active-turn evidence authorizes this one tool request only
 assert.match(requestContext, /capabilityAuthority/);
 assert.match(requestContext, /progressAuthority/);
 assert.match(requestContext, /progressAuthorityPromise/);
-assert.match(correlation, /if \(!distributedTraces\.length && !trace && !sessionHint && !runtimeHint\) return null;/,
+assert.match(correlation, /if \(!distributedTraces\.length && !trace && !sessionAliases\.length && !sessionHint && !runtimeHint\) return null;/,
   "an unscoped tool name may never select another Main conversation");
 assert.match(correlation, /tracesIntersect\(distributedTraces, entry\.traceCorrelationFingerprints\)/,
-  "server-side MCP calls may bind only through an exact distributed-trace match when browser call_mcp no longer exists");
+  "server-side MCP calls may bind through an exact distributed-trace match when browser call_mcp no longer exists");
+assert.match(correlation, /sessionsIntersect\(sessionAliases, entry\.sessionCorrelationFingerprints\)/,
+  "a wrapped server-side session descriptor may bind only through a shared hashed alias from the browser turn");
 assert.match(server, /const traceCorrelationFingerprints = requestTraceCorrelationFingerprints\(req\?\.headers \|\| \{\}\);/);
+assert.match(server, /const sessionCorrelationFingerprints = sessionCorrelationFingerprintsFromHeaders\(req\?\.headers \|\| \{\}\);/);
 assert.match(server, /authoritativeCurrent:\s*true/,
   "an exact request trace may refresh the reused MCP session's current conversation mapping");
 assert.match(correlation, /entry\.sessionFingerprint === sessionHint/,

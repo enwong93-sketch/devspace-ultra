@@ -6,6 +6,7 @@ const authority = await readFile(new URL("../dist/classic-conversation-authority
 const cdp = await readFile(new URL("../dist/context-guardian-cdp.js", import.meta.url), "utf8");
 const observer = await readFile(new URL("../dist/classic-turn-transport-observer.js", import.meta.url), "utf8");
 const callCorrelation = await readFile(new URL("../dist/classic-mcp-call-correlation.js", import.meta.url), "utf8");
+const sessionCorrelation = await readFile(new URL("../dist/session-correlation.js", import.meta.url), "utf8");
 const requestContext = await readFile(new URL("../dist/mcp-conversation-request-context.js", import.meta.url), "utf8");
 
 assert.match(server, /ClassicConversationAuthorityRegistry/, "server must instantiate the native conversation authority registry");
@@ -23,7 +24,8 @@ assert.doesNotMatch(server, /const requestAuthority = conversationAuthority\.res
 assert.doesNotMatch(server, /const fingerprint = requestFingerprint \|\| sessionFingerprintFromMcpExtra\(extra\)/, "tool handlers must not open a second unbounded session authority wait");
 assert.match(server, /new ClassicActiveTurnRegistry\(\)/, "server-side MCP calls must correlate against the exact active or just-finished ChatGPT turn when the host does not use the legacy call_mcp route");
 assert.match(server, /const traceCorrelationFingerprints = requestTraceCorrelationFingerprints\(req\?\.headers \|\| \{\}\)/, "the direct MCP request must derive bounded distributed-trace correlation keys from its own headers");
-assert.match(server, /activeTurnRegistry\.resolveGatewayCall\(\{\s*toolName,\s*turnTraceFingerprint,\s*traceCorrelationFingerprints,\s*sessionFingerprintHint:\s*sessionFingerprint,\s*runtimeKeyHint:\s*progressOnlyTool\s*\?\s*null\s*:\s*persistedRuntimeKey/, "active-turn correlation must prefer exact request trace/session evidence while keeping progress independent of Runtime ownership");
+assert.match(server, /const sessionCorrelationFingerprints = sessionCorrelationFingerprintsFromHeaders\(req\?\.headers \|\| \{\}\)/, "the direct MCP request must derive bounded session aliases from its own descriptor");
+assert.match(server, /activeTurnRegistry\.resolveGatewayCall\(\{\s*toolName,\s*turnTraceFingerprint,\s*traceCorrelationFingerprints,\s*sessionCorrelationFingerprintsHint:\s*sessionCorrelationFingerprints,\s*sessionFingerprintHint:\s*sessionFingerprint,\s*runtimeKeyHint:\s*progressOnlyTool\s*\?\s*null\s*:\s*persistedRuntimeKey/, "active-turn correlation must prefer exact request trace/session evidence while keeping progress independent of Runtime ownership");
 assert.match(server, /const verifyCapabilityAuthority = async \(candidate\)/, "a persisted direct-session mapping must be treated as a candidate, not final authority");
 assert.match(server, /findAtRuntime\(\{[\s\S]*conversationId:\s*candidate\.conversationId[\s\S]*runtimeKey:\s*candidateRuntimeKey/, "candidate authority must be verified against the exact live conversation page at its locator Runtime");
 assert.match(server, /page\.generating !== true/, "an idle page may never revive stale capability authority");
@@ -39,6 +41,7 @@ assert.match(cdp, /sessionFingerprint:\s*sessionFingerprintFromClassicRequest\(r
 assert.match(cdp, /local_function_names/, "CDP native turn parser must capture only bounded model-visible local function names for direct-tool correlation");
 assert.match(cdp, /turnTraceFingerprint:\s*turnTraceFingerprintFromClassicRequest\(request\)/, "CDP native turn parser must hash the turn trace instead of persisting the raw trace id");
 assert.match(cdp, /traceCorrelationFingerprints:\s*requestTraceCorrelationFingerprints\(request\?\.headers \|\| \{\}\)/, "CDP native turn parser must derive bounded distributed trace correlation keys");
+assert.match(cdp, /sessionCorrelationFingerprints:\s*sessionCorrelationFingerprintsFromHeaders\(request\?\.headers \|\| \{\}\)/, "CDP native turn parser must derive bounded aliases for wrapped and bare session descriptors");
 assert.match(observer, /parseNativeCallMcpRequest/, "native ChatGPT call_mcp requests must be observed without DOM inference");
 assert.match(observer, /onActiveTurn/, "turn start/finish/failure must drive bounded active-turn correlation lifecycle");
 assert.match(observer, /transportOnly:\s*true/, "browser upload transport completion must not be mistaken for assistant completion");
@@ -50,16 +53,20 @@ assert.match(callCorrelation, /candidatePairs\[0\]\.skewMs === candidatePairs\[1
 assert.match(callCorrelation, /class ClassicActiveTurnRegistry/, "server-side direct tool routing requires a bounded active-turn registry");
 assert.match(callCorrelation, /entry\.localFunctionNames\.includes\(tool\)/, "active-turn routing must accept only tools that the exact model turn was actually offered");
 assert.match(callCorrelation, /tracesIntersect\(distributedTraces, entry\.traceCorrelationFingerprints\)/, "new server-side direct calls must join the exact browser turn through distributed trace correlation");
+assert.match(callCorrelation, /sessionsIntersect\(sessionAliases, entry\.sessionCorrelationFingerprints\)/, "wrapped direct-session descriptors must join the browser turn through a shared hashed session alias");
 assert.match(callCorrelation, /unique\.size !== 1/, "active-turn routing must fail closed when more than one conversation is eligible");
 assert.match(callCorrelation, /postTurnGraceMs/, "server-side MCP calls that arrive after browser transport completion require a bounded post-turn grace");
 assert.match(callCorrelation, /classic-active-turn-post-transport-request-trace-correlation/, "post-transport exact request correlation must remain explicit and diagnosable");
-assert.match(callCorrelation, /exactDistributedTrace[\s\S]*tracesIntersect\(distributedTraces, entry\.traceCorrelationFingerprints\)[\s\S]*entry\.turnTraceFingerprint === trace/, "an exact distributed or hashed turn trace must support tools disclosed after the initial local function snapshot");
+assert.match(callCorrelation, /correlationKind = "request-trace"[\s\S]*correlationKind = "turn-trace"[\s\S]*correlationKind = "session-alias"/, "exact request trace, turn trace, and wrapped-session alias evidence must be attempted in deterministic priority order");
 assert.match(callCorrelation, /local\.continue_in_work/, "progressive disclosure fallback must be limited to ChatGPT's explicit local continue placeholder");
-assert.match(callCorrelation, /!exactDistributedTrace && !trace[\s\S]*candidates\.length === 0[\s\S]*isDeferredPlaceholderTurn/, "placeholder fallback must run only when no exact trace or offered-tool match exists");
+assert.match(callCorrelation, /!candidates\.length && !trace[\s\S]*isDeferredPlaceholderTurn/, "placeholder fallback must run only when no exact trace, session alias, or offered-tool match exists");
+assert.match(sessionCorrelation, /raw values never leave the function/i);
+assert.doesNotMatch(sessionCorrelation, /return\s+raw\b|sessionCorrelationFingerprints[^\n]*:\s*raw/,
+  "session alias correlation must never return or persist the raw OpenAI session descriptor");
 assert.match(callCorrelation, /completeConversation\(conversationId\)/, "normal completion must revoke every active authority entry for the exact conversation");
 assert.match(requestContext, /AsyncLocalStorage/, "request-scoped identity propagation must be concurrency-safe and must not use globals");
 assert.match(requestContext, /cross|current\(\)/i, "request context must expose only the active asynchronous call scope");
 assert.doesNotMatch(callCorrelation, /localStorage|querySelector|document\.|location\./, "call correlation must remain transport-only");
 assert.doesNotMatch(authority, /querySelector|document\.|location\.|Page\.reload|Page\.navigate/, "conversation authority registry must never depend on renderer state");
 
-console.log(JSON.stringify({ ok: true, gate: "classic-conversation-authority-static", nativeTransportOnly: true, nativeCallMcpCompatibility: true, distributedTraceCorrelation: true, requestScopedAuthority: true, staleSessionReverification: true, transportFinishIsNotAssistantCompletion: true, activeTurnCorrelation: true, delayedPostTransportCorrelation: true, deferredToolExactTraceCorrelation: true, deferredPlaceholderUniqueOwnerCorrelation: true, hashedTurnTraceOnly: true, canonicalArgumentsHashedOnly: true, completionRevokesAuthority: true, ambiguityFailsClosed: true, persisted: true }));
+console.log(JSON.stringify({ ok: true, gate: "classic-conversation-authority-static", nativeTransportOnly: true, nativeCallMcpCompatibility: true, distributedTraceCorrelation: true, wrappedSessionAliasCorrelation: true, requestScopedAuthority: true, staleSessionReverification: true, transportFinishIsNotAssistantCompletion: true, activeTurnCorrelation: true, delayedPostTransportCorrelation: true, deferredToolExactTraceCorrelation: true, deferredPlaceholderUniqueOwnerCorrelation: true, hashedTurnTraceOnly: true, canonicalArgumentsHashedOnly: true, completionRevokesAuthority: true, ambiguityFailsClosed: true, persisted: true }));

@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { sessionFingerprintFromClassicRequest } from "./classic-conversation-authority.js";
 import { mergeTraceCorrelationFingerprints, tracesIntersect } from "./request-trace-correlation.js";
+import { mergeSessionCorrelationFingerprints, sessionsIntersect } from "./session-correlation.js";
 
 const DEFAULT_TTL_MS = 30_000;
 const DEFAULT_MAX_PENDING = 128;
@@ -164,6 +165,10 @@ export class ClassicActiveTurnRegistry {
       if (!entry) return false;
       entry.turnTraceFingerprint = cleanTraceFingerprint(input?.turnTraceFingerprint) || entry.turnTraceFingerprint;
       entry.sessionFingerprint = cleanSessionFingerprint(input?.sessionFingerprint) || entry.sessionFingerprint;
+      entry.sessionCorrelationFingerprints = mergeSessionCorrelationFingerprints(
+        entry.sessionCorrelationFingerprints,
+        input?.sessionCorrelationFingerprints,
+      );
       entry.traceCorrelationFingerprints = mergeTraceCorrelationFingerprints(
         entry.traceCorrelationFingerprints,
         input?.traceCorrelationFingerprints,
@@ -182,6 +187,10 @@ export class ClassicActiveTurnRegistry {
         entry.traceCorrelationFingerprints = mergeTraceCorrelationFingerprints(
           entry.traceCorrelationFingerprints,
           input?.traceCorrelationFingerprints,
+        );
+        entry.sessionCorrelationFingerprints = mergeSessionCorrelationFingerprints(
+          entry.sessionCorrelationFingerprints,
+          input?.sessionCorrelationFingerprints,
         );
         this.active.set(key, entry);
         this.prune();
@@ -212,6 +221,7 @@ export class ClassicActiveTurnRegistry {
       localFunctionNames: cleanToolNames(input?.localFunctionNames),
       turnTraceFingerprint: cleanTraceFingerprint(input?.turnTraceFingerprint),
       sessionFingerprint: cleanSessionFingerprint(input?.sessionFingerprint),
+      sessionCorrelationFingerprints: mergeSessionCorrelationFingerprints(input?.sessionCorrelationFingerprints),
       traceCorrelationFingerprints: mergeTraceCorrelationFingerprints(input?.traceCorrelationFingerprints),
       startedAtMs: Number.isFinite(Number(input?.observedAtMs))
         ? Number(input.observedAtMs)
@@ -243,6 +253,7 @@ export class ClassicActiveTurnRegistry {
     toolName,
     turnTraceFingerprint = null,
     traceCorrelationFingerprints = null,
+    sessionCorrelationFingerprintsHint = null,
     sessionFingerprintHint = null,
     runtimeKeyHint = null,
   } = {}) {
@@ -251,38 +262,53 @@ export class ClassicActiveTurnRegistry {
     if (!tool) return null;
     const trace = cleanTraceFingerprint(turnTraceFingerprint);
     const distributedTraces = mergeTraceCorrelationFingerprints(traceCorrelationFingerprints);
+    const sessionAliases = mergeSessionCorrelationFingerprints(sessionCorrelationFingerprintsHint);
     const sessionHint = cleanSessionFingerprint(sessionFingerprintHint);
     const runtimeHint = cleanRuntimeKey(runtimeKeyHint);
     // Tool-name uniqueness across browser windows is not conversation
     // authority. Without an exact hashed turn trace or a runtime key already
     // derived from the request's own session, fail closed rather than allowing
     // one Main's deferred tool call to claim another Main's conversation.
-    if (!distributedTraces.length && !trace && !sessionHint && !runtimeHint) return null;
+    if (!distributedTraces.length && !trace && !sessionAliases.length && !sessionHint && !runtimeHint) return null;
     const now = this.now();
     const entries = [...this.active.values()];
-    const exactDistributedTrace = distributedTraces.length > 0;
-    const scopedEntries = exactDistributedTrace
-      ? entries
-      : entries.filter((entry) => (
-          (!runtimeHint || entry.runtimeKey === runtimeHint)
-          && (!sessionHint || entry.sessionFingerprint === sessionHint)
-          && (
-            entry.transportFinishedAtMs == null
-            || now - Number(entry.transportFinishedAtMs || 0) <= this.postTurnGraceMs
-            || entry.finishedAtMs != null
-          )
-        ));
-    let candidates = scopedEntries.filter((entry) => (
-      exactDistributedTrace
-        ? tracesIntersect(distributedTraces, entry.traceCorrelationFingerprints)
-        : trace
-          ? entry.turnTraceFingerprint === trace
-          : entry.localFunctionNames.includes(tool)
+    const liveEnough = (entry) => (
+      entry.transportFinishedAtMs == null
+      || now - Number(entry.transportFinishedAtMs || 0) <= this.postTurnGraceMs
+      || entry.finishedAtMs != null
+    );
+    let correlationKind = null;
+    let candidates = [];
+    if (distributedTraces.length) {
+      candidates = entries.filter((entry) => (
+        tracesIntersect(distributedTraces, entry.traceCorrelationFingerprints)
+      ));
+      if (candidates.length) correlationKind = "request-trace";
+    }
+    if (!candidates.length && trace) {
+      candidates = entries.filter((entry) => entry.turnTraceFingerprint === trace);
+      if (candidates.length) correlationKind = "turn-trace";
+    }
+    if (!candidates.length && sessionAliases.length) {
+      candidates = entries.filter((entry) => (
+        sessionsIntersect(sessionAliases, entry.sessionCorrelationFingerprints)
+      ));
+      if (candidates.length) correlationKind = "session-alias";
+    }
+    const scopedEntries = entries.filter((entry) => (
+      (!runtimeHint || entry.runtimeKey === runtimeHint)
+      && (!sessionHint || entry.sessionFingerprint === sessionHint)
+      && liveEnough(entry)
     ));
+    if (!candidates.length && (sessionHint || runtimeHint)) {
+      candidates = scopedEntries.filter((entry) => entry.localFunctionNames.includes(tool));
+      if (candidates.length) correlationKind = sessionHint ? "session" : "runtime-tool";
+    }
     let deferredPlaceholder = false;
-    if (!exactDistributedTrace && !trace && (sessionHint || runtimeHint) && candidates.length === 0) {
+    if (!candidates.length && !trace && (sessionAliases.length || sessionHint || runtimeHint)) {
       candidates = scopedEntries.filter((entry) => isDeferredPlaceholderTurn(entry));
       deferredPlaceholder = candidates.length > 0;
+      if (deferredPlaceholder) correlationKind = "deferred-placeholder";
     }
     const unique = new Map();
     for (const entry of candidates) {
@@ -304,19 +330,25 @@ export class ClassicActiveTurnRegistry {
       && entry.transportFinishedAtMs !== undefined
       && Number.isFinite(Number(entry.transportFinishedAtMs));
     let source;
-    if (exactDistributedTrace) {
+    if (correlationKind === "request-trace") {
       source = postTurn
         ? "classic-active-turn-post-finish-request-trace-correlation"
         : postTransport
           ? "classic-active-turn-post-transport-request-trace-correlation"
           : "classic-active-turn-request-trace-correlation";
-    } else if (trace) {
+    } else if (correlationKind === "turn-trace") {
       source = postTurn
         ? "classic-active-turn-post-finish-trace-correlation"
         : postTransport
           ? "classic-active-turn-post-transport-trace-correlation"
           : "classic-active-turn-trace-correlation";
-    } else if (sessionHint) {
+    } else if (correlationKind === "session-alias") {
+      source = postTurn
+        ? "classic-active-turn-post-finish-session-alias-correlation"
+        : postTransport
+          ? "classic-active-turn-post-transport-session-alias-correlation"
+          : "classic-active-turn-session-alias-correlation";
+    } else if (correlationKind === "session") {
       source = postTurn
         ? "classic-active-turn-post-finish-session-correlation"
         : postTransport
@@ -348,6 +380,7 @@ export class ClassicActiveTurnRegistry {
     toolName,
     turnTraceFingerprint = null,
     traceCorrelationFingerprints = null,
+    sessionCorrelationFingerprintsHint = null,
     sessionFingerprintHint = null,
     runtimeKeyHint = null,
     signal,
@@ -357,6 +390,7 @@ export class ClassicActiveTurnRegistry {
       toolName,
       turnTraceFingerprint,
       traceCorrelationFingerprints,
+      sessionCorrelationFingerprintsHint,
       sessionFingerprintHint,
       runtimeKeyHint,
     });
@@ -392,6 +426,7 @@ export class ClassicActiveTurnRegistry {
       toolName: tool,
       turnTraceFingerprint: cleanTraceFingerprint(turnTraceFingerprint),
       traceCorrelationFingerprints: mergeTraceCorrelationFingerprints(traceCorrelationFingerprints),
+      sessionCorrelationFingerprintsHint: mergeSessionCorrelationFingerprints(sessionCorrelationFingerprintsHint),
       sessionFingerprintHint: cleanSessionFingerprint(sessionFingerprintHint),
       runtimeKeyHint: cleanRuntimeKey(runtimeKeyHint),
       createdAtMs: this.now(),
@@ -474,11 +509,13 @@ export class ClassicActiveTurnRegistry {
       turnsWithTrace: entries.filter((entry) => Boolean(entry.turnTraceFingerprint)).length,
       turnsWithRequestTrace: entries.filter((entry) => entry.traceCorrelationFingerprints?.length > 0).length,
       turnsWithSession: entries.filter((entry) => Boolean(entry.sessionFingerprint)).length,
+      turnsWithSessionAliases: entries.filter((entry) => entry.sessionCorrelationFingerprints?.length > 0).length,
       transportFinishedTurns: entries.filter((entry) => entry.transportFinishedAtMs != null && entry.finishedAtMs == null).length,
       placeholderOnlyTurns: entries.filter((entry) => isDeferredPlaceholderTurn(entry)).length,
       waitersWithTrace: waiters.filter((waiter) => Boolean(waiter.turnTraceFingerprint)).length,
       waitersWithRequestTrace: waiters.filter((waiter) => waiter.traceCorrelationFingerprints?.length > 0).length,
       waitersWithSession: waiters.filter((waiter) => Boolean(waiter.sessionFingerprintHint)).length,
+      waitersWithSessionAliases: waiters.filter((waiter) => waiter.sessionCorrelationFingerprintsHint?.length > 0).length,
       recentResolved: this.recentResolved.length,
       ambiguousMatches: this.ambiguousMatches,
       activeTtlMs: this.activeTtlMs,

@@ -83,8 +83,10 @@ assert.equal(activeTurns[0].conversationId, "conversation-a");
 assert.deepEqual(activeTurns[0].localFunctionNames, ["blender_runtime", "blender_mcp"]);
 assert.match(activeTurns[0].turnTraceFingerprint, /^[a-f0-9]{64}$/);
 assert.match(activeTurns[0].sessionFingerprint, /^[a-f0-9]{64}$/);
+assert.equal(activeTurns[0].sessionCorrelationFingerprints.length, 1);
 assert.equal(activeTurns[0].traceCorrelationFingerprints.length, 2);
 assert.equal(activeTurns[1].kind, "metadata");
+assert.deepEqual(activeTurns[1].sessionCorrelationFingerprints, activeTurns[0].sessionCorrelationFingerprints);
 assert.deepEqual(activeTurns[1].traceCorrelationFingerprints, activeTurns[0].traceCorrelationFingerprints);
 assert.equal(JSON.stringify(activeTurns[0]).includes("turn-trace-secret-a"), false, "raw turn trace ids must never leave the parser");
 assert.equal(JSON.stringify(activeTurns[0]).includes("session-secret-a"), false, "raw session ids must never leave the active-turn parser");
@@ -96,6 +98,7 @@ assert.deepEqual(events.slice(-2).map((item) => item.kind), ["response", "finish
 assert.equal(activeTurns.at(-1).kind, "finished");
 assert.equal(activeTurns.at(-1).transportOnly, true);
 assert.equal(activeTurns.at(-1).requestId, "r1");
+assert.deepEqual(activeTurns.at(-1).sessionCorrelationFingerprints, activeTurns[0].sessionCorrelationFingerprints);
 assert.equal(tracker.pendingSize, 0, "finished native turn must leave no pending transport record");
 const delayedGatewayIdentity = delayedGatewayTurns.resolveGatewayCall({
   toolName: "blender_mcp",

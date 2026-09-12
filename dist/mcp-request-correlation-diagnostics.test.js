@@ -10,6 +10,7 @@ const summary = summarizeMcpCorrelationRequest({
     cookie: "session=do-not-persist",
     "mcp-session-id": "backend-session-a",
     "x-devspace-client-session-fingerprint": "a".repeat(64),
+    "x-openai-session": JSON.stringify({ id: "9b5fcb28-405f-4f5e-8ee7-c6c23d509a4a" }),
     "x-oai-turn-trace-id": "opaque-turn-trace",
     traceparent: "00-0123456789abcdef000000000000002a-1111111111111111-01",
     "x-datadog-trace-id": "42",
@@ -39,6 +40,8 @@ assert.equal(summary.clientSessionFingerprint, "a".repeat(64));
 assert.equal(summary.turnTraceFingerprint, "b".repeat(64));
 assert.equal(summary.traceCorrelationFingerprints.length, 2);
 assert.equal(summary.traceCorrelationFingerprints.every((value) => /^[a-f0-9]{64}$/.test(value)), true);
+assert.equal(summary.sessionCorrelationFingerprints.length >= 3, true);
+assert.equal(summary.sessionCorrelationFingerprints.every((value) => /^[a-f0-9]{64}$/.test(value)), true);
 assert.deepEqual(summary.argumentKeys, ["message", "nested"]);
 assert.deepEqual(summary.metaKeys.sort(), ["openai/session", "request_id", "turn_id"].sort());
 assert.equal(summary.correlationScalarPaths.some((item) => item.path === "body.params._meta.request_id"), true);
@@ -50,6 +53,7 @@ for (const forbidden of [
   "opaque-openai-session",
   "opaque-turn-trace",
   "backend-session-a",
+  "9b5fcb28-405f-4f5e-8ee7-c6c23d509a4a",
   "0123456789abcdef000000000000002a",
 ]) {
   assert.equal(encoded.includes(forbidden), false, `diagnostics must not persist ${forbidden}`);

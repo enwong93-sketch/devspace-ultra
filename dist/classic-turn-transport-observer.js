@@ -5,6 +5,7 @@ import { defaultMainDebugPorts } from "./goal-host-bridge.js";
 import { runtimeKeyForPort } from "./classic-stream-recovery-cdp.js";
 import { isNativeCallMcpRequest, parseNativeCallMcpRequest } from "./classic-mcp-call-correlation.js";
 import { mergeTraceCorrelationFingerprints, requestTraceCorrelationFingerprints } from "./request-trace-correlation.js";
+import { mergeSessionCorrelationFingerprints, sessionCorrelationFingerprintsFromHeaders } from "./session-correlation.js";
 
 const DEFAULT_CONNECTION_POLL_MS = 15_000;
 const DEFAULT_PROBE_TIMEOUT_MS = 700;
@@ -75,6 +76,7 @@ export class ClassicTurnTransportTracker {
       localFunctionNames: metadata.localFunctionNames || [],
       turnTraceFingerprint: metadata.turnTraceFingerprint || null,
       sessionFingerprint: metadata.sessionFingerprint || null,
+      sessionCorrelationFingerprints: mergeSessionCorrelationFingerprints(metadata.sessionCorrelationFingerprints),
       traceCorrelationFingerprints: mergeTraceCorrelationFingerprints(metadata.traceCorrelationFingerprints),
     });
     this.#enforceCap();
@@ -85,6 +87,7 @@ export class ClassicTurnTransportTracker {
       localFunctionNames: metadata.localFunctionNames || [],
       turnTraceFingerprint: metadata.turnTraceFingerprint || null,
       sessionFingerprint: metadata.sessionFingerprint || null,
+      sessionCorrelationFingerprints: mergeSessionCorrelationFingerprints(metadata.sessionCorrelationFingerprints),
       traceCorrelationFingerprints: mergeTraceCorrelationFingerprints(metadata.traceCorrelationFingerprints),
       observedAt: observedAt(firstSeenAt),
       observedAtMs: firstSeenAt,
@@ -103,8 +106,13 @@ export class ClassicTurnTransportTracker {
         entry.traceCorrelationFingerprints,
         requestTraceCorrelationFingerprints(params?.headers || {}),
       );
+      const sessionCorrelationFingerprints = mergeSessionCorrelationFingerprints(
+        entry.sessionCorrelationFingerprints,
+        sessionCorrelationFingerprintsFromHeaders(params?.headers || {}),
+      );
       const metadataSession = sessionFingerprintFromClassicRequest({ headers: params?.headers || {} });
       entry.traceCorrelationFingerprints = traceCorrelationFingerprints;
+      entry.sessionCorrelationFingerprints = sessionCorrelationFingerprints;
       if (metadataSession) entry.sessionFingerprint = metadataSession;
       this.pending.set(requestId, entry);
       this.#emitActiveTurn({
@@ -112,6 +120,7 @@ export class ClassicTurnTransportTracker {
         requestId,
         conversationId: entry.conversationId,
         sessionFingerprint: entry.sessionFingerprint || null,
+        sessionCorrelationFingerprints,
         traceCorrelationFingerprints,
         observedAt: observedAt(atMs),
         observedAtMs: atMs,
@@ -171,6 +180,7 @@ export class ClassicTurnTransportTracker {
         transportOnly: true,
         requestId,
         conversationId: entry.conversationId,
+        sessionCorrelationFingerprints: entry.sessionCorrelationFingerprints || [],
         traceCorrelationFingerprints: entry.traceCorrelationFingerprints || [],
         observedAt: observedAt(atMs),
         observedAtMs: atMs,

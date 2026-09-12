@@ -63,6 +63,7 @@ import { ContextGuardianRolloverCoordinator } from "./context-guardian-rollover.
 import { ClassicConversationAuthorityRegistry, sessionFingerprintFromClassicRequest, turnTraceFingerprintFromClassicRequest } from "./classic-conversation-authority.js";
 import { ClassicActiveTurnRegistry, ClassicMcpCallCorrelator, fingerprintMcpToolCall } from "./classic-mcp-call-correlation.js";
 import { requestTraceCorrelationFingerprints } from "./request-trace-correlation.js";
+import { sessionCorrelationFingerprintsFromHeaders } from "./session-correlation.js";
 import { ClassicTurnTransportObserver } from "./classic-turn-transport-observer.js";
 import { ClassicNativeUsageEvidenceStore } from "./classic-native-usage-evidence.js";
 import { ClassicExactUsageAuthority } from "./classic-exact-usage-authority.js";
@@ -1955,6 +1956,7 @@ export function createServer(config = loadConfig(), options = {}) {
         const toolName = String(req?.body?.params?.name || "").trim() || null;
         const turnTraceFingerprint = turnTraceFingerprintFromClassicRequest({ headers: req?.headers || {} });
         const traceCorrelationFingerprints = requestTraceCorrelationFingerprints(req?.headers || {});
+        const sessionCorrelationFingerprints = sessionCorrelationFingerprintsFromHeaders(req?.headers || {});
         await conversationAuthorityReady;
         const persistedSessionAuthority = conversationAuthority.resolveFingerprint(sessionFingerprint);
         const persistedRuntimeKey = Array.isArray(persistedSessionAuthority?.runtimeKeys)
@@ -2038,15 +2040,16 @@ export function createServer(config = loadConfig(), options = {}) {
                 toolName,
                 turnTraceFingerprint,
                 traceCorrelationFingerprints,
+                sessionCorrelationFingerprintsHint: sessionCorrelationFingerprints,
                 sessionFingerprintHint: sessionFingerprint,
                 runtimeKeyHint: progressOnlyTool ? null : persistedRuntimeKey,
               })
             : null;
         if (activeTurn) {
             const scopedTurnAuthority = ephemeralTurnAuthority(activeTurn);
-            const exactRequestTrace = /request-trace-correlation$/.test(String(activeTurn.source || ""));
+            const exactRequestAuthority = /(?:request-trace|session-alias)-correlation$/.test(String(activeTurn.source || ""));
             let durableTurnAuthority = null;
-            if (exactRequestTrace) {
+            if (exactRequestAuthority) {
                 durableTurnAuthority = await persistConversationIdentity({
                     ...activeTurn,
                     sessionFingerprint,
@@ -2087,17 +2090,18 @@ export function createServer(config = loadConfig(), options = {}) {
         }
         if (!capabilityAuthority?.conversationId && !progressOnlyTool) {
             const correlationWaits = [];
-            if (toolName && (traceCorrelationFingerprints.length || turnTraceFingerprint || persistedRuntimeKey)) {
+            if (toolName && (traceCorrelationFingerprints.length || sessionCorrelationFingerprints.length || turnTraceFingerprint || persistedRuntimeKey)) {
                 correlationWaits.push((signal) => activeTurnRegistry.waitForIdentity({
                     toolName,
                     turnTraceFingerprint,
                     traceCorrelationFingerprints,
+                    sessionCorrelationFingerprintsHint: sessionCorrelationFingerprints,
                     runtimeKeyHint: persistedRuntimeKey,
                     signal,
                     timeoutMs: MCP_CONVERSATION_CORRELATION_TIMEOUT_MS,
                 }).then(async (identity) => {
                     if (!identity?.conversationId) return null;
-                    if (/request-trace-correlation$/.test(String(identity.source || ""))) {
+                    if (/(?:request-trace|session-alias)-correlation$/.test(String(identity.source || ""))) {
                         const persisted = await persistConversationIdentity({
                             ...identity,
                             sessionFingerprint,
@@ -2121,18 +2125,19 @@ export function createServer(config = loadConfig(), options = {}) {
         }
         if (progressOnlyTool && !progressAuthority?.conversationId) {
             const progressWaits = [];
-            if (toolName && (turnTraceFingerprint || sessionFingerprint)) {
+            if (toolName && (traceCorrelationFingerprints.length || sessionCorrelationFingerprints.length || turnTraceFingerprint || sessionFingerprint)) {
                 progressWaits.push((signal) => activeTurnRegistry.waitForIdentity({
                     toolName,
                     turnTraceFingerprint,
                     traceCorrelationFingerprints,
+                    sessionCorrelationFingerprintsHint: sessionCorrelationFingerprints,
                     sessionFingerprintHint: sessionFingerprint,
                     runtimeKeyHint: null,
                     signal,
                     timeoutMs: MCP_CONVERSATION_CORRELATION_TIMEOUT_MS,
                 }).then(async (identity) => {
                     if (!identity?.conversationId) return null;
-                    if (/request-trace-correlation$/.test(String(identity.source || ""))) {
+                    if (/(?:request-trace|session-alias)-correlation$/.test(String(identity.source || ""))) {
                         await persistConversationIdentity({
                             ...identity,
                             sessionFingerprint,

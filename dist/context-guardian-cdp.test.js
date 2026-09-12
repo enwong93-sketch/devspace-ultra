@@ -34,6 +34,7 @@ import { fingerprintClassicSession } from "./classic-conversation-authority.js";
   assert.equal(parsed.thinkingEffort, "max");
   assert.equal(parsed.conversationId, "conv-12345678");
   assert.equal(parsed.sessionFingerprint, fingerprintClassicSession("native-session-value"));
+  assert.deepEqual(parsed.sessionCorrelationFingerprints, [fingerprintClassicSession("native-session-value")]);
   assert.equal(parsed.turnTraceFingerprint, fingerprintClassicSession("turn-trace-secret"));
   assert.deepEqual(parsed.localFunctionNames, ["blender_runtime", "blender_mcp"]);
   assert.ok(Number.isInteger(parsed.estimatedInputTokens));

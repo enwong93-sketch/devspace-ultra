@@ -7,6 +7,7 @@ import { ClassicActiveTurnRegistry } from "./classic-mcp-call-correlation.js";
 import { ClassicTurnTransportTracker } from "./classic-turn-transport-observer.js";
 import { McpConversationRequestContext } from "./mcp-conversation-request-context.js";
 import { requestTraceCorrelationFingerprints } from "./request-trace-correlation.js";
+import { sessionCorrelationFingerprintsFromHeaders } from "./session-correlation.js";
 
 const temp = await mkdtemp(join(tmpdir(), "devspace-direct-tool-correlation-"));
 const authorityPath = join(temp, "authority.json");
@@ -97,6 +98,32 @@ const directFingerprintA = sessionFingerprintFromClassicRequest({ headers: direc
 const directFingerprintB = sessionFingerprintFromClassicRequest({ headers: directHeadersB });
 const traceKeysA = requestTraceCorrelationFingerprints(directHeadersA);
 const traceKeysB = requestTraceCorrelationFingerprints(directHeadersB);
+
+const browserWrappedSession = "9b5fcb28-405f-4f5e-8ee7-c6c23d509a4a";
+browserTurn({
+  requestId: "turn-wrapped-session",
+  runtimeKey: "main-03",
+  conversationId: "conversation-direct-wrapped-session",
+  session: browserWrappedSession,
+  traceId: "0123456789abcdef0000000000000067",
+  datadogTraceId: "103",
+});
+const wrappedDirectHeaders = {
+  "x-openai-session": JSON.stringify({ id: browserWrappedSession, issued_at: now }),
+  // Intentionally unrelated to the browser upload trace. The exact embedded
+  // session UUID is the only valid join for this host transport shape.
+  traceparent: "00-0123456789abcdef0000000000000099-4444444444444444-01",
+  "x-datadog-trace-id": "153",
+};
+const wrappedSessionIdentity = activeTurns.resolveGatewayCall({
+  toolName: "devspace_progress_report",
+  traceCorrelationFingerprints: requestTraceCorrelationFingerprints(wrappedDirectHeaders),
+  sessionCorrelationFingerprintsHint: sessionCorrelationFingerprintsFromHeaders(wrappedDirectHeaders),
+  sessionFingerprintHint: sessionFingerprintFromClassicRequest({ headers: wrappedDirectHeaders }),
+});
+assert.equal(wrappedSessionIdentity?.conversationId, "conversation-direct-wrapped-session");
+assert.equal(wrappedSessionIdentity?.runtimeKey, "main-03");
+assert.match(wrappedSessionIdentity?.source || "", /session-alias-correlation$/);
 
 for (const toolName of ["blender_runtime", "blender_mcp", "devspace_progress_report"]) {
   const identity = activeTurns.resolveGatewayCall({
@@ -219,7 +246,7 @@ assert.equal(activeTurns.resolveGatewayCall({
 })?.conversationId, "conversation-direct-b", "completion cleanup must stay conversation-scoped");
 
 const persisted = await readFile(authorityPath, "utf8");
-for (const rawSecret of [traceA, traceB, "101", "102", browserSessionA, browserSessionB, directSessionA, directSessionB]) {
+for (const rawSecret of [traceA, traceB, "101", "102", browserSessionA, browserSessionB, directSessionA, directSessionB, browserWrappedSession]) {
   assert.equal(persisted.includes(rawSecret), false, `authority state must not persist raw correlation secret ${rawSecret}`);
 }
 
@@ -229,6 +256,7 @@ console.log(JSON.stringify({
   gate: "direct-tool-conversation-correlation",
   directTools: ["blender_runtime", "blender_mcp", "devspace_progress_report"],
   exactDistributedTraceAuthority: true,
+  wrappedSessionAliasAuthority: true,
   browserAndDirectSessionsMayDiffer: true,
   requestContextIsolation: true,
   progressCapabilityDomainsSeparated: true,

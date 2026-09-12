@@ -52,10 +52,12 @@ const snapshot = createMemoryDiagnostics({
         waiters: 4,
         turnsWithTrace: 2,
         turnsWithRequestTrace: 3,
+        turnsWithSessionAliases: 3,
         transportFinishedTurns: 1,
         placeholderOnlyTurns: 1,
         waitersWithTrace: 3,
         waitersWithRequestTrace: 2,
+        waitersWithSessionAliases: 4,
         recentResolved: 5,
         ambiguousMatches: 6,
         postTurnGraceMs: 120000,
@@ -124,10 +126,12 @@ assert.equal(snapshot.registries.classicTrackedTurns, 3);
 assert.equal(snapshot.registries.classicActiveTurnWaiters, 4);
 assert.equal(snapshot.registries.classicTurnsWithTrace, 2);
 assert.equal(snapshot.registries.classicTurnsWithRequestTrace, 3);
+assert.equal(snapshot.registries.classicTurnsWithSessionAliases, 3);
 assert.equal(snapshot.registries.classicTransportFinishedTurns, 1);
 assert.equal(snapshot.registries.classicPlaceholderOnlyTurns, 1);
 assert.equal(snapshot.registries.classicActiveTurnWaitersWithTrace, 3);
 assert.equal(snapshot.registries.classicActiveTurnWaitersWithRequestTrace, 2);
+assert.equal(snapshot.registries.classicActiveTurnWaitersWithSessionAliases, 4);
 assert.equal(snapshot.registries.classicActiveTurnCorrelationsResolved, 5);
 assert.equal(snapshot.registries.classicActiveTurnAmbiguities, 6);
 assert.equal(snapshot.registries.classicPostTurnGraceMs, 120000);

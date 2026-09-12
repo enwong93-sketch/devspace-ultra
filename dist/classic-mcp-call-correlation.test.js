@@ -6,6 +6,7 @@ import {
   isNativeCallMcpRequest,
   parseNativeCallMcpRequest,
 } from "./classic-mcp-call-correlation.js";
+import { sessionCorrelationFingerprintsFromValue } from "./session-correlation.js";
 
 const first = fingerprintMcpToolCall("tools/call", {
   name: "devspace_goal_status",
@@ -282,6 +283,68 @@ assert.equal(
   "a distributed trace observed in two conversations must fail closed",
 );
 assert.equal(ambiguousDistributedTrace.diagnostics().ambiguousMatches > 0, true);
+
+const wrappedSessionTurns = new ClassicActiveTurnRegistry({
+  now: () => now,
+  activeTtlMs: 60_000,
+  postTurnGraceMs: 1_000,
+});
+const browserSessionId = "9b5fcb28-405f-4f5e-8ee7-c6c23d509a4a";
+const directSessionDescriptor = JSON.stringify({ id: browserSessionId, issued_at: now });
+wrappedSessionTurns.noteTurn({
+  kind: "started",
+  requestId: "wrapped-session-turn",
+  runtimeKey: "main-02",
+  conversationId: "conversation-wrapped-session",
+  localFunctionNames: ["local.continue_in_work"],
+  sessionCorrelationFingerprints: sessionCorrelationFingerprintsFromValue(browserSessionId),
+  observedAtMs: now,
+});
+wrappedSessionTurns.noteTurn({
+  kind: "finished",
+  transportOnly: true,
+  requestId: "wrapped-session-turn",
+  runtimeKey: "main-02",
+  conversationId: "conversation-wrapped-session",
+  observedAtMs: now + 10,
+});
+const wrappedSessionMatch = wrappedSessionTurns.resolveGatewayCall({
+  toolName: "devspace_progress_report",
+  // The direct request may expose a distributed trace that the browser upload
+  // does not carry. A non-matching trace must not suppress the exact session
+  // alias shared by the browser UUID and the wrapped MCP descriptor.
+  traceCorrelationFingerprints: ["9".repeat(64)],
+  sessionCorrelationFingerprintsHint: sessionCorrelationFingerprintsFromValue(directSessionDescriptor),
+  sessionFingerprintHint: "8".repeat(64),
+});
+assert.equal(wrappedSessionMatch?.conversationId, "conversation-wrapped-session");
+assert.equal(wrappedSessionMatch?.source, "classic-active-turn-post-transport-session-alias-correlation");
+assert.equal(wrappedSessionTurns.diagnostics().turnsWithSessionAliases, 1);
+
+const ambiguousSessionAliases = new ClassicActiveTurnRegistry({ now: () => now });
+for (const [runtimeKey, conversationId, requestId] of [
+  ["main-01", "conversation-session-alias-left", "session-alias-left"],
+  ["main-02", "conversation-session-alias-right", "session-alias-right"],
+]) {
+  ambiguousSessionAliases.noteTurn({
+    kind: "started",
+    runtimeKey,
+    conversationId,
+    requestId,
+    localFunctionNames: ["local.continue_in_work"],
+    sessionCorrelationFingerprints: sessionCorrelationFingerprintsFromValue(browserSessionId),
+    observedAtMs: now,
+  });
+}
+assert.equal(
+  ambiguousSessionAliases.resolveGatewayCall({
+    toolName: "devspace_progress_report",
+    sessionCorrelationFingerprintsHint: sessionCorrelationFingerprintsFromValue(directSessionDescriptor),
+  }),
+  null,
+  "one session alias observed in two conversations must fail closed",
+);
+assert.equal(ambiguousSessionAliases.diagnostics().ambiguousMatches > 0, true);
 
 const reusedSessionTurns = new ClassicActiveTurnRegistry({ now: () => now });
 for (const [runtimeKey, conversationId, requestId, offset] of [
