@@ -18,6 +18,8 @@ assert.match(cli, /DuckDNS \+ Caddy \(recommended\)/, "DuckDNS/Caddy must remain
 assert.match(cli, /Cloudflare Worker \+ Tunnel fallback/, "Cloudflare must remain an explicit fallback");
 assert.match(cli, /--edge <duckdns\|cloudflare\|local>/, "CLI automation needs an explicit deterministic edge selector");
 assert.match(cli, /existing configuration and generated owner token were preserved for repair\/retry/i, "failed setup must preserve recoverable state");
+assert.match(cli, /goalRoundRecoveryEnabled:\s*files\.config\.goalRoundRecoveryEnabled !== false/,
+  "fresh CLI setup must enable accepted exact-page Goal Recovery while preserving an explicit false hold");
 
 // Root one-command bootstrap.
 assert.match(installer, /\[ValidateSet\("DuckDNS", "Cloudflare", "Local"\)\]/);
@@ -36,7 +38,8 @@ assert.match(publicSetup, /CaddyServer\.Caddy/, "DuckDNS setup must provision Ca
 assert.match(publicSetup, /Cloudflare\.cloudflared/, "Cloudflare fallback must provision cloudflared when missing");
 assert.match(publicSetup, /stableGatewayCoreHeapProfile" "system"/, "public setup must use system-managed Core heap");
 assert.match(publicSetup, /autoCompactEnabled" \$false/, "unaccepted Auto Compact must remain disabled by default");
-assert.match(publicSetup, /goalRoundRecoveryEnabled" \$false/, "unaccepted Goal Recovery must remain disabled by default");
+assert.match(publicSetup, /goalRoundRecoveryEnabled" \$true/,
+  "accepted exact-page Goal Recovery must be enabled by default while retaining the explicit operator hold");
 assert.match(publicSetup, /ConvertFrom-SecureString/, "provider credentials must be DPAPI protected");
 assert.match(publicSetup, /Read-Host \$Prompt -AsSecureString/, "interactive secrets must be entered through a masked local prompt");
 assert.match(publicSetup, /Wait-ForGateway/, "setup must wait for real Gateway readiness");
@@ -73,6 +76,7 @@ console.log(JSON.stringify({
   fallbackIngress: "cloudflare-named-tunnel",
   stableGatewayAutostart: true,
   agentSkillInstalled: true,
+  exactPageGoalRecoveryDefault: true,
   secretArgumentsRejected: true,
   recoverableFailure: true,
 }));

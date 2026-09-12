@@ -14,7 +14,7 @@ function clip(value, max) {
 }
 function key(goal) { return `${goal.id ?? goal.goalId ?? goal.runId}:${goal.round}`; }
 function category(name) {
-  if (/^(read|grep|glob|ls|context_|browser_control_status|chat_.*_status|devspace_.*_status)/.test(name)) return "inspection";
+  if (/^(read|grep|glob|ls|context_|codex_computer_use_status|chat_.*_status|devspace_.*_status)/.test(name)) return "inspection";
   if (/^(edit|write|apply_patch|show_changes)/.test(name)) return "change";
   if (/^(bash|exec_command|write_stdin)/.test(name)) return "verification";
   if (/^(devspace_goal_|devspace_plan_|update_plan)/.test(name)) return "goal-control";

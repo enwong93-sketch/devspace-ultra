@@ -187,7 +187,7 @@ Set-Property $config "edgeBackendPort" 7678
 Set-Property $config "edgePublicBaseUrl" $publicBaseUrl
 Set-Property $config "edgeFixedStateDir" $StateDir
 Set-Property $config "autoCompactEnabled" $false
-Set-Property $config "goalRoundRecoveryEnabled" $false
+Set-Property $config "goalRoundRecoveryEnabled" $true
 
 Write-AtomicText $ConfigPath (($config | ConvertTo-Json -Depth 100) + "`n")
 
@@ -270,7 +270,7 @@ $summary = [ordered]@{
     coreHeapProfile = "system"
     heapLimitMB = [Math]::Round($memory.memory.heapSizeLimit / 1MB, 1)
     autoCompactEnabled = $false
-    goalRoundRecoveryEnabled = $false
+    goalRoundRecoveryEnabled = $true
     secretsPersistedInPlainText = $false
     configPath = $ConfigPath
     stateDir = $StateDir

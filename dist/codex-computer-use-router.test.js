@@ -3,6 +3,7 @@ import { codexComputerUseRoute, registerCodexComputerUseRouter } from "./codex-c
 
 assert.equal(codexComputerUseRoute("Click the visible Save button in the desktop app").useComputer, true);
 assert.equal(codexComputerUseRoute("幫我撳桌面視窗入面個按鈕").recommendedTool, "codex_computer_use");
+assert.equal(codexComputerUseRoute("Use Chrome browser UI to open a page and click the visible form button").recommendedTool, "codex_computer_use");
 assert.equal(codexComputerUseRoute("Edit the source code and run unit tests").useComputer, false);
 
 const calls = [];
@@ -49,6 +50,8 @@ registerCodexComputerUseRouter({
 });
 
 assert.deepEqual(registrations.map((entry) => entry.name), ["codex_computer_use_status", "codex_computer_use"]);
+assert.match(registrations[1].definition.description, /ordinary Chrome and Edge browser-window automation/i);
+assert.match(registrations[1].definition.description, /browser_control_\* Chrome-extension path is retired/i);
 const status = await registrations[0].handler({});
 assert.equal(status.structuredContent.payload.target, "windows");
 assert.equal(status.structuredContent.nativeRuntimeEvidence.runtime, "@oai/sky");
@@ -64,6 +67,7 @@ console.log(JSON.stringify({
   ok: true,
   gate: "codex-computer-use-router",
   automaticVisualRouting: true,
+  ordinaryBrowserRouting: true,
   directOpenAiSkyDelegation: true,
   persistentNodeRepl: true,
   fullAccessOnly: true,

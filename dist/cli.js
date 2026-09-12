@@ -193,7 +193,7 @@ async function runSetupCommand(args) {
         stableGatewayCoreBPort: gatewayPort + 11,
         stableGatewayCoreHeapProfile: "system",
         autoCompactEnabled: files.config.autoCompactEnabled === true,
-        goalRoundRecoveryEnabled: files.config.goalRoundRecoveryEnabled === true,
+        goalRoundRecoveryEnabled: files.config.goalRoundRecoveryEnabled !== false,
     };
     const auth = {
         ownerToken: files.auth.ownerToken ?? generateOwnerToken(),

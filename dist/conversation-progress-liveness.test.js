@@ -122,6 +122,7 @@ const pages = new Map([
 ]);
 const duplicateConversations = new Set();
 const rescueHooks = new Map();
+const rescueResults = new Map();
 
 function locatedPage(conversationId, page) {
   return {
@@ -173,7 +174,7 @@ const adapter = {
     });
     const hook = rescueHooks.get(input.conversationId);
     if (hook) await hook(input);
-    return { ok: true };
+    return rescueResults.get(input.conversationId) || { ok: true };
   },
 };
 
@@ -420,6 +421,56 @@ assert.equal(
   1,
 );
 
+// A click accepted by the exact page is a committed dispatch even if the
+// bounded DOM visibility check cannot confirm the user turn. The same episode
+// must close rather than sending a duplicate rescue message.
+pages.set("conversation-rescue-unverified", {
+  runtimeKey: "main-03",
+  port: 9733,
+  hydrated: true,
+  generating: false,
+  composerEmpty: true,
+  latestMessageRole: "user",
+  hasTurnError: true,
+  normalCompletion: false,
+  incompleteUserTurn: true,
+});
+rescueResults.set("conversation-rescue-unverified", {
+  ok: false,
+  state: "missing",
+  dispatchCommitted: true,
+  visibilityVerified: false,
+});
+await supervisor.noteTurn({
+  kind: "started",
+  conversationId: "conversation-rescue-unverified",
+  runtimeKey: "main-03",
+  observedAtMs: now,
+});
+await supervisor.noteTurn({
+  kind: "failed",
+  conversationId: "conversation-rescue-unverified",
+  runtimeKey: "main-03",
+  canceled: false,
+  observedAtMs: now + 1_000,
+});
+now += 21 * 60_000;
+await supervisor.tick();
+now += 30_000;
+await supervisor.tick();
+const unverifiedRescue = supervisor.status().records.find((row) => row.conversationId === "conversation-rescue-unverified");
+assert.equal(unverifiedRescue.armed, false);
+assert.equal(unverifiedRescue.turnState, "rescue-submitted-unverified");
+assert.equal(unverifiedRescue.continueAttempts, 1);
+assert.equal(unverifiedRescue.lastDispatchState, "single-conversation-rescue-committed-no-retry");
+now += 30 * 60_000;
+await supervisor.tick();
+assert.equal(
+  calls.filter((row) => row.action === "sendContinue" && row.conversationId === "conversation-rescue-unverified").length,
+  1,
+  "a committed-but-unverified rescue may never be sent twice",
+);
+
 // Version-3 interrupted episodes may survive a Core restart, but only behind
 // a fresh exact-page verification. Normal completion and already-rescued
 // episodes remain disarmed, preventing the old repeated-message loop.
@@ -586,8 +637,149 @@ assert.equal(wrongRuntime.state, "conversation-not-in-runtime");
 assert.equal(typeof runtime03Adapter.sendReminder, "undefined", "the ten-minute reminder API must not exist");
 assert.equal(typeof runtime03Adapter.projectReminder, "undefined", "the ten-minute reminder banner API must not exist");
 
+const exactRecoveryTarget = {
+  id: "main-03-goal-recovery",
+  type: "page",
+  url: "https://chatgpt.com/c/conversation-goal-recovery",
+  webSocketDebuggerUrl: "ws://main-03-goal-recovery",
+};
+const recoveryEvaluations = [];
+const recoveryCalls = [];
+let recoveryEvaluationIndex = 0;
+const exactPageRecoveryAdapter = new ConversationProgressLivenessCdpAdapter({
+  runtimeKeys: ["main-03"],
+  listTargets: async () => [exactRecoveryTarget],
+  sleep: async () => {},
+  connect: async () => ({
+    evaluate: async (expression) => {
+      recoveryEvaluations.push(expression);
+      recoveryEvaluationIndex += 1;
+      if (recoveryEvaluationIndex === 1) return { ok: true };
+      if (recoveryEvaluationIndex === 2) return { ok: true };
+      return { ok: true, state: "visible" };
+    },
+    call: async (method, params) => {
+      recoveryCalls.push({ method, params });
+      return {};
+    },
+    close() {},
+  }),
+});
+const goalRecoverySend = await exactPageRecoveryAdapter.sendGoalRecovery({
+  conversationId: "conversation-goal-recovery",
+  target: {
+    exact: true,
+    conversationId: "conversation-goal-recovery",
+    runtimeKey: "main-03",
+    port: 9733,
+    target: {
+      runtimeKey: "main-03",
+      port: 9733,
+      targetId: exactRecoveryTarget.id,
+      url: exactRecoveryTarget.url,
+      webSocketDebuggerUrl: exactRecoveryTarget.webSocketDebuggerUrl,
+    },
+  },
+  prompt: "[DEVSPACE_GOAL_ROUND_RECOVERY]\nContinue the same verified Goal round.",
+  attempt: 1,
+});
+assert.equal(goalRecoverySend.ok, true);
+assert.equal(goalRecoverySend.purpose, "goal-round-recovery");
+assert.equal(goalRecoverySend.dispatchCommitted, true);
+assert.equal(goalRecoverySend.visibilityVerified, true);
+assert.equal(goalRecoverySend.foregroundActivation, false);
+assert.equal(goalRecoverySend.pageNavigation, false);
+assert.equal(recoveryCalls.length, 1);
+assert.equal(recoveryCalls[0].method, "Input.insertText");
+assert.match(recoveryEvaluations[0], /const allowNormalCompletion = true;/,
+  "Goal Recovery must allow the completed assistant message that proves the prior round ended");
+assert.match(recoveryEvaluations[0], /const requireInterruptionEvidence = false;/,
+  "the Goal guard, not generic rescue DOM heuristics, owns recovery eligibility");
+const invalidGoalRecovery = await exactPageRecoveryAdapter.sendGoalRecovery({
+  conversationId: "conversation-goal-recovery",
+  prompt: "untrusted arbitrary follow-up",
+});
+assert.deepEqual(invalidGoalRecovery, { ok: false, state: "invalid-goal-recovery-prompt" });
+
+let alreadyVisibleCalls = 0;
+const alreadyVisibleRecoveryAdapter = new ConversationProgressLivenessCdpAdapter({
+  runtimeKeys: ["main-03"],
+  listTargets: async () => [exactRecoveryTarget],
+  sleep: async () => {},
+  connect: async () => ({
+    evaluate: async () => ({ ok: true, state: "already-visible", alreadyVisible: true }),
+    call: async () => { alreadyVisibleCalls += 1; return {}; },
+    close() {},
+  }),
+});
+const alreadyVisibleRecovery = await alreadyVisibleRecoveryAdapter.sendGoalRecovery({
+  conversationId: "conversation-goal-recovery",
+  target: {
+    exact: true,
+    conversationId: "conversation-goal-recovery",
+    runtimeKey: "main-03",
+    port: 9733,
+    target: {
+      runtimeKey: "main-03",
+      port: 9733,
+      targetId: exactRecoveryTarget.id,
+      url: exactRecoveryTarget.url,
+      webSocketDebuggerUrl: exactRecoveryTarget.webSocketDebuggerUrl,
+    },
+  },
+  prompt: "[DEVSPACE_GOAL_ROUND_RECOVERY]\nContinue the same verified Goal round.",
+  attempt: 1,
+});
+assert.equal(alreadyVisibleRecovery.ok, true);
+assert.equal(alreadyVisibleRecovery.alreadyVisible, true);
+assert.equal(alreadyVisibleRecovery.dispatchCommitted, true);
+assert.equal(alreadyVisibleCalls, 0, "an already visible exact recovery turn must not be submitted twice");
+
+let uncertainEvaluationIndex = 0;
+const uncertainRecoveryAdapter = new ConversationProgressLivenessCdpAdapter({
+  runtimeKeys: ["main-03"],
+  listTargets: async () => [exactRecoveryTarget],
+  sleep: async () => {},
+  connect: async () => ({
+    evaluate: async () => {
+      uncertainEvaluationIndex += 1;
+      if (uncertainEvaluationIndex <= 2) return { ok: true };
+      return { ok: false, state: "missing" };
+    },
+    call: async () => ({}),
+    close() {},
+  }),
+});
+const uncertainRecovery = await uncertainRecoveryAdapter.sendGoalRecovery({
+  conversationId: "conversation-goal-recovery",
+  target: {
+    exact: true,
+    conversationId: "conversation-goal-recovery",
+    runtimeKey: "main-03",
+    port: 9733,
+    target: {
+      runtimeKey: "main-03",
+      port: 9733,
+      targetId: exactRecoveryTarget.id,
+      url: exactRecoveryTarget.url,
+      webSocketDebuggerUrl: exactRecoveryTarget.webSocketDebuggerUrl,
+    },
+  },
+  prompt: "[DEVSPACE_GOAL_ROUND_RECOVERY]\nContinue one uncertain submission.",
+  attempt: 2,
+});
+assert.equal(uncertainRecovery.ok, false);
+assert.equal(uncertainRecovery.dispatchCommitted, true);
+assert.equal(uncertainRecovery.visibilityVerified, false);
+assert.equal(uncertainRecovery.definiteFailure, false);
+assert.equal(uncertainEvaluationIndex, 22,
+  "visibility verification must be bounded after one committed click");
+
 await supervisor.close();
 await runtime03Adapter.close();
+await exactPageRecoveryAdapter.close();
+await alreadyVisibleRecoveryAdapter.close();
+await uncertainRecoveryAdapter.close();
 await rm(dir, { recursive: true, force: true });
 
 console.log(JSON.stringify({
@@ -602,9 +794,13 @@ console.log(JSON.stringify({
   twentyMinuteInterruptedTurnRescueOnly: true,
   normalCompletionDisarms: true,
   completionRevokesActiveTurnAuthority: true,
+  exactPageGoalRecovery: true,
+  goalRecoveryForegroundActivation: false,
+  goalRecoveryPageNavigation: false,
   transportFinishRequiresPageCompletion: true,
   cancelledTurnDisarms: true,
   oneRescuePerInterruptionEpisode: true,
+  committedRescueNeverRetried: true,
   rescueStartRaceProtected: true,
   persistedOldEpisodeDisarmed: true,
   interruptedEpisodeRestartRecoveredByPageEvidence: true,

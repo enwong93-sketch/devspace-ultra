@@ -17,7 +17,6 @@ const MAX_CONVERSATION_ID_CHARS = 240;
 const REPORT_HISTORY_LIMIT = 32;
 const DEFAULT_DISPATCH_LEASE_MS = 45_000;
 const DEFAULT_DISPATCH_RECOVERY_MS = 120_000;
-const DEFAULT_ROUND_RECOVERY_RETRY_MS = 30_000;
 const DEFAULT_ROUND_RECOVERY_RELEASE_MS = 5_000;
 const MAX_ROUND_RECOVERY_ATTEMPTS = 5;
 
@@ -76,9 +75,9 @@ function buildRoundRecoveryPrompt(goal, recoveryId) {
   return [
     "[DEVSPACE_GOAL_ROUND_RECOVERY]",
     `Resume DevSpace Goal ${goal.id} in the same working round ${goal.round}.`,
-    "The previous assistant turn ended before devspace_goal_turn_report, so this is an automatic runtime recovery, not a new user request and not a new Goal round.",
+    "The previous assistant turn ended before devspace_goal_turn_report. DevSpace inserted this recovery turn into the exact same conversation page; it is not new user intent and not a new Goal round.",
     "Do not call devspace_goal_round_begin. Read the current Goal and Plan state, continue meaningful unfinished work for this same round, verify progress, then call devspace_goal_turn_report as the final tool call before one complete visible final report.",
-    "Do not stop after merely acknowledging this recovery prompt. Do not create a synthetic user message. Preserve the full original Goal objective and success criteria.",
+    "Do not stop after merely acknowledging this recovery prompt. Do not send another recovery/follow-up turn. Preserve the full original Goal objective and success criteria.",
     `Recovery id: ${recoveryId}`,
   ].join("\n");
 }
@@ -646,8 +645,8 @@ export class GoalRuntime {
     if (recovery.state === "dispatching") {
       return { goal: clone(goal), claimed: false, reason: "recovery-in-flight" };
     }
-    if (recovery.state === "dispatched" && Number.isFinite(retryAfterMs) && this.now() < retryAfterMs) {
-      return { goal: clone(goal), claimed: false, reason: "recovery-cooldown" };
+    if (recovery.state === "dispatched") {
+      return { goal: clone(goal), claimed: false, reason: "recovery-already-dispatched" };
     }
     if (recovery.state === "idle" && Number.isFinite(retryAfterMs) && this.now() < retryAfterMs) {
       return { goal: clone(goal), claimed: false, reason: "recovery-cooldown" };
@@ -702,7 +701,7 @@ export class GoalRuntime {
         ...goal.roundRecovery,
         state: "dispatched",
         dispatchedAt: this.nowIso(),
-        retryAfterAt: this.continuationExpiryIso(DEFAULT_ROUND_RECOVERY_RETRY_MS),
+        retryAfterAt: null,
       };
       this.touch(goal);
       await this.save();

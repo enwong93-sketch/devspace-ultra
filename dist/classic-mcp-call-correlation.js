@@ -300,9 +300,21 @@ export class ClassicActiveTurnRegistry {
       && (!sessionHint || entry.sessionFingerprint === sessionHint)
       && liveEnough(entry)
     ));
-    if (!candidates.length && (sessionHint || runtimeHint)) {
+    if (!candidates.length && sessionHint) {
+      // The exact request-owned MCP session is already a conversation-scoped
+      // authority signal. ChatGPT can disclose a direct tool after the browser
+      // turn's initial local_function_names snapshot, so requiring the tool to
+      // appear in that earlier list would incorrectly reject legitimate calls
+      // such as devspace_progress_report. Reused sessions still fail closed at
+      // the unique owner check below.
+      candidates = scopedEntries;
+      if (candidates.length) correlationKind = "session";
+    }
+    if (!candidates.length && runtimeHint) {
+      // Runtime-only fallback is weaker and therefore remains constrained to a
+      // tool that the exact browser turn was visibly offered.
       candidates = scopedEntries.filter((entry) => entry.localFunctionNames.includes(tool));
-      if (candidates.length) correlationKind = sessionHint ? "session" : "runtime-tool";
+      if (candidates.length) correlationKind = "runtime-tool";
     }
     let deferredPlaceholder = false;
     if (!candidates.length && !trace && (sessionAliases.length || sessionHint || runtimeHint)) {

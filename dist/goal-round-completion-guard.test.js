@@ -167,7 +167,7 @@ const guard = new moduleUnderTest.ClassicGoalRoundCompletionGuard({
   },
   dispatch: async (claim) => {
     calls.dispatch.push(claim);
-    return { ok: true, transport: "classic-raw-host-rpc" };
+    return { ok: true, transport: "classic-exact-page-composer" };
   },
   pollMs: 0,
 });
@@ -206,7 +206,44 @@ const failedGuard = new moduleUnderTest.ClassicGoalRoundCompletionGuard({
 });
 const failed = await failedGuard.pollOnce();
 assert.equal(failed.recovered, 0);
-assert.equal(failedRuntimeCalls.release, 1, "failed hidden dispatch must release the recovery claim");
+assert.equal(failedRuntimeCalls.release, 1, "failed exact-page dispatch must release the recovery claim");
+
+const uncertainRuntimeCalls = { ack: 0, release: 0 };
+const uncertainGuard = new moduleUnderTest.ClassicGoalRoundCompletionGuard({
+  goalRuntime: {
+    async recoverableWorkingRounds() { return [baseGoal]; },
+    async claimRoundRecovery() {
+      return { claimed: true, claim: { goalId: baseGoal.id, round: 2, attempt: 1, recoveryId: "recovery_cccccccccccccccc", prompt: "recover" } };
+    },
+    async roundRecovery({ action }) {
+      if (action === "ack") uncertainRuntimeCalls.ack += 1;
+      if (action === "release") uncertainRuntimeCalls.release += 1;
+    },
+  },
+  now: () => Date.parse("2026-09-05T03:00:05.000Z"),
+  inspect: async () => ({
+    ...stablePageRoute,
+    chatMode: true,
+    generating: false,
+    streamStatus: "COMPLETE",
+    turnRequestObservedAt: "2026-09-05T02:59:59.000Z",
+  }),
+  dispatch: async () => ({
+    ok: false,
+    state: "missing",
+    dispatchCommitted: true,
+    visibilityVerified: false,
+    transport: "classic-exact-page-composer",
+  }),
+  pollMs: 0,
+});
+const uncertain = await uncertainGuard.pollOnce();
+assert.equal(uncertain.recovered, 0);
+assert.equal(uncertainRuntimeCalls.ack, 1,
+  "a committed exact-page send must close the recovery episode even when visibility confirmation is delayed");
+assert.equal(uncertainRuntimeCalls.release, 0,
+  "a committed send may never be released for an automatic duplicate retry");
+assert.equal(uncertain.results[0].reason, "dispatch-committed-unverified-no-retry");
 
 let reentryClaims = 0;
 const reentryGuard = new moduleUnderTest.ClassicGoalRoundCompletionGuard({
@@ -237,6 +274,7 @@ assert.equal(reentry.results[0].reason, "reentry-or-unobserved-turn");
 
 await guard.close();
 await failedGuard.close();
+await uncertainGuard.close();
 await reentryGuard.close();
 
 console.log(JSON.stringify({
@@ -246,4 +284,5 @@ console.log(JSON.stringify({
   serverCompleteOrNativeDeliveryFailureRequired: true,
   sameRoundRecovery: true,
   failedDispatchReleased: true,
+  committedDispatchNeverRetried: true,
 }));

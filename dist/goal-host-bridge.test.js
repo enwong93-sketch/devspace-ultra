@@ -10,6 +10,7 @@ try {
 assert.equal(typeof moduleUnderTest?.ClassicGoalHostBridge, "function", "ClassicGoalHostBridge must exist");
 assert.equal(typeof moduleUnderTest?.defaultMainDebugPorts, "function", "defaultMainDebugPorts must exist");
 assert.equal(typeof moduleUnderTest?.waitForVisibleReportBoundary, "function", "waitForVisibleReportBoundary must exist");
+assert.equal(typeof moduleUnderTest?.probeClassicConversationPagePort, "function", "exact conversation page probe must exist");
 
 {
   const snapshots = [
@@ -209,54 +210,76 @@ assert.equal(defaultBoundary.ok, true);
 assert.equal(defaultBoundaryInspections.length, 1, "production default must inspect the visible report boundary");
 assert.equal(defaultBoundaryRawCalls.length, 1);
 
-const recoveryRawCalls = [];
+const recoveryComposerCalls = [];
+let recoveryBeforeDispatchCalls = 0;
 const recoveryBridge = new moduleUnderTest.ClassicGoalHostBridge({
   ports: [9732],
-  async probePort() {
-    return [{ runtimePort: 9732, runtimeLabel: "Main-02", targetId: "recovery-target", goalId: "goal_recovery", chatMode: true, pageWebSocketDebuggerUrl: "ws://page-recovery" }];
+  async beforeDispatch() { recoveryBeforeDispatchCalls += 1; },
+  async probeConversationPage(port, conversationId) {
+    if (port !== 9732 || conversationId !== "conversation_recovery") return [];
+    return [{
+      runtimePort: 9732,
+      runtimeLabel: "Main-02",
+      pageTargetId: "recovery-page",
+      pageWebSocketDebuggerUrl: "ws://page-recovery",
+      pageUrl: "https://chatgpt.com/c/conversation_recovery",
+      conversationId,
+      chatMode: true,
+      directPage: true,
+    }];
   },
   async inspectVisibleReport() {
     return { chatMode: true, generating: false, streamStatus: "COMPLETE", latestAssistantText: "premature final", conversationId: "conversation_recovery" };
   },
-  async sendRaw(candidate, payload) {
-    recoveryRawCalls.push({ candidate, payload });
-    return { ok: true };
+  async sendRecovery(payload) {
+    recoveryComposerCalls.push(payload);
+    return { ok: true, transport: "classic-exact-page-composer", foregroundActivation: false, pageNavigation: false };
   },
 });
-const workingSnapshot = await recoveryBridge.inspectWorkingRound("goal_recovery");
+const workingSnapshot = await recoveryBridge.inspectWorkingRound({
+  id: "goal_recovery",
+  conversationId: "conversation_recovery",
+});
 assert.equal(workingSnapshot.chatMode, true);
 assert.equal(workingSnapshot.generating, false);
 assert.equal(workingSnapshot.streamStatus, "COMPLETE");
 assert.equal(workingSnapshot.conversationId, "conversation_recovery");
 const recoveryDispatch = await recoveryBridge.dispatchRoundRecovery({
   goalId: "goal_recovery",
+  conversationId: "conversation_recovery",
   round: 2,
   recoveryId: "recovery_aaaaaaaaaaaaaaaa",
+  attempt: 1,
+  expectedPageTargetId: "recovery-page",
   prompt: "[DEVSPACE_GOAL_ROUND_RECOVERY] continue same round",
 });
 assert.equal(recoveryDispatch.ok, true);
-assert.equal(recoveryDispatch.transport, "classic-raw-host-rpc");
-assert.equal(recoveryRawCalls.length, 1);
-assert.match(recoveryRawCalls[0].payload.prompt, /GOAL_ROUND_RECOVERY/);
-assert.equal(recoveryRawCalls[0].payload.round, 2);
-assert.equal(recoveryRawCalls[0].payload.recoveryId, "recovery_aaaaaaaaaaaaaaaa");
+assert.equal(recoveryDispatch.transport, "classic-exact-page-composer");
+assert.equal(recoveryDispatch.foregroundActivation, false);
+assert.equal(recoveryDispatch.pageNavigation, false);
+assert.equal(recoveryDispatch.pageTargetId, "recovery-page");
+assert.equal(recoveryComposerCalls.length, 1);
+assert.match(recoveryComposerCalls[0].prompt, /GOAL_ROUND_RECOVERY/);
+assert.equal(recoveryComposerCalls[0].round, 2);
+assert.equal(recoveryComposerCalls[0].recoveryId, "recovery_aaaaaaaaaaaaaaaa");
+assert.equal(recoveryComposerCalls[0].expectedPageTargetId, "recovery-page");
+assert.equal(recoveryBeforeDispatchCalls, 0,
+  "Goal Recovery must not run Primary debug repair or another foreground-affecting pre-dispatch hook");
 
-const relayFallbackCalls = [];
+const directPageFallbackCalls = [];
 const relayFallbackBridge = new moduleUnderTest.ClassicGoalHostBridge({
   ports: [9732, 9733],
-  async probePort() { return []; },
-  async probeRelayPort(port, conversationId) {
+  async probeConversationPage(port, conversationId) {
     if (port !== 9733 || conversationId !== "conversation_bound_recovery") return [];
     return [{
       runtimePort: 9733,
       runtimeLabel: "Main-03",
-      targetId: "generic-devspace-relay",
-      goalId: null,
+      pageTargetId: "direct-bound-recovery-page",
       chatMode: true,
       conversationId,
       pageWebSocketDebuggerUrl: "ws://page-bound-recovery",
-      webSocketDebuggerUrl: "ws://relay-bound-recovery",
-      relayOnly: true,
+      pageUrl: "https://chatgpt.com/c/conversation_bound_recovery",
+      directPage: true,
     }];
   },
   async inspectVisibleReport(candidate) {
@@ -271,31 +294,91 @@ const relayFallbackBridge = new moduleUnderTest.ClassicGoalHostBridge({
       safetyCheckVisible: false,
     };
   },
-  async sendRaw(candidate, payload) {
-    relayFallbackCalls.push({ candidate, payload });
-    return { ok: true };
+  async sendRecovery(payload) {
+    directPageFallbackCalls.push(payload);
+    return { ok: true, transport: "classic-exact-page-composer" };
   },
 });
 const relaySnapshot = await relayFallbackBridge.inspectWorkingRound({
   id: "goal_bound_recovery",
   conversationId: "conversation_bound_recovery",
 });
-assert.equal(relaySnapshot.chatMode, true, "conversation-bound recovery must inspect the page even when the Goal Dock iframe disappeared");
+assert.equal(relaySnapshot.chatMode, true, "conversation-bound recovery must inspect the exact page even when every Goal app iframe disappeared");
 assert.equal(relaySnapshot.conversationId, "conversation_bound_recovery");
-assert.equal(relaySnapshot.relayFallback, true);
+assert.equal(relaySnapshot.relayFallback, false);
+assert.equal(relaySnapshot.directPage, true);
 const relayRecovery = await relayFallbackBridge.dispatchRoundRecovery({
   goalId: "goal_bound_recovery",
   conversationId: "conversation_bound_recovery",
   round: 5,
   recoveryId: "recovery_bound_recovery",
+  expectedPageTargetId: "direct-bound-recovery-page",
   prompt: "[DEVSPACE_GOAL_ROUND_RECOVERY] continue durable run",
 });
 assert.equal(relayRecovery.ok, true);
-assert.equal(relayRecovery.transport, "classic-raw-host-rpc");
-assert.equal(relayRecovery.relayFallback, true);
-assert.equal(relayFallbackCalls.length, 1);
-assert.equal(relayFallbackCalls[0].candidate.targetId, "generic-devspace-relay");
-assert.equal(relayFallbackCalls[0].payload.goalId, "goal_bound_recovery");
+assert.equal(relayRecovery.transport, "classic-exact-page-composer");
+assert.equal(relayRecovery.relayFallback, false);
+assert.equal(directPageFallbackCalls.length, 1);
+assert.equal(directPageFallbackCalls[0].goalId, "goal_bound_recovery");
+assert.equal(directPageFallbackCalls[0].expectedPageTargetId, "direct-bound-recovery-page");
+
+let duplicateRecoverySends = 0;
+const duplicateRecoveryBridge = new moduleUnderTest.ClassicGoalHostBridge({
+  ports: [9721, 9732],
+  async probeConversationPage(port, conversationId) {
+    return [{
+      runtimePort: port,
+      runtimeLabel: port === 9721 ? "Main-01" : "Main-02",
+      pageTargetId: `duplicate-recovery-${port}`,
+      pageWebSocketDebuggerUrl: `ws://duplicate-recovery-${port}`,
+      pageUrl: `https://chatgpt.com/c/${conversationId}`,
+      conversationId,
+      chatMode: true,
+      directPage: true,
+    }];
+  },
+  async sendRecovery() { duplicateRecoverySends += 1; return { ok: true }; },
+});
+const duplicateRecovery = await duplicateRecoveryBridge.dispatchRoundRecovery({
+  goalId: "goal_duplicate_recovery",
+  conversationId: "conversation_duplicate_recovery",
+  round: 4,
+  recoveryId: "recovery_duplicate_recovery",
+  prompt: "[DEVSPACE_GOAL_ROUND_RECOVERY] duplicate must fail closed",
+});
+assert.equal(duplicateRecovery.ok, false);
+assert.equal(duplicateRecovery.ambiguous, true);
+assert.equal(duplicateRecovery.matchCount, 2);
+assert.equal(duplicateRecoverySends, 0);
+
+let changedTargetSends = 0;
+const changedTargetBridge = new moduleUnderTest.ClassicGoalHostBridge({
+  ports: [9732],
+  async probeConversationPage(_port, conversationId) {
+    return [{
+      runtimePort: 9732,
+      runtimeLabel: "Main-02",
+      pageTargetId: "new-page-target",
+      pageWebSocketDebuggerUrl: "ws://new-page-target",
+      pageUrl: `https://chatgpt.com/c/${conversationId}`,
+      conversationId,
+      chatMode: true,
+      directPage: true,
+    }];
+  },
+  async sendRecovery() { changedTargetSends += 1; return { ok: true }; },
+});
+const changedTargetRecovery = await changedTargetBridge.dispatchRoundRecovery({
+  goalId: "goal_changed_target",
+  conversationId: "conversation_changed_target",
+  round: 2,
+  recoveryId: "recovery_changed_target",
+  expectedPageTargetId: "old-page-target",
+  prompt: "[DEVSPACE_GOAL_ROUND_RECOVERY] target changed",
+});
+assert.equal(changedTargetRecovery.ok, false);
+assert.match(changedTargetRecovery.error, /target changed/i);
+assert.equal(changedTargetSends, 0);
 
 const livenessFollowUps = [];
 const livenessBridge = new moduleUnderTest.ClassicGoalHostBridge({
@@ -357,7 +440,7 @@ assert.equal(ambiguousLiveness.ambiguous, true);
 assert.equal(ambiguousLiveness.matchCount, 2);
 assert.equal(ambiguousLivenessSends, 0, "a duplicated conversation route must never receive a follow-up on either Main");
 
-const staleWidgetDispatches = [];
+const exactConversationDispatches = [];
 const conversationSafeBridge = new moduleUnderTest.ClassicGoalHostBridge({
   ports: [9732, 9733],
   async probePort(port) {
@@ -373,18 +456,17 @@ const conversationSafeBridge = new moduleUnderTest.ClassicGoalHostBridge({
       webSocketDebuggerUrl: "ws://widget-wrong",
     }];
   },
-  async probeRelayPort(port, conversationId) {
+  async probeConversationPage(port, conversationId) {
     if (port !== 9733 || conversationId !== "conversation_authoritative") return [];
     return [{
       runtimePort: 9733,
       runtimeLabel: "Main-03",
-      targetId: "authoritative-conversation-relay",
-      goalId: null,
+      pageTargetId: "authoritative-conversation-page",
       chatMode: true,
       conversationId,
       pageWebSocketDebuggerUrl: "ws://page-authoritative",
-      webSocketDebuggerUrl: "ws://relay-authoritative",
-      relayOnly: true,
+      pageUrl: "https://chatgpt.com/c/conversation_authoritative",
+      directPage: true,
     }];
   },
   async inspectVisibleReport(candidate) {
@@ -396,9 +478,9 @@ const conversationSafeBridge = new moduleUnderTest.ClassicGoalHostBridge({
       conversationId: candidate.conversationId,
     };
   },
-  async sendRaw(candidate, payload) {
-    staleWidgetDispatches.push({ candidate, payload });
-    return { ok: true };
+  async sendRecovery(payload) {
+    exactConversationDispatches.push(payload);
+    return { ok: true, transport: "classic-exact-page-composer" };
   },
 });
 const conversationSafeSnapshot = await conversationSafeBridge.inspectWorkingRound({
@@ -407,19 +489,22 @@ const conversationSafeSnapshot = await conversationSafeBridge.inspectWorkingRoun
 });
 assert.equal(conversationSafeSnapshot.conversationId, "conversation_authoritative");
 assert.equal(conversationSafeSnapshot.runtimePort, 9733);
-assert.equal(conversationSafeSnapshot.relayFallback, true, "a stale same-goal widget in another conversation must be ignored");
+assert.equal(conversationSafeSnapshot.relayFallback, false, "a stale same-goal widget in another conversation must be ignored");
+assert.equal(conversationSafeSnapshot.directPage, true);
 const conversationSafeDispatch = await conversationSafeBridge.dispatchRoundRecovery({
   goalId: "goal_conversation_safe",
   conversationId: "conversation_authoritative",
   round: 3,
   recoveryId: "recovery_conversation_safe",
+  expectedPageTargetId: "authoritative-conversation-page",
   prompt: "[DEVSPACE_GOAL_ROUND_RECOVERY] stay on authoritative conversation",
 });
 assert.equal(conversationSafeDispatch.ok, true);
 assert.equal(conversationSafeDispatch.runtimePort, 9733);
-assert.equal(staleWidgetDispatches.length, 1);
-assert.equal(staleWidgetDispatches[0].candidate.targetId, "authoritative-conversation-relay");
-assert.notEqual(staleWidgetDispatches[0].candidate.targetId, "stale-goal-widget");
+assert.equal(conversationSafeDispatch.pageTargetId, "authoritative-conversation-page");
+assert.equal(exactConversationDispatches.length, 1);
+assert.equal(exactConversationDispatches[0].expectedPageTargetId, "authoritative-conversation-page");
+assert.notEqual(exactConversationDispatches[0].expectedPageTargetId, "stale-goal-widget");
 
 const rolloverHookCalls = [];
 const rolloverBridge = new moduleUnderTest.ClassicGoalHostBridge({
@@ -509,4 +594,7 @@ console.log(JSON.stringify({
   main32: ports.at(-1),
   chatModeOnly: true,
   singleRawDispatch: true,
+  exactPageComposerRecovery: true,
+  recoveryForegroundActivation: false,
+  recoveryPageNavigation: false,
 }));

@@ -432,6 +432,41 @@ export async function probeClassicRelayPort(port, conversationId, options = {}) 
   return found;
 }
 
+export async function probeClassicConversationPagePort(port, conversationId, options = {}) {
+  const expectedConversationId = String(conversationId || "").trim();
+  if (!expectedConversationId) return [];
+  let targets;
+  try {
+    targets = await fetchJson(`http://127.0.0.1:${port}/json/list`, options);
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(targets)) return [];
+  return targets
+    .filter((target) => (
+      target?.type === "page"
+      && typeof target.webSocketDebuggerUrl === "string"
+      && /chatgpt\.com/i.test(target.url || "")
+      && !/[?&]surface=work(?:&|$)/i.test(target.url || "")
+      && conversationIdFromPageUrl(target.url) === expectedConversationId
+    ))
+    .map((target) => ({
+      runtimePort: port,
+      runtimeLabel: runtimeLabelForPort(port),
+      targetId: null,
+      webSocketDebuggerUrl: null,
+      pageTargetId: target.id,
+      pageWebSocketDebuggerUrl: target.webSocketDebuggerUrl,
+      pageUrl: target.url,
+      conversationId: expectedConversationId,
+      title: target.title || "",
+      goalId: null,
+      chatMode: true,
+      relayOnly: false,
+      directPage: true,
+    }));
+}
+
 async function findRawHostObject(client, contextId) {
   const fn = (await client.call("Runtime.evaluate", {
     contextId,
@@ -498,7 +533,9 @@ export class ClassicGoalHostBridge {
     ports = defaultMainDebugPorts(),
     probePort,
     probeRelayPort,
+    probeConversationPage,
     sendRaw,
+    sendRecovery,
     beforeDispatch,
     beforeRawDispatch,
     waitForVisibleReport,
@@ -515,7 +552,9 @@ export class ClassicGoalHostBridge {
     this.options = { fetchImpl, WebSocketImpl, timeoutMs: probeTimeoutMs, contextSettleMs };
     this.probePort = probePort || ((port) => probeClassicMainPort(port, this.options));
     this.probeRelayPort = probeRelayPort || ((port, conversationId) => probeClassicRelayPort(port, conversationId, this.options));
+    this.probeConversationPage = probeConversationPage || ((port, conversationId) => probeClassicConversationPagePort(port, conversationId, this.options));
     this.sendRaw = sendRaw || ((candidate, payload) => sendRawHostFollowUp(candidate, payload, this.options));
+    this.sendRecovery = typeof sendRecovery === "function" ? sendRecovery : null;
     this.beforeDispatch = beforeDispatch;
     this.beforeRawDispatch = beforeRawDispatch;
     this.inspectVisibleReport = inspectVisibleReport || ((candidate, payload) => inspectVisibleReportCommit(candidate, { ...this.options, payload }));
@@ -606,6 +645,41 @@ export class ClassicGoalHostBridge {
     return { candidate: matches[0], ambiguous: false, matchCount: 1, error: null };
   }
 
+  async findExactConversationPage(conversationId, { runtimePort = null } = {}) {
+    const expectedConversationId = String(conversationId || "").trim();
+    if (!expectedConversationId) {
+      return { candidate: null, ambiguous: false, matchCount: 0, error: "conversationId is required." };
+    }
+    const orderedPorts = Number.isInteger(runtimePort)
+      ? [runtimePort, ...this.ports.filter((port) => port !== runtimePort)]
+      : this.ports;
+    const matches = [];
+    for (const port of orderedPorts) {
+      let candidates = [];
+      try {
+        candidates = await this.probeConversationPage(port, expectedConversationId);
+      } catch {
+        continue;
+      }
+      for (const candidate of candidates || []) {
+        if (candidate?.chatMode !== true) continue;
+        if (candidate?.conversationId !== expectedConversationId) continue;
+        matches.push(candidate);
+      }
+    }
+    if (matches.length !== 1) {
+      return {
+        candidate: null,
+        ambiguous: matches.length > 1,
+        matchCount: matches.length,
+        error: matches.length > 1
+          ? `Conversation ${expectedConversationId} is open in more than one ChatGPT Main runtime.`
+          : `No exact Chat-mode page is open for conversation ${expectedConversationId}.`,
+      };
+    }
+    return { candidate: matches[0], ambiguous: false, matchCount: 1, error: null };
+  }
+
   async dispatchConversationFollowUp({ conversationId, prompt, runtimePort = null, purpose = "conversation-liveness" } = {}) {
     const expectedConversationId = String(conversationId || "").trim();
     if (!expectedConversationId) throw new Error("Conversation follow-up dispatch requires conversationId.");
@@ -665,7 +739,9 @@ export class ClassicGoalHostBridge {
     if (!goalId) throw new Error("Goal working-round inspection requires goalId.");
     const conversationId = String(goal?.conversationId || "").trim() || null;
     const runtimePort = Number.isInteger(goal?.runtimePort) ? goal.runtimePort : null;
-    const resolved = await this.resolveRecoveryCandidate({ goalId, conversationId, runtimePort });
+    const resolved = conversationId
+      ? await this.findExactConversationPage(conversationId, { runtimePort })
+      : await this.resolveRecoveryCandidate({ goalId, conversationId, runtimePort });
     const matching = resolved.candidate;
     if (!matching) {
       return {
@@ -675,8 +751,11 @@ export class ClassicGoalHostBridge {
         conversationId,
         definiteFailure: true,
         relayFallback: false,
+        directPage: Boolean(conversationId),
+        ambiguous: resolved.ambiguous === true,
+        matchCount: Number(resolved.matchCount || 0),
         error: conversationId
-          ? `No matching Chat-mode DevSpace relay was found for Goal ${goalId} in conversation ${conversationId}.`
+          ? resolved.error || `No exact Chat-mode page was found for Goal ${goalId} in conversation ${conversationId}.`
           : `No matching Chat-mode Goal widget was found for ${goalId}, and no authoritative conversation fallback is available.`,
       };
     }
@@ -685,54 +764,95 @@ export class ClassicGoalHostBridge {
       ...snapshot,
       runtimePort: matching.runtimePort,
       runtimeLabel: matching.runtimeLabel,
-      relayFallback: resolved.relayFallback,
+      relayFallback: conversationId ? false : resolved.relayFallback,
+      directPage: matching.directPage === true,
     };
   }
 
-  async dispatchRoundRecovery({ goalId, prompt, round, recoveryId, conversationId = null, runtimePort = null } = {}) {
+  async dispatchRoundRecovery({
+    goalId,
+    prompt,
+    round,
+    recoveryId,
+    attempt = 1,
+    conversationId = null,
+    runtimePort = null,
+    expectedPageTargetId = null,
+  } = {}) {
     if (typeof goalId !== "string" || !goalId.trim()) throw new Error("Goal round recovery dispatch requires goalId.");
     if (typeof prompt !== "string" || !prompt.trim()) throw new Error("Goal round recovery dispatch requires prompt.");
-    if (typeof this.beforeDispatch === "function") {
-      try {
-        await this.beforeDispatch({ goalId, round, recoveryId, recovery: true });
-      } catch {
-        // Best-effort Primary debug maintenance; target discovery remains authoritative.
-      }
+    const expectedConversationId = String(conversationId || "").trim();
+    if (!expectedConversationId) {
+      return {
+        ok: false,
+        definiteFailure: true,
+        error: "Goal round recovery requires an exact bound conversationId.",
+      };
     }
-    const resolved = await this.resolveRecoveryCandidate({ goalId, conversationId, runtimePort });
+    if (typeof this.sendRecovery !== "function") {
+      return {
+        ok: false,
+        definiteFailure: true,
+        error: "Goal round recovery exact-page sender is unavailable.",
+      };
+    }
+    // Unlike ordinary Goal continuation, recovery never runs Primary debug
+    // repair and never discovers or calls an app iframe. It addresses the exact
+    // already-open conversation page, matching the proven twenty-minute rescue
+    // transport and therefore cannot open, navigate, or foreground another Main.
+    const resolved = await this.findExactConversationPage(expectedConversationId, { runtimePort });
     const matching = resolved.candidate;
     if (!matching) {
       return {
         ok: false,
         definiteFailure: true,
-        relayFallback: false,
-        error: conversationId
-          ? `No matching Chat-mode DevSpace relay was found for Goal ${goalId} in conversation ${conversationId}.`
-          : `No matching Chat-mode Goal widget was found for ${goalId}, and no authoritative conversation fallback is available.`,
+        ambiguous: resolved.ambiguous === true,
+        matchCount: Number(resolved.matchCount || 0),
+        error: resolved.error || `No exact Chat-mode page was found for Goal ${goalId} in conversation ${expectedConversationId}.`,
+      };
+    }
+    const expectedTarget = String(expectedPageTargetId || "").trim();
+    if (expectedTarget && matching.pageTargetId !== expectedTarget) {
+      return {
+        ok: false,
+        definiteFailure: true,
+        error: "Goal round recovery page target changed after the eligibility snapshot.",
       };
     }
     try {
-      const sent = await this.sendRaw(matching, {
+      const sent = await this.sendRecovery({
+        conversationId: expectedConversationId,
         prompt,
-        scrollToBottom: false,
         goalId,
         round,
         recoveryId,
+        attempt,
+        runtimePort: matching.runtimePort,
+        runtimeLabel: matching.runtimeLabel,
+        expectedPageTargetId: matching.pageTargetId,
       });
       if (sent?.ok !== true) {
         return {
           ok: false,
           definiteFailure: sent?.definiteFailure === true,
-          error: sent?.error || "Raw ChatGPT Classic round-recovery RPC did not confirm dispatch.",
+          dispatchCommitted: sent?.dispatchCommitted === true,
+          visibilityVerified: sent?.visibilityVerified === true,
+          state: sent?.state || null,
+          error: sent?.error || sent?.state || "Exact ChatGPT Classic page-composer recovery did not confirm dispatch.",
         };
       }
       return {
         ok: true,
-        transport: "classic-raw-host-rpc",
+        transport: sent.transport || "classic-exact-page-composer",
+        conversationId: expectedConversationId,
         runtimeLabel: matching.runtimeLabel,
         runtimePort: matching.runtimePort,
-        targetId: matching.targetId,
-        relayFallback: resolved.relayFallback,
+        pageTargetId: matching.pageTargetId,
+        relayFallback: false,
+        foregroundActivation: false,
+        pageNavigation: false,
+        dispatchCommitted: sent?.dispatchCommitted !== false,
+        visibilityVerified: sent?.visibilityVerified !== false,
       };
     } catch (error) {
       return { ok: false, definiteFailure: false, error: errorMessage(error) };

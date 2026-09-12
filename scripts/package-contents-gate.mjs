@@ -29,6 +29,15 @@ for (const required of [
 ]) {
   assert.ok(files.has(required), `npm package is missing required public setup file: ${required}`);
 }
+for (const retired of [
+  "dist/browser-control.js",
+  "dist/browser-control.test.js",
+  "scripts/browser-control-live-gate.mjs",
+  "browser-control-bridge/manifest.json",
+  "browser-control-bridge/background.js",
+]) {
+  assert.equal(files.has(retired), false, `npm package still contains retired Browser Control artifact: ${retired}`);
+}
 console.log(JSON.stringify({
   ok: true,
   gate: "package-contents",
@@ -36,4 +45,5 @@ console.log(JSON.stringify({
   publicInstallerIncluded: true,
   networkRunnersIncluded: true,
   documentationIncluded: true,
+  retiredBrowserControlExcluded: true,
 }));

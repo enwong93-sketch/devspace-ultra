@@ -85,4 +85,4 @@ Every tagged GitHub release contains the exact `install.ps1` used by the tagged 
 
 ## Safe feature defaults
 
-The public setup enables the stable Local Gateway, plugin/Skill routing, progress overlay, Context Guardian, and stream recovery. `Auto Compact` and automatic `Goal Recovery` remain disabled until their prepare/commit/rollback and re-entry gates pass the release acceptance suite. The installer never enables an experimental recovery path merely to make a feature list look complete.
+The public setup enables the stable Local Gateway, plugin/Skill routing, progress overlay, Context Guardian, stream recovery, and exact-conversation `Goal Recovery`. Goal Recovery is accepted only through the page-composer gate shared with interrupted-turn rescue: it resolves exactly one bound conversation, never foregrounds or navigates a ChatGPT window, and permits only one successfully visible recovery message per Goal round. `Auto Compact` remains disabled until its separate prepare/commit/rollback and re-entry gates pass the release acceptance suite. Operators can temporarily hold Goal Recovery with `DEVSPACE_GOAL_ROUND_RECOVERY=0` without pausing or rebinding the Goal.

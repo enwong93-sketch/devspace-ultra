@@ -248,13 +248,33 @@ export class ClassicGoalRoundCompletionGuard {
         this.recoverySessions.delete(`${goal.id}:${goal.round}`);
         recovered += 1;
         results.push({ goalId: goal.id, round: goal.round, recovered: true, attempt: recovery.claim.attempt, transport: sent.transport || null });
+      } else if (sent?.dispatchCommitted === true) {
+        // The exact page accepted the send click, but the follow-up message was
+        // not confirmed visible within the bounded verification window. Close
+        // the recovery episode rather than risking a duplicate user turn.
+        await this.goalRuntime.roundRecovery({
+          goalId: goal.id,
+          action: "ack",
+          recoveryId: recovery.claim.recoveryId,
+        });
+        this.nativeCompleteSince.delete(`${goal.id}:${goal.round}`);
+        this.recoverySessions.delete(`${goal.id}:${goal.round}`);
+        results.push({
+          goalId: goal.id,
+          round: goal.round,
+          recovered: false,
+          attempt: recovery.claim.attempt,
+          reason: "dispatch-committed-unverified-no-retry",
+          transport: sent.transport || null,
+          error: sent?.error || sent?.state || "exact-page recovery submission could not be visibly confirmed",
+        });
       } else {
         await this.goalRuntime.roundRecovery({
           goalId: goal.id,
           action: "release",
           recoveryId: recovery.claim.recoveryId,
         }).catch(() => {});
-        results.push({ goalId: goal.id, round: goal.round, recovered: false, reason: "dispatch-failed", error: sent?.error || "hidden round recovery dispatch failed" });
+        results.push({ goalId: goal.id, round: goal.round, recovered: false, reason: "dispatch-failed", error: sent?.error || "exact-page round recovery dispatch failed" });
       }
     }
     return { ok: true, recovered, results };

@@ -94,7 +94,7 @@ export function registerCodexComputerUseRouter(server, {
 
   server.registerTool("codex_computer_use", {
     title: "OpenAI Codex Computer Use",
-    description: "Use automatically for Windows GUI work that requires seeing or operating a visible app. This is a thin adapter over the installed OpenAI bundled Computer Use runtime: persistent Codex node_repl imports @oai/sky, and all window discovery, screenshots, accessibility, clicks, typing, scrolling and dragging are executed by sky itself. DevSpace has no second GUI driver. Follow the official observe→decide→one action→re-observe workflow. Do not automate terminals, authentication/password/security UI, or ChatGPT/Codex app UI. Prefer Browser Use for ordinary browser automation.",
+    description: "Use automatically for Windows GUI work, including ordinary Chrome and Edge browser-window automation, that requires seeing or operating a visible app. This is a thin gate over the installed OpenAI bundled Computer Use runtime: persistent Codex node_repl imports @oai/sky, and all window discovery, screenshots, accessibility, clicks, typing, scrolling and dragging are executed by sky itself. DevSpace has no second GUI or browser driver; the former browser_control_* Chrome-extension path is retired. Follow observe→decide→one action→re-observe. Do not automate terminals, authentication/password/security UI, or ChatGPT/Codex app UI.",
     inputSchema: {
       action: z.enum([
         "list_apps",

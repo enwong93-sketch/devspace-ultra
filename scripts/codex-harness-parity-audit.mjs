@@ -145,9 +145,9 @@ export function evaluateParity({ codexText, devspaceText }) {
       id: "web-research",
       priority: "P1",
       codex: ["web_search"],
-      devspaceAny: ["web_search", "browser_control_claim"],
+      devspaceAny: ["web_search", "codex_computer_use"],
       target: "host-native",
-      note: "ChatGPT supplies current-source web search; DevSpace supplies signed-in browser control.",
+      note: "ChatGPT supplies current-source web search; visible browser-window work uses the installed Codex Computer Use gate.",
     },
     {
       id: "javascript-repl",
@@ -185,9 +185,9 @@ export function evaluateParity({ codexText, devspaceText }) {
       id: "browser-and-computer-use",
       priority: "P2",
       codexAny: ["computer", "screenshot", "browser"],
-      devspaceAll: ["browser_control_status", "browser_control_claim", "computer-use", "@oai/sky", "linked-codex-node-repl"],
+      devspaceAll: ["codex_computer_use_status", "codex_computer_use", "computer-use", "@oai/sky", "linked-codex-node-repl"],
       target: "bridged",
-      note: "Signed-in browser work uses Browser Control; Windows desktop work directly reuses the installed official Codex computer-use skill, node_repl and @oai/sky service.",
+      note: "Browser and Windows desktop work directly reuse the installed official Codex computer-use skill, persistent node_repl and @oai/sky service; no second DevSpace browser driver remains active.",
     },
     {
       id: "full-access-execution-policy",

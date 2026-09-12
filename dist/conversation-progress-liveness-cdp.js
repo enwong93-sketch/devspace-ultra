@@ -173,12 +173,14 @@ export class ConversationProgressLivenessCdpAdapter {
     runtimeKeys = null,
     listTargets = targetsForPort,
     connect = connectTarget,
+    sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   } = {}) {
     this.runtimeKeys = Array.isArray(runtimeKeys) && runtimeKeys.length
       ? [...new Set(runtimeKeys.map(cleanRuntimeKey).filter(Boolean))]
       : Array.from({ length: 32 }, (_, index) => `main-${String(index + 1).padStart(2, "0")}`);
     this.listTargets = listTargets;
     this.connect = connect;
+    this.sleep = sleep;
   }
 
   async find({ conversationId } = {}) {
@@ -283,15 +285,49 @@ export class ConversationProgressLivenessCdpAdapter {
       expectedPrefix: "工作中斷補救：",
       purpose: "interrupted-turn-rescue",
       attempt,
+      allowNormalCompletion: false,
+      requireInterruptionEvidence: true,
     });
   }
 
-  async #sendConversationMessage({ resolved, text, expectedPrefix, purpose, attempt }) {
+  async sendGoalRecovery({ conversationId, target = null, prompt, attempt = 1 } = {}) {
+    const text = String(prompt || "").trim();
+    if (!text.startsWith("[DEVSPACE_GOAL_ROUND_RECOVERY]")) {
+      return { ok: false, state: "invalid-goal-recovery-prompt" };
+    }
+    const resolved = await this.#resolveExactTarget(conversationId, target);
+    if (!resolved.ok) return resolved;
+    return await this.#sendConversationMessage({
+      resolved,
+      text,
+      expectedPrefix: "[DEVSPACE_GOAL_ROUND_RECOVERY]",
+      purpose: "goal-round-recovery",
+      attempt,
+      // The Goal guard independently proves that a working round terminated
+      // without devspace_goal_turn_report. A visible assistant message is
+      // therefore expected and must not block the exact recovery turn.
+      allowNormalCompletion: true,
+      requireInterruptionEvidence: false,
+    });
+  }
+
+  async #sendConversationMessage({
+    resolved,
+    text,
+    expectedPrefix,
+    purpose,
+    attempt,
+    allowNormalCompletion = false,
+    requireInterruptionEvidence = true,
+  }) {
     const page = await this.connect(resolved.target);
     const marker = markerFor(resolved.conversationId, `${purpose}:${attempt}`);
     try {
       const preflight = await page.evaluate(`(() => {
         const expected = ${JSON.stringify(resolved.conversationId)};
+        const expectedText = ${JSON.stringify(text)};
+        const allowNormalCompletion = ${allowNormalCompletion === true};
+        const requireInterruptionEvidence = ${requireInterruptionEvidence !== false};
         const actual = location.pathname.match(/\\/c\\/([^/?#]+)/)?.[1] || null;
         const visible = (element) => {
           if (!(element instanceof HTMLElement)) return false;
@@ -308,6 +344,11 @@ export class ConversationProgressLivenessCdpAdapter {
         const latestMessage = messageNodes.at(-1) || null;
         const latestMessageRole = latestMessage?.getAttribute('data-message-author-role') || null;
         const latestMessageText = String(latestMessage?.innerText || latestMessage?.textContent || '').trim();
+        const latestUser = [...messageNodes].reverse().find((node) => node.getAttribute('data-message-author-role') === 'user') || null;
+        const latestUserText = String(latestUser?.innerText || latestUser?.textContent || '').trim();
+        if (latestUserText === expectedText) {
+          return { ok:true, state:'already-visible', alreadyVisible:true };
+        }
         const latestTurnContainer = latestMessage?.closest('article') || latestMessage;
         const errorNodes = latestTurnContainer
           ? [...latestTurnContainer.querySelectorAll('[role="alert"],[data-testid*="error" i],[data-testid*="retry" i]')].filter(visible)
@@ -318,10 +359,10 @@ export class ConversationProgressLivenessCdpAdapter {
             && latestTurnContainer
             && (button.closest('article') || button.parentElement)?.contains(latestTurnContainer)
           ));
-        if (latestMessageRole === 'assistant' && latestMessageText.length > 0 && !hasTurnError) {
+        if (!allowNormalCompletion && latestMessageRole === 'assistant' && latestMessageText.length > 0 && !hasTurnError) {
           return { ok:false, state:'normal-completion-observed' };
         }
-        if (latestMessageRole !== 'user' && !hasTurnError) {
+        if (requireInterruptionEvidence && latestMessageRole !== 'user' && !hasTurnError) {
           return { ok:false, state:'no-interruption-evidence' };
         }
         const editors = [...document.querySelectorAll('#prompt-textarea,textarea,div.ProseMirror[contenteditable="true"],[data-lexical-editor="true"][contenteditable="true"],[contenteditable="true"][role="textbox"]')].filter(visible);
@@ -333,9 +374,30 @@ export class ConversationProgressLivenessCdpAdapter {
         editor.focus();
         return { ok:true };
       })()`);
-      if (!preflight?.ok) return preflight;
+      const committedResult = (extra = {}) => ({
+        ok: true,
+        conversationId: resolved.conversationId,
+        locatedRuntimeKey: resolved.runtimeKey,
+        locatedPort: resolved.port,
+        attempt,
+        purpose,
+        runtimeBinding: false,
+        foregroundActivation: false,
+        pageNavigation: false,
+        markerPersisted: false,
+        rawMessagePersisted: false,
+        dispatchCommitted: true,
+        visibilityVerified: true,
+        ...extra,
+      });
+      if (preflight?.alreadyVisible === true) {
+        return committedResult({ state: "already-visible", alreadyVisible: true });
+      }
+      if (!preflight?.ok) {
+        return { ...preflight, definiteFailure: true, dispatchCommitted: false };
+      }
       await page.call("Input.insertText", { text });
-      await new Promise((resolve) => setTimeout(resolve, 350));
+      await this.sleep(350);
       const submitted = await page.evaluate(`(() => {
         const marker = ${JSON.stringify(marker)};
         const visible = (element) => {
@@ -356,30 +418,54 @@ export class ConversationProgressLivenessCdpAdapter {
         send.click();
         return { ok:true };
       })()`);
-      if (!submitted?.ok) return submitted;
-      await new Promise((resolve) => setTimeout(resolve, 1_000));
-      const verified = await page.evaluate(`(() => {
-        const expected = ${JSON.stringify(resolved.conversationId)};
-        const expectedPrefix = ${JSON.stringify(expectedPrefix)};
-        const actual = location.pathname.match(/\\/c\\/([^/?#]+)/)?.[1] || null;
-        if (actual !== expected) return { ok:false, state:'route-changed-after-send' };
-        const users = [...document.querySelectorAll('[data-message-author-role="user"]')];
-        const latest = String(users.at(-1)?.innerText || users.at(-1)?.textContent || '').trim();
-        return { ok: latest.startsWith(expectedPrefix), state: latest ? 'visible' : 'missing' };
-      })()`);
+      if (!submitted?.ok) {
+        return { ...submitted, definiteFailure: true, dispatchCommitted: false };
+      }
+
+      let verified = null;
+      try {
+        for (let poll = 0; poll < 20; poll += 1) {
+          await this.sleep(poll === 0 ? 500 : 250);
+          verified = await page.evaluate(`(() => {
+            const expected = ${JSON.stringify(resolved.conversationId)};
+            const expectedPrefix = ${JSON.stringify(expectedPrefix)};
+            const expectedText = ${JSON.stringify(text)};
+            const actual = location.pathname.match(/\\/c\\/([^/?#]+)/)?.[1] || null;
+            if (actual !== expected) return { ok:false, state:'route-changed-after-send' };
+            const users = [...document.querySelectorAll('[data-message-author-role="user"]')];
+            const latest = String(users.at(-1)?.innerText || users.at(-1)?.textContent || '').trim();
+            return {
+              ok: latest === expectedText || latest.startsWith(expectedPrefix),
+              state: latest ? 'visible' : 'missing',
+            };
+          })()`);
+          if (verified?.ok || verified?.state === "route-changed-after-send") break;
+        }
+      } catch (error) {
+        return {
+          ok: false,
+          state: "submitted-verification-error",
+          error: error instanceof Error ? error.message : String(error),
+          dispatchCommitted: true,
+          visibilityVerified: false,
+          definiteFailure: false,
+          conversationId: resolved.conversationId,
+          purpose,
+          attempt,
+        };
+      }
       return verified?.ok
-        ? {
-            ok: true,
+        ? committedResult({ state: verified.state || "visible" })
+        : {
+            ...(verified || { state: "submitted-unverified" }),
+            ok: false,
+            dispatchCommitted: true,
+            visibilityVerified: false,
+            definiteFailure: false,
             conversationId: resolved.conversationId,
-            locatedRuntimeKey: resolved.runtimeKey,
-            locatedPort: resolved.port,
-            attempt,
             purpose,
-            runtimeBinding: false,
-            markerPersisted: false,
-            rawMessagePersisted: false,
-          }
-        : verified;
+            attempt,
+          };
     } finally {
       page.close();
     }

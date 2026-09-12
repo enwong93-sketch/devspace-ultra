@@ -7,7 +7,12 @@ const script = await readFile(new URL("./chat-classic-primary-debug.ps1", import
 assert.match(server, /import \{ ClassicPrimaryDebugGuard \} from "\.\/primary-debug-guard\.js";/);
 assert.match(server, /const primaryDebugGuard = new ClassicPrimaryDebugGuard\(\)/);
 assert.match(server, /const\s+classicCdpOptions\s*=\s*Array\.isArray\(config\.classicMainDebugPorts\)[\s\S]{0,180}ports:\s*config\.classicMainDebugPorts/, "Primary/Host Bridge lifecycle must use the bounded configured Classic port set");
-assert.match(server, /new ClassicGoalHostBridge\(\{\s*\.\.\.classicCdpOptions,\s*beforeDispatch:\s*config\.passiveCore\s*\?\s*undefined\s*:\s*\(\) => primaryDebugGuard\.pollOnce\(\),?\s*\}\)/s);
+assert.match(server, /new ClassicGoalHostBridge\(\{\s*\.\.\.classicCdpOptions,\s*beforeDispatch:\s*config\.passiveCore\s*\?\s*undefined\s*:\s*\(\) => primaryDebugGuard\.pollOnce\(\),\s*sendRecovery:\s*sendExactGoalRecovery,?\s*\}\)/s);
+const recoveryStart = server.indexOf("const sendExactGoalRecovery = async");
+const recoveryEnd = server.indexOf("const goalHostBridge = new ClassicGoalHostBridge", recoveryStart);
+assert.ok(recoveryStart >= 0 && recoveryEnd > recoveryStart);
+assert.doesNotMatch(server.slice(recoveryStart, recoveryEnd), /primaryDebugGuard|beforeDispatch/,
+  "same-round Goal Recovery must never activate Primary debug repair");
 assert.match(server, /if\s*\(!config\.passiveCore\)[\s\S]*primaryDebugGuard\.start\(\)/, "production Core keeps Primary Debug Guard while passive canary Core suppresses it");
 assert.match(server, /await primaryDebugGuard\.close\(\)/);
 

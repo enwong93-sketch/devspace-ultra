@@ -5,11 +5,11 @@ description: Route Windows GUI tasks to the installed OpenAI bundled Computer Us
 
 # Codex Computer Use routing
 
-Use `codex_computer_use` automatically when a task requires observing or operating a Windows graphical application: visible windows, buttons, menus, dialogs, screenshots, accessibility state, clicking, typing, scrolling, dragging, or rendered-state verification.
+Use `codex_computer_use` automatically when a task requires observing or operating a Windows graphical application, including an ordinary Chrome or Edge browser window: visible windows, buttons, menus, dialogs, screenshots, accessibility state, clicking, typing, scrolling, dragging, navigation through the visible address bar, or rendered-state verification.
 
-Do not use it for repository/file edits, shell commands, APIs, database queries, or source-code search. Prefer Browser Use for ordinary browser automation.
+Do not use it for repository/file edits, shell commands, APIs, database queries, or source-code search. DevSpace's former `browser_control_*` Chrome-extension driver is retired; do not pair, claim, or route browser work through that implementation.
 
-The DevSpace tool is only a structured adapter over the installed OpenAI bundled Computer Use runtime. The execution path is the shared persistent Codex `node_repl` importing `@oai/sky`; DevSpace does not implement SendInput, UI Automation, screenshot capture, Selenium, Playwright, PowerShell UI automation, or another GUI driver.
+The DevSpace tool is only a structured adapter over the installed OpenAI bundled Computer Use runtime. The execution path is the shared persistent Codex `node_repl` importing `@oai/sky`; DevSpace does not implement SendInput, UI Automation, screenshot capture, Chrome Debugger/CDP control, Selenium, Playwright, PowerShell UI automation, or another GUI/browser driver.
 
 Follow the official observe/action discipline:
 

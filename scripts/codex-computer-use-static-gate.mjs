@@ -17,10 +17,14 @@ const plugin = JSON.parse(pluginText);
 
 assert.match(server, /BUILTIN_CODEX_COMPUTER_USE_PLUGIN/);
 assert.match(server, /registerCodexComputerUseRouter\(server, \{ capabilityRuntime, codexMcpBridge, resolveConversation: resolveConversationAuthority \}\)/);
+assert.doesNotMatch(server, /BrowserControlCoordinator|registerBrowserControlTools/);
+assert.match(server, /ordinary Chrome, Edge, and browser-window automation[\s\S]*codex_computer_use/);
 assert.doesNotMatch(server, /CodexSandboxRuntime|registerCodexSandboxTools|request_permissions|exec_sandboxed/);
 assert.match(router, /server\.registerTool\("codex_computer_use"/);
 assert.match(router, /callCodexComputerUse/);
 assert.match(router, /persistent Codex node_repl imports @oai\/sky/i);
+assert.match(router, /ordinary Chrome and Edge browser-window automation/i);
+assert.match(router, /former browser_control_\* Chrome-extension path is retired/i);
 assert.match(adapter, /callJsReplCompatibility/);
 assert.match(adapter, /CODEX_COMPUTER_USE_RUNTIME = "@oai\/sky"/);
 assert.match(adapter, /CODEX_COMPUTER_USE_PLUGIN_ID = "computer-use@openai-bundled"/);
@@ -41,7 +45,10 @@ assert.deepEqual(plugin.skills, ["skills"]);
 assert.match(plugin.description, /@oai\/sky/);
 assert.match(skill, /Use `codex_computer_use` automatically/);
 assert.match(skill, /shared persistent Codex `node_repl` importing `@oai\/sky`/);
+assert.match(skill, /ordinary Chrome or Edge browser window/);
+assert.match(skill, /former `browser_control_\*` Chrome-extension driver is retired/);
 assert.equal(packageJson.files.includes("capabilities"), true);
+assert.equal(packageJson.files.includes("browser-control-bridge"), false);
 assert.equal(Object.hasOwn(packageJson.scripts, "verify:codex-sandbox"), false);
 assert.match(packageJson.scripts["verify:ultra"], /verify:computer-use/);
 assert.doesNotMatch(runtime, /MAX_TOOL_TIMEOUT_MS|Promise\.race\(|setTimeout\(/,
@@ -57,6 +64,8 @@ console.log(JSON.stringify({
   automaticRouteTool: true,
   persistentCodexNodeRepl: true,
   officialSkyRuntime: true,
+  ordinaryBrowserWindowAutomation: true,
+  customChromeExtensionRetired: true,
   structuredActionsOnly: true,
   fullAccessOnly: true,
   sandboxToolSurfaceRemoved: true,

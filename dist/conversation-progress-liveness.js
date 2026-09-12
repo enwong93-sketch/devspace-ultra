@@ -471,6 +471,19 @@ export class ConversationProgressLivenessSupervisor {
         record.rescuePending = false;
         record.reportOverdue = false;
         record.lastDispatchState = "single-conversation-rescue-sent";
+      } else if (dispatched?.dispatchCommitted === true) {
+        // Once the exact page accepted the send click, never retry the same
+        // interruption episode merely because DOM visibility confirmation was
+        // delayed or the page route changed immediately afterwards. Retrying an
+        // uncertain committed send can create duplicate synthetic user turns.
+        record.lastContinueAt = new Date(now).toISOString();
+        record.continueAttempts = 1;
+        record.idleObservedAt = null;
+        record.armed = false;
+        record.turnState = "rescue-submitted-unverified";
+        record.rescuePending = false;
+        record.reportOverdue = false;
+        record.lastDispatchState = "single-conversation-rescue-committed-no-retry";
       } else if (dispatched?.state === "normal-completion-observed") {
         this.#disarm(record, "completed", now, "normal-completion-observed-before-rescue");
       } else {

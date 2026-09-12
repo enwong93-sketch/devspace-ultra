@@ -190,6 +190,28 @@ const sessionScopedProgress = activeTurns.resolveGatewayCall({
 });
 assert.equal(sessionScopedProgress?.conversationId, "conversation-main-02");
 assert.equal(sessionScopedProgress?.source, "classic-active-turn-session-correlation");
+
+const dynamicallyDisclosedSessionTool = new ClassicActiveTurnRegistry({ now: () => now });
+dynamicallyDisclosedSessionTool.noteTurn({
+  kind: "started",
+  requestId: "session-dynamic-tool",
+  runtimeKey: "main-02",
+  conversationId: "conversation-session-dynamic-tool",
+  localFunctionNames: ["some_other_tool"],
+  sessionFingerprint: "c".repeat(64),
+  observedAtMs: now,
+});
+const dynamicProgressByExactSession = dynamicallyDisclosedSessionTool.resolveGatewayCall({
+  toolName: "devspace_progress_report",
+  sessionFingerprintHint: "c".repeat(64),
+});
+assert.equal(dynamicProgressByExactSession?.conversationId, "conversation-session-dynamic-tool");
+assert.equal(dynamicProgressByExactSession?.source, "classic-active-turn-session-correlation");
+assert.equal(
+  dynamicProgressByExactSession?.toolName,
+  "devspace_progress_report",
+  "an exact request-owned session must authorize a tool disclosed after the initial local function snapshot",
+);
 assert.equal(
   activeTurns.resolveGatewayCall({
     toolName: "devspace_progress_report",
@@ -356,7 +378,7 @@ for (const [runtimeKey, conversationId, requestId, offset] of [
     requestId,
     runtimeKey,
     conversationId,
-    localFunctionNames: ["devspace_progress_report"],
+    localFunctionNames: ["some_other_tool"],
     sessionFingerprint: "d".repeat(64),
     observedAtMs: now + offset,
   });

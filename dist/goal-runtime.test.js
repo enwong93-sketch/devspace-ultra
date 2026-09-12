@@ -376,34 +376,38 @@ try {
   assert.equal(duplicateRecoveryClaim.claimed, false);
   assert.equal(duplicateRecoveryClaim.reason, "recovery-in-flight");
 
-  const recoveryAck = await reloaded.roundRecovery({
+  const recoveryRelease = await reloaded.roundRecovery({
     goalId: raceGoal.id,
-    action: "ack",
+    action: "release",
     recoveryId: recovery1.claim.recoveryId,
   });
-  assert.equal(recoveryAck.goal.roundRecovery.state, "dispatched");
-  assert.equal(recoveryAck.acknowledged, true);
+  assert.equal(recoveryRelease.goal.roundRecovery.state, "idle");
+  assert.equal(recoveryRelease.released, true);
 
   const coolingRecovery = await reloaded.claimRoundRecovery({ goalId: raceGoal.id });
   assert.equal(coolingRecovery.claimed, false);
   assert.equal(coolingRecovery.reason, "recovery-cooldown");
 
-  advance(30_001);
+  advance(5_001);
   const recovery2 = await reloaded.claimRoundRecovery({ goalId: raceGoal.id });
   assert.equal(recovery2.claimed, true);
   assert.equal(recovery2.claim.attempt, 2);
-  const recoveryRelease = await reloaded.roundRecovery({
+  const recoveryAck = await reloaded.roundRecovery({
     goalId: raceGoal.id,
-    action: "release",
+    action: "ack",
     recoveryId: recovery2.claim.recoveryId,
   });
-  assert.equal(recoveryRelease.goal.roundRecovery.state, "idle");
+  assert.equal(recoveryAck.goal.roundRecovery.state, "dispatched");
+  assert.equal(recoveryAck.acknowledged, true);
 
-  advance(5_001);
-  const recovery3 = await reloaded.claimRoundRecovery({ goalId: raceGoal.id });
-  assert.equal(recovery3.claimed, true);
-  assert.equal(recovery3.claim.attempt, 3);
-  await reloaded.roundRecovery({ goalId: raceGoal.id, action: "ack", recoveryId: recovery3.claim.recoveryId });
+  const duplicateAfterAck = await reloaded.claimRoundRecovery({ goalId: raceGoal.id });
+  assert.equal(duplicateAfterAck.claimed, false);
+  assert.equal(duplicateAfterAck.reason, "recovery-already-dispatched");
+  advance(30_001);
+  const duplicateAfterTime = await reloaded.claimRoundRecovery({ goalId: raceGoal.id });
+  assert.equal(duplicateAfterTime.claimed, false,
+    "one successfully visible recovery message must permanently close the current Goal round recovery episode");
+  assert.equal(duplicateAfterTime.reason, "recovery-already-dispatched");
 
   const raceRound2Reported = await reloaded.turnReport({
     goalId: raceGoal.id,

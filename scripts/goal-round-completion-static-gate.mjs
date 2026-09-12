@@ -11,12 +11,28 @@ assert.match(server, /if\s*\(config\.goalRoundRecoveryEnabled\)[\s\S]*goalRoundC
 assert.match(server, /goalRoundCompletionGuard\.close\(\)/);
 assert.match(server, /goalHostBridge\.inspectWorkingRound/);
 assert.match(server, /goalHostBridge\.dispatchRoundRecovery/);
+assert.match(server, /progressLivenessAdapter\.sendGoalRecovery/,
+  "Goal Recovery must reuse the exact page-composer transport proven by interrupted-turn rescue");
+assert.match(server, /sendRecovery:\s*sendExactGoalRecovery/);
 assert.match(runtime, /recoverableWorkingRounds/);
 assert.match(runtime, /claimRoundRecovery/);
 assert.match(runtime, /DEVSPACE_GOAL_ROUND_RECOVERY/);
 assert.match(runtime, /Do not call devspace_goal_round_begin/i);
+assert.match(runtime, /recovery-already-dispatched/,
+  "one successfully visible Goal recovery must close the current round recovery episode");
 assert.match(bridge, /inspectWorkingRound/);
 assert.match(bridge, /dispatchRoundRecovery/);
+assert.match(bridge, /findExactConversationPage/);
+assert.match(bridge, /classic-exact-page-composer/);
+assert.match(bridge, /foregroundActivation:\s*false/);
+assert.match(bridge, /pageNavigation:\s*false/);
+const recoveryStart = bridge.indexOf("async dispatchRoundRecovery");
+const recoveryEnd = bridge.indexOf("setBeforeRawDispatch", recoveryStart);
+const recoveryBody = bridge.slice(recoveryStart, recoveryEnd);
+assert.doesNotMatch(recoveryBody, /beforeDispatch|sendRaw|findConversationRelay|findMatchingCandidate/,
+  "Goal Recovery must not run Primary repair, app-relay discovery, or raw host follow-up RPC");
+assert.doesNotMatch(recoveryBody, /Page\.navigate|Page\.reload|bringToFront|activate|showWindow/i,
+  "Goal Recovery must not navigate, foreground, or pop another conversation window");
 assert.match(guard, /streamStatus/);
 assert.match(guard, /COMPLETE/);
 assert.match(guard, /generating/);
@@ -36,4 +52,8 @@ console.log(JSON.stringify({
   chatModeOnly: true,
   nativeCompleteOrTransportFailureRequired: true,
   guiAloneNeverAuthoritative: true,
+  exactPageComposerTransport: true,
+  oneVisibleRecoveryPerRound: true,
+  foregroundActivation: false,
+  pageNavigation: false,
 }));

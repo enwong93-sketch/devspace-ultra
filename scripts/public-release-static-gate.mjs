@@ -24,7 +24,7 @@ assert.match(files["skills/devspace-ultra-setup/SKILL.md"], /DuckDNS\/DDNS \+ Ca
 assert.match(files["skills/devspace-ultra-setup/SKILL.md"], /Cloudflare named tunnel/);
 assert.match(setup, /stableGatewayCoreHeapProfile" "system"/);
 assert.match(setup, /autoCompactEnabled" \$false/);
-assert.match(setup, /goalRoundRecoveryEnabled" \$false/);
+assert.match(setup, /goalRoundRecoveryEnabled" \$true/);
 assert.match(setup, /ExecutionTimeLimit \(\[TimeSpan\]::Zero/);
 assert.match(setup, /ConvertFrom-SecureString/);
 assert.match(setup, /DEVSPACE_DUCKDNS_TOKEN/);
@@ -51,6 +51,6 @@ console.log(JSON.stringify({
   cloudflareQuotaWarning: true,
   dpapiSecrets: true,
   unrestrictedCoreHeap: true,
-  experimentalRecoveryDisabledByDefault: true,
+  exactPageGoalRecoveryEnabledByDefault: true,
   userSpecificEndpoints: false,
 }));

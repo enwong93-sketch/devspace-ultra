@@ -16,7 +16,7 @@ Use this Skill as an interactive installation and recovery runbook. The Agent ex
 - Never ask the user to paste a DuckDNS token, Cloudflare token, OAuth token, cookie, API key, or password into chat. Use a secure local prompt or a process-scoped environment variable, then clear it.
 - Never write secrets to Git, `config.json`, logs, generated status JSON, shell history, Task Scheduler arguments, or progress narration.
 - Do not impose a Core heap cap, workspace limit, MCP-session count limit, or work timeout. Production Core uses the system-managed heap profile.
-- Keep `autoCompactEnabled=false` and `goalRoundRecoveryEnabled=false` unless the installed release explicitly reports that their live safety gates have passed.
+- Keep `autoCompactEnabled=false`. Enable `goalRoundRecoveryEnabled=true` only when the installed release contains the exact-conversation page-composer recovery gate: one successful recovery per Goal round, no Primary repair, no window activation, no page navigation/reload, and duplicate conversations fail closed. Retain `DEVSPACE_GOAL_ROUND_RECOVERY=0` as the explicit operator hold.
 - Use `devspace_progress_report` after each meaningful medium-sized setup step, not after every command and not only at the very end.
 
 ## Phase 1 — inspect before changing anything

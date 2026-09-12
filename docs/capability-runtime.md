@@ -1,10 +1,10 @@
 # DevSpace Ultra Unified Agent Capability Runtime
 
-Status: **released in DevSpace Ultra v0.3.0** (2026-08-20). The release gate includes deterministic runtime regression, Git-installed capability verification, dual stateful MCP isolation, Codex-plugin compatibility scanning, package/security inspection, and preservation of the existing Browser Control/Chat Swarm regressions.
+Status: **released in DevSpace Ultra v0.3.0** (2026-08-20). The current release gate includes deterministic runtime regression, Git-installed capability verification, dual stateful MCP isolation, Codex-plugin compatibility scanning, package/security inspection, the Codex native browser gate, and Chat Swarm regressions. The earlier custom Browser Control regression remains historical only.
 
 ## Goal
 
-DevSpace Ultra already gives every connected agent the same backend for local workspace operations, Chat Swarm routing, and Browser Control. The Unified Agent Capability Runtime extends that backend into a reusable plugin host.
+DevSpace Ultra already gives every connected agent the same backend for local workspace operations, Chat Swarm routing, and Codex-native Computer Use. The Unified Agent Capability Runtime extends that backend into a reusable plugin host.
 
 The design target is:
 
@@ -271,4 +271,4 @@ The deterministic test suite must cover at least:
 - disable closes execution access;
 - managed uninstall;
 - Git source installation into an isolated temporary store;
-- existing Browser Control + Chat Swarm regressions remain green.
+- the Codex native browser gate + Chat Swarm regressions remain green.
