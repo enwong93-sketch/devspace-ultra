@@ -1,6 +1,6 @@
 # Codex native browser gate
 
-> Status: **current production architecture**. The former DevSpace Chrome-extension `browser_control_*` driver described in older releases is retired.
+> Status: **current production architecture**. The former DevSpace custom Chrome-extension driver described in older releases has been removed from the source tree and release package.
 
 ## Execution boundary
 
@@ -17,7 +17,7 @@ ChatGPT Agent
 
 DevSpace supplies the routing, schema validation, conversation isolation, and safety gate. It does not implement a second browser engine, screenshot service, accessibility tree, mouse/keyboard driver, or tab-claim transport.
 
-The production server does not register `browser_control_pair`, `browser_control_status`, `browser_control_claim`, `browser_control_inspect`, `browser_control_act`, `browser_control_navigate`, `browser_control_wait`, `browser_control_release`, or `browser_control_cdp`.
+The production server does not register any legacy extension-control tools. When an already-open ChatGPT session submits one stale cached tool name, DevSpace returns a structured `retired_tool` result that names `codex_computer_use` as the replacement and explicitly states that the rest of the current tool surface is still available.
 
 Requests from an old extension to `/browser-control/bridge/*` receive HTTP 410 and a machine-readable replacement tool name: `codex_computer_use`.
 
@@ -49,6 +49,6 @@ Website text and rendered content are untrusted input. External side effects rem
 
 `codex_computer_use` resolves the current ChatGPT conversation before entering the linked Codex runtime. It does not inherit a browser claim from another conversation and it does not use Runtime number as persistent ownership. The request-scoped conversation identity is the authorization boundary.
 
-## Migration from the retired extension
+## Migration from the removed extension
 
-No extension pairing, claim token, tab sharing, Developer mode, or Chrome Debugger attachment is required. Existing extension files remain in the source repository only as historical migration material and are excluded from newly packed releases. They are not started, registered, or accepted as a browser automation fallback.
+No extension pairing, claim token, tab sharing, Developer mode, or Chrome Debugger attachment is required. The extension implementation has been deleted rather than retained as inactive source. Only the HTTP 410 compatibility tombstone and deterministic stale-session error remain; neither can operate a browser.

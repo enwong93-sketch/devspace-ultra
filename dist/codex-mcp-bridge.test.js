@@ -42,6 +42,22 @@ server.registerTool('write_fixture', {
   inputSchema:{value:z.string()},
   annotations:{readOnlyHint:false, destructiveHint:false, idempotentHint:false, openWorldHint:false}
 }, async ({value}) => ({content:[{type:'text', text:JSON.stringify({kind:'write', value})}]}));
+server.registerTool('approval_fixture', {
+  description:'Request a scoped form elicitation',
+  inputSchema:{app:z.string()},
+  annotations:{readOnlyHint:true, destructiveHint:false, idempotentHint:true, openWorldHint:false}
+}, async ({app}) => {
+  const response = await server.server.elicitInput({
+    mode:'form',
+    message:'Allow fixture '+app+'?',
+    requestedSchema:{
+      type:'object',
+      properties:{decision:{type:'string', title:'Decision', enum:['Allow','Decline']}},
+      required:['decision']
+    }
+  });
+  return {content:[{type:'text', text:JSON.stringify({kind:'approval', app, response})}]};
+});
 server.registerTool('blocked_fixture', {inputSchema:{}}, async () => ({content:[{type:'text', text:'blocked'}]}));
 server.registerResource('status', 'fixture://status', {description:'Fixture status', mimeType:'text/plain'}, async (uri) => ({contents:[{uri:String(uri), mimeType:'text/plain', text:'status-ok'}]}));
 server.registerResource('item', new ResourceTemplate('fixture://item/{id}', {list: undefined}), {mimeType:'application/json'}, async (uri, variables) => ({contents:[{uri:String(uri), mimeType:'application/json', text:JSON.stringify({id:variables.id})}]}));
@@ -58,7 +74,7 @@ env_vars = ["INHERITED_FIXTURE"]
 startup_timeout_sec = 20
 tool_timeout_sec = 20
 default_tools_approval_mode = "writes"
-enabled_tools = ["read_fixture", "write_fixture", "blocked_fixture"]
+enabled_tools = ["read_fixture", "write_fixture", "approval_fixture", "blocked_fixture"]
 disabled_tools = ["blocked_fixture"]
 
 [mcp_servers.fixture.tools.write_fixture]
@@ -123,7 +139,7 @@ try {
   const inspected = await bridge.probe("fixture");
   assert.equal(inspected.status, "online");
   assert.equal(inspected.capabilities.tools, true);
-  assert.deepEqual(inspected.tools.map((tool) => tool.name), ["read_fixture", "write_fixture"]);
+  assert.deepEqual(inspected.tools.map((tool) => tool.name), ["read_fixture", "write_fixture", "approval_fixture"]);
   assert.equal(inspected.tools[0].canonicalName, "mcp__fixture__read_fixture");
   assert.equal(inspected.resources.some((resource) => resource.uri === "fixture://status"), true);
   assert.equal(inspected.resourceTemplates.some((resource) => resource.uriTemplate === "fixture://item/{id}"), true);
@@ -156,6 +172,57 @@ try {
     () => bridge.callTool({ serverId: "fixture", toolName: "blocked_fixture" }),
     /disabled by enabled_tools or disabled_tools/,
   );
+
+  const cancelledApproval = await bridge.callTool({
+    serverId: "fixture",
+    toolName: "approval_fixture",
+    arguments: { app: "fixture-app" },
+  });
+  assert.equal(JSON.parse(cancelledApproval.result.content[0].text).response.action, "cancel",
+    "an unscoped downstream elicitation must fail closed instead of borrowing another call's approval");
+
+  let capturedElicitation = null;
+  const acceptedApproval = await bridge.callTool({
+    serverId: "fixture",
+    toolName: "approval_fixture",
+    arguments: { app: "fixture-app" },
+  }, "conversation-approval", {
+    elicitationHandler: async (request) => {
+      capturedElicitation = request;
+      return { action: "accept", content: { decision: "Allow" } };
+    },
+  });
+  const acceptedPayload = JSON.parse(acceptedApproval.result.content[0].text);
+  assert.equal(acceptedPayload.response.action, "accept");
+  assert.equal(acceptedPayload.response.content.decision, "Allow");
+  assert.equal(capturedElicitation.method, "elicitation/create");
+  assert.match(capturedElicitation.params.message, /fixture-app/);
+
+  let releaseApproval;
+  let firstElicitationSeen;
+  const firstElicitation = new Promise((resolve) => { firstElicitationSeen = resolve; });
+  const release = new Promise((resolve) => { releaseApproval = resolve; });
+  const firstCall = bridge.callTool({
+    serverId: "fixture",
+    toolName: "approval_fixture",
+    arguments: { app: "serialized-app" },
+  }, "conversation-serialized", {
+    elicitationHandler: async () => {
+      firstElicitationSeen();
+      await release;
+      return { action: "accept", content: { decision: "Allow" } };
+    },
+  });
+  await firstElicitation;
+  await assert.rejects(() => bridge.callTool({
+    serverId: "fixture",
+    toolName: "approval_fixture",
+    arguments: { app: "overlap-app" },
+  }, "conversation-serialized", {
+    elicitationHandler: async () => ({ action: "accept", content: { decision: "Allow" } }),
+  }), /already has an active elicitation-bearing call/);
+  releaseApproval();
+  await firstCall;
 
   const elevatedCall = await bridge.callTool({
     serverId: "windows-mcp-elevated",
@@ -215,6 +282,8 @@ try {
     configuredApprovalMetadataPreserved: true,
     toolFiltersEnforced: true,
     resourcesAndPrompts: true,
+    scopedElicitationRelay: true,
+    concurrentElicitationFailsClosed: true,
     invalidTomlFailsOpen: true,
   }));
 } finally {

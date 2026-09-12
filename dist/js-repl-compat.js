@@ -84,7 +84,11 @@ function callArguments(selected, code, timeoutMs) {
   return args;
 }
 
-export async function callJsReplCompatibility(dependencies, { code, timeoutMs = 30_000 } = {}) {
+export async function callJsReplCompatibility(dependencies, {
+  code,
+  timeoutMs = 30_000,
+  elicitationHandler = null,
+} = {}) {
   const { codexMcpBridge, capabilityRuntime, ownerConversationId } = dependenciesFrom(dependencies);
   if (!codexMcpBridge && !capabilityRuntime) throw new Error("A linked Codex MCP bridge or Capability runtime is required.");
 
@@ -102,7 +106,7 @@ export async function callJsReplCompatibility(dependencies, { code, timeoutMs = 
         serverId: "node_repl",
         toolName: selected.toolName,
         arguments: callArguments(selected, code, timeoutMs),
-      }, ownerConversationId);
+      }, ownerConversationId, { elicitationHandler });
       if (response?.approvalRequired) {
         throw new Error("The linked Codex node_repl unexpectedly requested local bridge approval.");
       }

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { readFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { promisify } from "node:util";
 import { resolve } from "node:path";
 
@@ -42,6 +43,15 @@ for (const retired of [
 ]) {
   assert.equal(files.has(retired), false, `npm package still contains retired Browser Control artifact: ${retired}`);
 }
+for (const removed of [
+  "dist/browser-control.js",
+  "dist/browser-control.test.js",
+  "scripts/browser-control-live-gate.mjs",
+  "browser-control-bridge",
+]) {
+  assert.equal(existsSync(resolve(root, removed)), false,
+    `repository still contains removed Browser Control source: ${removed}`);
+}
 for (const path of files) {
   assert.doesNotMatch(path, /(?:^|\/)\.?[^/]*(?:\.before-|\.bak(?:-|$)|oauthdiag)/i,
     `npm package contains a local backup or diagnostic artifact: ${path}`);
@@ -55,5 +65,6 @@ console.log(JSON.stringify({
   documentationIncluded: true,
   releaseNotes,
   retiredBrowserControlExcluded: true,
+  retiredBrowserControlSourceRemoved: true,
   localBackupArtifactsExcluded: true,
 }));

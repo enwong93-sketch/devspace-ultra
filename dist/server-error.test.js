@@ -62,8 +62,10 @@ try {
   console.log(JSON.stringify({ ok: true, gate: "server-public-error", healthStatus: health.status, status: response.status }));
 } finally {
   if (httpServer) {
-    await new Promise((resolve) => httpServer.close(resolve));
+    const closed = new Promise((resolve) => httpServer.close(resolve));
+    httpServer.closeAllConnections?.();
+    await closed;
   }
   if (appClose) await appClose();
-  rmSync(root, { recursive: true, force: true });
+  rmSync(root, { recursive: true, force: true, maxRetries: 12, retryDelay: 100 });
 }

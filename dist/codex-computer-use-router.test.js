@@ -7,6 +7,8 @@ assert.equal(codexComputerUseRoute("Use Chrome browser UI to open a page and cli
 assert.equal(codexComputerUseRoute("Edit the source code and run unit tests").useComputer, false);
 
 const calls = [];
+const elicitationRequests = [];
+let nextRiskLevel = "low";
 const fakeBridge = {
   async probe(serverId, ownerConversationId) {
     assert.equal(serverId, "node_repl");
@@ -24,13 +26,26 @@ const fakeBridge = {
       }],
     };
   },
-  async callTool(input, ownerConversationId) {
+  async callTool(input, ownerConversationId, executionOptions = {}) {
     assert.equal(ownerConversationId, "conversation-a");
     calls.push(input);
     const code = String(input.arguments.code || "");
-    const payload = code.includes("runtime:")
+    let payload = code.includes("runtime:")
       ? { ok: true, target: "windows", runtime: "@oai/sky", pluginId: "computer-use@openai-bundled" }
-      : [{ id: "app-a", windows: [] }];
+      : [{ id: "app-a", windows: [{ app: "app-a", id: 1, title: "Window" }] }];
+    if (code.includes("sky.get_window_state(") || code.includes("sky.press_key(")) {
+      const riskLevel = nextRiskLevel;
+      nextRiskLevel = "low";
+      const response = await executionOptions.elicitationHandler({
+        method: "elicitation/create",
+        params: {
+          message: "Allow Codex to use App A?",
+          _meta: { connector_id: "computer-use", riskLevel, tool_params: { app: "app-a" } },
+        },
+      });
+      assert.equal(response.action, "accept");
+      payload = { window: { app: "app-a", id: 1, title: "Window" }, screenshots: [], accessibility: { tree: "Window" } };
+    }
     return {
       ok: true,
       server: "node_repl",
@@ -51,7 +66,7 @@ registerCodexComputerUseRouter({
 
 assert.deepEqual(registrations.map((entry) => entry.name), ["codex_computer_use_status", "codex_computer_use"]);
 assert.match(registrations[1].definition.description, /ordinary Chrome and Edge browser-window automation/i);
-assert.match(registrations[1].definition.description, /browser_control_\* Chrome-extension path is retired/i);
+assert.match(registrations[1].definition.description, /legacy custom Chrome-extension path has been removed/i);
 const status = await registrations[0].handler({});
 assert.equal(status.structuredContent.payload.target, "windows");
 assert.equal(status.structuredContent.nativeRuntimeEvidence.runtime, "@oai/sky");
@@ -63,12 +78,96 @@ assert.equal(observed.structuredContent.readOnly, true);
 assert.match(calls.at(-1).arguments.code, /sky\.list_apps/);
 assert.equal(calls.at(-1).arguments.timeout_ms, 20_000);
 
+const state = await registrations[1].handler({
+  action: "get_window_state",
+  input: { window: { app: "app-a", id: 1, title: "Window" }, include_text: true, include_screenshot: true },
+  timeoutMs: 20_000,
+}, {
+  async sendRequest(request) {
+    elicitationRequests.push(request);
+    assert.equal(request.params._meta.connector_id, "computer-use");
+    return { action: "accept", content: { approval_scope: "current_tool_call" } };
+  },
+});
+assert.equal(state.structuredContent.nativeRuntimeEvidence.approvalRelay.action, "accept");
+assert.equal(elicitationRequests.length, 1);
+assert.equal(elicitationRequests[0].method, "elicitation/create");
+assert.equal(elicitationRequests[0].params._meta.connector_id, "computer-use");
+
+const unsupportedExtra = {
+  async sendRequest() {
+    throw new Error("MCP error -32600: Elicitation not supported");
+  },
+};
+const fallbackObservation = await registrations[1].handler({
+  action: "get_window_state",
+  input: { window: { app: "app-a", id: 1, title: "Window" }, include_text: true },
+  timeoutMs: 20_000,
+}, unsupportedExtra);
+assert.equal(fallbackObservation.structuredContent.nativeRuntimeEvidence.approvalRelay.action, "accept");
+assert.equal(fallbackObservation.structuredContent.nativeRuntimeEvidence.approvalRelay.fallback,
+  "host-elicitation-unsupported-exact-conversation-observe-action");
+
+const fallbackAction = await registrations[1].handler({
+  action: "press_key",
+  input: { window: { app: "app-a", id: 1, title: "Window" }, key: "F6" },
+  timeoutMs: 20_000,
+}, unsupportedExtra);
+assert.equal(fallbackAction.structuredContent.nativeRuntimeEvidence.approvalRelay.action, "accept");
+assert.equal(fallbackAction.structuredContent.nativeRuntimeEvidence.approvalRelay.fallback,
+  "host-elicitation-unsupported-exact-conversation-observe-action");
+
+const rejectedSecondAction = await registrations[1].handler({
+  action: "press_key",
+  input: { window: { app: "app-a", id: 1, title: "Window" }, key: "F6" },
+  timeoutMs: 20_000,
+}, unsupportedExtra);
+assert.equal(rejectedSecondAction.isError, true,
+  "a second mutation must re-observe instead of reusing one fallback grant twice");
+assert.match(rejectedSecondAction.content[0].text, /Elicitation not supported/);
+
+nextRiskLevel = "high";
+const highRiskRejected = await registrations[1].handler({
+  action: "get_window_state",
+  input: { window: { app: "app-a", id: 1, title: "Window" }, include_text: true, diagnostic_marker: "high-risk-fixture" },
+  timeoutMs: 20_000,
+}, unsupportedExtra);
+assert.equal(highRiskRejected.isError, true,
+  "high-risk app approval must not be inferred without explicit current-user authorization");
+
+nextRiskLevel = "high";
+const highRiskObserved = await registrations[1].handler({
+  action: "get_window_state",
+  input: {
+    window: { app: "app-a", id: 1, title: "Window" },
+    include_text: true,
+    user_authorized_app_control: true,
+    diagnostic_marker: "high-risk-fixture",
+  },
+  timeoutMs: 20_000,
+}, unsupportedExtra);
+assert.notEqual(highRiskObserved.isError, true, JSON.stringify(highRiskObserved));
+assert.equal(highRiskObserved.structuredContent.nativeRuntimeEvidence.approvalRelay.action, "accept");
+assert.equal(highRiskObserved.structuredContent.nativeRuntimeEvidence.approvalRelay.riskLevel, "high");
+
+nextRiskLevel = "high";
+const highRiskAction = await registrations[1].handler({
+  action: "press_key",
+  input: { window: { app: "app-a", id: 1, title: "Window" }, key: "F6", diagnostic_marker: "high-risk-fixture" },
+  timeoutMs: 20_000,
+}, unsupportedExtra);
+assert.equal(highRiskAction.structuredContent.nativeRuntimeEvidence.approvalRelay.action, "accept");
+
 console.log(JSON.stringify({
   ok: true,
   gate: "codex-computer-use-router",
   automaticVisualRouting: true,
   ordinaryBrowserRouting: true,
   directOpenAiSkyDelegation: true,
+  approvalRelay: true,
+  hostUnsupportedObserveActionFallback: true,
+  oneMutationPerObservation: true,
+  highRiskRequiresExplicitCurrentUserAuthorization: true,
   persistentNodeRepl: true,
   fullAccessOnly: true,
   noDevSpaceGuiDriver: true,

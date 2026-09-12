@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 0.5.6 — 2026-09-12
+
+- Deleted the obsolete custom Chrome-extension implementation, its tracked source bridge, retired runtime module, tests, and live gate instead of merely excluding them from npm. Current Agent instructions and the Computer Use skill no longer advertise the old tool names.
+- Added a deterministic stale-session tombstone for the nine removed browser tools. A cached ChatGPT tool call now returns `retired_tool`, identifies `codex_computer_use` as the replacement, and explicitly states that the rest of the current DevSpace tool surface remains available.
+- Added scoped downstream-to-upstream MCP form-elicitation relay so the official linked Codex `node_repl` can display and receive the native `@oai/sky` per-app Computer Use approval. Approval handlers are conversation-isolated, call-scoped, fail closed when absent, and reject concurrent borrowing.
+- Added an exact-conversation fallback for MCP hosts that explicitly report form elicitation unsupported: only a low-risk read-only app observation can mint a five-minute grant, and exactly one subsequent mutation for the same app consumes it, preserving the required observe → one action cycle.
+- High-risk app approval in that fallback is available only when the current tool call explicitly records that the user requested or confirmed control of that app in the current turn; the flag is accepted only on the observation that mints the one-action grant and is never inferred automatically.
+- Added explicit Computer Use target boundaries for ChatGPT, Codex, terminals, shells, computer-audio prompts, connector mismatch, and app mismatch, while preserving the official observe → one action → re-observe flow for ordinary Chrome and Windows apps.
+- Extended native browser, public package, Codex MCP bridge, and Computer Use regression gates to prove source removal, stale-schema diagnostics, official approval relay, and prohibited-app isolation.
+- Made the public-error integration gate explicitly close keep-alive HTTP connections and retry Windows temporary-directory cleanup, preventing completed verification runs from leaving orphan test processes or accumulating stale test state.
+
 ## 0.5.5 — 2026-09-12
 
 - Replaced the retired DevSpace Chrome-extension `browser_control_*` execution path with the installed OpenAI Codex Computer Use runtime. Ordinary Chrome, Edge, and Windows GUI work now routes through `codex_computer_use`, the persistent linked Codex `node_repl`, and bundled `@oai/sky`; the old bridge returns HTTP 410 and its runtime artifacts are excluded from release packages.

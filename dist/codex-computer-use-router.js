@@ -1,4 +1,5 @@
 import * as z from "zod/v4";
+import { ElicitResultSchema } from "@modelcontextprotocol/sdk/types.js";
 import { callCodexComputerUse, codexComputerUseStatus } from "./codex-computer-use.js";
 
 const READ_ONLY = {
@@ -13,6 +14,8 @@ const EXECUTING = {
   idempotentHint: false,
   openWorldHint: true,
 };
+const HOST_UNSUPPORTED_APPROVAL_GRANT_MS = 5 * 60_000;
+const MAX_HOST_UNSUPPORTED_APPROVAL_GRANTS = 64;
 
 const VISUAL_PATTERNS = [
   /\b(?:computer\s*use|desktop|gui|graphical|visible\s+(?:screen|window|control)|screen(?:shot)?|click|scroll|drag|drop|keypress|mouse|keyboard|dialog|menu|browser\s+ui|form\s+ui|canvas)\b/i,
@@ -53,6 +56,10 @@ function resultFromComputerUse(result) {
   return { content, structuredContent: metadata };
 }
 
+function approvalGrantApp(value) {
+  return String(value ?? "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
 export function codexComputerUseRoute(task) {
   const text = String(task || "").trim();
   if (!text) return { useComputer: false, score: 0, reason: "empty-task" };
@@ -74,12 +81,66 @@ export function registerCodexComputerUseRouter(server, {
   resolveConversation = null,
 } = {}) {
   if (!codexMcpBridge && !capabilityRuntime) throw new Error("Linked Codex node_repl or Capability Runtime is required for Computer Use.");
+  const hostUnsupportedApprovalGrants = new Map();
   const scopedDependencies = async (extra) => {
     if (typeof resolveConversation !== "function") throw new Error("Computer Use requires a conversation authority resolver.");
     const resolved = await resolveConversation(extra);
     const ownerConversationId = String(resolved?.conversationId || "").trim();
     if (!ownerConversationId) throw new Error("Computer Use requires the current ChatGPT conversation identity.");
-    return { capabilityRuntime, codexMcpBridge, ownerConversationId };
+    const elicitationHandler = async (request) => {
+      const params = request?.params && typeof request.params === "object"
+        ? request.params
+        : request && typeof request === "object"
+          ? request
+          : {};
+      if (typeof extra?.sendRequest === "function") {
+        return await extra.sendRequest({ method: "elicitation/create", params }, ElicitResultSchema);
+      }
+      if (typeof server?.server?.elicitInput === "function") {
+        return await server.server.elicitInput(params);
+      }
+      throw new Error("The connected host does not support the Computer Use approval prompt.");
+    };
+    const allowHostUnsupportedApproval = ({
+      app,
+      readOnly,
+      mutating,
+      riskLevel,
+      explicitUserAuthorization = false,
+    } = {}) => {
+      if (riskLevel !== "low" && riskLevel !== "high") return false;
+      const appKey = approvalGrantApp(app);
+      if (!appKey) return false;
+      const now = Date.now();
+      for (const [key, grant] of hostUnsupportedApprovalGrants) {
+        if (Number(grant?.expiresAt || 0) <= now) hostUnsupportedApprovalGrants.delete(key);
+      }
+      const key = `${ownerConversationId}\0${appKey}`;
+      if (readOnly === true) {
+        if (riskLevel === "high" && explicitUserAuthorization !== true) return false;
+        hostUnsupportedApprovalGrants.set(key, {
+          expiresAt: now + HOST_UNSUPPORTED_APPROVAL_GRANT_MS,
+          riskLevel,
+          explicitUserAuthorization: explicitUserAuthorization === true,
+        });
+        while (hostUnsupportedApprovalGrants.size > MAX_HOST_UNSUPPORTED_APPROVAL_GRANTS) {
+          hostUnsupportedApprovalGrants.delete(hostUnsupportedApprovalGrants.keys().next().value);
+        }
+        return true;
+      }
+      if (mutating !== true) return false;
+      const grant = hostUnsupportedApprovalGrants.get(key) || null;
+      hostUnsupportedApprovalGrants.delete(key);
+      return Number(grant?.expiresAt || 0) > now
+        && (grant?.riskLevel === "low" || grant?.explicitUserAuthorization === true);
+    };
+    return {
+      capabilityRuntime,
+      codexMcpBridge,
+      ownerConversationId,
+      elicitationHandler,
+      allowHostUnsupportedApproval,
+    };
   };
 
   server.registerTool("codex_computer_use_status", {
@@ -94,7 +155,7 @@ export function registerCodexComputerUseRouter(server, {
 
   server.registerTool("codex_computer_use", {
     title: "OpenAI Codex Computer Use",
-    description: "Use automatically for Windows GUI work, including ordinary Chrome and Edge browser-window automation, that requires seeing or operating a visible app. This is a thin gate over the installed OpenAI bundled Computer Use runtime: persistent Codex node_repl imports @oai/sky, and all window discovery, screenshots, accessibility, clicks, typing, scrolling and dragging are executed by sky itself. DevSpace has no second GUI or browser driver; the former browser_control_* Chrome-extension path is retired. Follow observe→decide→one action→re-observe. Do not automate terminals, authentication/password/security UI, or ChatGPT/Codex app UI.",
+    description: "Use automatically for Windows GUI work, including ordinary Chrome and Edge browser-window automation, that requires seeing or operating a visible app. This is a thin gate over the installed OpenAI bundled Computer Use runtime: persistent Codex node_repl imports @oai/sky, and all window discovery, screenshots, accessibility, clicks, typing, scrolling and dragging are executed by sky itself. DevSpace has no second GUI or browser driver; the legacy custom Chrome-extension path has been removed. Follow observe→decide→one action→re-observe. When the MCP host explicitly cannot render the native approval prompt and the user has explicitly requested or confirmed control of this app in the current turn, pass input.user_authorized_app_control=true on the read-only observation; the resulting exact-conversation grant permits one subsequent action for that app. Never infer this flag from general task context. Do not automate terminals, authentication/password/security UI, or ChatGPT/Codex app UI.",
     inputSchema: {
       action: z.enum([
         "list_apps",

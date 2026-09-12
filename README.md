@@ -7,11 +7,11 @@ DuckDNS/DDNS direct ingress is the recommended production route. It keeps the Lo
 For the most reliable guided path, install the setup Agent Skill first, then ask the Agent to use `devspace-ultra-setup`. The Skill lets the Agent execute local installation/repair commands and guide the user through the unavoidable DuckDNS-account and router-port-forwarding steps one at a time.
 
 ```powershell
-$p=Join-Path $env:TEMP 'devspace-ultra-install-skill.ps1'; iwr https://raw.githubusercontent.com/enwong93-sketch/devspace-ultra/v0.5.5/install-skill.ps1 -OutFile $p; & $p
+$p=Join-Path $env:TEMP 'devspace-ultra-install-skill.ps1'; iwr https://raw.githubusercontent.com/enwong93-sketch/devspace-ultra/v0.5.6/install-skill.ps1 -OutFile $p; & $p
 ```
 
 ```powershell
-$p=Join-Path $env:TEMP 'devspace-ultra-install.ps1'; iwr https://raw.githubusercontent.com/enwong93-sketch/devspace-ultra/v0.5.5/install.ps1 -OutFile $p; & $p -Network DuckDNS
+$p=Join-Path $env:TEMP 'devspace-ultra-install.ps1'; iwr https://raw.githubusercontent.com/enwong93-sketch/devspace-ultra/v0.5.6/install.ps1 -OutFile $p; & $p -Network DuckDNS
 ```
 
 Use the Cloudflare named-tunnel fallback only when DDNS/direct inbound access is unavailable. A Worker relay/free plan is quota-governed and must not be treated as unlimited. See [one-command setup](docs/ONE_COMMAND_SETUP.md) and [network ingress policy](docs/NETWORK_INGRESS.md).
@@ -53,7 +53,7 @@ The required workflow is:
 
 Navigation uses the visible address bar and native key actions. Stale accessibility indexes, screenshot IDs, and coordinates are never reused after the page changes. Password, authentication, security, ChatGPT, Codex, and terminal UI remain excluded.
 
-The former DevSpace `browser_control_*` Chrome-extension implementation is retired: its MCP tools are no longer registered, its local bridge returns HTTP 410 with `codex_computer_use` as the replacement, and the extension is excluded from new packages. The historical design document is retained only as a migration record; see [Codex native browser gate](docs/browser-control-architecture.md).
+The obsolete DevSpace Chrome-extension implementation has been removed from the repository and release package. Its legacy local bridge returns HTTP 410 with `codex_computer_use` as the replacement, and a cached old MCP tool call receives a deterministic `retired_tool` result instead of a generic missing-tool error. See [Codex native browser gate](docs/browser-control-architecture.md).
 
 ### Unified Agent Capability Runtime — v0.3
 
@@ -267,7 +267,7 @@ Distribution-level verification:
 npm run verify:ultra
 ```
 
-The Chat Swarm regression covers multi-worker fan-out, targeted routing, submit/repark, sparse wake-up, retry idempotency, persistence, close wake-up, recycle safety, resize invariants, session-bound ChatGPT joins, and legacy token compatibility. The native browser gate regression verifies that ordinary Chrome/Edge work routes only through `codex_computer_use`, the persistent Codex `node_repl`, and `@oai/sky`; no `browser_control_*` tools or custom extension transport remain registered or packaged. Capability Runtime regression covers install/trust separation, shared connection deduplication, stateful instance isolation, MCP tools/prompts/resources, command adapters, plugin path confinement, and secret non-persistence. Auto Compact regression covers the 90% gate, DOM + Backend Context Ledger pressure, capsule redaction, cached-tool-schema continuation through `chat_swarm_join`, protected-runtime exclusion, one-time tickets, session-bound continuation, replay rejection, and a 500-window rotation stress test. Runtime Identity regression verifies worker global-launch isolation, protected stop/update boundaries, authoritative pool planning, deferred self-heal, stale-cookie-safe CDP Session Seed, canonical conversation persistence, and safe backend handover.
+The Chat Swarm regression covers multi-worker fan-out, targeted routing, submit/repark, sparse wake-up, retry idempotency, persistence, close wake-up, recycle safety, resize invariants, session-bound ChatGPT joins, and legacy token compatibility. The native browser gate regression verifies that ordinary Chrome/Edge work routes only through `codex_computer_use`, the persistent Codex `node_repl`, and `@oai/sky`; no custom extension transport remains registered, tracked, or packaged. Capability Runtime regression covers install/trust separation, shared connection deduplication, stateful instance isolation, MCP tools/prompts/resources, command adapters, plugin path confinement, and secret non-persistence. Auto Compact regression covers the 90% gate, DOM + Backend Context Ledger pressure, capsule redaction, cached-tool-schema continuation through `chat_swarm_join`, protected-runtime exclusion, one-time tickets, session-bound continuation, replay rejection, and a 500-window rotation stress test. Runtime Identity regression verifies worker global-launch isolation, protected stop/update boundaries, authoritative pool planning, deferred self-heal, stale-cookie-safe CDP Session Seed, canonical conversation persistence, and safe backend handover.
 
 Release-specific live gates additionally exercise the real installed Codex Computer Use runtime, a real GitHub-installed capability package, dual stateful MCP instances, and Codex-plugin compatibility. The v0.3 release environment scanned 71 Codex plugin manifests with 71/71 structural compatibility; platform-managed App connector IDs and Codex host lifecycle hooks are preserved as explicit host dependencies rather than silently emulated. The old Chrome extension live gate remains historical and is not part of the current production acceptance path.
 
@@ -292,7 +292,7 @@ DevSpace Ultra is an independent community fork/distribution and is not an offic
 
 ## Codex Computer Use delegation
 
-DevSpace Ultra exposes visual desktop and ordinary browser-window interaction through the built-in `codex-computer-use` routing/skill capability. The top-level `codex_computer_use` tool delegates directly to the installed OpenAI bundled Computer Use runtime through the existing persistent Codex `node_repl`, which imports `@oai/sky`. DevSpace does not ship a second mouse, keyboard, screenshot, Selenium, Playwright, Chrome extension/CDP driver, PowerShell UIAutomation, SendInput, or UI Automation implementation under that name. The former `browser_control_*` implementation is retained only as historical source and is excluded from production registration and release packages.
+DevSpace Ultra exposes visual desktop and ordinary browser-window interaction through the built-in `codex-computer-use` routing/skill capability. The top-level `codex_computer_use` tool delegates directly to the installed OpenAI bundled Computer Use runtime through the existing persistent Codex `node_repl`, which imports `@oai/sky`. DevSpace does not ship a second mouse, keyboard, screenshot, Selenium, Playwright, Chrome extension/CDP driver, PowerShell UIAutomation, SendInput, or UI Automation implementation. The obsolete custom implementation and extension source have been deleted.
 
 The router is intended for visible controls, dialogs, screenshots, accessibility state, scrolling, dragging, GUI typing, and rendered-state verification. Source editing, repository search, shell commands, and APIs stay on normal workspace tools. Computer Use follows the bundled OpenAI observe → decide → one action → re-observe workflow and accepts only structured, allowlisted `sky.*` actions rather than arbitrary JavaScript.
 

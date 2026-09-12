@@ -9,6 +9,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport, getDefaultEnvironment } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
+import { ElicitRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 
 const MAX_SERVERS = 128;
 const MAX_TOOLS = 500;
@@ -361,7 +362,16 @@ export class CodexMcpBridge {
   }
 
   async createClient(server) {
-    const client = new Client({ name: `devspace-codex-mcp-${server.id}`, version: "0.5.0" });
+    const elicitationRuntime = { handler: null };
+    const client = new Client(
+      { name: `devspace-codex-mcp-${server.id}`, version: "0.5.6" },
+      { capabilities: { elicitation: { form: {} } } },
+    );
+    client.setRequestHandler(ElicitRequestSchema, async (request) => {
+      const handler = elicitationRuntime.handler;
+      if (typeof handler !== "function") return { action: "cancel" };
+      return await handler(request);
+    });
     let transport;
     if (server.type === "stdio") {
       const environment = { ...getDefaultEnvironment() };
@@ -412,7 +422,7 @@ export class CodexMcpBridge {
       try { await transport.close(); } catch {}
       throw new Error(`Codex MCP server ${server.id} failed to connect: ${error instanceof Error ? error.message : String(error)}`);
     }
-    return { client, transport };
+    return { client, transport, elicitationRuntime };
   }
 
   async getClient(serverId, ownerConversationId = INTERNAL_CODEX_OWNER) {
@@ -474,13 +484,24 @@ export class CodexMcpBridge {
     for (const id of serverIds) await this.closeClient(id, ownerConversationId);
   }
 
-  async execute(serverId, operation, ownerConversationId = INTERNAL_CODEX_OWNER) {
+  async execute(serverId, operation, ownerConversationId = INTERNAL_CODEX_OWNER, {
+    elicitationHandler = null,
+  } = {}) {
     const { server, holder } = await this.getClient(serverId, ownerConversationId);
+    const runtime = holder.elicitationRuntime;
+    if (elicitationHandler != null) {
+      if (typeof elicitationHandler !== "function") throw new Error("elicitationHandler must be a function.");
+      if (!runtime) throw new Error(`Codex MCP server ${server.id} does not expose an elicitation runtime.`);
+      if (runtime.handler) throw new Error(`Codex MCP server ${server.id} already has an active elicitation-bearing call for this conversation.`);
+      runtime.handler = elicitationHandler;
+    }
     try {
       return { server, holder, result: await operation(holder.client) };
     } catch (error) {
       if (shouldInvalidateClient(error)) await this.closeClient(server.id, ownerConversationId).catch(() => {});
       throw error;
+    } finally {
+      if (runtime?.handler === elicitationHandler) runtime.handler = null;
     }
   }
 
@@ -569,7 +590,11 @@ export class CodexMcpBridge {
     return { ok: true, server: server.id, uri: resourceUri, result };
   }
 
-  async callTool({ serverId, toolName, arguments: args = {} } = {}, ownerConversationId = INTERNAL_CODEX_OWNER) {
+  async callTool(
+    { serverId, toolName, arguments: args = {} } = {},
+    ownerConversationId = INTERNAL_CODEX_OWNER,
+    executionOptions = {},
+  ) {
     const server = this.requireServer(serverId);
     const selected = String(toolName ?? "").trim();
     if (!selected) throw new Error("toolName is required.");
@@ -583,7 +608,12 @@ export class CodexMcpBridge {
     if (!tool) throw new Error(`Unknown or unavailable Codex MCP tool ${server.id}/${selected}. Inspect the server first.`);
     const approval = approvalDecision(server, tool, this.executionPolicy);
     const requestKey = sha256(JSON.stringify({ serverId: server.id, toolName: selected, arguments: args || {} })).slice(0, 24);
-    const { result } = await this.execute(server.id, (client, options) => client.callTool({ name: selected, arguments: args || {} }, undefined, options), ownerConversationId);
+    const { result } = await this.execute(
+      server.id,
+      (client, options) => client.callTool({ name: selected, arguments: args || {} }, undefined, options),
+      ownerConversationId,
+      executionOptions,
+    );
     return {
       ok: true,
       approvalRequired: false,

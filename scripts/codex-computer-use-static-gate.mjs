@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
 
 const [server, runtime, router, adapter, pluginText, skill, packageText, canary, replCompat] = await Promise.all([
   readFile("dist/server.js", "utf8"),
@@ -24,7 +25,9 @@ assert.match(router, /server\.registerTool\("codex_computer_use"/);
 assert.match(router, /callCodexComputerUse/);
 assert.match(router, /persistent Codex node_repl imports @oai\/sky/i);
 assert.match(router, /ordinary Chrome and Edge browser-window automation/i);
-assert.match(router, /former browser_control_\* Chrome-extension path is retired/i);
+assert.match(router, /legacy custom Chrome-extension path has been removed/i);
+assert.match(router, /elicitation\/create/);
+assert.match(router, /ElicitResultSchema/);
 assert.match(adapter, /callJsReplCompatibility/);
 assert.match(adapter, /CODEX_COMPUTER_USE_RUNTIME = "@oai\/sky"/);
 assert.match(adapter, /CODEX_COMPUTER_USE_PLUGIN_ID = "computer-use@openai-bundled"/);
@@ -37,7 +40,11 @@ assert.match(adapter, /"drag",/);
 assert.match(adapter, /if \(!ACTIONS\.has\(normalized\)\) throw new Error/);
 assert.match(adapter, /sky\.\$\{method\}/);
 assert.match(adapter, /devspaceGuiDriver:\s*false/);
-assert.doesNotMatch(adapter, /spawn\(|Selenium|Playwright|UIAutomation|SendInput|powershell/i);
+assert.match(adapter, /validateComputerUseElicitation/);
+assert.match(adapter, /approvalRelay/);
+assert.match(adapter, /PROHIBITED_APP_PATTERN/);
+assert.doesNotMatch(adapter, /spawn\(|child_process|Selenium|Playwright|UIAutomation|SendInput/i,
+  "the adapter may name prohibited apps, but must not implement a second GUI process or driver");
 assert.match(replCompat, /linked Codex runtime is used directly/i);
 assert.equal(plugin.id, "codex-computer-use");
 assert.equal(Object.hasOwn(plugin, "tools"), false);
@@ -46,9 +53,15 @@ assert.match(plugin.description, /@oai\/sky/);
 assert.match(skill, /Use `codex_computer_use` automatically/);
 assert.match(skill, /shared persistent Codex `node_repl` importing `@oai\/sky`/);
 assert.match(skill, /ordinary Chrome or Edge browser window/);
-assert.match(skill, /former `browser_control_\*` Chrome-extension driver is retired/);
+assert.match(skill, /obsolete custom Chrome-extension driver has been removed/);
 assert.equal(packageJson.files.includes("capabilities"), true);
 assert.equal(packageJson.files.includes("browser-control-bridge"), false);
+for (const removed of [
+  "browser-control-bridge",
+  "dist/browser-control.js",
+  "dist/browser-control.test.js",
+  "scripts/browser-control-live-gate.mjs",
+]) assert.equal(existsSync(removed), false, `removed custom browser source still exists: ${removed}`);
 assert.equal(Object.hasOwn(packageJson.scripts, "verify:codex-sandbox"), false);
 assert.match(packageJson.scripts["verify:ultra"], /verify:computer-use/);
 assert.doesNotMatch(runtime, /MAX_TOOL_TIMEOUT_MS|Promise\.race\(|setTimeout\(/,
@@ -64,8 +77,9 @@ console.log(JSON.stringify({
   automaticRouteTool: true,
   persistentCodexNodeRepl: true,
   officialSkyRuntime: true,
+  officialApprovalRelay: true,
   ordinaryBrowserWindowAutomation: true,
-  customChromeExtensionRetired: true,
+  customChromeExtensionRemoved: true,
   structuredActionsOnly: true,
   fullAccessOnly: true,
   sandboxToolSurfaceRemoved: true,

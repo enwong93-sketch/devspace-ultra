@@ -34,6 +34,8 @@ const MUTATING_ACTIONS = new Set([
   "activate_window",
 ]);
 
+const PROHIBITED_APP_PATTERN = /(?:chatgpt|openai\.codex|\bcodex\b|windows\s*terminal|terminal|powershell|pwsh|cmd\.exe|command\s*prompt|conhost|wt\.exe)/i;
+
 function boundedString(value, max, label) {
   if (value == null) return undefined;
   const text = String(value);
@@ -60,6 +62,65 @@ function normalizeWindow(value) {
     id: integer(value.id, "window.id"),
     app: boundedString(value.app, 4096, "window.app"),
     ...(value.title == null ? {} : { title: boundedString(value.title, 2000, "window.title") }),
+  };
+}
+
+function comparableApp(value) {
+  return String(value ?? "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+function sameApp(left, right) {
+  const a = comparableApp(left);
+  const b = comparableApp(right);
+  if (!a || !b) return false;
+  return a === b || (Math.min(a.length, b.length) >= 4 && (a.includes(b) || b.includes(a)));
+}
+
+function targetApp(action, input) {
+  if (["status", "list_apps", "list_windows"].includes(action)) return null;
+  return String(input?.window?.app || input?.app || "").trim() || null;
+}
+
+function assertAllowedApp(app) {
+  if (!app) return;
+  if (PROHIBITED_APP_PATTERN.test(app)) {
+    throw new Error(`Codex Computer Use is not permitted to operate prohibited app ${app}.`);
+  }
+}
+
+function hostElicitationUnsupported(error) {
+  return /elicitation (?:is )?not supported|does not support the computer use approval prompt/i.test(
+    error instanceof Error ? error.message : String(error),
+  );
+}
+
+export function validateComputerUseElicitation(request, expectedApp) {
+  const params = request?.params && typeof request.params === "object"
+    ? request.params
+    : request && typeof request === "object"
+      ? request
+      : {};
+  const meta = params?.meta && typeof params.meta === "object"
+    ? params.meta
+    : params?._meta && typeof params._meta === "object"
+      ? params._meta
+      : {};
+  if (String(meta.connector_id || "") !== "computer-use") {
+    throw new Error("Rejected an elicitation that was not issued by the official Computer Use connector.");
+  }
+  const requestedApp = String(meta?.tool_params?.app || "").trim();
+  if (expectedApp && requestedApp && !sameApp(expectedApp, requestedApp)) {
+    throw new Error(`Computer Use approval app mismatch: expected ${expectedApp}, received ${requestedApp}.`);
+  }
+  if (/computer-audio|record computer audio|microphone/i.test(`${requestedApp} ${params.message || ""}`)) {
+    throw new Error("Computer audio approval is outside the DevSpace Computer Use gate.");
+  }
+  assertAllowedApp(requestedApp || expectedApp);
+  return {
+    connectorId: "computer-use",
+    expectedApp: expectedApp || null,
+    requestedApp: requestedApp || null,
+    riskLevel: String(meta.riskLevel || "").trim() || null,
   };
 }
 
@@ -186,11 +247,54 @@ export async function callCodexComputerUse(dependencies, {
   timeoutMs = 30_000,
 } = {}) {
   const info = codexComputerUseActionInfo(action);
+  const explicitUserAuthorization = input?.user_authorized_app_control === true;
   const normalized = normalizeInput(info.action, input);
+  const app = targetApp(info.action, normalized);
+  assertAllowedApp(app);
+  const approvalEvidence = {
+    required: false,
+    requested: false,
+    action: null,
+    app,
+  };
+  const upstreamElicitation = typeof dependencies?.elicitationHandler === "function"
+    ? dependencies.elicitationHandler
+    : null;
+  const elicitationHandler = app
+    ? async (request) => {
+        const validated = validateComputerUseElicitation(request, app);
+        approvalEvidence.required = true;
+        approvalEvidence.requested = true;
+        if (!upstreamElicitation) return { action: "cancel" };
+        approvalEvidence.requestedApp = validated.requestedApp;
+        approvalEvidence.riskLevel = validated.riskLevel;
+        try {
+          const response = await upstreamElicitation(request);
+          approvalEvidence.action = String(response?.action || "") || null;
+          return response;
+        } catch (error) {
+          const fallback = typeof dependencies?.allowHostUnsupportedApproval === "function"
+            && hostElicitationUnsupported(error)
+            && dependencies.allowHostUnsupportedApproval({
+              app: validated.requestedApp || app,
+              action: info.action,
+              readOnly: info.readOnly,
+              mutating: info.mutating,
+              riskLevel: validated.riskLevel,
+              explicitUserAuthorization,
+            }) === true;
+          if (!fallback) throw error;
+          approvalEvidence.action = "accept";
+          approvalEvidence.fallback = "host-elicitation-unsupported-exact-conversation-observe-action";
+          return { action: "accept" };
+        }
+      }
+    : null;
   const code = operationCode(info.action, normalized);
   const response = await callJsReplCompatibility(dependencies, {
     code,
     timeoutMs: Math.max(1_000, Math.min(120_000, Number(timeoutMs) || 30_000)),
+    elicitationHandler,
   });
   const parsed = parseNodeReplPayload(response);
   return {
@@ -205,6 +309,7 @@ export async function callCodexComputerUse(dependencies, {
       nodeRepl: true,
       runtime: CODEX_COMPUTER_USE_RUNTIME,
       devspaceGuiDriver: false,
+      approvalRelay: approvalEvidence,
     },
     executionPolicy: executionPolicySnapshot(),
   };
