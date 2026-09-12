@@ -122,6 +122,24 @@ function parseMcpBody(response) {
   return null;
 }
 
+async function exactConversationAtPort(port) {
+  try {
+    const response = await fetch(`http://127.0.0.1:${port}/json/list`, { cache: "no-store" });
+    if (!response.ok) return null;
+    const targets = await response.json();
+    const matches = (Array.isArray(targets) ? targets : [])
+      .filter((target) => target?.type === "page" && /chatgpt\.com/i.test(String(target?.url || "")))
+      .map((target) => {
+        try { return new URL(String(target.url)).pathname.match(/\/c\/([^/?#]+)/)?.[1] || null; }
+        catch { return null; }
+      })
+      .filter(Boolean);
+    return matches.length === 1 ? matches[0] : null;
+  } catch {
+    return null;
+  }
+}
+
 async function postMcp(baseUrl, body, { accessToken, sessionId, protocolVersion, openAiSessionId } = {}) {
   return await httpRequestBuffer(baseUrl, "/mcp", {
     method: "POST",
@@ -299,7 +317,13 @@ try {
   const offlineBlenderPort = await nextDistinctPort();
   const coreAPort = await nextDistinctPort();
   const coreBPort = await nextDistinctPort();
-  const replayConversationId = "canary-main-01-conversation";
+  // Replayed direct-session authority is intentionally page-verified. Use the
+  // currently open Main-01 conversation when this live canary is run beside a
+  // production desktop; otherwise verify the fail-closed path rather than
+  // inventing a browser page that does not exist.
+  const liveReplayConversationId = await exactConversationAtPort(9721);
+  const replayConversationId = liveReplayConversationId || "canary-main-01-conversation";
+  const replayPageAvailable = Boolean(liveReplayConversationId);
   const replayRuntimeId = "rosa-main-01-existing";
   const replayOpenAiSessionId = "stable-gateway-replayed-main01-session";
   const replaySessionFingerprint = createHash("sha256").update(replayOpenAiSessionId).digest("hex");
@@ -311,6 +335,8 @@ try {
       runtimeKeys: ["main-01"],
       ambiguous: false,
       updatedAt: new Date().toISOString(),
+      verifiedDirectSession: true,
+      verifiedDirectSessionAt: new Date().toISOString(),
     }],
   }, null, 2)}\n`, "utf8");
   await writeFile(join(stateDir, "blender-runtimes.json"), `${JSON.stringify({
@@ -553,19 +579,29 @@ try {
   );
   const replayedDirectPayload = parseMcpBody(replayedDirectStatus);
   const replayedDirectResult = replayedDirectPayload?.result?.structuredContent;
-  assert.equal(
-    replayedDirectPayload?.result?.isError === true,
-    false,
-    "replayed Main-01 direct blender_runtime call must not return a tool error",
-  );
-  assert.equal(replayedDirectResult?.ok, true);
-  assert.equal(replayedDirectResult?.runtime?.runtimeId, replayRuntimeId);
-  assert.equal(replayedDirectResult?.runtime?.ownerConversationId, replayConversationId);
-  assert.equal(
-    replayedDirectResult?.runtime?.state,
-    "offline",
-    "the canary Blender runtime is deliberately offline; success proves replayed authority/ownership resolution without touching a live Blender process",
-  );
+  if (replayPageAvailable) {
+    assert.equal(
+      replayedDirectPayload?.result?.isError === true,
+      false,
+      "page-verified replayed Main-01 direct blender_runtime call must not return a tool error",
+    );
+    assert.equal(replayedDirectResult?.ok, true);
+    assert.equal(replayedDirectResult?.runtime?.runtimeId, replayRuntimeId);
+    assert.equal(replayedDirectResult?.runtime?.ownerConversationId, replayConversationId);
+    assert.equal(
+      replayedDirectResult?.runtime?.state,
+      "offline",
+      "the canary Blender runtime is deliberately offline; success proves replayed authority/ownership resolution without touching a live Blender process",
+    );
+  } else {
+    assert.equal(replayedDirectPayload?.result?.isError, true,
+      "a replayed direct session without one exact live conversation page must fail closed");
+    assert.match(
+      String(replayedDirectPayload?.result?.content?.[0]?.text || ""),
+      /conversation identity is unavailable|conversation authority/i,
+      "the no-page replay failure must be an explicit identity error, not a timeout or unrelated tool failure",
+    );
+  }
 
   const refreshB = await refreshThroughGateway(gatewayBaseUrl, {
     clientId: oauth.clientId,
@@ -754,7 +790,8 @@ try {
     backgroundProfile: [...backgroundProfile].sort(),
     gatewayPortStable: runtime.gatewayPort === gatewayPortBefore,
     publicSessionStable: toolsAfter.headers["mcp-session-id"] === publicSessionId,
-    replayedMain01DirectTool: true,
+    replayedMain01DirectTool: replayPageAvailable,
+    replayedDirectSessionFailClosedWithoutPage: !replayPageAvailable,
     oauthRefreshBeforeHandover: true,
     oauthRefreshAfterHandover: true,
     refreshTokenRotatedTwice: true,

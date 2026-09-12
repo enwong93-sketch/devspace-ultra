@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
+import { readFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import { resolve } from "node:path";
 
 const execFileAsync = promisify(execFile);
 const root = resolve(import.meta.dirname, "..");
+const packageJson = JSON.parse(await readFile(resolve(root, "package.json"), "utf8"));
+const releaseNotes = `docs/releases/V${packageJson.version}.md`;
 const npmCli = process.env.npm_execpath;
 assert.ok(npmCli, "npm_execpath is required; run this gate through npm run verify:public-release.");
 const { stdout } = await execFileAsync(process.execPath, [npmCli, "pack", "--dry-run", "--json"], {
@@ -26,6 +29,7 @@ for (const required of [
   "dist/server.js",
   "docs/ONE_COMMAND_SETUP.md",
   "docs/NETWORK_INGRESS.md",
+  releaseNotes,
 ]) {
   assert.ok(files.has(required), `npm package is missing required public setup file: ${required}`);
 }
@@ -38,6 +42,10 @@ for (const retired of [
 ]) {
   assert.equal(files.has(retired), false, `npm package still contains retired Browser Control artifact: ${retired}`);
 }
+for (const path of files) {
+  assert.doesNotMatch(path, /(?:^|\/)\.?[^/]*(?:\.before-|\.bak(?:-|$)|oauthdiag)/i,
+    `npm package contains a local backup or diagnostic artifact: ${path}`);
+}
 console.log(JSON.stringify({
   ok: true,
   gate: "package-contents",
@@ -45,5 +53,7 @@ console.log(JSON.stringify({
   publicInstallerIncluded: true,
   networkRunnersIncluded: true,
   documentationIncluded: true,
+  releaseNotes,
   retiredBrowserControlExcluded: true,
+  localBackupArtifactsExcluded: true,
 }));

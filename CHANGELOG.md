@@ -2,9 +2,14 @@
 
 ## Unreleased
 
+## 0.5.5 — 2026-09-12
+
 - Replaced the retired DevSpace Chrome-extension `browser_control_*` execution path with the installed OpenAI Codex Computer Use runtime. Ordinary Chrome, Edge, and Windows GUI work now routes through `codex_computer_use`, the persistent linked Codex `node_repl`, and bundled `@oai/sky`; the old bridge returns HTTP 410 and its runtime artifacts are excluded from release packages.
 - Re-enabled Goal Recovery through the exact-conversation page-composer transport shared with interrupted-turn rescue. Recovery no longer runs Primary repair, activates or opens a window, navigates/reloads a page, selects by Runtime alone, or retries after a send has been committed.
 - Fixed server-side direct MCP authority for long assistant turns. After one direct request is verified against the exact active conversation page, later requests in the same assistant turn reuse only bounded hashed request-trace aliases, re-verify the page on every call, fail closed on cross-conversation ambiguity, and revoke inherited authority when the conversation settles. This restores `devspace_progress_report`, Goal/Plan, Blender routing, and Codex Computer Use without zombie correlation waiters.
+- Fixed reused ChatGPT session identity after a Main Runtime navigates to another conversation. A newly observed exact browser turn replaces the stale route only when either the conversation or physical Runtime is unchanged; unrelated conversation-plus-Runtime combinations remain ambiguous and fail closed.
+- Reduced the verified twenty-minute interrupted-turn rescue to the exact visible message `- 繼續`. The backend still enforces the twenty-minute threshold, exact conversation ownership, interruption evidence, empty composer, normal-completion/cancellation disarm, and one committed rescue per episode.
+- Hardened release packaging so timestamped `.before-*` and `.bak*` diagnostics cannot enter the npm archive, while the public package gate continues to reject retired Browser Control artifacts.
 
 ## 0.5.4 — 2026-09-10
 

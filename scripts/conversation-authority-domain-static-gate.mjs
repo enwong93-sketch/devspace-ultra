@@ -47,8 +47,18 @@ assert.match(correlation, /sessionsIntersect\(sessionAliases, entry\.sessionCorr
   "a wrapped server-side session descriptor may bind only through a shared hashed alias from the browser turn");
 assert.match(server, /const traceCorrelationFingerprints = requestTraceCorrelationFingerprints\(req\?\.headers \|\| \{\}\);/);
 assert.match(server, /const sessionCorrelationFingerprints = sessionCorrelationFingerprintsFromHeaders\(req\?\.headers \|\| \{\}\);/);
-assert.match(server, /authoritativeCurrent:\s*true/,
-  "an exact request trace may refresh the reused MCP session's current conversation mapping");
+assert.match(server, /resolveVerifiedDirectSession\(sessionFingerprint, \{/,
+  "later trace groups may reuse only a previously exact page-verified direct session");
+assert.match(server, /requireGenerating:\s*false/,
+  "server-side tool calls may continue after the renderer looks idle, but only through exact session + page verification");
+assert.match(server, /persistVerifiedDirectSessionIdentity\(\{/,
+  "an exact trace/page join must persist the current opaque direct-session fingerprint");
+assert.match(server, /onConversationIdentity:\s*\(event\)\s*=>\s*\{[\s\S]*authoritativeCurrent:\s*true/,
+  "browser-observed current-turn identity must collapse stale same-Runtime conversation routes");
+assert.match(server, /progressLivenessAdapter\.find\(\{[\s\S]*conversationId:\s*candidate\.conversationId/,
+  "direct-session authority must fail closed when a conversation is open in more than one Main Runtime");
+assert.match(server, /observeVerifiedDirectSession/,
+  "direct persistence must use the strict ambiguity-preserving registry path");
 assert.match(correlation, /entry\.sessionFingerprint === sessionHint/,
   "a request-owned hashed MCP session may confirm the current browser turn without binding narration to a Runtime");
 assert.match(correlation, /entry\.runtimeKey === runtimeHint/);
@@ -110,5 +120,7 @@ console.log(JSON.stringify({
   twentyMinuteInterruptedTurnRescueOnly: true,
   normalCompletionDisarms: true,
   exactSessionTurnCorrelation: true,
+  pageVerifiedDirectSessionCrossTraceReuse: true,
+  idleRendererDirectSessionReverification: true,
   restartFallbackPageVerified: true,
 }));

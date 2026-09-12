@@ -1,6 +1,6 @@
 {
   "name": "devspace-ultra",
-  "version": "0.5.4",
+  "version": "0.5.5",
   "description": "DevSpace Ultra: elastic ChatGPT Classic orchestration, Goal/Plan UX, Stream Recovery, universal capabilities, and model-aware long-context continuity.",
   "type": "module",
   "main": "dist/server.js",
@@ -15,6 +15,8 @@
   "files": [
     "dist",
     "!dist/chat-swarm.js.bak-before-plain-tools",
+    "!dist/*.before-*",
+    "!dist/*.bak*",
     "!dist/codex-sandbox.js",
     "!dist/codex-sandbox.test.js",
     "!dist/browser-control.js",
@@ -26,6 +28,7 @@
     "chat-swarm-browser-bridge",
     "capabilities",
     "scripts",
+    "!scripts/*.before-*",
     "!scripts/chat-swarm-classic-callback-relay.ps1",
     "!scripts/browser-control-live-gate.mjs",
     "skills",
@@ -42,7 +45,7 @@
     "access": "public"
   },
   "scripts": {
-    "verify:public-release": "node scripts/public-release-static-gate.mjs && node scripts/public-path-safety-gate.mjs && node scripts/package-contents-gate.mjs",
+    "verify:public-release": "node scripts/release-version-consistency-gate.mjs && node scripts/public-release-static-gate.mjs && node scripts/public-path-safety-gate.mjs && node scripts/package-contents-gate.mjs",
     "verify:production-soak": "node scripts/production-core-soak.mjs 300 5",
     "verify:conversation-bridge": "node --check scripts/devspace-conversation-bridge.mjs && node --check scripts/devspace-conversation-bridge-static-gate.mjs && node scripts/devspace-conversation-bridge-static-gate.mjs && node dist/blender-runtime-manager.test.js",
     "build": "node -e \"console.log('DevSpace Ultra ships a prebuilt dist/ tree; validating the distributable instead of recompiling.')\" && npm run verify:ultra",

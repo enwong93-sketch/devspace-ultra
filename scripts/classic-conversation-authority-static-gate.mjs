@@ -13,7 +13,13 @@ assert.match(server, /ClassicConversationAuthorityRegistry/, "server must instan
 assert.match(server, /classic-conversation-authority\.json/, "authority evidence must persist under canonical state");
 assert.match(server, /conversationAuthorityReady/, "server must gate first observation on persisted-registry load");
 assert.match(server, /persistConversationIdentity/, "server must use one bounded persistence path for every native identity source");
+assert.match(server, /persistVerifiedDirectSessionIdentity/,
+  "an exact page-verified direct request must persist its opaque session fingerprint for later trace groups");
 assert.match(server, /observeNativeTurn\(\{[\s\S]*sessionFingerprint:\s*event\.sessionFingerprint[\s\S]*conversationId:\s*event\.conversationId/, "native identity callback must feed session fingerprint + conversation id to authority registry");
+assert.match(server, /observeVerifiedDirectSession\(\{[\s\S]*sessionFingerprint:\s*event\.sessionFingerprint[\s\S]*conversationId:\s*event\.conversationId/,
+  "direct-session persistence must use the strict non-overwriting authority path");
+assert.match(server, /onConversationIdentity:\s*\(event\)\s*=>\s*\{[\s\S]*persistConversationIdentity\(\{\s*\.\.\.event,\s*authoritativeCurrent:\s*true\s*\}\)/,
+  "an exact browser turn must replace an older conversation route in the same Runtime instead of leaving the session permanently ambiguous");
 assert.match(server, /new ClassicMcpCallCorrelator\(\)/, "server must join native call_mcp conversation identity to the matching Gateway MCP call");
 assert.match(server, /fingerprintMcpToolCall\(req\?\.body\)/, "Gateway MCP call fingerprint must be derived from the real JSON-RPC body");
 assert.match(server, /requestConversationContext\.run\(/, "the exact Core HTTP request identity must propagate into the shared MCP tool handler");
@@ -28,12 +34,25 @@ assert.match(server, /const traceCorrelationFingerprints = requestTraceCorrelati
 assert.match(server, /const sessionCorrelationFingerprints = sessionCorrelationFingerprintsFromHeaders\(req\?\.headers \|\| \{\}\)/, "the direct MCP request must derive bounded session aliases from its own descriptor");
 assert.match(server, /activeTurnRegistry\.resolveGatewayCall\(\{\s*toolName,\s*turnTraceFingerprint,\s*traceCorrelationFingerprints,\s*sessionCorrelationFingerprintsHint:\s*sessionCorrelationFingerprints,\s*sessionFingerprintHint:\s*sessionFingerprint,\s*runtimeKeyHint:\s*progressOnlyTool\s*\?\s*null\s*:\s*persistedRuntimeKey/, "active-turn correlation must prefer exact request trace/session evidence while keeping progress independent of Runtime ownership");
 assert.match(server, /const verifyCapabilityAuthority = async \(candidate\)/, "a persisted direct-session mapping must be treated as a candidate, not final authority");
-assert.match(server, /findAtRuntime\(\{[\s\S]*conversationId:\s*candidate\.conversationId[\s\S]*runtimeKey:\s*candidateRuntimeKey/, "candidate authority must be verified against the exact live conversation page at its locator Runtime");
+assert.match(server, /resolveVerifiedDirectSession\(sessionFingerprint, \{[\s\S]*maxAgeMs:\s*DIRECT_SESSION_AUTHORITY_MAX_AGE_MS/,
+  "later trace groups may reuse only a bounded fresh verified direct-session mapping");
+assert.match(server, /source:\s*"classic-verified-direct-session-page-verified"/);
+assert.match(server, /requireGenerating:\s*false/,
+  "an exact direct-session mapping must survive renderer idleness while the server-side assistant still invokes tools");
+assert.match(server, /progressLivenessAdapter\.find\(\{[\s\S]*conversationId:\s*candidate\.conversationId/,
+  "candidate authority must be verified against one globally unique live conversation page");
+assert.match(server, /page\.runtimeKey !== candidateRuntimeKey/,
+  "the globally unique page must still match the persisted Runtime locator");
 assert.match(server, /page\.generating !== true/, "an idle page may never revive stale capability authority");
+assert.match(server, /page\.hydrated !== true \|\| page\.composerFound !== true/,
+  "idle direct-session reuse still requires one hydrated exact page and composer");
+assert.match(server, /page\.progressCardMounted === true && page\.progressConversationId !== candidate\.conversationId/,
+  "a mounted narration card for another conversation must fail closed");
 assert.match(server, /directRequestAuthorityRegistry\.resolve\(\{\s*traceCorrelationFingerprints/, "later direct tools must reuse only the current request's hashed server-side trace");
 assert.match(server, /candidate\?\.pageVerified !== true[\s\S]*directRequestAuthorityRegistry\.note/, "only exact page-verified authority may seed the direct request trace registry");
 assert.match(server, /directRequestAuthorityRegistry\.completeConversation\(conversationId\)/, "normal completion must revoke inherited direct-request authority for that exact conversation");
-assert.match(server, /authoritativeCurrent:\s*true/, "an exact distributed trace may refresh the direct MCP session to the current conversation");
+assert.match(server, /observeVerifiedDirectSession/,
+  "an exact distributed trace must bind the direct MCP session through the strict ambiguity-preserving path");
 assert.match(server, /const ephemeralProgressAuthority = \(identity\)/, "progress narration must use a request-scoped conversation-only authority object");
 assert.match(server, /const progressOnlyCall = event\?\.toolName === "devspace_progress_report";[\s\S]*if \(progressOnlyCall\) return;/, "progress-only native calls must not rewrite durable capability authority");
 assert.match(server, /onNativeMcpCall/, "always-on Classic observer must feed native call_mcp evidence into the correlator");
@@ -70,10 +89,22 @@ assert.match(callCorrelation, /!candidates\.length && !trace[\s\S]*isDeferredPla
 assert.match(sessionCorrelation, /raw values never leave the function/i);
 assert.doesNotMatch(sessionCorrelation, /return\s+raw\b|sessionCorrelationFingerprints[^\n]*:\s*raw/,
   "session alias correlation must never return or persist the raw OpenAI session descriptor");
+assert.match(authority, /observeVerifiedDirectSession/,
+  "the authority registry must expose one strict page-verified direct-session observation path");
+assert.match(authority, /function bindAuthoritativeCurrent/,
+  "exact route changes must use one shared ambiguity-preserving binding rule");
+assert.match(authority, /sameConversation \|\| sameRuntime/,
+  "the same conversation may move Runtime and one Runtime may navigate to a new exact conversation without retaining the stale route");
+assert.match(authority, /existing\.conversationIds\.push\(conversation\)/,
+  "a cross-conversation direct-session reuse must become ambiguous and fail closed");
+assert.match(authority, /resolveVerifiedDirectSession/);
+assert.match(authority, /verifiedDirectSessionAt/);
+assert.match(authority, /Number\(now\) - verifiedAtMs > boundedMaxAgeMs/,
+  "persisted direct-session authority must have a bounded freshness window");
 assert.match(callCorrelation, /completeConversation\(conversationId\)/, "normal completion must revoke every active authority entry for the exact conversation");
 assert.match(requestContext, /AsyncLocalStorage/, "request-scoped identity propagation must be concurrency-safe and must not use globals");
 assert.match(requestContext, /cross|current\(\)/i, "request context must expose only the active asynchronous call scope");
 assert.doesNotMatch(callCorrelation, /localStorage|querySelector|document\.|location\./, "call correlation must remain transport-only");
 assert.doesNotMatch(authority, /querySelector|document\.|location\.|Page\.reload|Page\.navigate/, "conversation authority registry must never depend on renderer state");
 
-console.log(JSON.stringify({ ok: true, gate: "classic-conversation-authority-static", nativeTransportOnly: true, nativeCallMcpCompatibility: true, distributedTraceCorrelation: true, wrappedSessionAliasCorrelation: true, pageVerifiedDirectTraceReuse: true, requestScopedAuthority: true, staleSessionReverification: true, transportFinishIsNotAssistantCompletion: true, activeTurnCorrelation: true, delayedPostTransportCorrelation: true, deferredToolExactTraceCorrelation: true, deferredPlaceholderUniqueOwnerCorrelation: true, hashedTurnTraceOnly: true, canonicalArgumentsHashedOnly: true, completionRevokesAuthority: true, ambiguityFailsClosed: true, persisted: true }));
+console.log(JSON.stringify({ ok: true, gate: "classic-conversation-authority-static", nativeTransportOnly: true, nativeCallMcpCompatibility: true, distributedTraceCorrelation: true, wrappedSessionAliasCorrelation: true, pageVerifiedDirectTraceReuse: true, pageVerifiedDirectSessionReuse: true, directSessionFreshnessBounded: true, requestScopedAuthority: true, staleSessionReverification: true, transportFinishIsNotAssistantCompletion: true, activeTurnCorrelation: true, delayedPostTransportCorrelation: true, deferredToolExactTraceCorrelation: true, deferredPlaceholderUniqueOwnerCorrelation: true, hashedTurnTraceOnly: true, canonicalArgumentsHashedOnly: true, completionRevokesAuthority: true, ambiguityFailsClosed: true, persisted: true }));

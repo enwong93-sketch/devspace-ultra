@@ -75,7 +75,7 @@ Use the tagged one-command installer whenever possible:
 
 ```powershell
 $p=Join-Path $env:TEMP 'devspace-ultra-install.ps1'
-iwr https://raw.githubusercontent.com/enwong93-sketch/devspace-ultra/v0.5.4/install.ps1 -OutFile $p
+iwr https://raw.githubusercontent.com/enwong93-sketch/devspace-ultra/v0.5.5/install.ps1 -OutFile $p
 & $p -Network DuckDNS
 ```
 
@@ -108,7 +108,7 @@ Use only when direct DDNS ingress is unavailable or rejected by evidence.
 
 ```powershell
 $p=Join-Path $env:TEMP 'devspace-ultra-install.ps1'
-iwr https://raw.githubusercontent.com/enwong93-sketch/devspace-ultra/v0.5.4/install.ps1 -OutFile $p
+iwr https://raw.githubusercontent.com/enwong93-sketch/devspace-ultra/v0.5.5/install.ps1 -OutFile $p
 & $p -Network Cloudflare -PublicHostname 'devspace.example.com'
 ```
 

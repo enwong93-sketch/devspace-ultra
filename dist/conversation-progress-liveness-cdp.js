@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
 
+export const INTERRUPTED_TURN_RESCUE_TEXT = "- 繼續";
+
 function cleanConversationId(value) {
   const text = String(value ?? "").trim();
   return text && /^[A-Za-z0-9_-]{8,200}$/.test(text) ? text : null;
@@ -278,11 +280,11 @@ export class ConversationProgressLivenessCdpAdapter {
   async sendContinue({ conversationId, target = null, attempt = 1 } = {}) {
     const resolved = await this.#resolveExactTarget(conversationId, target);
     if (!resolved.ok) return resolved;
-    const text = "工作中斷補救：系統確認呢個 conversation 上一輪工作未正常完成，而且已相隔至少二十分鐘。請先用 devspace_progress_report 以你自己嘅自然語言交代斷點、已核實內容同下一步，然後只由原工作斷點繼續。唔好重啟、接管或改動其他 conversation 嘅工具或 Runtime。";
+    const text = INTERRUPTED_TURN_RESCUE_TEXT;
     return await this.#sendConversationMessage({
       resolved,
       text,
-      expectedPrefix: "工作中斷補救：",
+      expectedPrefix: INTERRUPTED_TURN_RESCUE_TEXT,
       purpose: "interrupted-turn-rescue",
       attempt,
       allowNormalCompletion: false,

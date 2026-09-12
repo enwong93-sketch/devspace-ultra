@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 
-const [source, agents, toolProgress, gateway, productionJournal] = await Promise.all([
+const [source, agents, toolProgress, gateway, productionJournal, livenessCdp] = await Promise.all([
   readFile(new URL("../dist/server.js", import.meta.url), "utf8"),
   readFile(new URL("../AGENTS.md", import.meta.url), "utf8"),
   readFile(new URL("../dist/goal-tool-progress.js", import.meta.url), "utf8"),
   readFile(new URL("./devspace-stable-gateway.mjs", import.meta.url), "utf8"),
   readFile(new URL("../dist/agent-authored-progress-journal.js", import.meta.url), "utf8"),
+  readFile(new URL("../dist/conversation-progress-liveness-cdp.js", import.meta.url), "utf8"),
 ]);
 
 assert.match(source, /exactly one conversation-scoped floating progress narration card/i);
@@ -14,6 +15,7 @@ assert.match(source, /neither tool events nor timers may author visible narratio
 assert.match(source, /personally judge that a meaningful medium-sized step has completed/i);
 assert.match(source, /never leave more than ten minutes between Agent-authored reports/i);
 assert.match(source, /Ten minutes is a maximum silent interval for the working Agent, not a timer cadence/i);
+assert.match(source, /rescue may emit only the exact visible text `- 繼續`/i);
 assert.match(source, /Write the card text yourself in natural language/i);
 assert.match(source, /never show generated step counters, heartbeat prose, generic program status/i);
 assert.match(source, /server\.registerTool\("devspace_progress_report"/);
@@ -26,6 +28,7 @@ assert.match(agents, /ten minutes is an Agent reporting ceiling only/i);
 assert.match(agents, /No timer, supervisor, overlay, or hidden relay may send a ten-minute reminder/i);
 assert.match(agents, /only after at least twenty minutes/i);
 assert.match(agents, /normally completed or explicitly cancelled turn must disarm rescue immediately/i);
+assert.match(agents, /only visible text emitted by a verified twenty-minute interrupted-turn rescue is exactly `- 繼續`/i);
 assert.match(agents, /Write the update yourself in natural language/i);
 assert.doesNotMatch(agents, /batches of roughly ten steps/i);
 
@@ -37,6 +40,10 @@ assert.match(gateway, /agent-authored-progress-journal\.js/,
 assert.match(productionJournal, /automaticVisibleNarration:\s*false/);
 assert.doesNotMatch(productionJournal, /setInterval|setTimeout|append\(|message:/,
   "production journal must not schedule or synthesize visible progress messages");
+assert.match(livenessCdp, /INTERRUPTED_TURN_RESCUE_TEXT\s*=\s*"- 繼續"/,
+  "the rescue transport must expose only the minimal continuation message");
+assert.doesNotMatch(livenessCdp, /工作中斷補救：|請先用 devspace_progress_report/,
+  "backend rescue policy must not leak into the synthetic user turn");
 
 console.log(JSON.stringify({
   ok: true,
@@ -48,6 +55,7 @@ console.log(JSON.stringify({
   tenMinuteAgentReportCeilingFromWorkspaceInstructions: true,
   tenMinuteAutomaticReminder: false,
   twentyMinuteInterruptedTurnRescueOnly: true,
+  interruptedTurnRescueText: "- 繼續",
   normalCompletionDisarms: true,
   rawToolNarration: false,
   boundedCorrelationDeadline: true,

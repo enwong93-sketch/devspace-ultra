@@ -141,27 +141,48 @@ const exactA = activeTurns.resolveGatewayCall({
   traceCorrelationFingerprints: traceKeysA,
   sessionFingerprintHint: directFingerprintA,
 });
-await authority.observeNativeTurn({
+await authority.observeVerifiedDirectSession({
   sessionFingerprint: directFingerprintA,
   conversationId: exactA.conversationId,
   runtimeKey: exactA.runtimeKey,
   observedAt: new Date(now).toISOString(),
-  authoritativeCurrent: true,
 });
 const exactB = activeTurns.resolveGatewayCall({
   toolName: "blender_runtime",
   traceCorrelationFingerprints: traceKeysB,
   sessionFingerprintHint: directFingerprintB,
 });
-await authority.observeNativeTurn({
+await authority.observeVerifiedDirectSession({
   sessionFingerprint: directFingerprintB,
   conversationId: exactB.conversationId,
   runtimeKey: exactB.runtimeKey,
   observedAt: new Date(now).toISOString(),
-  authoritativeCurrent: true,
 });
 assert.equal(authority.resolveFingerprint(directFingerprintA)?.conversationId, "conversation-direct-a");
 assert.equal(authority.resolveFingerprint(directFingerprintB)?.conversationId, "conversation-direct-b");
+assert.equal(authority.resolveFingerprint(directFingerprintA)?.source, "classic-verified-direct-session");
+const nextTraceGroupA = requestTraceCorrelationFingerprints({
+  "x-openai-session": directSessionA,
+  traceparent: "00-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-6666666666666666-01",
+  "x-datadog-trace-id": "1099",
+});
+assert.equal(
+  activeTurns.resolveGatewayCall({
+    toolName: "devspace_progress_report",
+    traceCorrelationFingerprints: nextTraceGroupA,
+    sessionFingerprintHint: directFingerprintA,
+  }),
+  null,
+  "a new server-side trace group has no browser join and must not guess",
+);
+assert.equal(
+  authority.resolveVerifiedDirectSession(directFingerprintA, {
+    now: now + 1,
+    maxAgeMs: 60_000,
+  })?.conversationId,
+  "conversation-direct-a",
+  "the exact page-verified direct session must carry later trace groups without Runtime-only guessing",
+);
 
 // Current ChatGPT direct MCP calls may share a server-side request trace that
 // is intentionally unrelated to the browser conversation POST trace. Once one
@@ -315,6 +336,7 @@ console.log(JSON.stringify({
   directTools: ["blender_runtime", "blender_mcp", "devspace_progress_report"],
   exactDistributedTraceAuthority: true,
   pageVerifiedDirectTurnTraceReuse: true,
+  pageVerifiedDirectSessionCrossTraceReuse: true,
   wrappedSessionAliasAuthority: true,
   browserAndDirectSessionsMayDiffer: true,
   requestContextIsolation: true,

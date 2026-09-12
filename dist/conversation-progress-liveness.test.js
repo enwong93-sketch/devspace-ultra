@@ -8,6 +8,7 @@ import {
 } from "./conversation-progress-liveness.js";
 import {
   ConversationProgressLivenessCdpAdapter,
+  INTERRUPTED_TURN_RESCUE_TEXT,
   _test as cdpTest,
 } from "./conversation-progress-liveness-cdp.js";
 
@@ -18,6 +19,11 @@ const progressStatePath = join(dir, "progress.json");
 let now = Date.parse("2026-09-11T06:00:00.000Z");
 const calls = [];
 const settled = [];
+
+assert.equal(INTERRUPTED_TURN_RESCUE_TEXT, "- 繼續",
+  "the visible interrupted-turn rescue must stay minimal and must not inject policy instructions");
+assert.doesNotMatch(INTERRUPTED_TURN_RESCUE_TEXT, /devspace_progress_report|conversation|Runtime|工作中斷補救/i,
+  "rescue policy belongs to the backend guard, not the synthetic user message");
 
 const pages = new Map([
   ["conversation-running", {
