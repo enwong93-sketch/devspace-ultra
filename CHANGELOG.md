@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Replaced the retired DevSpace Chrome-extension `browser_control_*` execution path with the installed OpenAI Codex Computer Use runtime. Ordinary Chrome, Edge, and Windows GUI work now routes through `codex_computer_use`, the persistent linked Codex `node_repl`, and bundled `@oai/sky`; the old bridge returns HTTP 410 and its runtime artifacts are excluded from release packages.
+- Re-enabled Goal Recovery through the exact-conversation page-composer transport shared with interrupted-turn rescue. Recovery no longer runs Primary repair, activates or opens a window, navigates/reloads a page, selects by Runtime alone, or retries after a send has been committed.
+- Fixed server-side direct MCP authority for long assistant turns. After one direct request is verified against the exact active conversation page, later requests in the same assistant turn reuse only bounded hashed request-trace aliases, re-verify the page on every call, fail closed on cross-conversation ambiguity, and revoke inherited authority when the conversation settles. This restores `devspace_progress_report`, Goal/Plan, Blender routing, and Codex Computer Use without zombie correlation waiters.
+
 ## 0.5.4 — 2026-09-10
 
 - Fixed Stable Gateway quiet-boundary starvation when ChatGPT keeps long-lived replayable MCP event streams open. Pure SSE streams are now excluded from the non-stream in-flight counter, while real tool/HTTP requests still block handover until they finish.

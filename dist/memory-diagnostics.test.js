@@ -64,6 +64,17 @@ const snapshot = createMemoryDiagnostics({
       };
     },
   },
+  directRequestAuthorityRegistry: {
+    diagnostics() {
+      return {
+        records: 2,
+        conversations: 1,
+        resolved: 7,
+        ambiguousMatches: 3,
+        ttlMs: 21600000,
+      };
+    },
+  },
   contextMetadataAdapter: {
     status() {
       return {
@@ -135,6 +146,11 @@ assert.equal(snapshot.registries.classicActiveTurnWaitersWithSessionAliases, 4);
 assert.equal(snapshot.registries.classicActiveTurnCorrelationsResolved, 5);
 assert.equal(snapshot.registries.classicActiveTurnAmbiguities, 6);
 assert.equal(snapshot.registries.classicPostTurnGraceMs, 120000);
+assert.equal(snapshot.registries.directRequestAuthorities, 2);
+assert.equal(snapshot.registries.directRequestAuthorityConversations, 1);
+assert.equal(snapshot.registries.directRequestAuthorityResolved, 7);
+assert.equal(snapshot.registries.directRequestAuthorityAmbiguities, 3);
+assert.equal(snapshot.registries.directRequestAuthorityTtlMs, 21600000);
 assert.equal(snapshot.capabilities.enabled, true);
 assert.equal(snapshot.capabilities.mcpClients, 1);
 assert.equal(snapshot.turnTransportCdp.connected, 1);

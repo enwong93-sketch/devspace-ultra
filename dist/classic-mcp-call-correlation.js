@@ -544,6 +544,141 @@ export class ClassicActiveTurnRegistry {
   }
 }
 
+/**
+ * Retains only hashed request-trace aliases after one direct MCP request has
+ * already been bound to an exact, page-verified ChatGPT conversation.
+ *
+ * ChatGPT's server-side direct MCP transport can issue many tool requests for
+ * one assistant turn without repeating the browser turn's session or network
+ * trace. Those direct requests do, however, share their own bounded trace
+ * aliases. This registry lets a later request (notably progress narration)
+ * reuse the exact authority established by an earlier request in the same
+ * assistant turn. Every consumer must still re-verify the exact conversation
+ * page before using the result. No raw trace, prompt, argument, or session
+ * value is retained.
+ */
+export class ClassicDirectRequestAuthorityRegistry {
+  constructor({
+    now = () => Date.now(),
+    ttlMs = 6 * 60 * 60_000,
+    maxRecords = 128,
+  } = {}) {
+    this.now = now;
+    this.ttlMs = Math.max(30_000, Number(ttlMs) || 6 * 60 * 60_000);
+    this.maxRecords = Math.max(4, Number(maxRecords) || 128);
+    this.records = [];
+    this.ambiguousMatches = 0;
+    this.resolved = 0;
+  }
+
+  note({
+    traceCorrelationFingerprints = null,
+    conversationId,
+    runtimeKey,
+    observedAtMs = this.now(),
+    source = "classic-direct-request-page-verified",
+  } = {}) {
+    const traces = mergeTraceCorrelationFingerprints(traceCorrelationFingerprints);
+    const conversation = cleanConversationId(conversationId);
+    const runtime = cleanRuntimeKey(runtimeKey);
+    const atMs = Number(observedAtMs);
+    if (!traces.length || !conversation || !runtime || !Number.isFinite(atMs)) return null;
+    this.prune();
+    const existing = this.records.find((record) => (
+      record.conversationId === conversation
+      && tracesIntersect(record.traceCorrelationFingerprints, traces)
+    ));
+    if (existing) {
+      existing.traceCorrelationFingerprints = mergeTraceCorrelationFingerprints(
+        existing.traceCorrelationFingerprints,
+        traces,
+      );
+      existing.runtimeKey = runtime;
+      existing.observedAtMs = atMs;
+      existing.source = cleanText(source, 240) || existing.source;
+      this.records.sort((left, right) => right.observedAtMs - left.observedAtMs);
+      return this.#identity(existing, "classic-direct-request-trace-authority-noted");
+    }
+    const record = {
+      traceCorrelationFingerprints: traces,
+      conversationId: conversation,
+      runtimeKey: runtime,
+      observedAtMs: atMs,
+      source: cleanText(source, 240) || "classic-direct-request-page-verified",
+    };
+    this.records.unshift(record);
+    this.records = this.records
+      .sort((left, right) => right.observedAtMs - left.observedAtMs)
+      .slice(0, this.maxRecords);
+    return this.#identity(record, "classic-direct-request-trace-authority-noted");
+  }
+
+  resolve({ traceCorrelationFingerprints = null } = {}) {
+    this.prune();
+    const traces = mergeTraceCorrelationFingerprints(traceCorrelationFingerprints);
+    if (!traces.length) return null;
+    const candidates = this.records.filter((record) => (
+      tracesIntersect(record.traceCorrelationFingerprints, traces)
+    ));
+    const owners = new Map();
+    for (const record of candidates) {
+      const previous = owners.get(record.conversationId);
+      if (!previous || record.observedAtMs >= previous.observedAtMs) {
+        owners.set(record.conversationId, record);
+      }
+    }
+    if (owners.size !== 1) {
+      if (owners.size > 1) this.ambiguousMatches += 1;
+      return null;
+    }
+    const [record] = owners.values();
+    this.resolved += 1;
+    return this.#identity(record, "classic-direct-request-trace-authority");
+  }
+
+  completeConversation(conversationId) {
+    const conversation = cleanConversationId(conversationId);
+    if (!conversation) return 0;
+    const before = this.records.length;
+    this.records = this.records.filter((record) => record.conversationId !== conversation);
+    return before - this.records.length;
+  }
+
+  prune() {
+    const cutoff = this.now() - this.ttlMs;
+    this.records = this.records
+      .filter((record) => record.observedAtMs >= cutoff)
+      .sort((left, right) => right.observedAtMs - left.observedAtMs)
+      .slice(0, this.maxRecords);
+  }
+
+  diagnostics() {
+    this.prune();
+    return {
+      records: this.records.length,
+      conversations: new Set(this.records.map((record) => record.conversationId)).size,
+      resolved: this.resolved,
+      ambiguousMatches: this.ambiguousMatches,
+      ttlMs: this.ttlMs,
+      maxRecords: this.maxRecords,
+      rawTraceIdsPersisted: false,
+      rawSessionPersisted: false,
+      rawArgumentsPersisted: false,
+    };
+  }
+
+  #identity(record, source) {
+    return {
+      conversationId: record.conversationId,
+      runtimeKey: record.runtimeKey,
+      observedAt: new Date(record.observedAtMs).toISOString(),
+      source,
+      authoritySource: record.source,
+      ephemeral: true,
+    };
+  }
+}
+
 export class ClassicMcpCallCorrelator {
   constructor({
     now = () => Date.now(),

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import {
   ClassicActiveTurnRegistry,
+  ClassicDirectRequestAuthorityRegistry,
   ClassicMcpCallCorrelator,
   fingerprintMcpToolCall,
   isNativeCallMcpRequest,
@@ -183,6 +184,62 @@ assert.equal(
   "revoking one conversation must not remove another conversation's authority",
 );
 assert.equal(activeTurns.completeConversation("conversation-not-present"), 0);
+
+let authorityNow = now;
+const directRequestAuthority = new ClassicDirectRequestAuthorityRegistry({
+  now: () => authorityNow,
+  ttlMs: 60_000,
+  maxRecords: 8,
+});
+const directTraceA = ["4".repeat(64), "5".repeat(64)];
+const directTraceB = ["6".repeat(64)];
+assert.equal(directRequestAuthority.resolve({ traceCorrelationFingerprints: directTraceA }), null);
+const notedDirectAuthority = directRequestAuthority.note({
+  traceCorrelationFingerprints: directTraceA,
+  conversationId: "conversation-direct-request-a",
+  runtimeKey: "main-02",
+  observedAtMs: authorityNow,
+  source: "page-verified-capability-request",
+});
+assert.equal(notedDirectAuthority?.conversationId, "conversation-direct-request-a");
+const reusedDirectAuthority = directRequestAuthority.resolve({
+  traceCorrelationFingerprints: ["5".repeat(64)],
+});
+assert.equal(reusedDirectAuthority?.conversationId, "conversation-direct-request-a");
+assert.equal(reusedDirectAuthority?.runtimeKey, "main-02");
+assert.equal(reusedDirectAuthority?.source, "classic-direct-request-trace-authority");
+assert.equal(reusedDirectAuthority?.authoritySource, "page-verified-capability-request");
+directRequestAuthority.note({
+  traceCorrelationFingerprints: directTraceA,
+  conversationId: "conversation-direct-request-b",
+  runtimeKey: "main-03",
+  observedAtMs: authorityNow + 1,
+  source: "page-verified-capability-request",
+});
+assert.equal(
+  directRequestAuthority.resolve({ traceCorrelationFingerprints: directTraceA }),
+  null,
+  "one direct request trace observed for two conversations must fail closed",
+);
+assert.equal(directRequestAuthority.diagnostics().ambiguousMatches > 0, true);
+assert.equal(directRequestAuthority.completeConversation("conversation-direct-request-b"), 1);
+assert.equal(
+  directRequestAuthority.resolve({ traceCorrelationFingerprints: directTraceA })?.conversationId,
+  "conversation-direct-request-a",
+  "settling one conversation must not revoke another trace authority",
+);
+directRequestAuthority.note({
+  traceCorrelationFingerprints: directTraceB,
+  conversationId: "conversation-direct-request-c",
+  runtimeKey: "main-04",
+  observedAtMs: authorityNow,
+});
+authorityNow += 60_001;
+directRequestAuthority.prune();
+assert.equal(directRequestAuthority.resolve({ traceCorrelationFingerprints: directTraceA }), null);
+assert.equal(directRequestAuthority.resolve({ traceCorrelationFingerprints: directTraceB }), null);
+assert.equal(directRequestAuthority.diagnostics().records, 0);
+assert.equal(directRequestAuthority.diagnostics().rawTraceIdsPersisted, false);
 
 const sessionScopedProgress = activeTurns.resolveGatewayCall({
   toolName: "devspace_progress_report",

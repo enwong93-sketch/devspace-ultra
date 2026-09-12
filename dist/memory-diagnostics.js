@@ -39,6 +39,7 @@ export function createMemoryDiagnostics({
   turnTransportObserver,
   mcpCallCorrelator,
   activeTurnRegistry,
+  directRequestAuthorityRegistry,
   contextMetadataAdapter,
   streamRecoveryAdapter,
   config = {},
@@ -55,6 +56,7 @@ export function createMemoryDiagnostics({
   const turn = safeStatus(turnTransportObserver);
   const callCorrelation = safeDiagnostics(mcpCallCorrelator);
   const activeTurnCorrelation = safeDiagnostics(activeTurnRegistry);
+  const directRequestAuthority = safeDiagnostics(directRequestAuthorityRegistry);
   const context = safeStatus(contextMetadataAdapter);
   const stream = safeStatus(streamRecoveryAdapter);
   const contextRuntimes = Array.isArray(context?.runtimes) ? context.runtimes : [];
@@ -109,6 +111,11 @@ export function createMemoryDiagnostics({
       classicActiveTurnCorrelationsResolved: finiteNumber(activeTurnCorrelation?.recentResolved),
       classicActiveTurnAmbiguities: finiteNumber(activeTurnCorrelation?.ambiguousMatches),
       classicPostTurnGraceMs: finiteNumber(activeTurnCorrelation?.postTurnGraceMs),
+      directRequestAuthorities: finiteNumber(directRequestAuthority?.records),
+      directRequestAuthorityConversations: finiteNumber(directRequestAuthority?.conversations),
+      directRequestAuthorityResolved: finiteNumber(directRequestAuthority?.resolved),
+      directRequestAuthorityAmbiguities: finiteNumber(directRequestAuthority?.ambiguousMatches),
+      directRequestAuthorityTtlMs: finiteNumber(directRequestAuthority?.ttlMs),
     },
     capabilities: {
       enabled: capabilities?.enabled === true,

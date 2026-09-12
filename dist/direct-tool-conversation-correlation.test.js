@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { ClassicConversationAuthorityRegistry, sessionFingerprintFromClassicRequest } from "./classic-conversation-authority.js";
-import { ClassicActiveTurnRegistry } from "./classic-mcp-call-correlation.js";
+import { ClassicActiveTurnRegistry, ClassicDirectRequestAuthorityRegistry } from "./classic-mcp-call-correlation.js";
 import { ClassicTurnTransportTracker } from "./classic-turn-transport-observer.js";
 import { McpConversationRequestContext } from "./mcp-conversation-request-context.js";
 import { requestTraceCorrelationFingerprints } from "./request-trace-correlation.js";
@@ -163,6 +163,64 @@ await authority.observeNativeTurn({
 assert.equal(authority.resolveFingerprint(directFingerprintA)?.conversationId, "conversation-direct-a");
 assert.equal(authority.resolveFingerprint(directFingerprintB)?.conversationId, "conversation-direct-b");
 
+// Current ChatGPT direct MCP calls may share a server-side request trace that
+// is intentionally unrelated to the browser conversation POST trace. Once one
+// capability request has been exact-page verified, later direct requests in
+// that same assistant turn (including progress narration) reuse only the
+// hashed direct trace and must still fail closed if another conversation ever
+// claims the same trace.
+const directTurnAuthority = new ClassicDirectRequestAuthorityRegistry({
+  now: () => now,
+  ttlMs: 60_000,
+});
+const serverSideTurnHeaders = {
+  traceparent: "00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-5555555555555555-01",
+  "x-datadog-trace-id": "999",
+};
+const serverSideTurnTraces = requestTraceCorrelationFingerprints(serverSideTurnHeaders);
+assert.equal(
+  activeTurns.resolveGatewayCall({
+    toolName: "devspace_progress_report",
+    traceCorrelationFingerprints: serverSideTurnTraces,
+    sessionFingerprintHint: "7".repeat(64),
+  }),
+  null,
+  "the direct server-side trace alone must not guess a browser conversation",
+);
+directTurnAuthority.note({
+  traceCorrelationFingerprints: serverSideTurnTraces,
+  conversationId: "conversation-direct-a",
+  runtimeKey: "main-01",
+  observedAtMs: now,
+  source: "classic-capability-session-page-verified",
+});
+const inheritedProgressAuthority = directTurnAuthority.resolve({
+  traceCorrelationFingerprints: requestTraceCorrelationFingerprints({
+    ...serverSideTurnHeaders,
+    "x-openai-session": "a-new-mcp-session-for-the-same-assistant-turn",
+  }),
+});
+assert.equal(inheritedProgressAuthority?.conversationId, "conversation-direct-a");
+assert.equal(inheritedProgressAuthority?.runtimeKey, "main-01");
+assert.equal(inheritedProgressAuthority?.source, "classic-direct-request-trace-authority");
+directTurnAuthority.note({
+  traceCorrelationFingerprints: serverSideTurnTraces,
+  conversationId: "conversation-direct-b",
+  runtimeKey: "main-02",
+  observedAtMs: now + 1,
+  source: "classic-capability-session-page-verified",
+});
+assert.equal(
+  directTurnAuthority.resolve({ traceCorrelationFingerprints: serverSideTurnTraces }),
+  null,
+  "a reused direct request trace across two conversations must fail closed",
+);
+assert.equal(directTurnAuthority.completeConversation("conversation-direct-b"), 1);
+assert.equal(
+  directTurnAuthority.resolve({ traceCorrelationFingerprints: serverSideTurnTraces })?.conversationId,
+  "conversation-direct-a",
+);
+
 await requestContext.run({
   capabilityAuthority: authority.resolveFingerprint(directFingerprintA),
   sessionFingerprint: directFingerprintA,
@@ -256,6 +314,7 @@ console.log(JSON.stringify({
   gate: "direct-tool-conversation-correlation",
   directTools: ["blender_runtime", "blender_mcp", "devspace_progress_report"],
   exactDistributedTraceAuthority: true,
+  pageVerifiedDirectTurnTraceReuse: true,
   wrappedSessionAliasAuthority: true,
   browserAndDirectSessionsMayDiffer: true,
   requestContextIsolation: true,
