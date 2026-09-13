@@ -42,6 +42,13 @@ import { fingerprintClassicSession } from "./classic-conversation-authority.js";
   assert.equal(JSON.stringify(parsed).includes("private prompt body"), false);
   assert.equal(JSON.stringify(parsed).includes("SECRET"), false);
   assert.equal(JSON.stringify(parsed).includes("turn-trace-secret"), false);
+  const parsedResume = parseClassicTurnRequest({
+    url: "https://chatgpt.com/backend-api/f/conversation/resume",
+    method: "POST",
+    headers: {},
+    postData: JSON.stringify({ model: "gpt-test", conversation_id: "conv-resume-1234", messages: [] }),
+  });
+  assert.equal(parsedResume?.conversationId, "conv-resume-1234");
   assert.equal(parseClassicTurnRequest({ url: "https://chatgpt.com/backend-api/other", method: "POST", postData: "{}" }), null);
 }
 

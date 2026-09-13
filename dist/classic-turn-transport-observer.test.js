@@ -177,9 +177,28 @@ assert.equal(JSON.stringify(responseInvocations).includes("response-request-secr
 tracker.noteFinished({ requestId: "r1" });
 assert.deepEqual(events.slice(-2).map((item) => item.kind), ["response", "finished"]);
 assert.equal(activeTurns.at(-1).kind, "finished");
-assert.equal(activeTurns.at(-1).transportOnly, true);
-assert.equal(activeTurns.at(-1).requestId, "r1");
-assert.deepEqual(activeTurns.at(-1).sessionCorrelationFingerprints, activeTurns[0].sessionCorrelationFingerprints);
+
+tracker.noteRequest({
+  requestId: "resume-1",
+  request: {
+    url: "https://chatgpt.com/backend-api/f/conversation/resume",
+    method: "POST",
+    postData: JSON.stringify({ conversation_id: "conversation-resume", model: "gpt-test", messages: [] }),
+    headers: {},
+  },
+});
+assert.equal(tracker.noteResponse({
+  requestId: "resume-1",
+  response: { url: "https://chatgpt.com/backend-api/f/conversation/resume", status: 200 },
+})?.conversationId, "conversation-resume");
+tracker.noteFinished({ requestId: "resume-1" });
+const resumedFinished = activeTurns.at(-1);
+assert.equal(resumedFinished.kind, "finished");
+assert.equal(resumedFinished.requestId, "resume-1");
+assert.equal(resumedFinished.conversationId, "conversation-resume");
+const originalFinished = activeTurns.findLast((item) => item.requestId === "r1" && item.kind === "finished");
+assert.equal(originalFinished?.transportOnly, true);
+assert.deepEqual(originalFinished?.sessionCorrelationFingerprints, activeTurns[0].sessionCorrelationFingerprints);
 assert.equal(tracker.pendingSize, 0, "finished native turn must leave no pending transport record");
 const delayedGatewayIdentity = delayedGatewayTurns.resolveGatewayCall({
   toolName: "blender_mcp",

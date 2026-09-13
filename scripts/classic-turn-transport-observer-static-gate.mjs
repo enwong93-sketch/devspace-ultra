@@ -16,6 +16,7 @@ assert.match(observer, /Network\.getRequestPostData/);
 assert.match(observer, /Network\.streamResourceContent/);
 assert.match(observer, /Network\.dataReceived/);
 assert.match(observer, /isNativeCallMcpRequest/);
+assert.match(observer, /\/backend-api\/f\/conversation\/resume/, "hidden Goal continuation turns must remain observable through the native resume transport");
 assert.doesNotMatch(observer, /Runtime\.enable|Runtime\.evaluate|client\.call\("Page\.(?:reload|navigate)"|Network\.getResponseBody/, "always-on delivery observer must stay network-only and low-memory");
 assert.match(observer, /maxPending/);
 assert.match(observer, /pendingTtlMs/);
@@ -41,6 +42,7 @@ console.log(JSON.stringify({
   automaticGoalConversationBinding: true,
   nativeCallMcpCorrelation: true,
   streamedToolInvocationCorrelation: true,
+  goalContinuationResumeObserved: true,
   staleGuiGeneratingCannotBlockForever: true,
   safetyCheckFailsClosed: true,
 }));
