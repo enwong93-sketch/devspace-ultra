@@ -78,6 +78,7 @@ import { registerToolchainTools } from "./toolchain-tools.js";
 import { registerUnifiedRoutingTool } from "./unified-routing-tools.js";
 import { retiredToolCallResult } from "./retired-tool-compat.js";
 import { EXACT_CONVERSATION_REQUEST_PROOF } from "./progress-ownership-proof.js";
+import { ProgressClaimRegistry } from "./progress-claim-registry.js";
 // ChatGPT/OpenAI MCP clients may reconnect without sending DELETE. Core session
 // lifetime is therefore tied to the actual standalone SSE connection: when that
 // stream disconnects and no real tool request is still active, the transport is
@@ -91,6 +92,7 @@ const WORKSPACE_APP_MANIFEST_ENTRY = "workspace-app.html";
 const PLAN_CARD_URI = "ui://devspace/plan-card.html";
 const GOAL_DOCK_URI = "ui://devspace/goal-dock.html";
 const GOAL_RELAY_URI = "ui://devspace/goal-continuation-relay.html";
+const PROGRESS_CLAIM_RELAY_URI = "ui://devspace/progress-claim-relay.html";
 const CHAT_SWARM_UI_DIAGNOSTICS = {
     resourceReads: 0,
     assetRequests: 0,
@@ -396,6 +398,9 @@ function goalDockHtml() {
 }
 function goalContinuationRelayHtml() {
     return readFileSync(new URL("./ui/goal-continuation-relay.html", import.meta.url), "utf8");
+}
+function progressClaimRelayHtml() {
+    return readFileSync(new URL("./ui/progress-claim-relay.html", import.meta.url), "utf8");
 }
 function appCsp(config) {
     const publicBaseUrl = config.publicBaseUrl.replace(/\/+$/, "");
@@ -735,7 +740,7 @@ function registerCodexProcessTools(server, config, workspaces, processSessions) 
         });
     });
 }
-function createMcpServer(config, workspaces, reviewCheckpoints, processSessions, localAgentProviders, incomingArtifactAdapters, chatSwarm, capabilityRuntime, blenderRuntimeManager, codexMcpBridge, conversationContinuity, contextGuardian, exactUsageAuthority, codexContextBridge, planRuntime, goalRuntime, goalHostBridge, hostOverlayProjection, conversationAuthority, conversationAuthorityReady, goalRunProgress, requestConversationContext, conversationProgressLiveness = null) {
+function createMcpServer(config, workspaces, reviewCheckpoints, processSessions, localAgentProviders, incomingArtifactAdapters, chatSwarm, capabilityRuntime, blenderRuntimeManager, codexMcpBridge, conversationContinuity, contextGuardian, exactUsageAuthority, codexContextBridge, planRuntime, goalRuntime, goalHostBridge, hostOverlayProjection, conversationAuthority, conversationAuthorityReady, goalRunProgress, requestConversationContext, progressClaimRegistry, conversationProgressLiveness = null) {
     const toolSurface = toolModeCapabilities(config.toolMode);
     const modelInstructions = serverInstructions(config);
     const modelInstructionsFingerprint = createHash("sha256").update(modelInstructions).digest("hex");
@@ -899,6 +904,27 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
             },
         ],
     }));
+    registerAppResource(server, "DevSpace Progress Claim Relay", PROGRESS_CLAIM_RELAY_URI, {
+        description: "Hidden one-time relay that binds one pending progress report to the exact ChatGPT Classic page that received its tool result.",
+        _meta: {
+            ui: {
+                csp: appCsp(config),
+            },
+        },
+    }, async () => ({
+        contents: [
+            {
+                uri: PROGRESS_CLAIM_RELAY_URI,
+                mimeType: RESOURCE_MIME_TYPE,
+                text: progressClaimRelayHtml(),
+                _meta: {
+                    ui: {
+                        csp: appCsp(config),
+                    },
+                },
+            },
+        ],
+    }));
     registerChatSwarmTools(server, chatSwarm, {
         workerStreamUrl: `${config.publicBaseUrl.replace(/\/+$/, "")}/chat-swarm/worker-events`,
     });
@@ -927,12 +953,57 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
     registerCodexContextBridgeTools(server, codexContextBridge);
     const resolveConversation = resolveCapabilityConversationAuthority;
     const resolveProgressConversation = resolveProgressConversationAuthority;
-    server.registerTool("devspace_progress_report", {
+    const writeVerifiedProgress = async ({ message, kind, resolved, dedupeKey = null }) => {
+        const conversationId = String(resolved?.conversationId || "").trim();
+        if (!conversationId)
+            throw new Error("ChatGPT Classic conversation identity is unavailable for this MCP request.");
+        if (resolved?.pageVerified !== true || !resolved?.runtimeKey || !resolved?.callFingerprint) {
+            throw new Error("Progress narration requires an exact page-verified tool invocation for the current conversation.");
+        }
+        const gatewayPort = Number(config.stableGatewayPort ?? config.edgeBackendPort ?? 7678);
+        if (!Number.isInteger(gatewayPort) || gatewayPort < 1024 || gatewayPort > 65535)
+            throw new Error("Stable Gateway progress endpoint port is invalid.");
+        const response = await fetch(`http://127.0.0.1:${gatewayPort}/__devspace/progress`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+                message,
+                conversationId,
+                source: "agent-progress-tool",
+                kind,
+                ...(dedupeKey ? { dedupeKey } : {}),
+                ownershipProof: EXACT_CONVERSATION_REQUEST_PROOF,
+                ownershipSource: resolved.source,
+                ownershipObservedAt: resolved.observedAt || new Date().toISOString(),
+                ownershipRuntimeKey: resolved.runtimeKey,
+                ownershipCallFingerprint: resolved.callFingerprint,
+                ownershipInvocationFingerprint: resolved.invocationFingerprint || undefined,
+            }),
+        });
+        const snapshot = await response.json().catch(() => null);
+        if (!response.ok)
+            throw new Error(`Progress narration endpoint returned HTTP ${response.status}${snapshot?.error ? ` (${snapshot.error})` : ""}.`);
+        await conversationProgressLiveness?.noteReport?.({
+            conversationId,
+            observedAtMs: Date.parse(snapshot?.updatedAt || "") || Date.now(),
+        }).catch(() => null);
+        return {
+            conversationId,
+            kind,
+            messageCount: Array.isArray(snapshot?.messages)
+                ? snapshot.messages.filter((item) => item?.conversationId === conversationId).length
+                : null,
+            updatedAt: snapshot?.updatedAt ?? null,
+        };
+    };
+    registerAppTool(server, "devspace_progress_report", {
         title: "Report Conversation Progress",
-        description: "Write one concise, conversation-bound update to the floating DEV Space progress narration card in your own natural language. Write after each meaningful medium-sized step, important verification, material direction change, or genuine blocker: not after every tool call, not on a timer or fixed tool count, and not only after several large phases have accumulated. During ongoing non-atomic work, never leave more than ten minutes between Agent-authored reports. Keep the wording completely free-form and specific to what just became true. Do not mirror low-level tools, counters, heartbeats, templates, or program status. The tool resolves only the current ChatGPT Classic conversation, fails promptly and removes its request waiter when identity is unavailable or ambiguous, never accepts another conversation id, and cannot write across chats.",
+        description: "Write one concise, conversation-bound update to the floating DEV Space progress narration card in your own natural language. Write after each meaningful medium-sized step, important verification, material direction change, or genuine blocker: not after every tool call, not on a timer or fixed tool count, and not only after several large phases have accumulated. During ongoing non-atomic work, never leave more than ten minutes between Agent-authored reports. Keep the wording completely free-form and specific to what just became true. Do not mirror low-level tools, counters, heartbeats, templates, or program status. The tool writes only after the exact ChatGPT Classic page that received this result confirms a one-time claim; it never accepts another conversation id and cannot write across chats.",
         inputSchema: {
-            message: z.string().min(1).max(1600),
+            message: z.string().min(1).max(1600).optional(),
             kind: z.enum(["progress", "milestone", "verification", "blocker", "direction-change"]).default("progress"),
+            claimId: z.string().min(16).max(200).optional()
+                .describe("Reserved for the hidden exact-page relay. Agents must not set this field."),
         },
         annotations: {
             readOnlyHint: false,
@@ -940,58 +1011,74 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
             idempotentHint: false,
             openWorldHint: false,
         },
-    }, async ({ message, kind }, extra) => {
+        _meta: {
+            ui: {
+                resourceUri: PROGRESS_CLAIM_RELAY_URI,
+                visibility: ["model"],
+            },
+        },
+    }, async ({ message, kind, claimId }, extra) => {
         try {
-            const resolved = await resolveProgressConversation(extra);
-            const conversationId = String(resolved?.conversationId || "").trim();
-            if (!conversationId)
-                throw new Error("ChatGPT Classic conversation identity is unavailable for this MCP session.");
-            if (resolved?.pageVerified !== true || !resolved?.runtimeKey || !resolved?.callFingerprint) {
-                throw new Error("Progress narration requires an exact page-verified tool invocation for the current conversation.");
+            const relayClaimId = String(claimId || "").trim();
+            const reportMessage = String(message || "").trim();
+            if (relayClaimId && reportMessage) {
+                throw new Error("Progress report accepts either an Agent message or one hidden relay claim, never both.");
             }
-            const gatewayPort = Number(config.stableGatewayPort ?? config.edgeBackendPort ?? 7678);
-            if (!Number.isInteger(gatewayPort) || gatewayPort < 1024 || gatewayPort > 65535)
-                throw new Error("Stable Gateway progress endpoint port is invalid.");
-            const response = await fetch(`http://127.0.0.1:${gatewayPort}/__devspace/progress`, {
-                method: "POST",
-                headers: { "content-type": "application/json" },
-                body: JSON.stringify({
-                    message,
-                    conversationId,
-                    source: "agent-progress-tool",
-                    kind,
-                    ownershipProof: EXACT_CONVERSATION_REQUEST_PROOF,
-                    ownershipSource: resolved.source,
-                    ownershipObservedAt: resolved.observedAt || new Date().toISOString(),
-                    ownershipRuntimeKey: resolved.runtimeKey,
-                    ownershipCallFingerprint: resolved.callFingerprint,
-                    ownershipInvocationFingerprint: resolved.invocationFingerprint || undefined,
-                }),
-            });
-            const snapshot = await response.json().catch(() => null);
-            if (!response.ok)
-                throw new Error(`Progress narration endpoint returned HTTP ${response.status}${snapshot?.error ? ` (${snapshot.error})` : ""}.`);
-            await conversationProgressLiveness?.noteReport?.({
-                conversationId,
-                observedAtMs: Date.parse(snapshot?.updatedAt || "") || Date.now(),
-            }).catch(() => null);
+            const resolved = await resolveProgressConversation(extra);
+            if (relayClaimId) {
+                const result = await progressClaimRegistry.claim({
+                    claimId: relayClaimId,
+                    authority: resolved,
+                    complete: async ({ message: claimedMessage, kind: claimedKind, authority }) => await writeVerifiedProgress({
+                        message: claimedMessage,
+                        kind: claimedKind,
+                        resolved: authority,
+                        dedupeKey: `progress-claim:${relayClaimId}`,
+                    }),
+                });
+                return {
+                    content: [{ type: "text", text: "Pending progress narration was bound to the exact current conversation." }],
+                    structuredContent: {
+                        ok: true,
+                        claimed: true,
+                        claimId: relayClaimId,
+                        conversationId: result.conversationId,
+                        runtimeKey: result.runtimeKey,
+                        messageCount: result.messageCount ?? null,
+                        updatedAt: result.updatedAt ?? null,
+                    },
+                };
+            }
+            if (!reportMessage) throw new Error("Progress report message is required.");
+            if (!resolved?.conversationId) {
+                const progressClaim = progressClaimRegistry.create({ message: reportMessage, kind });
+                return {
+                    content: [{
+                        type: "text",
+                        text: "Progress narration is awaiting exact page-local ownership confirmation.",
+                    }],
+                    structuredContent: {
+                        ok: true,
+                        pending: true,
+                        progressClaim,
+                    },
+                };
+            }
+            const result = await writeVerifiedProgress({ message: reportMessage, kind, resolved });
             return {
-                content: [{ type: "text", text: `Progress narration updated for the current conversation: ${message}` }],
+                content: [{ type: "text", text: `Progress narration updated for the current conversation: ${reportMessage}` }],
                 structuredContent: {
                     ok: true,
-                    conversationId,
-                    kind,
-                    messageCount: Array.isArray(snapshot?.messages) ? snapshot.messages.length : null,
-                    updatedAt: snapshot?.updatedAt ?? null,
+                    ...result,
                 },
             };
         }
         catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
+            const errorMessage = error instanceof Error ? error.message : String(error);
             return {
                 isError: true,
-                content: [{ type: "text", text: message }],
-                structuredContent: { ok: false, error: message },
+                content: [{ type: "text", text: errorMessage }],
+                structuredContent: { ok: false, error: errorMessage },
             };
         }
     });
@@ -1974,6 +2061,7 @@ export function createServer(config = loadConfig(), options = {}) {
     const conversationAuthorityReady = conversationAuthority.load().catch(() => conversationAuthority.snapshot());
     const mcpCallCorrelator = new ClassicMcpCallCorrelator();
     const activeTurnRegistry = new ClassicActiveTurnRegistry();
+    const progressClaimRegistry = new ProgressClaimRegistry();
     const mcpRequestCorrelationDiagnostics = new McpRequestCorrelationDiagnostics();
     const requestConversationContext = new McpConversationRequestContext();
     let conversationProgressLiveness = null;
@@ -1997,6 +2085,9 @@ export function createServer(config = loadConfig(), options = {}) {
         const toolName = String(req?.body?.params?.name || "").trim() || null;
         await conversationAuthorityReady;
         const progressOnlyTool = toolName === "devspace_progress_report";
+        const progressClaimTool = progressOnlyTool
+            && typeof req?.body?.params?.arguments?.claimId === "string"
+            && String(req.body.params.arguments.claimId).trim().length > 0;
         const verifyPageAuthority = async (candidate, {
             requireCurrentSession = false,
             requireGenerating = true,
@@ -2099,6 +2190,7 @@ export function createServer(config = loadConfig(), options = {}) {
             if (!identity?.conversationId) return null;
             const verified = await verifyPageAuthority(ephemeralTurnAuthority(identity), {
                 requireCurrentSession: false,
+                requireGenerating: !progressClaimTool,
                 source: `${String(identity.source || "classic-request-correlation").replace(/-page-verified$/, "")}-page-verified`,
             });
             return verified?.conversationId
@@ -2471,7 +2563,7 @@ export function createServer(config = loadConfig(), options = {}) {
     const localAgentProviders = config.subagents
         ? getLocalAgentProviderAvailabilitySnapshot()
         : [];
-    const mcpServerTemplate = createMcpServer(config, workspaces, reviewCheckpoints, processSessions, localAgentProviders, incomingArtifactAdapters, chatSwarm, capabilityRuntime, blenderRuntimeManager, codexMcpBridge, conversationContinuity, contextGuardian, exactUsageAuthority, codexContextBridge, planRuntime, goalRuntime, goalHostBridge, hostOverlayProjection, conversationAuthority, conversationAuthorityReady, goalRunProgress, requestConversationContext, conversationProgressLiveness);
+    const mcpServerTemplate = createMcpServer(config, workspaces, reviewCheckpoints, processSessions, localAgentProviders, incomingArtifactAdapters, chatSwarm, capabilityRuntime, blenderRuntimeManager, codexMcpBridge, conversationContinuity, contextGuardian, exactUsageAuthority, codexContextBridge, planRuntime, goalRuntime, goalHostBridge, hostOverlayProjection, conversationAuthority, conversationAuthorityReady, goalRunProgress, requestConversationContext, progressClaimRegistry, conversationProgressLiveness);
     const mcpTemplateDiagnostics = mcpServerTemplateDiagnostics(mcpServerTemplate);
     logEvent(config.logging, "info", "mcp_server_template_ready", mcpTemplateDiagnostics);
     const createSessionMcpServer = () => createMcpSessionServerFromTemplate(mcpServerTemplate);
@@ -2564,6 +2656,7 @@ export function createServer(config = loadConfig(), options = {}) {
             turnTransportObserver,
             mcpCallCorrelator,
             activeTurnRegistry,
+            progressClaimRegistry,
             contextMetadataAdapter,
             streamRecoveryAdapter,
             config,

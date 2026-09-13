@@ -10,13 +10,19 @@ const progressOverlay = await readFile(new URL("../dist/classic-progress-narrati
 const liveness = await readFile(new URL("../dist/conversation-progress-liveness.js", import.meta.url), "utf8");
 const livenessCdp = await readFile(new URL("../dist/conversation-progress-liveness-cdp.js", import.meta.url), "utf8");
 const transportObserver = await readFile(new URL("../dist/classic-turn-transport-observer.js", import.meta.url), "utf8");
+const progressClaims = await readFile(new URL("../dist/progress-claim-registry.js", import.meta.url), "utf8");
+const progressRelay = await readFile(new URL("../dist/ui/progress-claim-relay.html", import.meta.url), "utf8");
 
 assert.match(server, /const resolveCapabilityConversationAuthority = async \(extra\) =>/);
 assert.match(server, /const resolveProgressConversationAuthority = async \(extra\) =>/);
 assert.match(server, /const resolveConversationAuthority = resolveCapabilityConversationAuthority;/);
 assert.match(server, /const resolveConversation = resolveCapabilityConversationAuthority;/);
 assert.match(server, /const resolveProgressConversation = resolveProgressConversationAuthority;/);
-assert.match(server, /server\.registerTool\("devspace_progress_report"[\s\S]*const resolved = await resolveProgressConversation\(extra\);/);
+assert.match(server, /registerAppTool\(server, "devspace_progress_report"[\s\S]*const resolved = await resolveProgressConversation\(extra\);/);
+assert.match(server, /resourceUri:\s*PROGRESS_CLAIM_RELAY_URI/);
+assert.match(server, /progressClaimRegistry\.create\(\{ message:\s*reportMessage, kind \}\)/);
+assert.match(server, /claimId:\s*z\.string\(\)\.min\(16\)\.max\(200\)\.optional\(\)/);
+assert.match(server, /progressClaimRegistry\.claim\(/);
 
 const progressResolverStart = server.indexOf("const resolveProgressConversationAuthority = async (extra) =>");
 const progressResolverEnd = server.indexOf("const resolveConversationAuthority = resolveCapabilityConversationAuthority", progressResolverStart);
@@ -38,6 +44,11 @@ assert.match(server, /page\.progressCardMounted === true && page\.progressConver
 assert.match(server, /resolved\?\.pageVerified !== true \|\| !resolved\?\.runtimeKey \|\| !resolved\?\.callFingerprint/,
   "progress writes require exact page plus canonical tool invocation proof");
 assert.match(server, /ownershipProof:\s*EXACT_CONVERSATION_REQUEST_PROOF/);
+assert.match(progressClaims, /exact page-verified conversation authority/);
+assert.match(progressClaims, /another conversation page/);
+assert.match(progressClaims, /durableConversationOwners:\s*0/);
+assert.match(progressRelay, /window\.openai\.callTool\("devspace_progress_report"/);
+assert.doesNotMatch(progressRelay, /sendFollowUpMessage|prompt-textarea|composer/);
 
 assert.doesNotMatch(server, /resolveVerifiedDirectSession\(|persistVerifiedDirectSessionIdentity|directRequestAuthorityRegistry/,
   "durable direct-session and direct-trace authority is retired");
@@ -102,6 +113,7 @@ console.log(JSON.stringify({
   capabilityAuthorityIsolated: true,
   exactPageInvocationJoin: true,
   exactGatewayRequestBinding: true,
+  exactPageClaimRelay: true,
   durableSessionAuthorityRetired: true,
   runtimeAuthorityRetired: true,
   legacyProgressRowsDiagnosticOnly: true,

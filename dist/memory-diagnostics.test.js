@@ -76,6 +76,19 @@ const snapshot = createMemoryDiagnostics({
       };
     },
   },
+  progressClaimRegistry: {
+    diagnostics() {
+      return {
+        pending: 2,
+        claiming: 1,
+        retainedCompleted: 3,
+        created: 8,
+        completed: 4,
+        expired: 1,
+        rejected: 2,
+      };
+    },
+  },
   contextMetadataAdapter: {
     status() {
       return {
@@ -153,6 +166,13 @@ assert.equal(snapshot.registries.classicToolInvocationDuplicates, 2);
 assert.equal(snapshot.registries.classicToolInvocationResponseBuffers, 1);
 assert.equal(snapshot.registries.classicToolInvocationResponseBufferChars, 4096);
 assert.equal(snapshot.registries.durableDirectRequestAuthorities, 0);
+assert.equal(snapshot.registries.progressClaimsPending, 2);
+assert.equal(snapshot.registries.progressClaimsClaiming, 1);
+assert.equal(snapshot.registries.progressClaimsRetainedCompleted, 3);
+assert.equal(snapshot.registries.progressClaimsCreated, 8);
+assert.equal(snapshot.registries.progressClaimsCompleted, 4);
+assert.equal(snapshot.registries.progressClaimsExpired, 1);
+assert.equal(snapshot.registries.progressClaimsRejected, 2);
 assert.equal(snapshot.capabilities.enabled, true);
 assert.equal(snapshot.capabilities.mcpClients, 1);
 assert.equal(snapshot.turnTransportCdp.connected, 1);
