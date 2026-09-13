@@ -20,6 +20,8 @@ assert.match(server, /const resolveConversation = resolveCapabilityConversationA
 assert.match(server, /const resolveProgressConversation = resolveProgressConversationAuthority;/);
 assert.match(server, /registerAppTool\(server, "devspace_progress_report"[\s\S]*const resolved = await resolveProgressConversation\(extra\);/);
 assert.match(server, /resourceUri:\s*PROGRESS_CLAIM_RELAY_URI/);
+assert.match(server, /resourceUri:\s*PROGRESS_CLAIM_RELAY_URI,[\s\S]{0,800}visibility:\s*\["model",\s*"app"\]/,
+  "the progress relay must be callable by the exact page MCP App as well as the model");
 assert.match(server, /progressClaimRegistry\.create\(\{ message:\s*reportMessage, kind \}\)/);
 assert.match(server, /claimId:\s*z\.string\(\)\.min\(16\)\.max\(200\)\.optional\(\)/);
 assert.match(server, /progressClaimRegistry\.claim\(/);

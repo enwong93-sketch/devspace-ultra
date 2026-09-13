@@ -1014,7 +1014,11 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
         _meta: {
             ui: {
                 resourceUri: PROGRESS_CLAIM_RELAY_URI,
-                visibility: ["model"],
+                // The model authors the first progress message, then the
+                // exact ChatGPT page's hidden MCP App performs the one-time
+                // claim. Restricting this tool to `model` made callTool()
+                // unavailable inside the relay and left every claim pending.
+                visibility: ["model", "app"],
             },
         },
     }, async ({ message, kind, claimId }, extra) => {

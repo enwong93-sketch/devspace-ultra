@@ -42,8 +42,10 @@
     for (let attempt = 0; attempt < 3; attempt += 1) {
       try {
         if (typeof window.openai?.callTool !== "function") throw new Error("tool bridge unavailable");
-        await window.openai.callTool("devspace_progress_report", { claimId: claim.claimId });
-        return;
+        const result = await window.openai.callTool("devspace_progress_report", { claimId: claim.claimId });
+        const structured = result?.structuredContent ?? result?.structured_content ?? result;
+        if (structured?.ok === true && structured?.claimed === true) return;
+        throw new Error("progress claim was not completed");
       } catch {
         if (attempt < 2) await sleep(250 * (attempt + 1));
       }
