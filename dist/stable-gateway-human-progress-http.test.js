@@ -4,6 +4,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createStableGatewayHumanProgress, handleStableGatewayHumanProgressRequest } from "./stable-gateway-human-progress.js";
+import { EXACT_CONVERSATION_REQUEST_PROOF } from "./progress-ownership-proof.js";
 
 async function listen(server) {
   await new Promise((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolve); });
@@ -63,8 +64,29 @@ try {
   const get = await request(base, "GET");
   assert.equal(get.status, 200);
   const snapshot = JSON.parse(get.body);
-  assert.equal(snapshot.version, 2);
+  assert.equal(snapshot.version, 3);
   assert.equal(snapshot.messages.length, 1);
+
+  const unproved = await request(base, "POST", {
+    message: "unproved direct progress",
+    conversationId: "conversation-direct",
+    source: "agent-progress-tool",
+  });
+  assert.equal(unproved.status, 400);
+
+  const proved = await request(base, "POST", {
+    message: "exact direct progress",
+    conversationId: "conversation-direct",
+    source: "agent-progress-tool",
+    kind: "verification",
+    ownershipProof: EXACT_CONVERSATION_REQUEST_PROOF,
+    ownershipSource: "classic-websocket-tool-invocation-correlation-page-verified",
+    ownershipObservedAt: "2026-09-13T04:30:00.000Z",
+    ownershipRuntimeKey: "main-03",
+    ownershipCallFingerprint: "b".repeat(64),
+  });
+  assert.equal(proved.status, 200);
+  assert.equal(JSON.parse(proved.body).messages.at(-1).conversationId, "conversation-direct");
 
   const legacy = await request(base, "POST", { doing: "legacy doing", completed: "legacy completed" });
   assert.equal(legacy.status, 200, "legacy progress writers must remain accepted during migration");

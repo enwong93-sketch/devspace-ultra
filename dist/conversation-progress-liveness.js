@@ -1,5 +1,6 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
+import { isProjectableProgressMessage } from "./progress-ownership-proof.js";
 
 // Ten minutes is an Agent reporting SLO only. It must never create a visible
 // reminder, synthetic user turn, DOM banner, or tool-execution dependency.
@@ -72,6 +73,7 @@ function latestReports(state) {
   const result = new Map();
   const messages = Array.isArray(state?.messages) ? state.messages : [];
   for (const message of messages) {
+    if (!isProjectableProgressMessage(message)) continue;
     const conversationId = cleanConversationId(message?.conversationId);
     if (!conversationId) continue;
     if (!["agent-progress-tool", "goal-round-report"].includes(String(message?.source || ""))) continue;
@@ -185,7 +187,7 @@ export class ConversationProgressLivenessSupervisor {
   }
 
   async start({ schedule = true } = {}) {
-    const persisted = await readJson(this.statePath, { version: 3, records: {} });
+    const persisted = await readJson(this.statePath, { version: 4, records: {} });
     const persistedVersion = Number(persisted?.version || 0);
     const startupNow = this.now();
     for (const value of Object.values(persisted?.records || {})) {
@@ -201,7 +203,7 @@ export class ConversationProgressLivenessSupervisor {
       const interruptedAtMs = finiteTime(value?.interruptedAt) || 0;
       const latestEpisodeAt = Math.max(startedAtMs, interruptedAtMs);
       const restorableState = ["running", "interrupted", "completion-pending", "uncertain"].includes(persistedTurnState);
-      const restorable = persistedVersion >= 3
+      const restorable = persistedVersion >= 4
         && value?.armed === true
         && Number(value?.continueAttempts || 0) === 0
         && restorableState
@@ -590,7 +592,7 @@ export class ConversationProgressLivenessSupervisor {
     const records = {};
     for (const [conversationId, record] of this.records) records[conversationId] = serializableRecord(record);
     await writeJsonAtomic(this.statePath, {
-      version: 3,
+      version: 4,
       identityKey: "conversationId",
       runtimeBinding: false,
       tenMinuteAutomaticReminder: false,

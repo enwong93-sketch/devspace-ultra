@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { atomicWriteJson } from "./atomic-file.js";
+import { normalizeProgressOwnershipProof } from "./progress-ownership-proof.js";
 
 const DEFAULT_LIMIT = 48;
 const MAX_LEGACY_TEXT = 400;
@@ -81,6 +82,8 @@ function normalizePersistedMessage(item) {
     toolCategory: cleanMetadataText(item?.toolCategory, 80),
   };
   for (const [key, value] of Object.entries(fields)) if (value) message[key] = value;
+  const ownership = normalizeProgressOwnershipProof(item);
+  if (ownership) Object.assign(message, ownership);
   const round = cleanRound(item?.round);
   if (round) message.round = round;
   const toolStepCount = Number(item?.toolStepCount);
@@ -98,8 +101,9 @@ export async function createStableGatewayHumanProgress({ statePath, limit = DEFA
     .filter(Boolean)
     .slice(-maxItems);
   let state = {
-    version: 2,
+    version: 3,
     messages: persistedMessages,
+    ownershipPolicy: "exact-conversation-request-v1",
     // Legacy fields remain for older writers/readers during migration only.
     current: persisted?.current?.text ? persisted.current : null,
     completed: Array.isArray(persisted?.completed) ? persisted.completed.slice(0, maxItems) : [],
@@ -125,6 +129,12 @@ export async function createStableGatewayHumanProgress({ statePath, limit = DEFA
     dedupeKey,
     toolCategory,
     toolStepCount,
+    ownershipProof,
+    ownershipSource,
+    ownershipObservedAt,
+    ownershipRuntimeKey,
+    ownershipCallFingerprint,
+    ownershipInvocationFingerprint,
   } = {}) => {
     const messageText = cleanText(message, "message", MAX_MESSAGE_TEXT);
     const doingText = cleanText(doing, "doing", MAX_LEGACY_TEXT);
@@ -145,7 +155,16 @@ export async function createStableGatewayHumanProgress({ statePath, limit = DEFA
         dedupeKey,
         toolCategory,
         toolStepCount,
+        ownershipProof,
+        ownershipSource,
+        ownershipObservedAt,
+        ownershipRuntimeKey,
+        ownershipCallFingerprint,
+        ownershipInvocationFingerprint,
       });
+      if (normalized?.source === "agent-progress-tool" && !normalizeProgressOwnershipProof(normalized)) {
+        throw new Error("agent progress requires exact conversation ownership proof");
+      }
       const duplicate = normalized?.dedupeKey
         && state.messages.some((item) => item?.dedupeKey === normalized.dedupeKey);
       if (normalized && !duplicate) state.messages.push(normalized);
@@ -203,6 +222,12 @@ export async function handleStableGatewayHumanProgressRequest(req, res, { progre
       dedupeKey: body?.dedupeKey,
       toolCategory: body?.toolCategory,
       toolStepCount: body?.toolStepCount,
+      ownershipProof: body?.ownershipProof,
+      ownershipSource: body?.ownershipSource,
+      ownershipObservedAt: body?.ownershipObservedAt,
+      ownershipRuntimeKey: body?.ownershipRuntimeKey,
+      ownershipCallFingerprint: body?.ownershipCallFingerprint,
+      ownershipInvocationFingerprint: body?.ownershipInvocationFingerprint,
     });
     sendJson(res, 200, snapshot);
   } catch (error) {

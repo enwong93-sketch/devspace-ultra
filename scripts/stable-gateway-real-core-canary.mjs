@@ -317,10 +317,9 @@ try {
   const offlineBlenderPort = await nextDistinctPort();
   const coreAPort = await nextDistinctPort();
   const coreBPort = await nextDistinctPort();
-  // Replayed direct-session authority is intentionally page-verified. Use the
-  // currently open Main-01 conversation when this live canary is run beside a
-  // production desktop; otherwise verify the fail-closed path rather than
-  // inventing a browser page that does not exist.
+  // Seed a legacy verified-direct-session row deliberately. v0.5.7 must retire
+  // it on load even when the referenced Main-01 conversation is currently
+  // open. A host session plus an open page is not an exact tool invocation.
   const liveReplayConversationId = await exactConversationAtPort(9721);
   const replayConversationId = liveReplayConversationId || "canary-main-01-conversation";
   const replayPageAvailable = Boolean(liveReplayConversationId);
@@ -572,36 +571,16 @@ try {
       arguments: { action: "status", runtimeId: replayRuntimeId },
     },
   }, { accessToken: refreshA.access_token, sessionId: publicSessionId, protocolVersion });
-  assert.equal(
-    replayedDirectStatus.status,
-    200,
-    "replayed Main-01 direct blender_runtime call must return without waiting for a fresh native-call correlation",
-  );
+  assert.equal(replayedDirectStatus.status, 200,
+    "a stale replayed direct-session call must return one bounded identity error instead of hanging");
   const replayedDirectPayload = parseMcpBody(replayedDirectStatus);
-  const replayedDirectResult = replayedDirectPayload?.result?.structuredContent;
-  if (replayPageAvailable) {
-    assert.equal(
-      replayedDirectPayload?.result?.isError === true,
-      false,
-      "page-verified replayed Main-01 direct blender_runtime call must not return a tool error",
-    );
-    assert.equal(replayedDirectResult?.ok, true);
-    assert.equal(replayedDirectResult?.runtime?.runtimeId, replayRuntimeId);
-    assert.equal(replayedDirectResult?.runtime?.ownerConversationId, replayConversationId);
-    assert.equal(
-      replayedDirectResult?.runtime?.state,
-      "offline",
-      "the canary Blender runtime is deliberately offline; success proves replayed authority/ownership resolution without touching a live Blender process",
-    );
-  } else {
-    assert.equal(replayedDirectPayload?.result?.isError, true,
-      "a replayed direct session without one exact live conversation page must fail closed");
-    assert.match(
-      String(replayedDirectPayload?.result?.content?.[0]?.text || ""),
-      /conversation identity is unavailable|conversation authority/i,
-      "the no-page replay failure must be an explicit identity error, not a timeout or unrelated tool failure",
-    );
-  }
+  assert.equal(replayedDirectPayload?.result?.isError, true,
+    "legacy direct-session authority must fail closed even when its old page is still open");
+  assert.match(
+    String(replayedDirectPayload?.result?.content?.[0]?.text || ""),
+    /conversation identity is unavailable|conversation authority|requires the current ChatGPT conversation identity/i,
+    "the stale-session failure must be an explicit identity error, not a timeout or unrelated tool failure",
+  );
 
   const refreshB = await refreshThroughGateway(gatewayBaseUrl, {
     clientId: oauth.clientId,
@@ -790,8 +769,9 @@ try {
     backgroundProfile: [...backgroundProfile].sort(),
     gatewayPortStable: runtime.gatewayPort === gatewayPortBefore,
     publicSessionStable: toolsAfter.headers["mcp-session-id"] === publicSessionId,
-    replayedMain01DirectTool: replayPageAvailable,
-    replayedDirectSessionFailClosedWithoutPage: !replayPageAvailable,
+    replayPageWasOpen: replayPageAvailable,
+    replayedDirectSessionAlwaysFailsClosed: true,
+    exactPageInvocationRequired: true,
     oauthRefreshBeforeHandover: true,
     oauthRefreshAfterHandover: true,
     refreshTokenRotatedTwice: true,

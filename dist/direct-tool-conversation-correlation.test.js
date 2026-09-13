@@ -2,12 +2,18 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { ClassicConversationAuthorityRegistry, sessionFingerprintFromClassicRequest } from "./classic-conversation-authority.js";
-import { ClassicActiveTurnRegistry, ClassicDirectRequestAuthorityRegistry } from "./classic-mcp-call-correlation.js";
+import {
+  ClassicConversationAuthorityRegistry,
+  sessionFingerprintFromClassicRequest,
+} from "./classic-conversation-authority.js";
+import {
+  ClassicActiveTurnRegistry,
+  ClassicMcpCallCorrelator,
+  fingerprintMcpToolCall,
+} from "./classic-mcp-call-correlation.js";
 import { ClassicTurnTransportTracker } from "./classic-turn-transport-observer.js";
 import { McpConversationRequestContext } from "./mcp-conversation-request-context.js";
 import { requestTraceCorrelationFingerprints } from "./request-trace-correlation.js";
-import { sessionCorrelationFingerprintsFromHeaders } from "./session-correlation.js";
 
 const temp = await mkdtemp(join(tmpdir(), "devspace-direct-tool-correlation-"));
 const authorityPath = join(temp, "authority.json");
@@ -61,10 +67,12 @@ function browserTurn({ requestId, runtimeKey, conversationId, session, traceId, 
 
 const traceA = "0123456789abcdef0000000000000065";
 const traceB = "0123456789abcdef0000000000000066";
-const browserSessionA = "browser-statsig-session-a";
-const browserSessionB = "browser-statsig-session-b";
-const directSessionA = "server-side-openai-session-a";
-const directSessionB = "server-side-openai-session-b";
+const browserSessionA = "browser-session-a";
+const browserSessionB = "browser-session-b";
+const sharedDirectSession = "shared-host-direct-session";
+const sharedDirectFingerprint = sessionFingerprintFromClassicRequest({
+  headers: { "x-openai-session": sharedDirectSession },
+});
 
 browserTurn({
   requestId: "turn-a",
@@ -84,235 +92,157 @@ browserTurn({
   datadogTraceId: "102",
 });
 
-const directHeadersA = {
-  "x-openai-session": directSessionA,
+const traceKeysA = requestTraceCorrelationFingerprints({
   traceparent: `00-${traceA}-2222222222222222-01`,
   "x-datadog-trace-id": "101",
-};
-const directHeadersB = {
-  "x-openai-session": directSessionB,
+});
+const traceKeysB = requestTraceCorrelationFingerprints({
   traceparent: `00-${traceB}-3333333333333333-01`,
   "x-datadog-trace-id": "102",
-};
-const directFingerprintA = sessionFingerprintFromClassicRequest({ headers: directHeadersA });
-const directFingerprintB = sessionFingerprintFromClassicRequest({ headers: directHeadersB });
-const traceKeysA = requestTraceCorrelationFingerprints(directHeadersA);
-const traceKeysB = requestTraceCorrelationFingerprints(directHeadersB);
-
-const browserWrappedSession = "9b5fcb28-405f-4f5e-8ee7-c6c23d509a4a";
-browserTurn({
-  requestId: "turn-wrapped-session",
-  runtimeKey: "main-03",
-  conversationId: "conversation-direct-wrapped-session",
-  session: browserWrappedSession,
-  traceId: "0123456789abcdef0000000000000067",
-  datadogTraceId: "103",
 });
-const wrappedDirectHeaders = {
-  "x-openai-session": JSON.stringify({ id: browserWrappedSession, issued_at: now }),
-  // Intentionally unrelated to the browser upload trace. The exact embedded
-  // session UUID is the only valid join for this host transport shape.
-  traceparent: "00-0123456789abcdef0000000000000099-4444444444444444-01",
-  "x-datadog-trace-id": "153",
-};
-const wrappedSessionIdentity = activeTurns.resolveGatewayCall({
-  toolName: "devspace_progress_report",
-  traceCorrelationFingerprints: requestTraceCorrelationFingerprints(wrappedDirectHeaders),
-  sessionCorrelationFingerprintsHint: sessionCorrelationFingerprintsFromHeaders(wrappedDirectHeaders),
-  sessionFingerprintHint: sessionFingerprintFromClassicRequest({ headers: wrappedDirectHeaders }),
-});
-assert.equal(wrappedSessionIdentity?.conversationId, "conversation-direct-wrapped-session");
-assert.equal(wrappedSessionIdentity?.runtimeKey, "main-03");
-assert.match(wrappedSessionIdentity?.source || "", /session-alias-correlation$/);
 
 for (const toolName of ["blender_runtime", "blender_mcp", "devspace_progress_report"]) {
   const identity = activeTurns.resolveGatewayCall({
     toolName,
     traceCorrelationFingerprints: traceKeysA,
-    sessionFingerprintHint: directFingerprintA,
+    sessionFingerprintHint: sharedDirectFingerprint,
   });
-  assert.equal(identity?.conversationId, "conversation-direct-a", `${toolName} must resolve through the exact request trace`);
+  assert.equal(identity?.conversationId, "conversation-direct-a", `${toolName} must resolve only through the exact request trace`);
   assert.equal(identity?.runtimeKey, "main-01");
   assert.match(identity?.source || "", /request-trace-correlation$/);
 }
 
-const exactA = activeTurns.resolveGatewayCall({
-  toolName: "blender_runtime",
-  traceCorrelationFingerprints: traceKeysA,
-  sessionFingerprintHint: directFingerprintA,
-});
-await authority.observeVerifiedDirectSession({
-  sessionFingerprint: directFingerprintA,
-  conversationId: exactA.conversationId,
-  runtimeKey: exactA.runtimeKey,
-  observedAt: new Date(now).toISOString(),
-});
-const exactB = activeTurns.resolveGatewayCall({
-  toolName: "blender_runtime",
-  traceCorrelationFingerprints: traceKeysB,
-  sessionFingerprintHint: directFingerprintB,
-});
-await authority.observeVerifiedDirectSession({
-  sessionFingerprint: directFingerprintB,
-  conversationId: exactB.conversationId,
-  runtimeKey: exactB.runtimeKey,
-  observedAt: new Date(now).toISOString(),
-});
-assert.equal(authority.resolveFingerprint(directFingerprintA)?.conversationId, "conversation-direct-a");
-assert.equal(authority.resolveFingerprint(directFingerprintB)?.conversationId, "conversation-direct-b");
-assert.equal(authority.resolveFingerprint(directFingerprintA)?.source, "classic-verified-direct-session");
-const nextTraceGroupA = requestTraceCorrelationFingerprints({
-  "x-openai-session": directSessionA,
-  traceparent: "00-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-6666666666666666-01",
-  "x-datadog-trace-id": "1099",
-});
-assert.equal(
-  activeTurns.resolveGatewayCall({
-    toolName: "devspace_progress_report",
-    traceCorrelationFingerprints: nextTraceGroupA,
-    sessionFingerprintHint: directFingerprintA,
-  }),
-  null,
-  "a new server-side trace group has no browser join and must not guess",
-);
-assert.equal(
-  authority.resolveVerifiedDirectSession(directFingerprintA, {
-    now: now + 1,
-    maxAgeMs: 60_000,
-  })?.conversationId,
-  "conversation-direct-a",
-  "the exact page-verified direct session must carry later trace groups without Runtime-only guessing",
-);
+assert.equal(activeTurns.resolveGatewayCall({
+  toolName: "devspace_progress_report",
+  sessionFingerprintHint: sharedDirectFingerprint,
+}), null, "a bare direct MCP session must never select a conversation");
+assert.equal(activeTurns.resolveGatewayCall({
+  toolName: "devspace_progress_report",
+  traceCorrelationFingerprints: ["f".repeat(64)],
+  sessionFingerprintHint: sharedDirectFingerprint,
+}), null, "an unrelated request trace must fail closed");
 
-// Current ChatGPT direct MCP calls may share a server-side request trace that
-// is intentionally unrelated to the browser conversation POST trace. Once one
-// capability request has been exact-page verified, later direct requests in
-// that same assistant turn (including progress narration) reuse only the
-// hashed direct trace and must still fail closed if another conversation ever
-// claims the same trace.
-const directTurnAuthority = new ClassicDirectRequestAuthorityRegistry({
+const callCorrelation = new ClassicMcpCallCorrelator({
   now: () => now,
-  ttlMs: 60_000,
+  ttlMs: 1_000,
+  maxSkewMs: 100,
+  waitTimeoutMs: 25,
 });
-const serverSideTurnHeaders = {
-  traceparent: "00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-5555555555555555-01",
-  "x-datadog-trace-id": "999",
-};
-const serverSideTurnTraces = requestTraceCorrelationFingerprints(serverSideTurnHeaders);
-assert.equal(
-  activeTurns.resolveGatewayCall({
-    toolName: "devspace_progress_report",
-    traceCorrelationFingerprints: serverSideTurnTraces,
-    sessionFingerprintHint: "7".repeat(64),
-  }),
-  null,
-  "the direct server-side trace alone must not guess a browser conversation",
-);
-directTurnAuthority.note({
-  traceCorrelationFingerprints: serverSideTurnTraces,
+const progressCallA = fingerprintMcpToolCall("tools/call", {
+  name: "devspace_progress_report",
+  arguments: { kind: "milestone", message: "conversation A exact report" },
+});
+const progressCallB = fingerprintMcpToolCall("tools/call", {
+  name: "devspace_progress_report",
+  arguments: { kind: "milestone", message: "conversation B exact report" },
+});
+callCorrelation.noteNative({
+  callFingerprint: progressCallA,
   conversationId: "conversation-direct-a",
   runtimeKey: "main-01",
+  toolName: "devspace_progress_report",
+  source: "classic-websocket-tool-invocation",
   observedAtMs: now,
-  source: "classic-capability-session-page-verified",
 });
-const inheritedProgressAuthority = directTurnAuthority.resolve({
-  traceCorrelationFingerprints: requestTraceCorrelationFingerprints({
-    ...serverSideTurnHeaders,
-    "x-openai-session": "a-new-mcp-session-for-the-same-assistant-turn",
-  }),
+const correlatedA = callCorrelation.noteGateway({
+  callFingerprint: progressCallA,
+  sessionFingerprint: sharedDirectFingerprint,
+  gatewayRequestId: "gateway-request-a",
+  toolName: "devspace_progress_report",
+  observedAtMs: now + 5,
 });
-assert.equal(inheritedProgressAuthority?.conversationId, "conversation-direct-a");
-assert.equal(inheritedProgressAuthority?.runtimeKey, "main-01");
-assert.equal(inheritedProgressAuthority?.source, "classic-direct-request-trace-authority");
-directTurnAuthority.note({
-  traceCorrelationFingerprints: serverSideTurnTraces,
+assert.equal(correlatedA?.conversationId, "conversation-direct-a");
+assert.equal(correlatedA?.runtimeKey, "main-01");
+assert.equal(correlatedA?.source, "classic-websocket-tool-invocation-correlation");
+assert.equal(correlatedA?.gatewayRequestId, "gateway-request-a");
+
+callCorrelation.noteNative({
+  callFingerprint: progressCallB,
   conversationId: "conversation-direct-b",
   runtimeKey: "main-02",
-  observedAtMs: now + 1,
-  source: "classic-capability-session-page-verified",
+  toolName: "devspace_progress_report",
+  source: "classic-websocket-tool-invocation",
+  observedAtMs: now + 10,
 });
-assert.equal(
-  directTurnAuthority.resolve({ traceCorrelationFingerprints: serverSideTurnTraces }),
-  null,
-  "a reused direct request trace across two conversations must fail closed",
-);
-assert.equal(directTurnAuthority.completeConversation("conversation-direct-b"), 1);
-assert.equal(
-  directTurnAuthority.resolve({ traceCorrelationFingerprints: serverSideTurnTraces })?.conversationId,
-  "conversation-direct-a",
-);
-
-await requestContext.run({
-  capabilityAuthority: authority.resolveFingerprint(directFingerprintA),
-  sessionFingerprint: directFingerprintA,
-  mcpSessionId: "backend-session-a",
-}, async () => {
-  await Promise.resolve();
-  assert.equal(requestContext.current()?.capabilityAuthority?.conversationId, "conversation-direct-a");
-  assert.equal(requestContext.current()?.progressAuthority, null);
+const correlatedB = callCorrelation.noteGateway({
+  callFingerprint: progressCallB,
+  sessionFingerprint: sharedDirectFingerprint,
+  gatewayRequestId: "gateway-request-b",
+  toolName: "devspace_progress_report",
+  observedAtMs: now + 15,
 });
-await requestContext.run({
-  progressAuthority: {
-    conversationId: "conversation-direct-a",
-    sessionFingerprint: directFingerprintA,
-    authorityDomain: "progress",
-    ephemeral: true,
-  },
-  sessionFingerprint: directFingerprintA,
-}, async () => {
-  assert.equal(requestContext.current()?.progressAuthority?.conversationId, "conversation-direct-a");
-  assert.equal(requestContext.current()?.capabilityAuthority, null, "progress authority must not become Blender/capability authority");
+assert.equal(correlatedB?.conversationId, "conversation-direct-b",
+  "two conversations may share one host session without sharing progress ownership");
+assert.equal(correlatedB?.runtimeKey, "main-02");
+
+callCorrelation.noteGateway({
+  callFingerprint: progressCallA,
+  sessionFingerprint: sharedDirectFingerprint,
+  gatewayRequestId: "gateway-request-a-later",
+  toolName: "devspace_progress_report",
+  observedAtMs: now + 20,
 });
-assert.equal(requestContext.current(), null, "request authority must not leak after the MCP request completes");
+assert.equal(await callCorrelation.waitForIdentity({
+  callFingerprint: progressCallA,
+  sessionFingerprint: sharedDirectFingerprint,
+  gatewayRequestId: "gateway-request-a-later",
+  timeoutMs: 25,
+}), null, "a later identical request must not reuse an earlier resolved conversation owner");
 
-assert.equal(
-  activeTurns.resolveGatewayCall({
-    toolName: "blender_runtime",
-    traceCorrelationFingerprints: traceKeysA,
-    sessionFingerprintHint: directFingerprintB,
-  })?.conversationId,
-  "conversation-direct-a",
-  "the exact request trace, not a reused/mismatched session hint, owns the direct call",
-);
-assert.equal(
-  activeTurns.resolveGatewayCall({
-    toolName: "blender_runtime",
-    traceCorrelationFingerprints: traceKeysB,
-    sessionFingerprintHint: directFingerprintA,
-  })?.conversationId,
-  "conversation-direct-b",
-);
-
-const ambiguous = new ClassicActiveTurnRegistry({ now: () => now });
-for (const [runtimeKey, conversationId, requestId] of [
-  ["main-01", "conversation-ambiguous-a", "ambiguous-a"],
-  ["main-02", "conversation-ambiguous-b", "ambiguous-b"],
+const ambiguous = new ClassicMcpCallCorrelator({ now: () => now, maxSkewMs: 100 });
+const sameCall = fingerprintMcpToolCall("tools/call", {
+  name: "devspace_progress_report",
+  arguments: { kind: "progress", message: "identical simultaneous report" },
+});
+for (const [conversationId, runtimeKey] of [
+  ["conversation-ambiguous-a", "main-01"],
+  ["conversation-ambiguous-b", "main-02"],
 ]) {
-  ambiguous.noteTurn({
-    kind: "started",
-    runtimeKey,
+  ambiguous.noteNative({
+    callFingerprint: sameCall,
     conversationId,
-    requestId,
-    traceCorrelationFingerprints: traceKeysA,
-    localFunctionNames: ["local.continue_in_work"],
+    runtimeKey,
+    toolName: "devspace_progress_report",
+    source: "classic-websocket-tool-invocation",
     observedAtMs: now,
   });
 }
-assert.equal(ambiguous.resolveGatewayCall({
+assert.equal(ambiguous.noteGateway({
+  callFingerprint: sameCall,
+  sessionFingerprint: sharedDirectFingerprint,
+  gatewayRequestId: "gateway-ambiguous",
   toolName: "devspace_progress_report",
-  traceCorrelationFingerprints: traceKeysA,
-}), null, "a trace observed in two conversations must fail closed");
+  observedAtMs: now,
+}), null, "the same canonical invocation visible in two conversations must fail closed");
 assert.equal(ambiguous.diagnostics().ambiguousMatches > 0, true);
+assert.equal(typeof authority.observeVerifiedDirectSession, "undefined",
+  "the retired durable direct-session writer must not remain available");
+assert.equal(typeof authority.resolveVerifiedDirectSession, "undefined");
 
-const unmatched = await activeTurns.waitForIdentity({
-  toolName: "devspace_progress_report",
-  traceCorrelationFingerprints: ["f".repeat(64)],
-  sessionFingerprintHint: directFingerprintA,
+await requestContext.run({
+  progressAuthority: {
+    conversationId: correlatedA.conversationId,
+    runtimeKey: correlatedA.runtimeKey,
+    callFingerprint: correlatedA.callFingerprint,
+    pageVerified: true,
+    authorityDomain: "progress",
+    ephemeral: true,
+  },
+  sessionFingerprint: sharedDirectFingerprint,
+}, async () => {
+  assert.equal(requestContext.current()?.progressAuthority?.conversationId, "conversation-direct-a");
+  assert.equal(requestContext.current()?.capabilityAuthority, null);
+});
+assert.equal(requestContext.current(), null, "request authority must not leak after the MCP request completes");
+
+const unmatched = await callCorrelation.waitForIdentity({
+  callFingerprint: "f".repeat(64),
+  sessionFingerprint: sharedDirectFingerprint,
   timeoutMs: 25,
 });
 assert.equal(unmatched, null);
-assert.equal(activeTurns.diagnostics().waiters, 0, "an unresolved direct call must leave no zombie waiter");
-assert.equal(activeTurns.diagnostics().timedOutWaiters > 0, true);
+assert.equal(callCorrelation.diagnostics().waiters, 0, "unresolved exact invocation must leave no zombie waiter");
+assert.equal(callCorrelation.diagnostics().timedOutWaiters > 0, true);
 
 assert.equal(activeTurns.completeConversation("conversation-direct-a"), 1);
 assert.equal(activeTurns.resolveGatewayCall({
@@ -324,8 +254,18 @@ assert.equal(activeTurns.resolveGatewayCall({
   traceCorrelationFingerprints: traceKeysB,
 })?.conversationId, "conversation-direct-b", "completion cleanup must stay conversation-scoped");
 
+const browserAuthoritySecret = "browser-authority-secret";
+await authority.observeNativeTurn({
+  sessionFingerprint: sessionFingerprintFromClassicRequest({
+    headers: { "x-openai-session": browserAuthoritySecret },
+  }),
+  conversationId: "conversation-native-diagnostic",
+  runtimeKey: "main-04",
+  observedAt: new Date(now).toISOString(),
+  authoritativeCurrent: true,
+});
 const persisted = await readFile(authorityPath, "utf8");
-for (const rawSecret of [traceA, traceB, "101", "102", browserSessionA, browserSessionB, directSessionA, directSessionB, browserWrappedSession]) {
+for (const rawSecret of [traceA, traceB, "101", "102", browserSessionA, browserSessionB, sharedDirectSession, browserAuthoritySecret]) {
   assert.equal(persisted.includes(rawSecret), false, `authority state must not persist raw correlation secret ${rawSecret}`);
 }
 
@@ -333,15 +273,11 @@ await rm(temp, { recursive: true, force: true });
 console.log(JSON.stringify({
   ok: true,
   gate: "direct-tool-conversation-correlation",
-  directTools: ["blender_runtime", "blender_mcp", "devspace_progress_report"],
   exactDistributedTraceAuthority: true,
-  pageVerifiedDirectTurnTraceReuse: true,
-  pageVerifiedDirectSessionCrossTraceReuse: true,
-  wrappedSessionAliasAuthority: true,
-  browserAndDirectSessionsMayDiffer: true,
+  exactWebSocketInvocationAuthority: true,
+  durableDirectSessionAuthorityRetired: true,
+  sharedHostSessionConversationIsolation: true,
   requestContextIsolation: true,
-  progressCapabilityDomainsSeparated: true,
-  twoConversationIsolation: true,
   ambiguityFailsClosed: true,
   boundedWaiterCleanup: true,
   normalCompletionCleanup: true,

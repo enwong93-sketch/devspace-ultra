@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import {
   ClassicActiveTurnRegistry,
-  ClassicDirectRequestAuthorityRegistry,
   ClassicMcpCallCorrelator,
   fingerprintMcpToolCall,
   isNativeCallMcpRequest,
@@ -163,11 +162,10 @@ assert.equal(activeTurns.diagnostics().ambiguousMatches, 0, "unscoped calls fail
 assert.equal(
   activeTurns.resolveGatewayCall({ toolName: "blender_mcp" }),
   null,
-  "even a unique tool name must not become cross-window authority without a request-owned runtime hint",
+  "even a unique tool name must not become cross-window authority without an exact request trace",
 );
 const uniqueTurn = activeTurns.resolveGatewayCall({ toolName: "blender_mcp", runtimeKeyHint: "main-01" });
-assert.equal(uniqueTurn?.conversationId, "conversation-main-01");
-assert.equal(uniqueTurn?.source, "classic-active-turn-unique-tool-correlation");
+assert.equal(uniqueTurn, null, "Runtime is only a page locator and must never become conversation authority");
 
 assert.equal(activeTurns.completeConversation("conversation-main-01"), 1);
 assert.equal(
@@ -178,75 +176,18 @@ assert.equal(
 assert.equal(
   activeTurns.resolveGatewayCall({
     toolName: "devspace_progress_report",
-    sessionFingerprintHint: "b".repeat(64),
+    turnTraceFingerprint: "2".repeat(64),
   })?.conversationId,
   "conversation-main-02",
-  "revoking one conversation must not remove another conversation's authority",
+  "revoking one conversation must not remove another conversation's exact trace authority",
 );
 assert.equal(activeTurns.completeConversation("conversation-not-present"), 0);
-
-let authorityNow = now;
-const directRequestAuthority = new ClassicDirectRequestAuthorityRegistry({
-  now: () => authorityNow,
-  ttlMs: 60_000,
-  maxRecords: 8,
-});
-const directTraceA = ["4".repeat(64), "5".repeat(64)];
-const directTraceB = ["6".repeat(64)];
-assert.equal(directRequestAuthority.resolve({ traceCorrelationFingerprints: directTraceA }), null);
-const notedDirectAuthority = directRequestAuthority.note({
-  traceCorrelationFingerprints: directTraceA,
-  conversationId: "conversation-direct-request-a",
-  runtimeKey: "main-02",
-  observedAtMs: authorityNow,
-  source: "page-verified-capability-request",
-});
-assert.equal(notedDirectAuthority?.conversationId, "conversation-direct-request-a");
-const reusedDirectAuthority = directRequestAuthority.resolve({
-  traceCorrelationFingerprints: ["5".repeat(64)],
-});
-assert.equal(reusedDirectAuthority?.conversationId, "conversation-direct-request-a");
-assert.equal(reusedDirectAuthority?.runtimeKey, "main-02");
-assert.equal(reusedDirectAuthority?.source, "classic-direct-request-trace-authority");
-assert.equal(reusedDirectAuthority?.authoritySource, "page-verified-capability-request");
-directRequestAuthority.note({
-  traceCorrelationFingerprints: directTraceA,
-  conversationId: "conversation-direct-request-b",
-  runtimeKey: "main-03",
-  observedAtMs: authorityNow + 1,
-  source: "page-verified-capability-request",
-});
-assert.equal(
-  directRequestAuthority.resolve({ traceCorrelationFingerprints: directTraceA }),
-  null,
-  "one direct request trace observed for two conversations must fail closed",
-);
-assert.equal(directRequestAuthority.diagnostics().ambiguousMatches > 0, true);
-assert.equal(directRequestAuthority.completeConversation("conversation-direct-request-b"), 1);
-assert.equal(
-  directRequestAuthority.resolve({ traceCorrelationFingerprints: directTraceA })?.conversationId,
-  "conversation-direct-request-a",
-  "settling one conversation must not revoke another trace authority",
-);
-directRequestAuthority.note({
-  traceCorrelationFingerprints: directTraceB,
-  conversationId: "conversation-direct-request-c",
-  runtimeKey: "main-04",
-  observedAtMs: authorityNow,
-});
-authorityNow += 60_001;
-directRequestAuthority.prune();
-assert.equal(directRequestAuthority.resolve({ traceCorrelationFingerprints: directTraceA }), null);
-assert.equal(directRequestAuthority.resolve({ traceCorrelationFingerprints: directTraceB }), null);
-assert.equal(directRequestAuthority.diagnostics().records, 0);
-assert.equal(directRequestAuthority.diagnostics().rawTraceIdsPersisted, false);
 
 const sessionScopedProgress = activeTurns.resolveGatewayCall({
   toolName: "devspace_progress_report",
   sessionFingerprintHint: "b".repeat(64),
 });
-assert.equal(sessionScopedProgress?.conversationId, "conversation-main-02");
-assert.equal(sessionScopedProgress?.source, "classic-active-turn-session-correlation");
+assert.equal(sessionScopedProgress, null, "a host direct-session fingerprint must not own progress narration");
 
 const dynamicallyDisclosedSessionTool = new ClassicActiveTurnRegistry({ now: () => now });
 dynamicallyDisclosedSessionTool.noteTurn({
@@ -262,13 +203,8 @@ const dynamicProgressByExactSession = dynamicallyDisclosedSessionTool.resolveGat
   toolName: "devspace_progress_report",
   sessionFingerprintHint: "c".repeat(64),
 });
-assert.equal(dynamicProgressByExactSession?.conversationId, "conversation-session-dynamic-tool");
-assert.equal(dynamicProgressByExactSession?.source, "classic-active-turn-session-correlation");
-assert.equal(
-  dynamicProgressByExactSession?.toolName,
-  "devspace_progress_report",
-  "an exact request-owned session must authorize a tool disclosed after the initial local function snapshot",
-);
+assert.equal(dynamicProgressByExactSession, null,
+  "dynamic tool disclosure still requires exact trace or page-local invocation evidence");
 assert.equal(
   activeTurns.resolveGatewayCall({
     toolName: "devspace_progress_report",
@@ -396,8 +332,8 @@ const wrappedSessionMatch = wrappedSessionTurns.resolveGatewayCall({
   sessionCorrelationFingerprintsHint: sessionCorrelationFingerprintsFromValue(directSessionDescriptor),
   sessionFingerprintHint: "8".repeat(64),
 });
-assert.equal(wrappedSessionMatch?.conversationId, "conversation-wrapped-session");
-assert.equal(wrappedSessionMatch?.source, "classic-active-turn-post-transport-session-alias-correlation");
+assert.equal(wrappedSessionMatch, null,
+  "wrapped session aliases are transport metadata and cannot select a conversation");
 assert.equal(wrappedSessionTurns.diagnostics().turnsWithSessionAliases, 1);
 
 const ambiguousSessionAliases = new ClassicActiveTurnRegistry({ now: () => now });
@@ -421,9 +357,9 @@ assert.equal(
     sessionCorrelationFingerprintsHint: sessionCorrelationFingerprintsFromValue(directSessionDescriptor),
   }),
   null,
-  "one session alias observed in two conversations must fail closed",
+  "session aliases must fail closed even before comparing conversation candidates",
 );
-assert.equal(ambiguousSessionAliases.diagnostics().ambiguousMatches > 0, true);
+assert.equal(ambiguousSessionAliases.diagnostics().ambiguousMatches, 0);
 
 const reusedSessionTurns = new ClassicActiveTurnRegistry({ now: () => now });
 for (const [runtimeKey, conversationId, requestId, offset] of [
@@ -500,11 +436,8 @@ const runtimeScopedDeferredTool = deferredTraceTurns.resolveGatewayCall({
   toolName: "devspace_progress_report",
   runtimeKeyHint: "main-01",
 });
-assert.equal(runtimeScopedDeferredTool?.conversationId, "conversation-deferred-trace");
-assert.equal(
-  runtimeScopedDeferredTool?.source,
-  "classic-active-turn-post-finish-deferred-placeholder-correlation",
-);
+assert.equal(runtimeScopedDeferredTool, null,
+  "Runtime-scoped deferred placeholders must not become conversation authority");
 
 const deferredPlaceholderTurns = new ClassicActiveTurnRegistry({
   now: () => now,
@@ -538,14 +471,7 @@ const runtimeScopedWithoutTrace = deferredPlaceholderTurns.resolveGatewayCall({
   toolName: "devspace_progress_report",
   runtimeKeyHint: "main-01",
 });
-assert.equal(
-  runtimeScopedWithoutTrace?.conversationId,
-  "conversation-deferred-placeholder",
-);
-assert.equal(
-  runtimeScopedWithoutTrace?.source,
-  "classic-active-turn-post-finish-deferred-placeholder-correlation",
-);
+assert.equal(runtimeScopedWithoutTrace, null);
 
 const ambiguousDeferredPlaceholders = new ClassicActiveTurnRegistry({
   now: () => now,
@@ -581,9 +507,9 @@ assert.equal(
   ambiguousDeferredPlaceholders.resolveGatewayCall({
     toolName: "devspace_progress_report",
     runtimeKeyHint: "main-02",
-  })?.conversationId,
-  "conversation-placeholder-right",
-  "runtime-scoped deferred correlation must stay inside its exact Main",
+  }),
+  null,
+  "Runtime-scoped deferred correlation is retired",
 );
 
 const deferredTurns = new ClassicActiveTurnRegistry({
@@ -603,7 +529,8 @@ deferredTurns.noteTurn({
   localFunctionNames: ["devspace_progress_report"],
   observedAtMs: now,
 });
-assert.equal((await deferredIdentity)?.conversationId, "conversation-main-01");
+assert.equal(await deferredIdentity, null,
+  "a runtime-only waiter must fail closed immediately instead of waiting for another conversation");
 deferredTurns.noteTurn({
   kind: "finished",
   requestId: "turn-progress",
@@ -616,12 +543,8 @@ const delayedAfterFinished = deferredTurns.resolveGatewayCall({
   toolName: "devspace_progress_report",
   runtimeKeyHint: "main-01",
 });
-assert.equal(
-  delayedAfterFinished?.conversationId,
-  "conversation-main-01",
-  "server-side MCP calls may arrive after the browser turn transport has already finished",
-);
-assert.equal(delayedAfterFinished?.source, "classic-active-turn-post-finish-unique-tool-correlation");
+assert.equal(delayedAfterFinished, null,
+  "server-side calls after transport finish still require an exact trace or page-local invocation");
 assert.equal(deferredTurns.diagnostics().activeTurns, 0);
 assert.equal(deferredTurns.diagnostics().postTurnTurns, 1);
 
@@ -659,8 +582,8 @@ assert.equal(
   completedAmbiguity.resolveGatewayCall({
     toolName: "devspace_progress_report",
     runtimeKeyHint: "main-01",
-  })?.conversationId,
-  "conversation-completed-left",
+  }),
+  null,
 );
 
 const failedTurn = new ClassicActiveTurnRegistry({ now: () => now, postTurnGraceMs: 1_000 });
@@ -701,13 +624,13 @@ console.log(JSON.stringify({
   requestScopedBoundedWaiters: true,
   boundedTemporalJoin: true,
   activeTurnTraceMatch: true,
-  activeTurnUniqueToolMatch: true,
+  runtimeOnlyAuthorityRetired: true,
+  sessionOnlyAuthorityRetired: true,
   deferredToolExactTraceMatch: true,
   deferredToolWrongTraceFailsClosed: true,
-  deferredPlaceholderUniqueOwnerMatch: true,
-  deferredPlaceholderAmbiguityFailsClosed: true,
+  deferredPlaceholderAuthorityRetired: true,
   activeTurnAmbiguityFailsClosed: true,
-  delayedPostFinishCorrelation: true,
+  delayedPostFinishRequiresExactEvidence: true,
   completedTurnAmbiguityFailsClosed: true,
   failedTurnRevokesCorrelation: true,
   completedConversationRevokesAllAuthority: true,

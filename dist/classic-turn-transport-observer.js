@@ -1,9 +1,11 @@
 import { ClassicCdpClient } from "./classic-cdp-client.js";
+import { StringDecoder } from "node:string_decoder";
 import { ClassicTurnIdentityCorrelator, parseClassicTurnRequest } from "./context-guardian-cdp.js";
 import { sessionFingerprintFromClassicRequest } from "./classic-conversation-authority.js";
 import { defaultMainDebugPorts } from "./goal-host-bridge.js";
 import { runtimeKeyForPort } from "./classic-stream-recovery-cdp.js";
 import { isNativeCallMcpRequest, parseNativeCallMcpRequest } from "./classic-mcp-call-correlation.js";
+import { ClassicToolInvocationStreamTracker } from "./classic-tool-invocation-stream.js";
 import { mergeTraceCorrelationFingerprints, requestTraceCorrelationFingerprints } from "./request-trace-correlation.js";
 import { mergeSessionCorrelationFingerprints, sessionCorrelationFingerprintsFromHeaders } from "./session-correlation.js";
 
@@ -11,6 +13,8 @@ const DEFAULT_CONNECTION_POLL_MS = 15_000;
 const DEFAULT_PROBE_TIMEOUT_MS = 700;
 const DEFAULT_PENDING_TTL_MS = 10 * 60_000;
 const DEFAULT_MAX_PENDING = 128;
+const MAX_STREAM_BUFFER_CHARS = 512 * 1024;
+const MAX_STREAM_BUFFERS = 16;
 
 function observedAt(ms = Date.now()) { return new Date(ms).toISOString(); }
 
@@ -19,6 +23,29 @@ function isTurnUrl(url) {
     const parsed = new URL(String(url || ""));
     return parsed.hostname === "chatgpt.com" && parsed.pathname === "/backend-api/f/conversation";
   } catch { return false; }
+}
+
+function conversationIdFromUrl(url) {
+  try {
+    return new URL(String(url || "")).pathname.match(/\/c\/([^/?#]+)/)?.[1] || null;
+  } catch { return null; }
+}
+
+function decodedNetworkData(value, { base64Encoded = false, decoder = null } = {}) {
+  const raw = String(value ?? "");
+  if (!raw) return "";
+  if (base64Encoded) {
+    try {
+      const bytes = Buffer.from(raw, "base64");
+      return decoder instanceof StringDecoder ? decoder.write(bytes) : bytes.toString("utf8");
+    } catch { return ""; }
+  }
+  if (/^(?:data:|event:|\s*[\[{])/.test(raw)) return raw;
+  try {
+    const decoded = Buffer.from(raw, "base64").toString("utf8");
+    if (/^(?:data:|event:|\s*[\[{])/.test(decoded) || /\n(?:data:|event:)/.test(decoded)) return decoded;
+  } catch {}
+  return raw;
 }
 
 async function fetchJson(url, { fetchImpl = globalThis.fetch, timeoutMs = DEFAULT_PROBE_TIMEOUT_MS } = {}) {
@@ -43,6 +70,7 @@ export class ClassicTurnTransportTracker {
     onConversationIdentity,
     onTurnTransportEvent,
     onNativeMcpCall,
+    onToolInvocation,
     onActiveTurn,
   } = {}) {
     this.now = now;
@@ -53,7 +81,11 @@ export class ClassicTurnTransportTracker {
     this.onConversationIdentity = typeof onConversationIdentity === "function" ? onConversationIdentity : null;
     this.onTurnTransportEvent = typeof onTurnTransportEvent === "function" ? onTurnTransportEvent : null;
     this.onNativeMcpCall = typeof onNativeMcpCall === "function" ? onNativeMcpCall : null;
+    this.onToolInvocation = typeof onToolInvocation === "function" ? onToolInvocation : null;
     this.onActiveTurn = typeof onActiveTurn === "function" ? onActiveTurn : null;
+    this.toolInvocationStream = new ClassicToolInvocationStreamTracker({ now });
+    this.responseBuffers = new Map();
+    this.responseDecoders = new Map();
   }
 
   get pendingSize() { return this.pending.size; }
@@ -132,13 +164,61 @@ export class ClassicTurnTransportTracker {
   noteResponse(params = {}) {
     const requestId = String(params?.requestId || "").trim();
     const entry = requestId ? this.pending.get(requestId) : null;
-    if (!entry || !isTurnUrl(params?.response?.url)) return;
+    if (!entry || !isTurnUrl(params?.response?.url)) return null;
     this.#emitTransport({
       conversationId: entry.conversationId,
       kind: "response",
       status: Number(params?.response?.status || 0) || null,
       observedAt: observedAt(this.now()),
     });
+    return { requestId, conversationId: entry.conversationId };
+  }
+
+  noteResponseData({ requestId, data, base64Encoded = false, observedAtMs = this.now() } = {}) {
+    const id = String(requestId || "").trim();
+    const entry = id ? this.pending.get(id) : null;
+    if (!entry?.conversationId) return [];
+    let decoder = null;
+    if (base64Encoded) {
+      decoder = this.responseDecoders.get(id);
+      if (!decoder) {
+        decoder = new StringDecoder("utf8");
+        this.responseDecoders.set(id, decoder);
+      }
+    }
+    const chunk = decodedNetworkData(data, { base64Encoded, decoder });
+    if (!chunk) return [];
+    const previous = this.responseBuffers.get(id) || "";
+    let combined = `${previous}${chunk}`;
+    if (combined.length > MAX_STREAM_BUFFER_CHARS) combined = combined.slice(-MAX_STREAM_BUFFER_CHARS);
+
+    const blocks = combined.split(/\r?\n\r?\n/);
+    const remainder = blocks.pop() || "";
+    const accepted = [];
+    for (const block of blocks) {
+      accepted.push(...this.toolInvocationStream.notePayload({
+        payloadData: block,
+        conversationId: entry.conversationId,
+        observedAtMs,
+      }));
+    }
+    // Some ChatGPT stream variants deliver one complete JSON envelope without
+    // an SSE blank-line delimiter. Parse the bounded remainder as well; the
+    // invocation tracker deduplicates it if later chunks repeat the envelope.
+    accepted.push(...this.toolInvocationStream.notePayload({
+      payloadData: remainder,
+      conversationId: entry.conversationId,
+      observedAtMs,
+    }));
+    this.responseBuffers.set(id, remainder.slice(-MAX_STREAM_BUFFER_CHARS));
+    while (this.responseBuffers.size > MAX_STREAM_BUFFERS) {
+      const oldest = this.responseBuffers.keys().next().value;
+      if (!oldest) break;
+      this.responseBuffers.delete(oldest);
+      this.responseDecoders.delete(oldest);
+    }
+    for (const event of accepted) this.#emitToolInvocation(event);
+    return accepted;
   }
 
   noteFailure(params = {}) {
@@ -164,6 +244,8 @@ export class ClassicTurnTransportTracker {
         observedAt: observedAt(atMs),
         observedAtMs: atMs,
       });
+      this.responseBuffers.delete(requestId);
+      this.responseDecoders.delete(requestId);
       this.pending.delete(requestId);
     }
     if (requestId) this.identity.forget(requestId);
@@ -185,9 +267,33 @@ export class ClassicTurnTransportTracker {
         observedAt: observedAt(atMs),
         observedAtMs: atMs,
       });
+      this.responseBuffers.delete(requestId);
+      this.responseDecoders.delete(requestId);
       this.pending.delete(requestId);
     }
     if (requestId) this.identity.forget(requestId);
+  }
+
+  noteWebSocketFrame({ payloadData, conversationId, observedAtMs = this.now() } = {}) {
+    const events = this.toolInvocationStream.notePayload({
+      payloadData,
+      conversationId,
+      observedAtMs,
+    });
+    for (const event of events) this.#emitToolInvocation(event);
+    return events;
+  }
+
+  diagnostics() {
+    const invocation = this.toolInvocationStream.diagnostics();
+    return {
+      ...invocation,
+      responseBuffers: this.responseBuffers.size,
+      responseBufferChars: [...this.responseBuffers.values()]
+        .reduce((sum, value) => sum + String(value || "").length, 0),
+      maxResponseBuffers: MAX_STREAM_BUFFERS,
+      maxResponseBufferChars: MAX_STREAM_BUFFER_CHARS,
+    };
   }
 
   prune() {
@@ -203,6 +309,8 @@ export class ClassicTurnTransportTracker {
           observedAtMs: atMs,
         });
         this.pending.delete(requestId);
+        this.responseBuffers.delete(requestId);
+        this.responseDecoders.delete(requestId);
         this.identity.forget(requestId);
       }
     }
@@ -223,6 +331,8 @@ export class ClassicTurnTransportTracker {
         observedAtMs: atMs,
       });
       this.pending.delete(requestId);
+      this.responseBuffers.delete(requestId);
+      this.responseDecoders.delete(requestId);
       this.identity.forget(requestId);
     }
   }
@@ -242,6 +352,11 @@ export class ClassicTurnTransportTracker {
     try { this.onNativeMcpCall(event); } catch {}
   }
 
+  #emitToolInvocation(event) {
+    if (!this.onToolInvocation) return;
+    try { this.onToolInvocation(event); } catch {}
+  }
+
   #emitActiveTurn(event) {
     if (!this.onActiveTurn) return;
     try { this.onActiveTurn(event); } catch {}
@@ -255,6 +370,7 @@ export async function connectClassicTurnTransportPort(port, {
   onConversationIdentity,
   onTurnTransportEvent,
   onNativeMcpCall,
+  onToolInvocation,
   onActiveTurn,
   onDisconnected,
 } = {}) {
@@ -267,16 +383,26 @@ export async function connectClassicTurnTransportPort(port, {
   if (!page) return null;
 
   const runtimeKey = runtimeKeyForPort(port);
+  let currentConversationId = conversationIdFromUrl(page.url);
   const client = new ClassicCdpClient(page.webSocketDebuggerUrl, { WebSocketImpl, callTimeoutMs: 3_000, maxPendingCalls: 32 });
   await client.open();
   await client.call("Network.enable", { maxTotalBufferSize: 1_000_000, maxResourceBufferSize: 512_000, enableDurableMessages: false });
+  await client.call("Page.enable");
   const tracker = new ClassicTurnTransportTracker({
     onConversationIdentity: (identity) => onConversationIdentity?.({ runtimeKey, port, ...identity, observedAt: observedAt() }),
     onTurnTransportEvent: (event) => onTurnTransportEvent?.({ runtimeKey, port, ...event }),
     onNativeMcpCall: (event) => onNativeMcpCall?.({ runtimeKey, port, ...event }),
+    onToolInvocation: (event) => onToolInvocation?.({ runtimeKey, port, ...event }),
     onActiveTurn: (event) => onActiveTurn?.({ runtimeKey, port, ...event }),
   });
   const disposers = [
+    client.on("Page.frameNavigated", (params) => {
+      if (params?.frame?.parentId) return;
+      currentConversationId = conversationIdFromUrl(params?.frame?.url) || null;
+    }),
+    client.on("Page.navigatedWithinDocument", (params) => {
+      currentConversationId = conversationIdFromUrl(params?.url) || null;
+    }),
     client.on("Network.requestWillBeSent", (params) => {
       const request = params?.request;
       if (isNativeCallMcpRequest(request) && !request?.postData && params?.requestId) {
@@ -291,9 +417,37 @@ export async function connectClassicTurnTransportPort(port, {
       tracker.noteRequest(params);
     }),
     client.on("Network.requestWillBeSentExtraInfo", (params) => tracker.noteExtraInfo(params)),
-    client.on("Network.responseReceived", (params) => tracker.noteResponse(params)),
+    client.on("Network.responseReceived", (params) => {
+      const turn = tracker.noteResponse(params);
+      if (!turn?.requestId) return;
+      void client.call("Network.streamResourceContent", { requestId: turn.requestId })
+        .then((result) => tracker.noteResponseData({
+          requestId: turn.requestId,
+          data: result?.bufferedData || "",
+          base64Encoded: true,
+          observedAtMs: Date.now(),
+        }))
+        .catch(() => {});
+    }),
+    client.on("Network.dataReceived", (params) => {
+      if (!params?.data) return;
+      tracker.noteResponseData({
+        requestId: params.requestId,
+        data: params.data,
+        base64Encoded: true,
+        observedAtMs: Date.now(),
+      });
+    }),
     client.on("Network.loadingFailed", (params) => tracker.noteFailure(params)),
     client.on("Network.loadingFinished", (params) => tracker.noteFinished(params)),
+    client.on("Network.webSocketFrameReceived", (params) => {
+      if (!currentConversationId) return;
+      tracker.noteWebSocketFrame({
+        payloadData: params?.response?.payloadData,
+        conversationId: currentConversationId,
+        observedAtMs: Date.now(),
+      });
+    }),
   ];
   const closeListener = () => { try { onDisconnected?.({ runtimeKey, port }); } catch {} };
   client.ws.addEventListener?.("close", closeListener, { once: true });
@@ -302,6 +456,7 @@ export async function connectClassicTurnTransportPort(port, {
     port,
     connectedAt: observedAt(),
     get pendingSize() { return tracker.pendingSize; },
+    get toolInvocationDiagnostics() { return tracker.diagnostics(); },
     async close() {
       for (const dispose of disposers) dispose();
       client.close();
@@ -329,8 +484,8 @@ export class ClassicTurnTransportObserver {
     this.closed = false;
   }
 
-  setHandlers({ onConversationIdentity, onTurnTransportEvent, onNativeMcpCall, onActiveTurn } = {}) {
-    this.handlers = { onConversationIdentity, onTurnTransportEvent, onNativeMcpCall, onActiveTurn };
+  setHandlers({ onConversationIdentity, onTurnTransportEvent, onNativeMcpCall, onToolInvocation, onActiveTurn } = {}) {
+    this.handlers = { onConversationIdentity, onTurnTransportEvent, onNativeMcpCall, onToolInvocation, onActiveTurn };
   }
 
   async start({ schedule = true } = {}) {
@@ -367,9 +522,19 @@ export class ClassicTurnTransportObserver {
   }
 
   status() {
+    const invocation = [...this.sessions.values()]
+      .map((session) => session.toolInvocationDiagnostics || {})
+      .reduce((total, row) => ({
+        seen: total.seen + Number(row?.seen || 0),
+        observed: total.observed + Number(row?.observed || 0),
+        duplicates: total.duplicates + Number(row?.duplicates || 0),
+        responseBuffers: total.responseBuffers + Number(row?.responseBuffers || 0),
+        responseBufferChars: total.responseBufferChars + Number(row?.responseBufferChars || 0),
+      }), { seen: 0, observed: 0, duplicates: 0, responseBuffers: 0, responseBufferChars: 0 });
     return {
       connected: this.sessions.size,
       pending: [...this.sessions.values()].reduce((sum, session) => sum + Number(session.pendingSize || 0), 0),
+      toolInvocations: invocation,
       runtimes: [...this.sessions.values()].map((session) => ({ runtimeKey: session.runtimeKey, port: session.port, connectedAt: session.connectedAt || null, pendingSize: Number(session.pendingSize || 0) })),
     };
   }

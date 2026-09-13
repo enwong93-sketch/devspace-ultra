@@ -3,6 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createStableGatewayHumanProgress } from "./stable-gateway-human-progress.js";
+import { EXACT_CONVERSATION_REQUEST_PROOF } from "./progress-ownership-proof.js";
 
 const root = await mkdtemp(join(tmpdir(), "devspace-human-progress-test-"));
 const statePath = join(root, "devspace-live-progress.json");
@@ -22,7 +23,7 @@ try {
     toolStepCount: 0,
   });
   let snapshot = progress.snapshot();
-  assert.equal(snapshot.version, 2);
+  assert.equal(snapshot.version, 3);
   assert.equal(snapshot.messages.length, 1);
   assert.match(snapshot.messages[0].text, /啱啱我已經確認 Stable Gateway 正常/);
   assert.equal(snapshot.messages[0].conversationId, "conversation-a");
@@ -57,6 +58,27 @@ try {
 
   await assert.rejects(() => restored.update({ message: "x".repeat(1601) }), /1600 characters/i);
   await assert.rejects(() => restored.update({ message: "Bearer secret-token-value" }), /sensitive/i);
+
+  const proofPath = join(root, "proof-required.json");
+  const proofProgress = await createStableGatewayHumanProgress({ statePath: proofPath });
+  await assert.rejects(() => proofProgress.update({
+    message: "unproved agent report",
+    conversationId: "conversation-proof",
+    source: "agent-progress-tool",
+  }), /ownership proof/i);
+  await proofProgress.update({
+    message: "page-verified agent report",
+    conversationId: "conversation-proof",
+    source: "agent-progress-tool",
+    kind: "verification",
+    ownershipProof: EXACT_CONVERSATION_REQUEST_PROOF,
+    ownershipSource: "classic-websocket-tool-invocation-correlation-page-verified",
+    ownershipObservedAt: "2026-09-13T04:30:00.000Z",
+    ownershipRuntimeKey: "main-02",
+    ownershipCallFingerprint: "a".repeat(64),
+  });
+  assert.equal(proofProgress.snapshot().messages.length, 1);
+  assert.equal(proofProgress.snapshot().messages[0].ownershipProof, EXACT_CONVERSATION_REQUEST_PROOF);
 
   // Legacy writers remain accepted for compatibility, but the user-facing overlay does not render them.
   await restored.update({ doing: "legacy doing", completed: "legacy completed" });

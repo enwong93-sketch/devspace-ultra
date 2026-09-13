@@ -6,6 +6,7 @@ import { loadConfig } from "../dist/config.js";
 import { CapabilityRuntime } from "../dist/capability-runtime.js";
 import { BlenderRuntimeManager } from "../dist/blender-runtime-manager.js";
 import { loadDevspaceFiles } from "../dist/user-config.js";
+import { EXACT_PAGE_BRIDGE_PROOF } from "../dist/progress-ownership-proof.js";
 
 function fail(message) {
   throw new Error(message);
@@ -185,6 +186,7 @@ function mcpToolFailed(result) {
 }
 
 function progressPayload({ conversationId, runtimeKey, kind, message }) {
+  const now = new Date().toISOString();
   return {
     conversationId,
     runtimeKey,
@@ -192,6 +194,10 @@ function progressPayload({ conversationId, runtimeKey, kind, message }) {
     message,
     source: "agent-progress-tool",
     dedupeKey: `${conversationId}:${runtimeKey}:${Date.now()}:${message.slice(0, 80)}`,
+    ownershipProof: EXACT_PAGE_BRIDGE_PROOF,
+    ownershipSource: "devspace-conversation-bridge",
+    ownershipObservedAt: now,
+    ownershipRuntimeKey: runtimeKey,
   };
 }
 

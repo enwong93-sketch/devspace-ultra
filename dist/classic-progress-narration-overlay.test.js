@@ -8,8 +8,16 @@ import {
   conversationProgressNarrationMap,
   inspectProgressNarrationExpression,
 } from "./classic-progress-narration-overlay.js";
+import { EXACT_CONVERSATION_REQUEST_PROOF } from "./progress-ownership-proof.js";
 
 const now = Date.parse("2026-09-08T02:30:00.000Z");
+const ownership = (runtimeKey, fingerprint) => ({
+  ownershipProof: EXACT_CONVERSATION_REQUEST_PROOF,
+  ownershipSource: "classic-websocket-tool-invocation-correlation-page-verified",
+  ownershipObservedAt: new Date(now - 10_000).toISOString(),
+  ownershipRuntimeKey: runtimeKey,
+  ownershipCallFingerprint: fingerprint.repeat(64),
+});
 const humanProgress = {
   messages: [
     {
@@ -19,6 +27,7 @@ const humanProgress = {
       source: "agent-progress-tool",
       kind: "milestone",
       dedupeKey: "agent-b-1",
+      ...ownership("main-03", "b"),
     },
     {
       text: "第 10 個已驗證工具步驟已完成；程式自動旁白唔應顯示。",
@@ -37,6 +46,7 @@ const humanProgress = {
       source: "agent-progress-tool",
       kind: "verification",
       dedupeKey: "agent-a-1",
+      ...ownership("main-02", "a"),
     },
     {
       text: "我已完成雙 Runtime 單元隔離；而家會用兩個真實 Blender port 做交叉驗證。",
@@ -55,6 +65,7 @@ const humanProgress = {
       source: "agent-progress-tool",
       kind: "milestone",
       dedupeKey: "same-text-different-source",
+      ...ownership("main-02", "c"),
     },
     {
       text: "即使冇 active Goal 或 Plan，Agent 親自寫嘅訊息仍然要留喺自己 conversation。",
@@ -63,6 +74,15 @@ const humanProgress = {
       source: "agent-progress-tool",
       kind: "milestone",
       dedupeKey: "history-1",
+      ...ownership("main-04", "d"),
+    },
+    {
+      text: "呢條舊 direct-session 錯綁訊息只保留作診斷，不可再投影。",
+      at: new Date(now - 1_000).toISOString(),
+      conversationId: "conversation-corrupt-legacy",
+      source: "agent-progress-tool",
+      kind: "milestone",
+      dedupeKey: "legacy-unproved-row",
     },
   ],
 };

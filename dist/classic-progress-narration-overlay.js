@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { runtimeKeyForPort } from "./classic-stream-recovery-cdp.js";
 import { activeProgressRows } from "./goal-progress-narrator.js";
+import { isProjectableProgressMessage } from "./progress-ownership-proof.js";
 
 const ROOT_ID = "devspace-progress-narration-root";
 const STYLE_ID = "devspace-progress-narration-style";
@@ -34,6 +35,7 @@ async function readJson(path) {
 }
 
 function normalizeMessage(item) {
+  if (!isProjectableProgressMessage(item)) return null;
   const text = clean(item?.text, 1_600);
   const conversationId = clean(item?.conversationId, 200);
   const at = clean(item?.at, 80);

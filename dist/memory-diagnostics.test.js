@@ -30,7 +30,19 @@ const snapshot = createMemoryDiagnostics({
     },
   },
   turnTransportObserver: {
-    status() { return { connected: 1, pending: 2 }; },
+    status() {
+      return {
+        connected: 1,
+        pending: 2,
+        toolInvocations: {
+          seen: 3,
+          observed: 9,
+          duplicates: 2,
+          responseBuffers: 1,
+          responseBufferChars: 4096,
+        },
+      };
+    },
   },
   mcpCallCorrelator: {
     diagnostics() {
@@ -61,17 +73,6 @@ const snapshot = createMemoryDiagnostics({
         recentResolved: 5,
         ambiguousMatches: 6,
         postTurnGraceMs: 120000,
-      };
-    },
-  },
-  directRequestAuthorityRegistry: {
-    diagnostics() {
-      return {
-        records: 2,
-        conversations: 1,
-        resolved: 7,
-        ambiguousMatches: 3,
-        ttlMs: 21600000,
       };
     },
   },
@@ -146,15 +147,23 @@ assert.equal(snapshot.registries.classicActiveTurnWaitersWithSessionAliases, 4);
 assert.equal(snapshot.registries.classicActiveTurnCorrelationsResolved, 5);
 assert.equal(snapshot.registries.classicActiveTurnAmbiguities, 6);
 assert.equal(snapshot.registries.classicPostTurnGraceMs, 120000);
-assert.equal(snapshot.registries.directRequestAuthorities, 2);
-assert.equal(snapshot.registries.directRequestAuthorityConversations, 1);
-assert.equal(snapshot.registries.directRequestAuthorityResolved, 7);
-assert.equal(snapshot.registries.directRequestAuthorityAmbiguities, 3);
-assert.equal(snapshot.registries.directRequestAuthorityTtlMs, 21600000);
+assert.equal(snapshot.registries.classicToolInvocationsSeen, 3);
+assert.equal(snapshot.registries.classicToolInvocationsObserved, 9);
+assert.equal(snapshot.registries.classicToolInvocationDuplicates, 2);
+assert.equal(snapshot.registries.classicToolInvocationResponseBuffers, 1);
+assert.equal(snapshot.registries.classicToolInvocationResponseBufferChars, 4096);
+assert.equal(snapshot.registries.durableDirectRequestAuthorities, 0);
 assert.equal(snapshot.capabilities.enabled, true);
 assert.equal(snapshot.capabilities.mcpClients, 1);
 assert.equal(snapshot.turnTransportCdp.connected, 1);
 assert.equal(snapshot.turnTransportCdp.pending, 2);
+assert.deepEqual(snapshot.turnTransportCdp.toolInvocations, {
+  seen: 3,
+  observed: 9,
+  duplicates: 2,
+  responseBuffers: 1,
+  responseBufferChars: 4096,
+});
 assert.equal(snapshot.contextCdp.pendingCalls, 2);
 assert.equal(snapshot.contextCdp.pendingUsageRequests, 3);
 assert.equal(snapshot.contextCdp.pendingIdentityCorrelations, 4);

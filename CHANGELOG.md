@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 0.5.7 — 2026-09-13
+
+- Replaced reusable direct-session, direct-trace, Runtime-only, and deferred-placeholder ownership with an exact page-local tool-invocation join. DevSpace now observes the owning ChatGPT conversation response/WebSocket stream, hashes the canonical tool name and arguments, joins that evidence to one bounded Gateway request, re-verifies the unique live page, and discards the authority when that request ends.
+- Removed `ClassicDirectRequestAuthorityRegistry`, durable verified direct-session lookup/write APIs, and the old progress authority fallback that could let one long-lived ChatGPT host session write another conversation's progress card or influence its rescue timing.
+- Added bounded UTF-8-safe response-stream reconstruction for page-local tool invocations, including split multibyte characters, duplicate-frame suppression, a 512 KiB per-response tail, and a 16-response cap per Main Runtime. Raw arguments, message IDs, request IDs, traces, and session values are never persisted.
+- Added versioned ownership proofs to Agent-authored progress. New direct reports require `exact-conversation-request-v1`; the compatibility bridge requires an independently exact page proof. Legacy rows without proof remain available only as diagnostic history and are no longer projected into any floating card or counted as rescue activity.
+- Bumped conversation-progress liveness state to version 4 so pre-fix rescue episodes are disarmed on upgrade. The ten-minute policy remains an Agent-authored reporting ceiling with no synthetic reminder, while the twenty-minute rescue remains exact-conversation, interruption-only, one committed `- 繼續` per episode, and disarms on normal completion or cancellation.
+- Added shared-host-session, identical-concurrent-call, page-route, response-stream, UTF-8 split, stale-row, rescue-migration, zero-zombie-waiter, memory-bound, and multi-conversation regression gates. Goal, Plan, Capability, Blender, Computer Use, and linked Codex MCP tools now share the same exact request-scoped authority boundary.
+
 ## 0.5.6 — 2026-09-12
 
 - Deleted the obsolete custom Chrome-extension implementation, its tracked source bridge, retired runtime module, tests, and live gate instead of merely excluding them from npm. Current Agent instructions and the Computer Use skill no longer advertise the old tool names.

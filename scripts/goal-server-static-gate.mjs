@@ -19,7 +19,9 @@ assert.match(source, /registerAppResource\(server, "DevSpace Goal Continuation R
 assert.match(source, /new URL\("\.\/ui\/goal-continuation-relay\.html", import\.meta\.url\)/);
 assert.match(source, /const resolveCapabilityConversationAuthority = async \(extra\) => \{[\s\S]*requestContext\?\.capabilityAuthority/, "production Goal and capability tools must consume only request-scoped verified conversation authority");
 assert.doesNotMatch(source, /const resolveCapabilityConversationAuthority = async \(extra\) => \{[\s\S]*conversationAuthority\.resolveMcpExtra\(extra\)/, "Goal tools must not revive stale durable session authority inside the handler");
-assert.match(source, /const traceCorrelationFingerprints = requestTraceCorrelationFingerprints\(req\?\.headers \|\| \{\}\)/, "the Core HTTP request must establish exact distributed-trace authority before entering Goal tools");
+assert.match(source, /mcpCallCorrelator\.noteGateway\(\{[\s\S]*callFingerprint[\s\S]*gatewayRequestId:\s*gatewayCorrelationId/, "the Core HTTP request must establish one exact canonical page-invocation join before entering Goal tools");
+assert.match(source, /progressLivenessAdapter\.find\(\{[\s\S]*conversationId:\s*candidate\.conversationId/, "the joined invocation must be re-verified against one exact live conversation page");
+assert.doesNotMatch(source, /activeTurnRegistry\.(?:resolveGatewayCall|waitForIdentity)\(/, "Goal tools must not use Runtime, session, or browser-turn trace fallback as conversation authority");
 const progressResolverStart = source.indexOf("const resolveProgressConversationAuthority = async (extra) =>");
 const progressResolverEnd = source.indexOf("const resolveConversationAuthority = resolveCapabilityConversationAuthority", progressResolverStart);
 assert.ok(progressResolverStart >= 0 && progressResolverEnd > progressResolverStart, "progress authority resolver must exist");

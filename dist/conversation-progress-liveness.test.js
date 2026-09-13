@@ -187,7 +187,7 @@ const adapter = {
 // Old persisted episodes must never restart an automatic rescue loop after a
 // Core reload. The fresh native turn observer is the only arming authority.
 await writeFile(statePath, JSON.stringify({
-  version: 2,
+  version: 3,
   records: {
     "conversation-old": {
       conversationId: "conversation-old",
@@ -477,15 +477,16 @@ assert.equal(
   "a committed-but-unverified rescue may never be sent twice",
 );
 
-// Version-3 interrupted episodes may survive a Core restart, but only behind
+// Version-4 interrupted episodes may survive a Core restart, but only behind
 // a fresh exact-page verification. Normal completion and already-rescued
-// episodes remain disarmed, preventing the old repeated-message loop.
+// episodes remain disarmed. Version 3 is deliberately retired above because
+// its report ownership could have been polluted by a shared direct session.
 const restartDir = await mkdtemp(join(tmpdir(), "devspace-liveness-restart-test-"));
 const restartStatePath = join(restartDir, "liveness.json");
 const restartPlanStatePath = join(restartDir, "plans.json");
 const restartProgressStatePath = join(restartDir, "progress.json");
 await writeFile(restartStatePath, JSON.stringify({
-  version: 3,
+  version: 4,
   records: {
     "conversation-restart-interrupted": {
       conversationId: "conversation-restart-interrupted",
@@ -565,7 +566,7 @@ await restartSupervisor.close();
 await rm(restartDir, { recursive: true, force: true });
 
 const persisted = JSON.parse(await readFile(statePath, "utf8"));
-assert.equal(persisted.version, 3);
+assert.equal(persisted.version, 4);
 assert.equal(persisted.identityKey, "conversationId");
 assert.equal(persisted.runtimeBinding, false);
 assert.equal(persisted.tenMinuteAutomaticReminder, false);

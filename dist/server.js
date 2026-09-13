@@ -55,14 +55,11 @@ import { ClassicHostOverlayContextAdapter, ClassicHostOverlayProjection, createC
 import { ClassicProgressNarrationOverlay } from "./classic-progress-narration-overlay.js";
 import { ConversationProgressLivenessSupervisor } from "./conversation-progress-liveness.js";
 import { ConversationProgressLivenessCdpAdapter } from "./conversation-progress-liveness-cdp.js";
-import { verifyProgressConversationAuthority, DEFAULT_PROGRESS_AUTHORITY_MAX_AGE_MS } from "./progress-conversation-authority.js";
 import { ContextGuardianRuntime, registerContextGuardianTools } from "./context-guardian.js";
 import { ClassicContextMetadataCdpAdapter } from "./context-guardian-cdp.js";
 import { ContextGuardianRolloverCoordinator } from "./context-guardian-rollover.js";
 import { ClassicConversationAuthorityRegistry, sessionFingerprintFromClassicRequest, turnTraceFingerprintFromClassicRequest } from "./classic-conversation-authority.js";
-import { ClassicActiveTurnRegistry, ClassicDirectRequestAuthorityRegistry, ClassicMcpCallCorrelator, fingerprintMcpToolCall } from "./classic-mcp-call-correlation.js";
-import { requestTraceCorrelationFingerprints } from "./request-trace-correlation.js";
-import { sessionCorrelationFingerprintsFromHeaders } from "./session-correlation.js";
+import { ClassicActiveTurnRegistry, ClassicMcpCallCorrelator, fingerprintMcpToolCall } from "./classic-mcp-call-correlation.js";
 import { ClassicTurnTransportObserver } from "./classic-turn-transport-observer.js";
 import { ClassicNativeUsageEvidenceStore } from "./classic-native-usage-evidence.js";
 import { ClassicExactUsageAuthority } from "./classic-exact-usage-authority.js";
@@ -80,6 +77,7 @@ import { registerJsReplCompatibilityTool } from "./js-repl-compat.js";
 import { registerToolchainTools } from "./toolchain-tools.js";
 import { registerUnifiedRoutingTool } from "./unified-routing-tools.js";
 import { retiredToolCallResult } from "./retired-tool-compat.js";
+import { EXACT_CONVERSATION_REQUEST_PROOF } from "./progress-ownership-proof.js";
 // ChatGPT/OpenAI MCP clients may reconnect without sending DELETE. Core session
 // lifetime is therefore tied to the actual standalone SSE connection: when that
 // stream disconnects and no real tool request is still active, the transport is
@@ -104,7 +102,6 @@ const CHAT_SWARM_UI_DIAGNOSTICS = {
     mcpMethodCounts: {},
 };
 const MCP_CONVERSATION_CORRELATION_TIMEOUT_MS = 6_000;
-const DIRECT_SESSION_AUTHORITY_MAX_AGE_MS = 6 * 60 * 60_000;
 const WRITE_TOOL_ANNOTATIONS = {
     readOnlyHint: false,
     destructiveHint: true,
@@ -745,7 +742,7 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
     const server = new McpServer({
         name: "devspace",
         title: "DevSpace",
-        version: "0.5.6",
+        version: "0.5.7",
         description: "Secure local coding workspace for MCP clients. Provides workspace-scoped file, search, edit, write, process, capability, and Codex-parity tools.",
     }, {
         instructions: modelInstructions,
@@ -949,6 +946,9 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
             const conversationId = String(resolved?.conversationId || "").trim();
             if (!conversationId)
                 throw new Error("ChatGPT Classic conversation identity is unavailable for this MCP session.");
+            if (resolved?.pageVerified !== true || !resolved?.runtimeKey || !resolved?.callFingerprint) {
+                throw new Error("Progress narration requires an exact page-verified tool invocation for the current conversation.");
+            }
             const gatewayPort = Number(config.stableGatewayPort ?? config.edgeBackendPort ?? 7678);
             if (!Number.isInteger(gatewayPort) || gatewayPort < 1024 || gatewayPort > 65535)
                 throw new Error("Stable Gateway progress endpoint port is invalid.");
@@ -960,6 +960,12 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
                     conversationId,
                     source: "agent-progress-tool",
                     kind,
+                    ownershipProof: EXACT_CONVERSATION_REQUEST_PROOF,
+                    ownershipSource: resolved.source,
+                    ownershipObservedAt: resolved.observedAt || new Date().toISOString(),
+                    ownershipRuntimeKey: resolved.runtimeKey,
+                    ownershipCallFingerprint: resolved.callFingerprint,
+                    ownershipInvocationFingerprint: resolved.invocationFingerprint || undefined,
                 }),
             });
             const snapshot = await response.json().catch(() => null);
@@ -1968,7 +1974,6 @@ export function createServer(config = loadConfig(), options = {}) {
     const conversationAuthorityReady = conversationAuthority.load().catch(() => conversationAuthority.snapshot());
     const mcpCallCorrelator = new ClassicMcpCallCorrelator();
     const activeTurnRegistry = new ClassicActiveTurnRegistry();
-    const directRequestAuthorityRegistry = new ClassicDirectRequestAuthorityRegistry();
     const mcpRequestCorrelationDiagnostics = new McpRequestCorrelationDiagnostics();
     const requestConversationContext = new McpConversationRequestContext();
     let conversationProgressLiveness = null;
@@ -1984,33 +1989,13 @@ export function createServer(config = loadConfig(), options = {}) {
                 || event.source === "classic-native-call-mcp",
         });
     };
-    const persistVerifiedDirectSessionIdentity = async (event) => {
-        if (!event?.sessionFingerprint || !event?.conversationId || !event?.runtimeKey) return null;
-        await conversationAuthorityReady;
-        return await conversationAuthority.observeVerifiedDirectSession({
-            sessionFingerprint: event.sessionFingerprint,
-            conversationId: event.conversationId,
-            runtimeKey: event.runtimeKey,
-            observedAt: event.observedAt || new Date().toISOString(),
-        });
-    };
     const resolveAndBindMcpConversation = async (req) => {
         const sessionFingerprint = coreClientSessionFingerprint(req);
         if (!sessionFingerprint) return { conversationId: null, sessionFingerprint: null, runtimeKey: null };
         const callFingerprint = fingerprintMcpToolCall(req?.body);
+        const gatewayCorrelationId = callFingerprint ? randomUUID() : null;
         const toolName = String(req?.body?.params?.name || "").trim() || null;
-        const turnTraceFingerprint = turnTraceFingerprintFromClassicRequest({ headers: req?.headers || {} });
-        const traceCorrelationFingerprints = requestTraceCorrelationFingerprints(req?.headers || {});
-        const sessionCorrelationFingerprints = sessionCorrelationFingerprintsFromHeaders(req?.headers || {});
         await conversationAuthorityReady;
-        const persistedSessionAuthority = conversationAuthority.resolveFingerprint(sessionFingerprint);
-        const persistedVerifiedDirectAuthority = conversationAuthority.resolveVerifiedDirectSession(sessionFingerprint, {
-            maxAgeMs: DIRECT_SESSION_AUTHORITY_MAX_AGE_MS,
-        });
-        const persistedRuntimeKey = Array.isArray(persistedSessionAuthority?.runtimeKeys)
-            && persistedSessionAuthority.runtimeKeys.length === 1
-            ? persistedSessionAuthority.runtimeKeys[0]
-            : null;
         const progressOnlyTool = toolName === "devspace_progress_report";
         const verifyPageAuthority = async (candidate, {
             requireCurrentSession = false,
@@ -2045,18 +2030,7 @@ export function createServer(config = loadConfig(), options = {}) {
                 pageVerified: true,
             };
         };
-        const verifyCapabilityAuthority = async (candidate) => await verifyPageAuthority(candidate, {
-            requireCurrentSession: true,
-            source: "classic-capability-session-page-verified",
-        });
-        const verifiedPersistedDirectAuthority = await verifyPageAuthority(persistedVerifiedDirectAuthority, {
-            requireCurrentSession: true,
-            requireGenerating: false,
-            source: "classic-verified-direct-session-page-verified",
-        });
-        let capabilityAuthority = progressOnlyTool
-            ? null
-            : verifiedPersistedDirectAuthority || await verifyCapabilityAuthority(persistedSessionAuthority);
+        let capabilityAuthority = null;
         let progressAuthority = null;
         let authorityPromise = null;
         let progressAuthorityPromise = null;
@@ -2092,6 +2066,8 @@ export function createServer(config = loadConfig(), options = {}) {
                 runtimeKey: identity.runtimeKey || null,
                 observedAt: identity.observedAt || new Date().toISOString(),
                 source: identity.source || "classic-active-turn-ephemeral",
+                callFingerprint: identity.callFingerprint || null,
+                invocationFingerprint: identity.invocationFingerprint || null,
                 ephemeral: true,
               }
             : null;
@@ -2099,265 +2075,73 @@ export function createServer(config = loadConfig(), options = {}) {
             ? {
                 conversationId: identity.conversationId,
                 sessionFingerprint,
+                runtimeKey: identity.runtimeKey || null,
                 observedAt: identity.observedAt || new Date().toISOString(),
                 source: identity.source || "classic-progress-request-correlation",
+                callFingerprint: identity.callFingerprint || null,
+                invocationFingerprint: identity.invocationFingerprint || null,
+                pageVerified: identity.pageVerified === true,
                 ephemeral: true,
                 authorityDomain: "progress",
               }
             : null;
-        if (progressOnlyTool && verifiedPersistedDirectAuthority?.conversationId) {
-            progressAuthority = ephemeralProgressAuthority(verifiedPersistedDirectAuthority);
-        }
-        const noteDirectRequestAuthority = (candidate, source = null) => {
-            if (!candidate?.conversationId || !candidate?.runtimeKey || candidate?.pageVerified !== true) return null;
-            return directRequestAuthorityRegistry.note({
-                traceCorrelationFingerprints,
-                conversationId: candidate.conversationId,
-                runtimeKey: candidate.runtimeKey,
-                observedAtMs: Date.now(),
-                source: source || candidate.source || "classic-direct-request-page-verified",
-            });
+        const acceptVerifiedAuthority = (verified) => {
+            if (!verified?.conversationId || verified.pageVerified !== true) return null;
+            if (progressOnlyTool) {
+                const candidate = ephemeralProgressAuthority(verified);
+                progressAuthority = candidate;
+                return candidate;
+            }
+            capabilityAuthority = verified;
+            return verified;
         };
-        if (capabilityAuthority?.conversationId) {
-            noteDirectRequestAuthority(capabilityAuthority, "classic-capability-session-page-verified");
-        }
-        const inheritedDirectAuthority = directRequestAuthorityRegistry.resolve({
-            traceCorrelationFingerprints,
-        });
-        if (inheritedDirectAuthority?.conversationId) {
-            const verified = await verifyPageAuthority({
-                ...inheritedDirectAuthority,
-                sessionFingerprint,
-            }, {
+        const verifyCorrelatedIdentity = async (identity) => {
+            if (!identity?.conversationId) return null;
+            const verified = await verifyPageAuthority(ephemeralTurnAuthority(identity), {
                 requireCurrentSession: false,
-                source: "classic-direct-request-trace-page-verified",
+                source: `${String(identity.source || "classic-request-correlation").replace(/-page-verified$/, "")}-page-verified`,
             });
-            if (verified?.conversationId) {
-                const durableDirectAuthority = await persistVerifiedDirectSessionIdentity({
+            return verified?.conversationId
+                ? {
                     ...verified,
-                    sessionFingerprint,
-                    observedAt: new Date().toISOString(),
-                });
-                const requestAuthority = durableDirectAuthority?.conversationId
-                    ? { ...verified, ...durableDirectAuthority, runtimeKey: verified.runtimeKey, pageVerified: true }
-                    : verified;
-                if (progressOnlyTool) progressAuthority = ephemeralProgressAuthority(requestAuthority);
-                else if (!capabilityAuthority?.conversationId) capabilityAuthority = requestAuthority;
-            }
-        }
-        const activeTurn = toolName
-            ? activeTurnRegistry.resolveGatewayCall({
-                toolName,
-                turnTraceFingerprint,
-                traceCorrelationFingerprints,
-                sessionCorrelationFingerprintsHint: sessionCorrelationFingerprints,
-                sessionFingerprintHint: sessionFingerprint,
-                runtimeKeyHint: progressOnlyTool ? null : persistedRuntimeKey,
-              })
-            : null;
-        if (activeTurn) {
-            const scopedTurnAuthority = ephemeralTurnAuthority(activeTurn);
-            const verifiedTurnAuthority = await verifyPageAuthority(scopedTurnAuthority, {
-                requireCurrentSession: true,
-                source: `${String(activeTurn.source || "classic-active-turn").replace(/-page-verified$/, "")}-page-verified`,
-            });
-            const exactRequestAuthority = /(?:request-trace|session-alias)-correlation$/.test(String(activeTurn.source || ""));
-            let durableTurnAuthority = null;
-            if (exactRequestAuthority && verifiedTurnAuthority?.conversationId) {
-                durableTurnAuthority = await persistVerifiedDirectSessionIdentity({
-                    ...verifiedTurnAuthority,
-                    sessionFingerprint,
-                    observedAt: new Date().toISOString(),
-                });
-            }
-            if (verifiedTurnAuthority?.conversationId) {
-                noteDirectRequestAuthority(verifiedTurnAuthority, activeTurn.source);
-            }
-            if (progressOnlyTool && verifiedTurnAuthority?.conversationId) {
-                progressAuthority = ephemeralProgressAuthority(verifiedTurnAuthority);
-            }
-            else if (durableTurnAuthority?.conversationId) {
-                capabilityAuthority = durableTurnAuthority;
-            }
-            else if (!capabilityAuthority && verifiedTurnAuthority?.conversationId) {
-                // Active-turn evidence authorizes this one tool request only.
-                // It must never rewrite the durable session authority used by
-                // another tool domain such as Blender or narration.
-                capabilityAuthority = verifiedTurnAuthority;
-            }
-        }
+                    callFingerprint: identity.callFingerprint || callFingerprint || null,
+                    invocationFingerprint: identity.invocationFingerprint || null,
+                  }
+                : null;
+        };
         if (callFingerprint) {
             const correlated = mcpCallCorrelator.noteGateway({
                 callFingerprint,
                 sessionFingerprint,
+                gatewayRequestId: gatewayCorrelationId,
                 toolName,
                 observedAtMs: Date.now(),
             });
             if (correlated) {
-                const verifiedCorrelatedAuthority = await verifyPageAuthority(
-                    ephemeralTurnAuthority(correlated),
-                    {
-                        requireCurrentSession: true,
-                        source: "classic-native-call-mcp-page-verified",
-                    },
-                );
-                if (verifiedCorrelatedAuthority?.conversationId) {
-                    noteDirectRequestAuthority(verifiedCorrelatedAuthority, correlated.source);
-                }
-                const durableCorrelatedAuthority = verifiedCorrelatedAuthority?.conversationId
-                    ? await persistVerifiedDirectSessionIdentity({
-                        ...verifiedCorrelatedAuthority,
-                        sessionFingerprint,
-                        observedAt: new Date().toISOString(),
-                    })
+                acceptVerifiedAuthority(await verifyCorrelatedIdentity(correlated));
+            }
+        }
+        if (!capabilityAuthority?.conversationId && !progressAuthority?.conversationId) {
+            const waits = [];
+            if (callFingerprint) {
+                waits.push((signal) => mcpCallCorrelator.waitForIdentity({
+                    callFingerprint,
+                    sessionFingerprint,
+                    gatewayRequestId: gatewayCorrelationId,
+                    signal,
+                    timeoutMs: MCP_CONVERSATION_CORRELATION_TIMEOUT_MS,
+                }).then(verifyCorrelatedIdentity));
+            }
+            const exactPromise = firstResolvedAuthority(waits);
+            if (progressOnlyTool) {
+                progressAuthorityPromise = exactPromise
+                    ? exactPromise.then((verified) => verified?.conversationId
+                        ? ephemeralProgressAuthority(verified)
+                        : null)
                     : null;
-                if (progressOnlyTool && verifiedCorrelatedAuthority?.conversationId) {
-                    progressAuthority = ephemeralProgressAuthority(
-                        durableCorrelatedAuthority?.conversationId
-                            ? { ...verifiedCorrelatedAuthority, ...durableCorrelatedAuthority, runtimeKey: verifiedCorrelatedAuthority.runtimeKey }
-                            : verifiedCorrelatedAuthority,
-                    );
-                }
-                else if (verifiedCorrelatedAuthority?.conversationId) {
-                    if (durableCorrelatedAuthority?.conversationId)
-                        capabilityAuthority = durableCorrelatedAuthority;
-                }
+            } else {
+                authorityPromise = exactPromise;
             }
-        }
-        if (!capabilityAuthority?.conversationId && !progressOnlyTool) {
-            const correlationWaits = [];
-            if (toolName && (traceCorrelationFingerprints.length || sessionCorrelationFingerprints.length || turnTraceFingerprint || persistedRuntimeKey)) {
-                correlationWaits.push((signal) => activeTurnRegistry.waitForIdentity({
-                    toolName,
-                    turnTraceFingerprint,
-                    traceCorrelationFingerprints,
-                    sessionCorrelationFingerprintsHint: sessionCorrelationFingerprints,
-                    runtimeKeyHint: persistedRuntimeKey,
-                    signal,
-                    timeoutMs: MCP_CONVERSATION_CORRELATION_TIMEOUT_MS,
-                }).then(async (identity) => {
-                    if (!identity?.conversationId) return null;
-                    const verifiedIdentity = await verifyPageAuthority(ephemeralTurnAuthority(identity), {
-                        requireCurrentSession: true,
-                        source: `${String(identity.source || "classic-active-turn").replace(/-page-verified$/, "")}-page-verified`,
-                    });
-                    if (!verifiedIdentity?.conversationId) return null;
-                    noteDirectRequestAuthority(verifiedIdentity, identity.source);
-                    if (/(?:request-trace|session-alias)-correlation$/.test(String(identity.source || ""))) {
-                        const persisted = await persistVerifiedDirectSessionIdentity({
-                            ...verifiedIdentity,
-                            sessionFingerprint,
-                            observedAt: new Date().toISOString(),
-                        });
-                        if (persisted?.conversationId) return persisted;
-                    }
-                    return verifiedIdentity;
-                }));
-            }
-            if (callFingerprint) {
-                correlationWaits.push((signal) => mcpCallCorrelator.waitForIdentity({
-                    callFingerprint,
-                    sessionFingerprint,
-                    signal,
-                    timeoutMs: MCP_CONVERSATION_CORRELATION_TIMEOUT_MS,
-                }).then(async (identity) => {
-                    if (!identity?.conversationId) return null;
-                    const verifiedIdentity = await verifyPageAuthority(ephemeralTurnAuthority(identity), {
-                        requireCurrentSession: true,
-                        source: "classic-native-call-mcp-page-verified",
-                    });
-                    if (!verifiedIdentity?.conversationId) return null;
-                    noteDirectRequestAuthority(verifiedIdentity, identity.source);
-                    const persisted = await persistVerifiedDirectSessionIdentity({
-                        ...verifiedIdentity,
-                        sessionFingerprint,
-                        observedAt: new Date().toISOString(),
-                    });
-                    return persisted?.conversationId ? persisted : verifiedIdentity;
-                }));
-            }
-            authorityPromise = firstResolvedAuthority(correlationWaits);
-        }
-        if (progressOnlyTool && !progressAuthority?.conversationId) {
-            const progressWaits = [];
-            if (toolName && (traceCorrelationFingerprints.length || sessionCorrelationFingerprints.length || turnTraceFingerprint || sessionFingerprint)) {
-                progressWaits.push((signal) => activeTurnRegistry.waitForIdentity({
-                    toolName,
-                    turnTraceFingerprint,
-                    traceCorrelationFingerprints,
-                    sessionCorrelationFingerprintsHint: sessionCorrelationFingerprints,
-                    sessionFingerprintHint: sessionFingerprint,
-                    runtimeKeyHint: null,
-                    signal,
-                    timeoutMs: MCP_CONVERSATION_CORRELATION_TIMEOUT_MS,
-                }).then(async (identity) => {
-                    if (!identity?.conversationId) return null;
-                    const verifiedIdentity = await verifyPageAuthority(ephemeralTurnAuthority(identity), {
-                        requireCurrentSession: true,
-                        source: `${String(identity.source || "classic-active-turn").replace(/-page-verified$/, "")}-page-verified`,
-                    });
-                    if (!verifiedIdentity?.conversationId) return null;
-                    noteDirectRequestAuthority(verifiedIdentity, identity.source);
-                    if (/(?:request-trace|session-alias)-correlation$/.test(String(identity.source || ""))) {
-                        await persistVerifiedDirectSessionIdentity({
-                            ...verifiedIdentity,
-                            sessionFingerprint,
-                            observedAt: new Date().toISOString(),
-                        });
-                    }
-                    return ephemeralProgressAuthority(verifiedIdentity);
-                }));
-            }
-            if (callFingerprint) {
-                progressWaits.push((signal) => mcpCallCorrelator.waitForIdentity({
-                    callFingerprint,
-                    sessionFingerprint,
-                    signal,
-                    timeoutMs: MCP_CONVERSATION_CORRELATION_TIMEOUT_MS,
-                }).then(async (identity) => {
-                    if (!identity?.conversationId) return null;
-                    const verifiedIdentity = await verifyPageAuthority(ephemeralTurnAuthority(identity), {
-                        requireCurrentSession: true,
-                        source: "classic-native-call-mcp-page-verified",
-                    });
-                    if (!verifiedIdentity?.conversationId) return null;
-                    noteDirectRequestAuthority(verifiedIdentity, identity.source);
-                    const persisted = await persistVerifiedDirectSessionIdentity({
-                        ...verifiedIdentity,
-                        sessionFingerprint,
-                        observedAt: new Date().toISOString(),
-                    });
-                    return ephemeralProgressAuthority(
-                        persisted?.conversationId
-                            ? { ...verifiedIdentity, ...persisted, runtimeKey: verifiedIdentity.runtimeKey }
-                            : verifiedIdentity,
-                    );
-                }));
-            }
-            progressWaits.push(async (signal) => {
-                const minimumObservedAt = new Date(Date.now() - DEFAULT_PROGRESS_AUTHORITY_MAX_AGE_MS).toISOString();
-                await turnDeliveryEvidenceReady;
-                const immediate = await verifyProgressConversationAuthority({
-                    candidate: persistedSessionAuthority,
-                    sessionFingerprint,
-                    adapter: progressLivenessAdapter,
-                    deliveryEvidence: turnDeliveryEvidence,
-                });
-                if (immediate?.conversationId)
-                    return immediate;
-                const candidate = await conversationAuthority.waitForFingerprint(sessionFingerprint, {
-                    signal,
-                    minimumObservedAt,
-                    timeoutMs: MCP_CONVERSATION_CORRELATION_TIMEOUT_MS,
-                });
-                return await verifyProgressConversationAuthority({
-                    candidate,
-                    sessionFingerprint,
-                    adapter: progressLivenessAdapter,
-                    deliveryEvidence: turnDeliveryEvidence,
-                });
-            });
-            progressAuthorityPromise = firstResolvedAuthority(progressWaits);
         }
         const authority = capabilityAuthority;
         if (!authority?.conversationId && !progressAuthority?.conversationId) {
@@ -2426,6 +2210,13 @@ export function createServer(config = loadConfig(), options = {}) {
                 });
             });
         },
+        onToolInvocation: (event) => {
+            // The exact ChatGPT page response/WebSocket stream carries the
+            // conversation route plus canonical DevSpace tool arguments. This
+            // is request-scoped evidence only; it must never become a durable
+            // session/conversation mapping.
+            mcpCallCorrelator.noteNative(event);
+        },
         onTurnTransportEvent: async (event) => {
             await turnDeliveryEvidenceReady;
             await turnDeliveryEvidence.record(event);
@@ -2468,8 +2259,7 @@ export function createServer(config = loadConfig(), options = {}) {
         pollMs: Number(config.conversationProgressPollSeconds || 15) * 1_000,
         onConversationSettled: ({ conversationId }) => {
             const activeTurnsRemoved = activeTurnRegistry.completeConversation(conversationId);
-            const directAuthoritiesRemoved = directRequestAuthorityRegistry.completeConversation(conversationId);
-            return { activeTurnsRemoved, directAuthoritiesRemoved };
+            return { activeTurnsRemoved };
         },
     });
     contextMetadataAdapter.setHandlers({
@@ -2774,7 +2564,6 @@ export function createServer(config = loadConfig(), options = {}) {
             turnTransportObserver,
             mcpCallCorrelator,
             activeTurnRegistry,
-            directRequestAuthorityRegistry,
             contextMetadataAdapter,
             streamRecoveryAdapter,
             config,

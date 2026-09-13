@@ -61,8 +61,11 @@ function cleanEntry(fingerprint, input = {}) {
     runtimeKeys: [...new Set(Array.isArray(input.runtimeKeys) ? input.runtimeKeys.map((value) => String(value || "").trim()).filter(Boolean) : [])],
     ambiguous: ids.length > 1 || input.ambiguous === true,
     updatedAt: input.updatedAt || null,
-    verifiedDirectSession: input.verifiedDirectSession === true,
-    verifiedDirectSessionAt: input.verifiedDirectSessionAt || null,
+    // Direct MCP sessions are host transport descriptors, not durable
+    // conversation owners. Legacy verified flags are deliberately retired on
+    // load so a shared/stale session can never select another chat.
+    verifiedDirectSession: false,
+    verifiedDirectSessionAt: null,
   };
 }
 
@@ -140,24 +143,6 @@ export class ClassicConversationAuthorityRegistry {
     return resolved;
   }
 
-  async observeVerifiedDirectSession({ sessionFingerprint, conversationId, runtimeKey, observedAt } = {}) {
-    const fingerprint = requireText(sessionFingerprint, "sessionFingerprint").toLowerCase();
-    if (!/^[a-f0-9]{64}$/.test(fingerprint)) throw new Error("sessionFingerprint must be a SHA-256 hex digest.");
-    const conversation = requireText(conversationId, "conversationId");
-    const runtime = requireText(runtimeKey, "runtimeKey");
-    const at = String(observedAt || new Date().toISOString());
-    const existing = this.entries.get(fingerprint) || cleanEntry(fingerprint);
-    const exactRuntimeOwner = bindAuthoritativeCurrent(existing, conversation, runtime);
-    existing.updatedAt = at;
-    existing.verifiedDirectSession = exactRuntimeOwner;
-    existing.verifiedDirectSessionAt = exactRuntimeOwner ? at : null;
-    this.entries.set(fingerprint, existing);
-    await this.#persist();
-    const resolved = this.resolveFingerprint(fingerprint);
-    if (resolved) this.#resolveWaiters(fingerprint, resolved);
-    return resolved;
-  }
-
   resolveFingerprint(value) {
     const fingerprint = String(value || "").trim().toLowerCase();
     const entry = this.entries.get(fingerprint);
@@ -167,22 +152,10 @@ export class ClassicConversationAuthorityRegistry {
       sessionFingerprint: fingerprint,
       runtimeKeys: [...entry.runtimeKeys],
       observedAt: entry.updatedAt,
-      source: entry.verifiedDirectSession === true
-        ? "classic-verified-direct-session"
-        : "classic-native-turn",
-      verifiedDirectSession: entry.verifiedDirectSession === true,
-      verifiedDirectSessionAt: entry.verifiedDirectSessionAt || null,
+      source: "classic-native-turn",
+      verifiedDirectSession: false,
+      verifiedDirectSessionAt: null,
     };
-  }
-
-  resolveVerifiedDirectSession(value, { maxAgeMs = 6 * 60 * 60_000, now = Date.now() } = {}) {
-    const fingerprint = String(value || "").trim().toLowerCase();
-    const entry = this.entries.get(fingerprint);
-    if (!entry || entry.verifiedDirectSession !== true || entry.ambiguous || entry.conversationIds.length !== 1) return null;
-    const verifiedAtMs = Date.parse(String(entry.verifiedDirectSessionAt || entry.updatedAt || ""));
-    const boundedMaxAgeMs = Math.max(1_000, Number(maxAgeMs) || 6 * 60 * 60_000);
-    if (!Number.isFinite(verifiedAtMs) || !Number.isFinite(Number(now)) || Number(now) - verifiedAtMs > boundedMaxAgeMs) return null;
-    return this.resolveFingerprint(fingerprint);
   }
 
   async acceptVerifiedRollover({ oldConversationId, newConversationId, runtimeKey, observedAt } = {}) {

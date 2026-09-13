@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { sessionFingerprintFromClassicRequest } from "./classic-conversation-authority.js";
 import { mergeTraceCorrelationFingerprints, tracesIntersect } from "./request-trace-correlation.js";
-import { mergeSessionCorrelationFingerprints, sessionsIntersect } from "./session-correlation.js";
+import { mergeSessionCorrelationFingerprints } from "./session-correlation.js";
 
 const DEFAULT_TTL_MS = 30_000;
 const DEFAULT_MAX_PENDING = 128;
@@ -85,11 +85,27 @@ function boundedRecord(input, side, now) {
     const conversationId = cleanConversationId(input?.conversationId);
     const runtimeKey = cleanText(input?.runtimeKey, 80);
     if (!conversationId || !runtimeKey) return null;
-    return { side, callFingerprint, conversationId, runtimeKey, toolName: cleanText(input?.toolName, 220), atMs };
+    return {
+      side,
+      callFingerprint,
+      conversationId,
+      runtimeKey,
+      toolName: cleanText(input?.toolName, 220),
+      source: cleanText(input?.source, 240) || "classic-native-call-mcp",
+      invocationFingerprint: cleanTraceFingerprint(input?.invocationFingerprint),
+      atMs,
+    };
   }
   const sessionFingerprint = cleanText(input?.sessionFingerprint, 64)?.toLowerCase();
   if (!sessionFingerprint || !/^[a-f0-9]{64}$/.test(sessionFingerprint)) return null;
-  return { side, callFingerprint, sessionFingerprint, toolName: cleanText(input?.toolName, 220), atMs };
+  return {
+    side,
+    callFingerprint,
+    sessionFingerprint,
+    gatewayRequestId: cleanText(input?.gatewayRequestId, 160),
+    toolName: cleanText(input?.toolName, 220),
+    atMs,
+  };
 }
 
 function cleanToolNames(values) {
@@ -262,21 +278,15 @@ export class ClassicActiveTurnRegistry {
     if (!tool) return null;
     const trace = cleanTraceFingerprint(turnTraceFingerprint);
     const distributedTraces = mergeTraceCorrelationFingerprints(traceCorrelationFingerprints);
-    const sessionAliases = mergeSessionCorrelationFingerprints(sessionCorrelationFingerprintsHint);
-    const sessionHint = cleanSessionFingerprint(sessionFingerprintHint);
-    const runtimeHint = cleanRuntimeKey(runtimeKeyHint);
+    void sessionCorrelationFingerprintsHint;
+    void sessionFingerprintHint;
+    void runtimeKeyHint;
     // Tool-name uniqueness across browser windows is not conversation
     // authority. Without an exact hashed turn trace or a runtime key already
     // derived from the request's own session, fail closed rather than allowing
     // one Main's deferred tool call to claim another Main's conversation.
-    if (!distributedTraces.length && !trace && !sessionAliases.length && !sessionHint && !runtimeHint) return null;
-    const now = this.now();
+    if (!distributedTraces.length && !trace) return null;
     const entries = [...this.active.values()];
-    const liveEnough = (entry) => (
-      entry.transportFinishedAtMs == null
-      || now - Number(entry.transportFinishedAtMs || 0) <= this.postTurnGraceMs
-      || entry.finishedAtMs != null
-    );
     let correlationKind = null;
     let candidates = [];
     if (distributedTraces.length) {
@@ -288,39 +298,6 @@ export class ClassicActiveTurnRegistry {
     if (!candidates.length && trace) {
       candidates = entries.filter((entry) => entry.turnTraceFingerprint === trace);
       if (candidates.length) correlationKind = "turn-trace";
-    }
-    if (!candidates.length && sessionAliases.length) {
-      candidates = entries.filter((entry) => (
-        sessionsIntersect(sessionAliases, entry.sessionCorrelationFingerprints)
-      ));
-      if (candidates.length) correlationKind = "session-alias";
-    }
-    const scopedEntries = entries.filter((entry) => (
-      (!runtimeHint || entry.runtimeKey === runtimeHint)
-      && (!sessionHint || entry.sessionFingerprint === sessionHint)
-      && liveEnough(entry)
-    ));
-    if (!candidates.length && sessionHint) {
-      // The exact request-owned MCP session is already a conversation-scoped
-      // authority signal. ChatGPT can disclose a direct tool after the browser
-      // turn's initial local_function_names snapshot, so requiring the tool to
-      // appear in that earlier list would incorrectly reject legitimate calls
-      // such as devspace_progress_report. Reused sessions still fail closed at
-      // the unique owner check below.
-      candidates = scopedEntries;
-      if (candidates.length) correlationKind = "session";
-    }
-    if (!candidates.length && runtimeHint) {
-      // Runtime-only fallback is weaker and therefore remains constrained to a
-      // tool that the exact browser turn was visibly offered.
-      candidates = scopedEntries.filter((entry) => entry.localFunctionNames.includes(tool));
-      if (candidates.length) correlationKind = "runtime-tool";
-    }
-    let deferredPlaceholder = false;
-    if (!candidates.length && !trace && (sessionAliases.length || sessionHint || runtimeHint)) {
-      candidates = scopedEntries.filter((entry) => isDeferredPlaceholderTurn(entry));
-      deferredPlaceholder = candidates.length > 0;
-      if (deferredPlaceholder) correlationKind = "deferred-placeholder";
     }
     const unique = new Map();
     for (const entry of candidates) {
@@ -354,24 +331,6 @@ export class ClassicActiveTurnRegistry {
         : postTransport
           ? "classic-active-turn-post-transport-trace-correlation"
           : "classic-active-turn-trace-correlation";
-    } else if (correlationKind === "session-alias") {
-      source = postTurn
-        ? "classic-active-turn-post-finish-session-alias-correlation"
-        : postTransport
-          ? "classic-active-turn-post-transport-session-alias-correlation"
-          : "classic-active-turn-session-alias-correlation";
-    } else if (correlationKind === "session") {
-      source = postTurn
-        ? "classic-active-turn-post-finish-session-correlation"
-        : postTransport
-          ? "classic-active-turn-post-transport-session-correlation"
-          : "classic-active-turn-session-correlation";
-    } else if (deferredPlaceholder) {
-      source = postTurn
-        ? "classic-active-turn-post-finish-deferred-placeholder-correlation"
-        : postTransport
-          ? "classic-active-turn-post-transport-deferred-placeholder-correlation"
-          : "classic-active-turn-deferred-placeholder-correlation";
     } else {
       source = postTurn
         ? "classic-active-turn-post-finish-unique-tool-correlation"
@@ -409,6 +368,9 @@ export class ClassicActiveTurnRegistry {
     if (immediate) return Promise.resolve(immediate);
     const tool = cleanText(toolName, 220);
     if (!tool) return Promise.resolve(null);
+    const exactTurnTrace = cleanTraceFingerprint(turnTraceFingerprint);
+    const exactRequestTraces = mergeTraceCorrelationFingerprints(traceCorrelationFingerprints);
+    if (!exactTurnTrace && exactRequestTraces.length === 0) return Promise.resolve(null);
     if (signal?.aborted) return Promise.reject(new Error("Active-turn conversation correlation was cancelled."));
     const waiterId = this.nextWaiterId++;
     const boundedTimeoutMs = Math.max(100, Number(timeoutMs) || this.waitTimeoutMs);
@@ -436,8 +398,8 @@ export class ClassicActiveTurnRegistry {
     if (signal) signal.addEventListener("abort", onAbort, { once: true });
     this.waiters.set(waiterId, {
       toolName: tool,
-      turnTraceFingerprint: cleanTraceFingerprint(turnTraceFingerprint),
-      traceCorrelationFingerprints: mergeTraceCorrelationFingerprints(traceCorrelationFingerprints),
+      turnTraceFingerprint: exactTurnTrace,
+      traceCorrelationFingerprints: exactRequestTraces,
       sessionCorrelationFingerprintsHint: mergeSessionCorrelationFingerprints(sessionCorrelationFingerprintsHint),
       sessionFingerprintHint: cleanSessionFingerprint(sessionFingerprintHint),
       runtimeKeyHint: cleanRuntimeKey(runtimeKeyHint),
@@ -544,141 +506,6 @@ export class ClassicActiveTurnRegistry {
   }
 }
 
-/**
- * Retains only hashed request-trace aliases after one direct MCP request has
- * already been bound to an exact, page-verified ChatGPT conversation.
- *
- * ChatGPT's server-side direct MCP transport can issue many tool requests for
- * one assistant turn without repeating the browser turn's session or network
- * trace. Those direct requests do, however, share their own bounded trace
- * aliases. This registry lets a later request (notably progress narration)
- * reuse the exact authority established by an earlier request in the same
- * assistant turn. Every consumer must still re-verify the exact conversation
- * page before using the result. No raw trace, prompt, argument, or session
- * value is retained.
- */
-export class ClassicDirectRequestAuthorityRegistry {
-  constructor({
-    now = () => Date.now(),
-    ttlMs = 6 * 60 * 60_000,
-    maxRecords = 128,
-  } = {}) {
-    this.now = now;
-    this.ttlMs = Math.max(30_000, Number(ttlMs) || 6 * 60 * 60_000);
-    this.maxRecords = Math.max(4, Number(maxRecords) || 128);
-    this.records = [];
-    this.ambiguousMatches = 0;
-    this.resolved = 0;
-  }
-
-  note({
-    traceCorrelationFingerprints = null,
-    conversationId,
-    runtimeKey,
-    observedAtMs = this.now(),
-    source = "classic-direct-request-page-verified",
-  } = {}) {
-    const traces = mergeTraceCorrelationFingerprints(traceCorrelationFingerprints);
-    const conversation = cleanConversationId(conversationId);
-    const runtime = cleanRuntimeKey(runtimeKey);
-    const atMs = Number(observedAtMs);
-    if (!traces.length || !conversation || !runtime || !Number.isFinite(atMs)) return null;
-    this.prune();
-    const existing = this.records.find((record) => (
-      record.conversationId === conversation
-      && tracesIntersect(record.traceCorrelationFingerprints, traces)
-    ));
-    if (existing) {
-      existing.traceCorrelationFingerprints = mergeTraceCorrelationFingerprints(
-        existing.traceCorrelationFingerprints,
-        traces,
-      );
-      existing.runtimeKey = runtime;
-      existing.observedAtMs = atMs;
-      existing.source = cleanText(source, 240) || existing.source;
-      this.records.sort((left, right) => right.observedAtMs - left.observedAtMs);
-      return this.#identity(existing, "classic-direct-request-trace-authority-noted");
-    }
-    const record = {
-      traceCorrelationFingerprints: traces,
-      conversationId: conversation,
-      runtimeKey: runtime,
-      observedAtMs: atMs,
-      source: cleanText(source, 240) || "classic-direct-request-page-verified",
-    };
-    this.records.unshift(record);
-    this.records = this.records
-      .sort((left, right) => right.observedAtMs - left.observedAtMs)
-      .slice(0, this.maxRecords);
-    return this.#identity(record, "classic-direct-request-trace-authority-noted");
-  }
-
-  resolve({ traceCorrelationFingerprints = null } = {}) {
-    this.prune();
-    const traces = mergeTraceCorrelationFingerprints(traceCorrelationFingerprints);
-    if (!traces.length) return null;
-    const candidates = this.records.filter((record) => (
-      tracesIntersect(record.traceCorrelationFingerprints, traces)
-    ));
-    const owners = new Map();
-    for (const record of candidates) {
-      const previous = owners.get(record.conversationId);
-      if (!previous || record.observedAtMs >= previous.observedAtMs) {
-        owners.set(record.conversationId, record);
-      }
-    }
-    if (owners.size !== 1) {
-      if (owners.size > 1) this.ambiguousMatches += 1;
-      return null;
-    }
-    const [record] = owners.values();
-    this.resolved += 1;
-    return this.#identity(record, "classic-direct-request-trace-authority");
-  }
-
-  completeConversation(conversationId) {
-    const conversation = cleanConversationId(conversationId);
-    if (!conversation) return 0;
-    const before = this.records.length;
-    this.records = this.records.filter((record) => record.conversationId !== conversation);
-    return before - this.records.length;
-  }
-
-  prune() {
-    const cutoff = this.now() - this.ttlMs;
-    this.records = this.records
-      .filter((record) => record.observedAtMs >= cutoff)
-      .sort((left, right) => right.observedAtMs - left.observedAtMs)
-      .slice(0, this.maxRecords);
-  }
-
-  diagnostics() {
-    this.prune();
-    return {
-      records: this.records.length,
-      conversations: new Set(this.records.map((record) => record.conversationId)).size,
-      resolved: this.resolved,
-      ambiguousMatches: this.ambiguousMatches,
-      ttlMs: this.ttlMs,
-      maxRecords: this.maxRecords,
-      rawTraceIdsPersisted: false,
-      rawSessionPersisted: false,
-      rawArgumentsPersisted: false,
-    };
-  }
-
-  #identity(record, source) {
-    return {
-      conversationId: record.conversationId,
-      runtimeKey: record.runtimeKey,
-      observedAt: new Date(record.observedAtMs).toISOString(),
-      source,
-      authoritySource: record.source,
-      ephemeral: true,
-    };
-  }
-}
-
 export class ClassicMcpCallCorrelator {
   constructor({
     now = () => Date.now(),
@@ -758,15 +585,18 @@ export class ClassicMcpCallCorrelator {
       runtimeKey: native.runtimeKey,
       toolName: native.toolName || gateway.toolName || null,
       callFingerprint,
+      gatewayRequestId: gateway.gatewayRequestId || null,
+      invocationFingerprint: cleanTraceFingerprint(native.invocationFingerprint),
       observedAt: new Date(Math.max(native.atMs, gateway.atMs)).toISOString(),
       skewMs,
-      source: "classic-native-call-mcp-correlation",
+      source: `${native.source || "classic-native-call-mcp"}-correlation`,
     };
     this.resolved.unshift(identity);
     this.resolved = this.resolved.slice(0, this.maxPending);
     for (const [key, waiter] of [...this.waiters]) {
       if (waiter.callFingerprint !== callFingerprint) continue;
       if (waiter.sessionFingerprint && waiter.sessionFingerprint !== identity.sessionFingerprint) continue;
+      if (waiter.gatewayRequestId && waiter.gatewayRequestId !== identity.gatewayRequestId) continue;
       this.waiters.delete(key);
       waiter.resolve(identity);
     }
@@ -776,13 +606,21 @@ export class ClassicMcpCallCorrelator {
   waitForIdentity({
     callFingerprint,
     sessionFingerprint = null,
+    gatewayRequestId = null,
     signal,
     timeoutMs = this.waitTimeoutMs,
   } = {}) {
     const call = cleanText(callFingerprint, 64)?.toLowerCase();
     const session = cleanText(sessionFingerprint, 64)?.toLowerCase() || null;
+    const requestId = cleanText(gatewayRequestId, 160);
     if (!call || !/^[a-f0-9]{64}$/.test(call)) return Promise.resolve(null);
-    const existing = this.resolved.find((item) => item.callFingerprint === call && (!session || item.sessionFingerprint === session));
+    const existing = requestId
+      ? this.resolved.find((item) => (
+          item.callFingerprint === call
+          && item.gatewayRequestId === requestId
+          && (!session || item.sessionFingerprint === session)
+        ))
+      : null;
     if (existing) return Promise.resolve(existing);
     if (signal?.aborted) return Promise.reject(new Error("MCP conversation correlation was cancelled."));
     const waiterId = this.nextWaiterId++;
@@ -812,6 +650,7 @@ export class ClassicMcpCallCorrelator {
     this.waiters.set(waiterId, {
       callFingerprint: call,
       sessionFingerprint: session,
+      gatewayRequestId: requestId,
       createdAtMs: this.now(),
       timeoutMs: boundedTimeoutMs,
       resolve: (value) => finish({ value }),

@@ -6,6 +6,7 @@ let now = 1_000;
 const identities = [];
 const events = [];
 const nativeMcpCalls = [];
+const toolInvocations = [];
 const activeTurns = [];
 const delayedGatewayTurns = new ClassicActiveTurnRegistry({
   now: () => now,
@@ -19,6 +20,7 @@ const tracker = new ClassicTurnTransportTracker({
   onConversationIdentity: (value) => identities.push(value),
   onTurnTransportEvent: (value) => events.push(value),
   onNativeMcpCall: (value) => nativeMcpCalls.push(value),
+  onToolInvocation: (value) => toolInvocations.push(value),
   onActiveTurn: (value) => {
     activeTurns.push(value);
     delayedGatewayTurns.noteTurn({ runtimeKey: "main-01", ...value });
@@ -46,6 +48,51 @@ assert.match(nativeMcpCalls[0].callFingerprint, /^[a-f0-9]{64}$/);
 assert.equal(JSON.stringify(nativeMcpCalls).includes("goal-a"), false);
 assert.equal(JSON.stringify(nativeMcpCalls).includes("never-persist"), false);
 assert.equal(tracker.pendingSize, 0, "native MCP call correlation must not enter turn-delivery pending state");
+
+tracker.noteWebSocketFrame({
+  conversationId: "conversation-websocket-tool",
+  observedAtMs: now,
+  payloadData: JSON.stringify({
+    message: {
+      id: "assistant-tool-message-a",
+      author: { role: "assistant" },
+      recipient: "api_tool.call_tool",
+      content: {
+        content_type: "code",
+        text: JSON.stringify({
+          path: "/DevSpace Local Gateway/link_6a9c8ea532a481918c0f3a852cdb8bbf/devspace_progress_report",
+          args: { kind: "milestone", message: "private exact progress" },
+        }),
+      },
+      metadata: { request_id: "request-secret", working_turn_id: "turn-secret" },
+    },
+  }),
+});
+assert.equal(toolInvocations.length, 1);
+assert.equal(toolInvocations[0].conversationId, "conversation-websocket-tool");
+assert.equal(toolInvocations[0].toolName, "devspace_progress_report");
+assert.match(toolInvocations[0].callFingerprint, /^[a-f0-9]{64}$/);
+assert.equal(JSON.stringify(toolInvocations).includes("private exact progress"), false);
+assert.equal(JSON.stringify(toolInvocations).includes("request-secret"), false);
+assert.equal(tracker.noteWebSocketFrame({
+  conversationId: "conversation-websocket-tool",
+  observedAtMs: now + 1,
+  payloadData: JSON.stringify({
+    message: {
+      id: "assistant-tool-message-a",
+      author: { role: "assistant" },
+      recipient: "api_tool.call_tool",
+      content: {
+        content_type: "code",
+        text: JSON.stringify({
+          path: "/DevSpace Local Gateway/link_6a9c8ea532a481918c0f3a852cdb8bbf/devspace_progress_report",
+          args: { kind: "milestone", message: "private exact progress" },
+        }),
+      },
+      metadata: { request_id: "request-secret", working_turn_id: "turn-secret" },
+    },
+  }),
+}).length, 0, "duplicate websocket frames must not create duplicate native correlation events");
 
 tracker.noteRequest({
   requestId: "r1",
@@ -93,6 +140,40 @@ assert.equal(JSON.stringify(activeTurns[0]).includes("session-secret-a"), false,
 assert.equal(JSON.stringify(activeTurns).includes("0123456789abcdef000000000000002a"), false, "raw distributed trace ids must never leave the active-turn parser");
 
 tracker.noteResponse({ requestId: "r1", response: { url: "https://chatgpt.com/backend-api/f/conversation", status: 200 } });
+const responseToolMessage = JSON.stringify({
+  message: {
+    id: "assistant-response-tool-a",
+    author: { role: "assistant" },
+    recipient: "DevSpace_Local_Gateway.devspace_progress_report",
+    content: {
+      content_type: "code",
+      text: JSON.stringify({ kind: "verification", message: "跨對話進度測試" }),
+    },
+    metadata: { request_id: "response-request-secret", turn_id: "response-turn-secret" },
+  },
+});
+const responseEnvelope = `data: ${responseToolMessage}\n\n`;
+const responseBytes = Buffer.from(responseEnvelope, "utf8");
+const chineseMarker = Buffer.from("跨", "utf8");
+const responseSplit = responseBytes.indexOf(chineseMarker) + 1;
+assert.equal(responseSplit > 0, true, "test fixture must split inside one UTF-8 code point");
+assert.equal(tracker.noteResponseData({
+  requestId: "r1",
+  data: responseBytes.subarray(0, responseSplit).toString("base64"),
+  base64Encoded: true,
+  observedAtMs: now,
+}).length, 0, "a split response envelope must wait for the remaining bytes");
+const responseInvocations = tracker.noteResponseData({
+  requestId: "r1",
+  data: responseBytes.subarray(responseSplit).toString("base64"),
+  base64Encoded: true,
+  observedAtMs: now + 1,
+});
+assert.equal(responseInvocations.length, 1);
+assert.equal(responseInvocations[0].conversationId, "conversation-a");
+assert.equal(responseInvocations[0].toolName, "devspace_progress_report");
+assert.equal(JSON.stringify(responseInvocations).includes("跨對話進度測試"), false);
+assert.equal(JSON.stringify(responseInvocations).includes("response-request-secret"), false);
 tracker.noteFinished({ requestId: "r1" });
 assert.deepEqual(events.slice(-2).map((item) => item.kind), ["response", "finished"]);
 assert.equal(activeTurns.at(-1).kind, "finished");
@@ -104,12 +185,8 @@ const delayedGatewayIdentity = delayedGatewayTurns.resolveGatewayCall({
   toolName: "blender_mcp",
   sessionFingerprintHint: activeTurns[0].sessionFingerprint,
 });
-assert.equal(
-  delayedGatewayIdentity?.conversationId,
-  "conversation-a",
-  "the correlation layer must retain a finished browser turn long enough for the later server-side MCP call",
-);
-assert.equal(delayedGatewayIdentity?.source, "classic-active-turn-post-transport-session-correlation");
+assert.equal(delayedGatewayIdentity, null,
+  "a browser/direct session alone must not retain conversation authority");
 now += 1_100;
 assert.equal(delayedGatewayTurns.resolveGatewayCall({
   toolName: "blender_mcp",
@@ -150,4 +227,4 @@ tracker.noteRequest({ requestId: "r5", request: { url: "https://chatgpt.com/back
 tracker.noteRequest({ requestId: "r6", request: { url: "https://chatgpt.com/backend-api/f/conversation", method: "POST", postData: JSON.stringify({ conversation_id: "conversation-f", model: "gpt-test" }), headers: {} } });
 assert.equal(tracker.pendingSize, 2, "native transport tracking must have a hard cap");
 
-console.log(JSON.stringify({ ok: true, gate: "classic-turn-transport-observer", networkOnly: true, nativeIdentity: true, nativeCallMcpCorrelation: true, activeTurnLifecycle: true, failureCancellationPropagated: true, delayedServerSideMcpAfterTransportFinish: true, localFunctionNamesObserved: true, hashedTurnTraceOnly: true, deliveryLifecycle: true, bounded: true, rawSessionPersisted: false, rawToolArgumentsPersisted: false }));
+console.log(JSON.stringify({ ok: true, gate: "classic-turn-transport-observer", networkOnly: true, nativeIdentity: true, nativeCallMcpCorrelation: true, websocketToolInvocationCorrelation: true, streamedResponseToolInvocationCorrelation: true, splitStreamEnvelopeReassembled: true, activeTurnLifecycle: true, failureCancellationPropagated: true, delayedServerSideMcpRequiresExactTrace: true, localFunctionNamesObserved: true, hashedTurnTraceOnly: true, deliveryLifecycle: true, bounded: true, rawSessionPersisted: false, rawToolArgumentsPersisted: false }));

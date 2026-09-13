@@ -39,7 +39,6 @@ export function createMemoryDiagnostics({
   turnTransportObserver,
   mcpCallCorrelator,
   activeTurnRegistry,
-  directRequestAuthorityRegistry,
   contextMetadataAdapter,
   streamRecoveryAdapter,
   config = {},
@@ -56,7 +55,6 @@ export function createMemoryDiagnostics({
   const turn = safeStatus(turnTransportObserver);
   const callCorrelation = safeDiagnostics(mcpCallCorrelator);
   const activeTurnCorrelation = safeDiagnostics(activeTurnRegistry);
-  const directRequestAuthority = safeDiagnostics(directRequestAuthorityRegistry);
   const context = safeStatus(contextMetadataAdapter);
   const stream = safeStatus(streamRecoveryAdapter);
   const contextRuntimes = Array.isArray(context?.runtimes) ? context.runtimes : [];
@@ -111,11 +109,12 @@ export function createMemoryDiagnostics({
       classicActiveTurnCorrelationsResolved: finiteNumber(activeTurnCorrelation?.recentResolved),
       classicActiveTurnAmbiguities: finiteNumber(activeTurnCorrelation?.ambiguousMatches),
       classicPostTurnGraceMs: finiteNumber(activeTurnCorrelation?.postTurnGraceMs),
-      directRequestAuthorities: finiteNumber(directRequestAuthority?.records),
-      directRequestAuthorityConversations: finiteNumber(directRequestAuthority?.conversations),
-      directRequestAuthorityResolved: finiteNumber(directRequestAuthority?.resolved),
-      directRequestAuthorityAmbiguities: finiteNumber(directRequestAuthority?.ambiguousMatches),
-      directRequestAuthorityTtlMs: finiteNumber(directRequestAuthority?.ttlMs),
+      classicToolInvocationsSeen: finiteNumber(turn?.toolInvocations?.seen),
+      classicToolInvocationsObserved: finiteNumber(turn?.toolInvocations?.observed),
+      classicToolInvocationDuplicates: finiteNumber(turn?.toolInvocations?.duplicates),
+      classicToolInvocationResponseBuffers: finiteNumber(turn?.toolInvocations?.responseBuffers),
+      classicToolInvocationResponseBufferChars: finiteNumber(turn?.toolInvocations?.responseBufferChars),
+      durableDirectRequestAuthorities: 0,
     },
     capabilities: {
       enabled: capabilities?.enabled === true,
@@ -131,6 +130,13 @@ export function createMemoryDiagnostics({
     turnTransportCdp: {
       connected: finiteNumber(turn?.connected),
       pending: finiteNumber(turn?.pending),
+      toolInvocations: {
+        seen: finiteNumber(turn?.toolInvocations?.seen),
+        observed: finiteNumber(turn?.toolInvocations?.observed),
+        duplicates: finiteNumber(turn?.toolInvocations?.duplicates),
+        responseBuffers: finiteNumber(turn?.toolInvocations?.responseBuffers),
+        responseBufferChars: finiteNumber(turn?.toolInvocations?.responseBufferChars),
+      },
     },
     contextCdp: {
       connected: finiteNumber(context?.connected),

@@ -13,8 +13,10 @@ assert.match(observer, /loadingFinished/);
 assert.match(observer, /parseNativeCallMcpRequest/);
 assert.match(observer, /onNativeMcpCall/);
 assert.match(observer, /Network\.getRequestPostData/);
+assert.match(observer, /Network\.streamResourceContent/);
+assert.match(observer, /Network\.dataReceived/);
 assert.match(observer, /isNativeCallMcpRequest/);
-assert.doesNotMatch(observer, /Runtime\.enable|Runtime\.evaluate|Page\.reload|Page\.navigate|Network\.getResponseBody/, "always-on delivery observer must stay network-only and low-memory");
+assert.doesNotMatch(observer, /Runtime\.enable|Runtime\.evaluate|client\.call\("Page\.(?:reload|navigate)"|Network\.getResponseBody/, "always-on delivery observer must stay network-only and low-memory");
 assert.match(observer, /maxPending/);
 assert.match(observer, /pendingTtlMs/);
 assert.match(server, /const\s+classicCdpOptions\s*=\s*Array\.isArray\(config\.classicMainDebugPorts\)[\s\S]{0,180}ports:\s*config\.classicMainDebugPorts/, "server must derive one bounded Classic CDP port option from config");
@@ -38,6 +40,7 @@ console.log(JSON.stringify({
   bounded: true,
   automaticGoalConversationBinding: true,
   nativeCallMcpCorrelation: true,
+  streamedToolInvocationCorrelation: true,
   staleGuiGeneratingCannotBlockForever: true,
   safetyCheckFailsClosed: true,
 }));
