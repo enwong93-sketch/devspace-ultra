@@ -21,6 +21,10 @@ try {
     DEVSPACE_SUBAGENTS: "false",
     DEVSPACE_LOG_REQUESTS: "false",
     DEVSPACE_LOG_TOOL_CALLS: "false",
+    // This unit test must never attach its background Classic observers to
+    // the user's live Main windows. An offline loopback port keeps shutdown
+    // deterministic and proves the public HTTP error contract in isolation.
+    DEVSPACE_CLASSIC_MAIN_DEBUG_PORTS: "1",
   });
   const created = createServer(config);
   appClose = created.close;
