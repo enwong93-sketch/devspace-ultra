@@ -64,6 +64,10 @@ assert.match(server, /activeTurnRegistry\.waitForIdentity\(/,
   "active-turn correlation must remain bounded to the current request");
 assert.match(server, /sessionCorrelationFingerprintsFromHeaders\(req\?\.headers \|\| \{\}\)/,
   "only request-owned hashed session aliases may be used as fallback evidence");
+assert.match(server, /conversationAuthority\.resolveFingerprint\(sessionFingerprint\)/,
+  "exact native ChatGPT session history may be reused only as an input to current page verification");
+assert.match(server, /requireCurrentSession:\s*true[\s\S]*source:\s*"classic-native-session-page-verified"/,
+  "native session recovery must verify the current request and exact page before entering any authority domain");
 assert.doesNotMatch(server, /verifyProgressConversationAuthority/,
   "the retired session/page fallback module must not remain wired");
 
@@ -122,6 +126,7 @@ console.log(JSON.stringify({
   exactGatewayRequestBinding: true,
   exactPageClaimRelay: true,
   activeTurnSessionAliasBounded: true,
+  exactNativeSessionPageRecovery: true,
   durableSessionAuthorityRetired: true,
   runtimeAuthorityRetired: true,
   legacyProgressRowsDiagnosticOnly: true,

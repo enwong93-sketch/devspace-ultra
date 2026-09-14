@@ -2236,6 +2236,33 @@ export function createServer(config = loadConfig(), options = {}) {
             }
         }
         if (!capabilityAuthority?.conversationId && !progressAuthority?.conversationId) {
+            // The ChatGPT host can execute direct MCP calls on a server-side
+            // connector session that is different from the browser upload
+            // session for the same conversation. Reuse only a session
+            // fingerprint that was previously learned from an exact native
+            // ChatGPT conversation request, then re-verify the globally unique
+            // live page, current Runtime locator, generating state and mounted
+            // progress-card owner for this request. Ambiguous native session
+            // history, a missing/idle page, or a duplicate page still fails
+            // closed. This is not the retired "verified direct session" cache:
+            // no direct request can create or extend this mapping.
+            const nativeSession = conversationAuthority.resolveFingerprint(sessionFingerprint);
+            if (nativeSession?.conversationId) {
+                const verified = await verifyPageAuthority(nativeSession, {
+                    requireCurrentSession: true,
+                    requireGenerating: !progressClaimTool,
+                    source: "classic-native-session-page-verified",
+                });
+                if (verified?.conversationId) {
+                    acceptVerifiedAuthority({
+                        ...verified,
+                        callFingerprint: callFingerprint || null,
+                        invocationFingerprint: null,
+                    });
+                }
+            }
+        }
+        if (!capabilityAuthority?.conversationId && !progressAuthority?.conversationId) {
             const waits = [];
             if (callFingerprint) {
                 waits.push((signal) => mcpCallCorrelator.waitForIdentity({

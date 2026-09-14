@@ -34,6 +34,16 @@ assert.match(server, /activeTurnRegistry\.waitForIdentity\(/,
   "active-turn session correlation must remain bounded to the current request");
 assert.match(server, /sessionCorrelationFingerprintsFromHeaders\(req\?\.headers \|\| \{\}\)/,
   "the direct request must contribute only hashed session aliases to active-turn correlation");
+assert.match(server, /const nativeSession = conversationAuthority\.resolveFingerprint\(sessionFingerprint\)/,
+  "a previously exact native ChatGPT session mapping may recover server-side connector calls");
+assert.match(server, /source:\s*"classic-native-session-page-verified"/,
+  "native session recovery must still pass exact live-page verification");
+const nativeSessionRecoveryStart = server.indexOf("const nativeSession = conversationAuthority.resolveFingerprint(sessionFingerprint)");
+const nativeSessionRecoveryEnd = server.indexOf("if (!capabilityAuthority?.conversationId && !progressAuthority?.conversationId)", nativeSessionRecoveryStart + 1);
+assert.ok(nativeSessionRecoveryStart >= 0 && nativeSessionRecoveryEnd > nativeSessionRecoveryStart);
+const nativeSessionRecovery = server.slice(nativeSessionRecoveryStart, nativeSessionRecoveryEnd);
+assert.doesNotMatch(nativeSessionRecovery, /observeNativeTurn|waitForFingerprint|observeVerifiedDirectSession/,
+  "a direct Gateway request must never create, refresh, or wait for native session ownership");
 assert.match(server, /requestConversationContext\.run\(/,
   "verified authority must remain request-scoped through AsyncLocalStorage");
 assert.match(server, /EXACT_CONVERSATION_REQUEST_PROOF/,
@@ -101,6 +111,7 @@ console.log(JSON.stringify({
   canonicalArgumentsHashedOnly: true,
   requestScopedAuthority: true,
   activeTurnSessionAliasBounded: true,
+  exactNativeSessionPageRecovery: true,
   durableDirectSessionAuthorityRetired: true,
   durableDirectTraceAuthorityRetired: true,
   runtimeAuthorityRetired: true,
