@@ -2026,9 +2026,13 @@ export function createServer(config = loadConfig(), options = {}) {
                 runtimeKey,
                 ...(snapshot?.conversationId ? { conversationId: snapshot.conversationId } : {}),
             } : null;
-            const request = evidenceFilter ? turnDeliveryEvidence.latest({ ...evidenceFilter, kind: "request" }) : null;
-            const response = evidenceFilter ? turnDeliveryEvidence.latest({ ...evidenceFilter, kind: "response" }) : null;
-            const finished = evidenceFilter ? turnDeliveryEvidence.latest({ ...evidenceFilter, kind: "finished" }) : null;
+            const roundEvidenceFilter = evidenceFilter ? {
+                ...evidenceFilter,
+                ...(goal?.roundBeganAt ? { since: goal.roundBeganAt } : {}),
+            } : null;
+            const request = roundEvidenceFilter ? turnDeliveryEvidence.latest({ ...roundEvidenceFilter, kind: "request" }) : null;
+            const response = roundEvidenceFilter ? turnDeliveryEvidence.latest({ ...roundEvidenceFilter, kind: "response" }) : null;
+            const finished = roundEvidenceFilter ? turnDeliveryEvidence.latest({ ...roundEvidenceFilter, kind: "finished" }) : null;
             const failure = evidenceFilter ? turnDeliveryEvidence.latest({
                 ...evidenceFilter,
                 kind: "failed",

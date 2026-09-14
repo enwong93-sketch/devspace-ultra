@@ -41,6 +41,12 @@ assert.match(guard, /deliveryTransportFailed/);
 assert.match(guard, /deliveryTimeoutVisible/);
 assert.match(guard, /retryVisible/);
 assert.match(guard, /safetyCheckVisible/);
+assert.match(guard, /currentTurnTransportFinished/,
+  "normal recovery must not exhaust attempts while the current assistant turn is still visibly generating");
+assert.match(guard, /sawCurrentRoundAssistant/,
+  "a stale GUI stop control needs current-round assistant proof before recovery");
+assert.match(runtime, /priorAttempts >= MAX_ROUND_RECOVERY_ATTEMPTS/,
+  "transient failed recovery attempts must become eligible again after their cooldown");
 assert.match(server, /ClassicTurnDeliveryEvidenceStore/);
 assert.match(server, /onTurnTransportEvent/);
 
@@ -51,6 +57,8 @@ console.log(JSON.stringify({
   noUserPromptRequired: true,
   chatModeOnly: true,
   nativeCompleteOrTransportFailureRequired: true,
+  staleGuiGeneratingRequiresCurrentTurnProof: true,
+  transientAttemptBurstCanRecover: true,
   guiAloneNeverAuthoritative: true,
   exactPageComposerTransport: true,
   oneVisibleRecoveryPerRound: true,

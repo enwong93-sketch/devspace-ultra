@@ -42,12 +42,32 @@ export function shouldRecoverWorkingRound(goal, snapshot, {
   if (snapshot?.chatMode !== true || snapshot?.recoverySessionEligible === false) return false;
   if (goal?.conversationId && snapshot?.conversationId && snapshot.conversationId !== goal.conversationId) return false;
   const nativeCompleteStableMs = Math.max(0, Number(snapshot?.nativeCompleteStableMs || 0));
+  const requestObservedAtMs = timestamp(snapshot?.turnRequestObservedAt);
+  const finishedObservedAtMs = timestamp(snapshot?.turnFinishedObservedAt);
+  const currentTurnTransportFinished = (
+    requestObservedAtMs != null
+    && finishedObservedAtMs != null
+    && finishedObservedAtMs >= requestObservedAtMs
+    && finishedObservedAtMs >= beganAt - DEFAULT_REQUEST_PRE_ROUND_SLOP_MS
+  );
+  const currentRoundAssistantCommitted = (
+    snapshot?.recoverySession?.sawCurrentRoundAssistant === true
+    && snapshot?.latestMessageRole === "assistant"
+    && typeof snapshot?.latestAssistantText === "string"
+    && snapshot.latestAssistantText.trim().length > 0
+  );
+  const staleGuiGeneratingOverride = (
+    snapshot?.generating === true
+    && nativeCompleteStableMs >= DEFAULT_NATIVE_COMPLETE_GRACE_MS
+    && currentTurnTransportFinished
+    && currentRoundAssistantCommitted
+  );
   const nativeComplete = (
     upper(snapshot?.streamStatus) === "COMPLETE"
     && snapshot?.safetyCheckVisible !== true
     && (
       snapshot?.generating === false
-      || nativeCompleteStableMs >= DEFAULT_NATIVE_COMPLETE_GRACE_MS
+      || staleGuiGeneratingOverride
     )
   );
   if (nativeComplete) return true;
@@ -116,6 +136,8 @@ export class ClassicGoalRoundCompletionGuard {
         lastObservedAtMs: this.now(),
         sawActiveTurn: false,
         sawCurrentRouteRequest: false,
+        baselineAssistantMessageId: String(snapshot?.latestAssistantMessageId || "").trim() || null,
+        sawCurrentRoundAssistant: false,
       };
       this.recoverySessions.set(runKey, session);
     }
@@ -137,6 +159,23 @@ export class ClassicGoalRoundCompletionGuard {
       }
     }
 
+    const latestMessageRole = String(snapshot?.latestMessageRole || "").trim().toLowerCase();
+    const latestAssistantMessageId = String(snapshot?.latestAssistantMessageId || "").trim() || null;
+    const assistantMessageChanged = Boolean(
+      latestAssistantMessageId
+      && latestAssistantMessageId !== session.baselineAssistantMessageId
+    );
+    if (
+      session.sawCurrentRouteRequest
+      && latestMessageRole === "assistant"
+      && (
+        assistantMessageChanged
+        || snapshot?.generating === true
+      )
+    ) {
+      session.sawCurrentRoundAssistant = true;
+    }
+
     session.lastObservedAtMs = this.now();
     const routeStableForMs = Math.max(0, Number(snapshot?.routeStableForMs || 0));
     const stableOpenRoute = (
@@ -155,6 +194,7 @@ export class ClassicGoalRoundCompletionGuard {
       stableOpenRoute,
       sawActiveTurn: session.sawActiveTurn,
       sawCurrentRouteRequest: session.sawCurrentRouteRequest,
+      sawCurrentRoundAssistant: session.sawCurrentRoundAssistant,
       reason: eligible
         ? "same-route-active-turn-observed"
         : !stableOpenRoute

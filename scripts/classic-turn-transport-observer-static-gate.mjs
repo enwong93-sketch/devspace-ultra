@@ -31,6 +31,10 @@ assert.match(server, /ClassicMcpCallCorrelator/);
 assert.match(server, /fingerprintMcpToolCall\(req\?\.body\)/);
 assert.match(guard, /DEFAULT_NATIVE_COMPLETE_GRACE_MS/);
 assert.match(guard, /nativeCompleteStableMs/);
+assert.match(guard, /currentTurnTransportFinished/,
+  "stale GUI generating may be overridden only by current-round transport-finished evidence");
+assert.match(guard, /sawCurrentRoundAssistant/,
+  "stale GUI generating may be overridden only after the current round produced an assistant message");
 assert.match(guard, /safetyCheckVisible !== true/);
 
 console.log(JSON.stringify({
@@ -43,6 +47,6 @@ console.log(JSON.stringify({
   nativeCallMcpCorrelation: true,
   streamedToolInvocationCorrelation: true,
   goalContinuationResumeObserved: true,
-  staleGuiGeneratingCannotBlockForever: true,
+  staleGuiGeneratingRequiresCurrentTurnProof: true,
   safetyCheckFailsClosed: true,
 }));

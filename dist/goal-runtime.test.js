@@ -419,6 +419,47 @@ try {
   assert.equal((await reloaded.recoverableWorkingRounds()).some((goal) => goal.id === raceGoal.id), false);
   assert.equal(raceRound2Reported.continuation.state, "pending");
 
+  const retryGoal = await reloaded.start({
+    objective: "Recover automatically after transient Goal recovery preflight failures",
+    successCriteria: ["Recovery attempts resume after the bounded cooldown instead of leaving a working round permanently dead"],
+  });
+  const retryRound1Reported = await reloaded.turnReport({
+    goalId: retryGoal.id,
+    summary: "Round one prepared the automatic recovery retry test.",
+    meaningfulProgress: true,
+  });
+  const retryLease = await reloaded.continuation({ goalId: retryGoal.id, action: "claim" });
+  await reloaded.roundBegin({
+    goalId: retryGoal.id,
+    continuationId: retryRound1Reported.continuation.continuationId,
+  });
+  await reloaded.continuation({
+    goalId: retryGoal.id,
+    action: "ack",
+    leaseId: retryLease.claim.leaseId,
+  });
+  for (let expectedAttempt = 1; expectedAttempt <= 5; expectedAttempt += 1) {
+    const claimed = await reloaded.claimRoundRecovery({ goalId: retryGoal.id });
+    assert.equal(claimed.claimed, true);
+    assert.equal(claimed.claim.attempt, expectedAttempt);
+    await reloaded.roundRecovery({
+      goalId: retryGoal.id,
+      action: "release",
+      recoveryId: claimed.claim.recoveryId,
+    });
+    advance(5_001);
+  }
+  const recoveredAfterBurstCap = await reloaded.claimRoundRecovery({ goalId: retryGoal.id });
+  assert.equal(recoveredAfterBurstCap.claimed, true,
+    "transient preflight failures must not permanently strand a working Goal round after the cooldown");
+  assert.equal(recoveredAfterBurstCap.claim.attempt, 1,
+    "the exhausted transient-attempt burst restarts from attempt one after cooldown");
+  await reloaded.roundRecovery({
+    goalId: retryGoal.id,
+    action: "ack",
+    recoveryId: recoveredAfterBurstCap.claim.recoveryId,
+  });
+
   const blockedGoal = await reloaded.start({
     objective: "Verify strict repeated blocker guard",
     successCriteria: ["Three reported rounds are required before blocked"],
