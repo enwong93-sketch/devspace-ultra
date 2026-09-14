@@ -60,6 +60,8 @@ import { ClassicContextMetadataCdpAdapter } from "./context-guardian-cdp.js";
 import { ContextGuardianRolloverCoordinator } from "./context-guardian-rollover.js";
 import { ClassicConversationAuthorityRegistry, sessionFingerprintFromClassicRequest, turnTraceFingerprintFromClassicRequest } from "./classic-conversation-authority.js";
 import { ClassicActiveTurnRegistry, ClassicMcpCallCorrelator, fingerprintMcpToolCall } from "./classic-mcp-call-correlation.js";
+import { requestTraceCorrelationFingerprints } from "./request-trace-correlation.js";
+import { mergeSessionCorrelationFingerprints, sessionCorrelationFingerprintsFromHeaders } from "./session-correlation.js";
 import { ClassicTurnTransportObserver } from "./classic-turn-transport-observer.js";
 import { ClassicNativeUsageEvidenceStore } from "./classic-native-usage-evidence.js";
 import { ClassicExactUsageAuthority } from "./classic-exact-usage-authority.js";
@@ -2084,6 +2086,11 @@ export function createServer(config = loadConfig(), options = {}) {
     const resolveAndBindMcpConversation = async (req) => {
         const sessionFingerprint = coreClientSessionFingerprint(req);
         if (!sessionFingerprint) return { conversationId: null, sessionFingerprint: null, runtimeKey: null };
+        const traceCorrelationFingerprints = requestTraceCorrelationFingerprints(req?.headers || {});
+        const sessionCorrelationFingerprints = mergeSessionCorrelationFingerprints(
+            sessionCorrelationFingerprintsFromHeaders(req?.headers || {}),
+            [sessionFingerprint],
+        );
         const callFingerprint = fingerprintMcpToolCall(req?.body);
         const gatewayCorrelationId = callFingerprint ? randomUUID() : null;
         const toolName = String(req?.body?.params?.name || "").trim() || null;
@@ -2218,6 +2225,17 @@ export function createServer(config = loadConfig(), options = {}) {
             }
         }
         if (!capabilityAuthority?.conversationId && !progressAuthority?.conversationId) {
+            const activeTurn = activeTurnRegistry.resolveGatewayCall({
+                toolName,
+                traceCorrelationFingerprints,
+                sessionCorrelationFingerprintsHint: sessionCorrelationFingerprints,
+                sessionFingerprintHint: sessionFingerprint,
+            });
+            if (activeTurn) {
+                acceptVerifiedAuthority(await verifyCorrelatedIdentity(activeTurn));
+            }
+        }
+        if (!capabilityAuthority?.conversationId && !progressAuthority?.conversationId) {
             const waits = [];
             if (callFingerprint) {
                 waits.push((signal) => mcpCallCorrelator.waitForIdentity({
@@ -2228,6 +2246,14 @@ export function createServer(config = loadConfig(), options = {}) {
                     timeoutMs: MCP_CONVERSATION_CORRELATION_TIMEOUT_MS,
                 }).then(verifyCorrelatedIdentity));
             }
+            waits.push((signal) => activeTurnRegistry.waitForIdentity({
+                toolName,
+                traceCorrelationFingerprints,
+                sessionCorrelationFingerprintsHint: sessionCorrelationFingerprints,
+                sessionFingerprintHint: sessionFingerprint,
+                signal,
+                timeoutMs: MCP_CONVERSATION_CORRELATION_TIMEOUT_MS,
+            }).then(verifyCorrelatedIdentity));
             const exactPromise = firstResolvedAuthority(waits);
             if (progressOnlyTool) {
                 progressAuthorityPromise = exactPromise

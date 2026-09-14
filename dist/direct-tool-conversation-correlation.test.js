@@ -14,6 +14,7 @@ import {
 import { ClassicTurnTransportTracker } from "./classic-turn-transport-observer.js";
 import { McpConversationRequestContext } from "./mcp-conversation-request-context.js";
 import { requestTraceCorrelationFingerprints } from "./request-trace-correlation.js";
+import { sessionCorrelationFingerprintsFromValue } from "./session-correlation.js";
 
 const temp = await mkdtemp(join(tmpdir(), "devspace-direct-tool-correlation-"));
 const authorityPath = join(temp, "authority.json");
@@ -100,6 +101,19 @@ const traceKeysB = requestTraceCorrelationFingerprints({
   traceparent: `00-${traceB}-3333333333333333-01`,
   "x-datadog-trace-id": "102",
 });
+
+const browserSessionFingerprintA = sessionFingerprintFromClassicRequest({
+  headers: { "x-openai-session": browserSessionA },
+});
+const activeSessionAuthorityA = activeTurns.resolveGatewayCall({
+  toolName: "devspace_progress_report",
+  sessionFingerprintHint: browserSessionFingerprintA,
+  sessionCorrelationFingerprintsHint: sessionCorrelationFingerprintsFromValue(browserSessionA),
+});
+assert.equal(activeSessionAuthorityA?.conversationId, "conversation-direct-a",
+  "a unique request-owned session alias may resolve only its currently active browser turn");
+assert.equal(activeSessionAuthorityA?.runtimeKey, "main-01");
+assert.match(activeSessionAuthorityA?.source || "", /session-alias-correlation$/);
 
 for (const toolName of ["blender_runtime", "blender_mcp", "devspace_progress_report"]) {
   const identity = activeTurns.resolveGatewayCall({
@@ -275,6 +289,7 @@ console.log(JSON.stringify({
   gate: "direct-tool-conversation-correlation",
   exactDistributedTraceAuthority: true,
   exactWebSocketInvocationAuthority: true,
+  boundedActiveSessionAuthority: true,
   durableDirectSessionAuthorityRetired: true,
   sharedHostSessionConversationIsolation: true,
   requestContextIsolation: true,

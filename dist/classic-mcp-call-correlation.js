@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { sessionFingerprintFromClassicRequest } from "./classic-conversation-authority.js";
 import { mergeTraceCorrelationFingerprints, tracesIntersect } from "./request-trace-correlation.js";
-import { mergeSessionCorrelationFingerprints } from "./session-correlation.js";
+import { mergeSessionCorrelationFingerprints, sessionsIntersect } from "./session-correlation.js";
 
 const DEFAULT_TTL_MS = 30_000;
 const DEFAULT_MAX_PENDING = 128;
@@ -278,37 +278,93 @@ export class ClassicActiveTurnRegistry {
     if (!tool) return null;
     const trace = cleanTraceFingerprint(turnTraceFingerprint);
     const distributedTraces = mergeTraceCorrelationFingerprints(traceCorrelationFingerprints);
-    void sessionCorrelationFingerprintsHint;
-    void sessionFingerprintHint;
+    const requestSessionFingerprint = cleanSessionFingerprint(sessionFingerprintHint);
+    const requestSessionAliases = mergeSessionCorrelationFingerprints(
+      sessionCorrelationFingerprintsHint,
+      requestSessionFingerprint ? [requestSessionFingerprint] : [],
+    );
     void runtimeKeyHint;
-    // Tool-name uniqueness across browser windows is not conversation
-    // authority. Without an exact hashed turn trace or a runtime key already
-    // derived from the request's own session, fail closed rather than allowing
-    // one Main's deferred tool call to claim another Main's conversation.
-    if (!distributedTraces.length && !trace) return null;
+    // Tool-name uniqueness and Runtime location are never conversation
+    // authority. A request-owned OpenAI session alias may be used only against
+    // currently active browser turns, only when it selects one unique
+    // conversation owner, and only for this request. This is deliberately not
+    // a durable session mapping: a completed turn immediately loses
+    // session-only authority, and reused aliases across active conversations
+    // fail closed.
+    if (!distributedTraces.length && !trace && !requestSessionAliases.length) return null;
     const entries = [...this.active.values()];
-    let correlationKind = null;
-    let candidates = [];
+    const uniqueOwners = (values) => {
+      const unique = new Map();
+      for (const entry of values) {
+        const ownerKey = `${entry.runtimeKey}:${entry.conversationId}`;
+        const previous = unique.get(ownerKey);
+        const entryAt = Number(entry.finishedAtMs ?? entry.transportFinishedAtMs ?? entry.startedAtMs ?? 0);
+        const previousAt = Number(previous?.finishedAtMs ?? previous?.transportFinishedAtMs ?? previous?.startedAtMs ?? 0);
+        if (!previous || entryAt >= previousAt) unique.set(ownerKey, entry);
+      }
+      return unique;
+    };
+    let traceKind = null;
+    let traceCandidates = [];
     if (distributedTraces.length) {
-      candidates = entries.filter((entry) => (
+      traceCandidates = entries.filter((entry) => (
         tracesIntersect(distributedTraces, entry.traceCorrelationFingerprints)
       ));
-      if (candidates.length) correlationKind = "request-trace";
+      if (traceCandidates.length) traceKind = "request-trace";
     }
-    if (!candidates.length && trace) {
-      candidates = entries.filter((entry) => entry.turnTraceFingerprint === trace);
-      if (candidates.length) correlationKind = "turn-trace";
+    if (!traceCandidates.length && trace) {
+      traceCandidates = entries.filter((entry) => entry.turnTraceFingerprint === trace);
+      if (traceCandidates.length) traceKind = "turn-trace";
     }
-    const unique = new Map();
-    for (const entry of candidates) {
-      const ownerKey = `${entry.runtimeKey}:${entry.conversationId}`;
-      const previous = unique.get(ownerKey);
-      const entryAt = Number(entry.finishedAtMs ?? entry.transportFinishedAtMs ?? entry.startedAtMs ?? 0);
-      const previousAt = Number(previous?.finishedAtMs ?? previous?.transportFinishedAtMs ?? previous?.startedAtMs ?? 0);
-      if (!previous || entryAt >= previousAt) unique.set(ownerKey, entry);
+    const sessionCandidates = requestSessionAliases.length
+      ? entries.filter((entry) => {
+          // Session-only evidence is valid only while the assistant turn is
+          // active. Recently completed turns remain available for exact trace
+          // joins during the bounded grace period, but never for a bare
+          // session alias.
+          if (entry.finishedAtMs !== null && entry.finishedAtMs !== undefined) return false;
+          return sessionsIntersect(
+            requestSessionAliases,
+            mergeSessionCorrelationFingerprints(
+              entry.sessionCorrelationFingerprints,
+              entry.sessionFingerprint ? [entry.sessionFingerprint] : [],
+            ),
+          );
+        })
+      : [];
+    const traceOwners = uniqueOwners(traceCandidates);
+    const sessionOwners = uniqueOwners(sessionCandidates);
+    let unique = new Map();
+    let correlationKind = null;
+    if (traceOwners.size === 1) {
+      const [ownerKey, entry] = [...traceOwners.entries()][0];
+      // One exact trace remains authoritative even when its session alias is
+      // shared. A single conflicting session owner, however, is inconsistent
+      // request evidence and must fail closed.
+      if (sessionOwners.size === 1 && !sessionOwners.has(ownerKey)) {
+        this.ambiguousMatches += 1;
+        return null;
+      }
+      unique.set(ownerKey, entry);
+      correlationKind = traceKind;
+    } else if (traceOwners.size > 1) {
+      const intersection = new Map(
+        [...traceOwners.entries()].filter(([ownerKey]) => sessionOwners.has(ownerKey)),
+      );
+      if (intersection.size !== 1) {
+        this.ambiguousMatches += 1;
+        return null;
+      }
+      unique = intersection;
+      correlationKind = `${traceKind}-session-alias`;
+    } else if (sessionOwners.size === 1) {
+      unique = sessionOwners;
+      correlationKind = "active-session-alias";
+    } else if (sessionOwners.size > 1) {
+      this.ambiguousMatches += 1;
+      return null;
     }
     if (unique.size !== 1) {
-      if (unique.size > 1) this.ambiguousMatches += 1;
       return null;
     }
     const [entry] = unique.values();
@@ -325,12 +381,28 @@ export class ClassicActiveTurnRegistry {
         : postTransport
           ? "classic-active-turn-post-transport-request-trace-correlation"
           : "classic-active-turn-request-trace-correlation";
+    } else if (correlationKind === "request-trace-session-alias") {
+      source = postTurn
+        ? "classic-active-turn-post-finish-request-trace-session-alias-correlation"
+        : postTransport
+          ? "classic-active-turn-post-transport-request-trace-session-alias-correlation"
+          : "classic-active-turn-request-trace-session-alias-correlation";
     } else if (correlationKind === "turn-trace") {
       source = postTurn
         ? "classic-active-turn-post-finish-trace-correlation"
         : postTransport
           ? "classic-active-turn-post-transport-trace-correlation"
           : "classic-active-turn-trace-correlation";
+    } else if (correlationKind === "turn-trace-session-alias") {
+      source = postTurn
+        ? "classic-active-turn-post-finish-trace-session-alias-correlation"
+        : postTransport
+          ? "classic-active-turn-post-transport-trace-session-alias-correlation"
+          : "classic-active-turn-trace-session-alias-correlation";
+    } else if (correlationKind === "active-session-alias") {
+      source = postTransport
+        ? "classic-active-turn-post-transport-session-alias-correlation"
+        : "classic-active-turn-session-alias-correlation";
     } else {
       source = postTurn
         ? "classic-active-turn-post-finish-unique-tool-correlation"
@@ -370,7 +442,14 @@ export class ClassicActiveTurnRegistry {
     if (!tool) return Promise.resolve(null);
     const exactTurnTrace = cleanTraceFingerprint(turnTraceFingerprint);
     const exactRequestTraces = mergeTraceCorrelationFingerprints(traceCorrelationFingerprints);
-    if (!exactTurnTrace && exactRequestTraces.length === 0) return Promise.resolve(null);
+    const exactSessionFingerprint = cleanSessionFingerprint(sessionFingerprintHint);
+    const exactSessionAliases = mergeSessionCorrelationFingerprints(
+      sessionCorrelationFingerprintsHint,
+      exactSessionFingerprint ? [exactSessionFingerprint] : [],
+    );
+    if (!exactTurnTrace && exactRequestTraces.length === 0 && exactSessionAliases.length === 0) {
+      return Promise.resolve(null);
+    }
     if (signal?.aborted) return Promise.reject(new Error("Active-turn conversation correlation was cancelled."));
     const waiterId = this.nextWaiterId++;
     const boundedTimeoutMs = Math.max(100, Number(timeoutMs) || this.waitTimeoutMs);

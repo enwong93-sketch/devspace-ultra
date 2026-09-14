@@ -56,10 +56,14 @@ assert.doesNotMatch(server, /resolveVerifiedDirectSession\(|persistVerifiedDirec
   "durable direct-session and direct-trace authority is retired");
 assert.doesNotMatch(server, /conversationAuthority\.waitForFingerprint\(sessionFingerprint/,
   "progress must not wait for a reusable session owner");
-assert.doesNotMatch(server, /runtimeKeyHint:\s*persistedRuntimeKey|sessionFingerprintHint:\s*sessionFingerprint/,
-  "Runtime and host session are not conversation owners");
-assert.doesNotMatch(server, /activeTurnRegistry\.(?:resolveGatewayCall|waitForIdentity)\(/,
-  "browser turn traces cannot authorize direct MCP tools; exact page-local tool invocation evidence is required");
+assert.doesNotMatch(server, /runtimeKeyHint:\s*persistedRuntimeKey/,
+  "Runtime is not a conversation owner");
+assert.match(server, /activeTurnRegistry\.resolveGatewayCall\(/,
+  "the request may correlate to one unique currently active browser turn");
+assert.match(server, /activeTurnRegistry\.waitForIdentity\(/,
+  "active-turn correlation must remain bounded to the current request");
+assert.match(server, /sessionCorrelationFingerprintsFromHeaders\(req\?\.headers \|\| \{\}\)/,
+  "only request-owned hashed session aliases may be used as fallback evidence");
 assert.doesNotMatch(server, /verifyProgressConversationAuthority/,
   "the retired session/page fallback module must not remain wired");
 
@@ -67,8 +71,9 @@ assert.match(requestContext, /capabilityAuthority/);
 assert.match(requestContext, /progressAuthority/);
 assert.match(requestContext, /progressAuthorityPromise/);
 assert.match(requestContext, /AsyncLocalStorage/);
-assert.match(correlation, /if \(!distributedTraces\.length && !trace\) return null/);
-assert.doesNotMatch(correlation, /correlationKind = "session"|correlationKind = "session-alias"|correlationKind = "runtime-tool"/);
+assert.match(correlation, /requestSessionAliases/);
+assert.match(correlation, /correlationKind = "active-session-alias"/);
+assert.doesNotMatch(correlation, /correlationKind = "runtime-tool"/);
 assert.doesNotMatch(correlation, /ClassicDirectRequestAuthorityRegistry/);
 assert.match(correlation, /gatewayRequestId/,
   "resolved canonical calls may be reused only by the exact Gateway request that created them");
@@ -116,6 +121,7 @@ console.log(JSON.stringify({
   exactPageInvocationJoin: true,
   exactGatewayRequestBinding: true,
   exactPageClaimRelay: true,
+  activeTurnSessionAliasBounded: true,
   durableSessionAuthorityRetired: true,
   runtimeAuthorityRetired: true,
   legacyProgressRowsDiagnosticOnly: true,

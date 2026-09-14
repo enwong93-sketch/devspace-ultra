@@ -187,7 +187,9 @@ const sessionScopedProgress = activeTurns.resolveGatewayCall({
   toolName: "devspace_progress_report",
   sessionFingerprintHint: "b".repeat(64),
 });
-assert.equal(sessionScopedProgress, null, "a host direct-session fingerprint must not own progress narration");
+assert.equal(sessionScopedProgress?.conversationId, "conversation-main-02",
+  "a unique request-owned session may select only its currently active browser turn");
+assert.equal(sessionScopedProgress?.source, "classic-active-turn-session-alias-correlation");
 
 const dynamicallyDisclosedSessionTool = new ClassicActiveTurnRegistry({ now: () => now });
 dynamicallyDisclosedSessionTool.noteTurn({
@@ -203,8 +205,8 @@ const dynamicProgressByExactSession = dynamicallyDisclosedSessionTool.resolveGat
   toolName: "devspace_progress_report",
   sessionFingerprintHint: "c".repeat(64),
 });
-assert.equal(dynamicProgressByExactSession, null,
-  "dynamic tool disclosure still requires exact trace or page-local invocation evidence");
+assert.equal(dynamicProgressByExactSession?.conversationId, "conversation-session-dynamic-tool",
+  "dynamic tool disclosure may use one unique request-owned active-turn session alias");
 assert.equal(
   activeTurns.resolveGatewayCall({
     toolName: "devspace_progress_report",
@@ -332,8 +334,8 @@ const wrappedSessionMatch = wrappedSessionTurns.resolveGatewayCall({
   sessionCorrelationFingerprintsHint: sessionCorrelationFingerprintsFromValue(directSessionDescriptor),
   sessionFingerprintHint: "8".repeat(64),
 });
-assert.equal(wrappedSessionMatch, null,
-  "wrapped session aliases are transport metadata and cannot select a conversation");
+assert.equal(wrappedSessionMatch?.conversationId, "conversation-wrapped-session");
+assert.equal(wrappedSessionMatch?.source, "classic-active-turn-post-transport-session-alias-correlation");
 assert.equal(wrappedSessionTurns.diagnostics().turnsWithSessionAliases, 1);
 
 const ambiguousSessionAliases = new ClassicActiveTurnRegistry({ now: () => now });
@@ -357,9 +359,9 @@ assert.equal(
     sessionCorrelationFingerprintsHint: sessionCorrelationFingerprintsFromValue(directSessionDescriptor),
   }),
   null,
-  "session aliases must fail closed even before comparing conversation candidates",
+  "one session alias reused by two active conversations must fail closed",
 );
-assert.equal(ambiguousSessionAliases.diagnostics().ambiguousMatches, 0);
+assert.equal(ambiguousSessionAliases.diagnostics().ambiguousMatches > 0, true);
 
 const reusedSessionTurns = new ClassicActiveTurnRegistry({ now: () => now });
 for (const [runtimeKey, conversationId, requestId, offset] of [
@@ -625,7 +627,8 @@ console.log(JSON.stringify({
   boundedTemporalJoin: true,
   activeTurnTraceMatch: true,
   runtimeOnlyAuthorityRetired: true,
-  sessionOnlyAuthorityRetired: true,
+  activeTurnSessionAliasBounded: true,
+  durableSessionAuthorityRetired: true,
   deferredToolExactTraceMatch: true,
   deferredToolWrongTraceFailsClosed: true,
   deferredPlaceholderAuthorityRetired: true,

@@ -204,13 +204,14 @@ const delayedGatewayIdentity = delayedGatewayTurns.resolveGatewayCall({
   toolName: "blender_mcp",
   sessionFingerprintHint: activeTurns[0].sessionFingerprint,
 });
-assert.equal(delayedGatewayIdentity, null,
-  "a browser/direct session alone must not retain conversation authority");
+assert.equal(delayedGatewayIdentity?.conversationId, "conversation-a",
+  "transport completion is not assistant completion; one unique active-turn session alias remains request-scoped authority");
+assert.equal(delayedGatewayIdentity?.source, "classic-active-turn-post-transport-session-alias-correlation");
 now += 1_100;
 assert.equal(delayedGatewayTurns.resolveGatewayCall({
   toolName: "blender_mcp",
   sessionFingerprintHint: activeTurns[0].sessionFingerprint,
-}), null);
+})?.conversationId, "conversation-a");
 assert.equal(
   delayedGatewayTurns.resolveGatewayCall({
     toolName: "blender_mcp",
@@ -220,6 +221,17 @@ assert.equal(
   "conversation-a",
   "the exact distributed trace must survive the short legacy post-transport grace",
 );
+delayedGatewayTurns.noteTurn({
+  kind: "finished",
+  requestId: "r1",
+  runtimeKey: "main-01",
+  conversationId: "conversation-a",
+  observedAtMs: now + 1,
+});
+assert.equal(delayedGatewayTurns.resolveGatewayCall({
+  toolName: "blender_mcp",
+  sessionFingerprintHint: activeTurns[0].sessionFingerprint,
+}), null, "assistant completion must revoke session-only authority immediately");
 
 tracker.noteRequest({ requestId: "r2", request: { url: "https://chatgpt.com/backend-api/f/conversation", method: "POST", postData: JSON.stringify({ conversation_id: "conversation-b", model: "gpt-test" }), headers: {} } });
 tracker.noteFailure({ requestId: "r2", errorText: "net::ERR_FAILED", canceled: true, blockedReason: "other" });
@@ -246,4 +258,4 @@ tracker.noteRequest({ requestId: "r5", request: { url: "https://chatgpt.com/back
 tracker.noteRequest({ requestId: "r6", request: { url: "https://chatgpt.com/backend-api/f/conversation", method: "POST", postData: JSON.stringify({ conversation_id: "conversation-f", model: "gpt-test" }), headers: {} } });
 assert.equal(tracker.pendingSize, 2, "native transport tracking must have a hard cap");
 
-console.log(JSON.stringify({ ok: true, gate: "classic-turn-transport-observer", networkOnly: true, nativeIdentity: true, nativeCallMcpCorrelation: true, websocketToolInvocationCorrelation: true, streamedResponseToolInvocationCorrelation: true, splitStreamEnvelopeReassembled: true, activeTurnLifecycle: true, failureCancellationPropagated: true, delayedServerSideMcpRequiresExactTrace: true, localFunctionNamesObserved: true, hashedTurnTraceOnly: true, deliveryLifecycle: true, bounded: true, rawSessionPersisted: false, rawToolArgumentsPersisted: false }));
+console.log(JSON.stringify({ ok: true, gate: "classic-turn-transport-observer", networkOnly: true, nativeIdentity: true, nativeCallMcpCorrelation: true, websocketToolInvocationCorrelation: true, streamedResponseToolInvocationCorrelation: true, splitStreamEnvelopeReassembled: true, activeTurnLifecycle: true, failureCancellationPropagated: true, delayedServerSideMcpUsesBoundedActiveSessionOrExactTrace: true, localFunctionNamesObserved: true, hashedTurnTraceOnly: true, deliveryLifecycle: true, bounded: true, rawSessionPersisted: false, rawToolArgumentsPersisted: false }));
