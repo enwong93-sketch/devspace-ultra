@@ -6,7 +6,7 @@ import { isProjectableProgressMessage } from "./progress-ownership-proof.js";
 const ROOT_ID = "devspace-progress-narration-root";
 const STYLE_ID = "devspace-progress-narration-style";
 const LEASE_KEY = "__devspaceProgressNarrationLeaseV1";
-const UI_VERSION = "6";
+const UI_VERSION = "7";
 const LEGACY_INLINE_RESOURCE_TITLES = [
   "ui://devspace/goal-dock.html",
   "ui://devspace/plan-card.html",
@@ -107,6 +107,7 @@ export function conversationProgressNarrationMap({
   const normalized = (Array.isArray(humanProgress?.messages) ? humanProgress.messages : [])
     .map(normalizeMessage)
     .filter(Boolean)
+    .filter((item) => Date.parse(item.at) >= nowMs - maxAgeMs)
     .sort((left, right) => Date.parse(left.at) - Date.parse(right.at));
   const result = {};
   const conversationIds = new Set(normalized.map((item) => item.conversationId));
@@ -169,6 +170,9 @@ export function buildProgressNarrationScript(map) {
     routeLifecycle.hydratedSinceMs = lifecycleHydrated ? (routeLifecycle.hydratedSinceMs || lifecycleNow) : null;
     routeLifecycle.lastSeenAtMs = lifecycleNow;
     const mappedState = (${serialized})[conversationId] || null;
+    // Every real Chat conversation keeps one stable narration surface. When
+    // no fresh, qualified progress exists, render an empty state rather than
+    // leaking historical rows or tearing the card down/recreating it.
     const state = mappedState?.messages?.length
       ? mappedState
       : conversationId
@@ -245,7 +249,7 @@ export function buildProgressNarrationScript(map) {
       if (style.dataset.uiVersion === UI_VERSION) return style;
       style.dataset.uiVersion = UI_VERSION;
       style.textContent = \`
-#${ROOT_ID}{position:fixed;z-index:44;box-sizing:border-box;pointer-events:auto;overflow:hidden;padding:0;border:1px solid rgba(0,0,0,.10);border-radius:14px;background:rgba(255,255,255,.97);box-shadow:0 8px 26px rgba(0,0,0,.10);font-family:"Söhne",Inter,system-ui,-apple-system,"Segoe UI",sans-serif;color:#0d0d0d;opacity:1;visibility:visible;transform:translateY(0);transition:opacity 160ms ease,transform 160ms ease,width 160ms ease,max-height 160ms ease}
+#${ROOT_ID}{position:fixed;z-index:44;box-sizing:border-box;pointer-events:auto;overflow:hidden;padding:0;border:1px solid rgba(0,0,0,.10);border-radius:14px;background:rgba(255,255,255,.97);box-shadow:0 8px 26px rgba(0,0,0,.10);font-family:"Söhne",Inter,system-ui,-apple-system,"Segoe UI",sans-serif;color:#0d0d0d;opacity:1;visibility:visible;transform:translateY(0);transition:opacity 160ms ease,transform 160ms ease}
 #${ROOT_ID}[data-visible="false"]{opacity:0;visibility:hidden;pointer-events:none;transform:translateY(4px)}
 #${ROOT_ID} .devspace-progress-header{display:flex;align-items:center;gap:7px;min-height:40px;padding:6px 8px 6px 11px;border-bottom:1px solid rgba(0,0,0,.09);user-select:none}
 #${ROOT_ID} .devspace-progress-label{min-width:0;flex:1;font-size:10px;line-height:1.35;font-weight:700;letter-spacing:.07em;text-transform:uppercase;color:#5f5f5f;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -296,16 +300,20 @@ html.dark #${ROOT_ID} .devspace-progress-scroll{scrollbar-color:rgba(220,220,220
       root.setAttribute('aria-label','DevSpace progress narration');
       document.body.appendChild(root);
     }
+    const setData = (key, value) => {
+      const next = String(value ?? '');
+      if (root.dataset[key] !== next) root.dataset[key] = next;
+    };
     const messages = Array.isArray(state?.messages) ? state.messages : [];
     const visible = Boolean(conversationId);
-    root.dataset.visible = visible ? 'true' : 'false';
-    root.dataset.retiredLegacyInlineApps = String(retiredLegacyInlineApps);
-    root.dataset.retiredLegacyInlineErrors = String(retiredLegacyInlineErrors);
-    root.dataset.conversationId = conversationId || '';
-    root.dataset.goalId = state?.goalId || '';
-    root.dataset.round = String(state?.round || '');
-    root.dataset.mode = mode;
-    root.dataset.progressKind = state?.progressKind || '';
+    setData('visible', visible ? 'true' : 'false');
+    setData('retiredLegacyInlineApps', retiredLegacyInlineApps);
+    setData('retiredLegacyInlineErrors', retiredLegacyInlineErrors);
+    setData('conversationId', conversationId || '');
+    setData('goalId', state?.goalId || '');
+    setData('round', state?.round || '');
+    setData('mode', mode);
+    setData('progressKind', state?.progressKind || '');
     const storageKey = '__devspaceProgressNarrationUiV3:' + (conversationId || 'none');
     const readUiState = () => {
       try {
@@ -328,22 +336,39 @@ html.dark #${ROOT_ID} .devspace-progress-scroll{scrollbar-color:rgba(220,220,220
       const formRect = form?.getBoundingClientRect();
       const goalRect = goalStrip?.getBoundingClientRect();
       const size = current.dataset.size || 'normal';
-      const anchorRect = goalRect?.width > 0 ? goalRect : formRect;
+      const now = Date.now();
+      const prior = current.__devspaceProgressAnchor;
+      const goalAnchor = goalRect?.width > 0
+        ? { left:goalRect.left, width:goalRect.width, top:goalRect.top, source:'goal', observedAt:now }
+        : null;
+      const formAnchor = formRect?.width > 0
+        ? { left:formRect.left, width:formRect.width, top:formRect.top, source:'composer', observedAt:now }
+        : null;
+      // Host Goal content is reconciled independently. Keep the last measured
+      // Goal rectangle during its short child-replacement window so this card
+      // never animates through the composer fallback.
+      const anchorRect = goalAnchor
+        || (prior?.source === 'goal' && now - Number(prior.observedAt || 0) < 1_500 ? prior : formAnchor);
+      if (anchorRect?.width > 0) current.__devspaceProgressAnchor = anchorRect;
       const cap = size === 'expanded' ? 640 : 560;
       if (anchorRect?.width > 0) {
         const width = size === 'compact'
           ? Math.max(260, Math.round(anchorRect.width))
           : Math.max(260, Math.min(Math.round(anchorRect.width), cap));
         const centeredLeft = Math.round(anchorRect.left + (anchorRect.width - width) / 2);
-        current.style.left = Math.max(12, Math.min(centeredLeft, Math.max(12, innerWidth - width - 12))) + 'px';
-        current.style.width = Math.min(width, Math.max(260, innerWidth - 24)) + 'px';
-        const anchorTop = anchorRect.top;
-        current.style.bottom = Math.max(12, Math.round(innerHeight - anchorTop + 8)) + 'px';
+        const nextLeft = Math.max(12, Math.min(centeredLeft, Math.max(12, innerWidth - width - 12))) + 'px';
+        const nextWidth = Math.min(width, Math.max(260, innerWidth - 24)) + 'px';
+        const nextBottom = Math.max(12, Math.round(innerHeight - anchorRect.top + 8)) + 'px';
+        if (current.style.left !== nextLeft) current.style.left = nextLeft;
+        if (current.style.width !== nextWidth) current.style.width = nextWidth;
+        if (current.style.bottom !== nextBottom) current.style.bottom = nextBottom;
       } else {
         const width = size === 'expanded' ? 640 : 560;
-        current.style.left = 'max(12px,calc(50vw - ' + Math.round(width / 2) + 'px))';
-        current.style.width = 'min(' + width + 'px,calc(100vw - 24px))';
-        current.style.bottom = '72px';
+        const nextLeft = 'max(12px,calc(50vw - ' + Math.round(width / 2) + 'px))';
+        const nextWidth = 'min(' + width + 'px,calc(100vw - 24px))';
+        if (current.style.left !== nextLeft) current.style.left = nextLeft;
+        if (current.style.width !== nextWidth) current.style.width = nextWidth;
+        if (current.style.bottom !== '72px') current.style.bottom = '72px';
       }
     };
     const ensureStructure = () => {
@@ -506,16 +531,21 @@ html.dark #${ROOT_ID} .devspace-progress-scroll{scrollbar-color:rgba(220,220,220
       position();
     }
     const previous = globalThis[LEASE_KEY];
-    if (previous?.timer) clearTimeout(previous.timer);
     if (visible) {
-      const nonce = String(Date.now()) + ':' + Math.random().toString(36).slice(2);
-      root.dataset.leaseNonce = nonce;
-      const timer = setTimeout(() => {
-        const current = document.getElementById(ROOT_ID);
-        if (current?.dataset.leaseNonce === nonce) current.dataset.visible = 'false';
-      }, LEASE_MS);
-      globalThis[LEASE_KEY] = { nonce, timer };
+      root.__devspaceProgressLastProjectionAt = Date.now();
+      if (!previous?.timer) {
+        const timer = setInterval(() => {
+          const current = document.getElementById(ROOT_ID);
+          const last = Number(current?.__devspaceProgressLastProjectionAt || 0);
+          if (!current || Date.now() - last <= LEASE_MS) return;
+          current.dataset.visible = 'false';
+          clearInterval(timer);
+          delete globalThis[LEASE_KEY];
+        }, 1_000);
+        globalThis[LEASE_KEY] = { timer };
+      }
     } else {
+      if (previous?.timer) clearInterval(previous.timer);
       delete globalThis[LEASE_KEY];
     }
     return {

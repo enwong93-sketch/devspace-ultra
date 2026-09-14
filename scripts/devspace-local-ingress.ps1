@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet("install", "run", "status", "refresh", "remove")]
+    [ValidateSet("install", "adopt", "run", "status", "refresh", "remove")]
     [string]$Action = "status",
     [string]$Domain,
     [string]$InterfaceAlias,
@@ -34,7 +34,7 @@ function Write-JsonFile {
 
 function Read-Config {
     if (-not (Test-Path -LiteralPath $configPath)) { throw "Local ingress config is missing: $configPath" }
-    return (Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json)
+    return ([System.IO.File]::ReadAllText($configPath, [System.Text.Encoding]::UTF8) | ConvertFrom-Json)
 }
 
 function Test-Administrator {
@@ -310,16 +310,33 @@ function Update-DuckDns {
         } catch {
             throw "DuckDNS update failed."
         }
-        if (([string]$response.Content).Trim().ToUpperInvariant() -ne "OK") { throw "DuckDNS rejected the update." }
+        $firstLine = Get-DuckDnsResponseFirstLine -Content $response.Content
+
+        if ($firstLine -ne "OK") {
+            throw "DuckDNS rejected the update."
+        }
     } finally {
         $token = $null
     }
 }
 
+function Get-DuckDnsResponseFirstLine {
+    param([object]$Content)
+    $body = if ($Content -is [byte[]]) {
+        [System.Text.Encoding]::UTF8.GetString($Content)
+    }
+    else {
+        [string]$Content
+    }
+    return (($body -split "\r?\n")[0]).Trim().ToUpperInvariant()
+}
+
 function Write-CaddyConfig {
-    param([string]$DomainName, [int]$UpstreamPort, [string]$Path)
+    param([string]$DomainName, [int]$UpstreamPort, [string]$LanIPv4, [string]$Path)
+    if ([string]::IsNullOrWhiteSpace($LanIPv4)) { throw "LAN IPv4 is required for the Caddy bind." }
     $text = @"
 $DomainName {
+    bind $LanIPv4
     route {
         @public path /healthz /mcp /.well-known/oauth-protected-resource/mcp /.well-known/oauth-authorization-server /authorize /token /register /revoke /mcp-app-assets/*
 
@@ -359,23 +376,53 @@ function Ensure-FirewallRule {
         -Profile Any | Out-Null
 }
 
-function Get-CaddyListener {
-    $listeners = @(Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object { $_.LocalPort -in 80,443 })
-    if ($listeners.Count -eq 0) { return $null }
-    $pids = @($listeners | Select-Object -ExpandProperty OwningProcess -Unique)
-    foreach ($pidValue in $pids) {
-        $process = Get-Process -Id $pidValue -ErrorAction SilentlyContinue
-        if ($process -and $process.ProcessName -ieq "caddy") {
-            return [pscustomobject]@{ Pid = $pidValue; Ports = @($listeners | Where-Object { $_.OwningProcess -eq $pidValue } | Select-Object -ExpandProperty LocalPort -Unique) }
-        }
+function Test-LanIngressListenerAddress {
+    param([string]$Address, [string]$LanIPv4)
+    return $Address -in @($LanIPv4, "0.0.0.0", "::")
+}
+
+function Get-LanIngressListenerState {
+    param(
+        [object[]]$Listeners,
+        [string]$LanIPv4,
+        [hashtable]$ProcessNames
+    )
+    $relevant = @($Listeners | Where-Object {
+        $_.LocalPort -in 80,443 -and (Test-LanIngressListenerAddress -Address ([string]$_.LocalAddress) -LanIPv4 $LanIPv4)
+    })
+    $nonCaddy = @($relevant | Where-Object {
+        $name = [string]$ProcessNames[[int]$_.OwningProcess]
+        -not [string]::Equals($name, "caddy", [System.StringComparison]::OrdinalIgnoreCase)
+    })
+    $caddy = @($relevant | Where-Object {
+        [string]::Equals([string]$ProcessNames[[int]$_.OwningProcess], "caddy", [System.StringComparison]::OrdinalIgnoreCase)
+    })
+    return [pscustomobject]@{
+        Relevant = $relevant
+        NonCaddy = $nonCaddy
+        Caddy = $caddy
     }
-    throw "TCP 80/443 is occupied by a non-Caddy process."
+}
+
+function Get-CaddyListener {
+    param([string]$LanIPv4)
+    $listeners = @(Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object { $_.LocalPort -in 80,443 })
+    $pids = @($listeners | Select-Object -ExpandProperty OwningProcess -Unique)
+    $processNames = @{}
+    foreach ($pidValue in $pids) {
+        $processNames[[int]$pidValue] = [string](Get-Process -Id $pidValue -ErrorAction SilentlyContinue).ProcessName
+    }
+    $state = Get-LanIngressListenerState -Listeners $listeners -LanIPv4 $LanIPv4 -ProcessNames $processNames
+    if ($state.NonCaddy.Count -gt 0) { throw "TCP 80/443 is occupied by a non-Caddy process on the LAN or wildcard bind." }
+    if ($state.Caddy.Count -eq 0) { return $null }
+    $caddyPid = [int]($state.Caddy | Select-Object -First 1 -ExpandProperty OwningProcess)
+    return [pscustomobject]@{ Pid = $caddyPid; Ports = @($state.Caddy | Select-Object -ExpandProperty LocalPort -Unique) }
 }
 
 function Start-Caddy {
     param($Config)
     if ($script:caddyProcess -and -not $script:caddyProcess.HasExited) { return $script:caddyProcess.Id }
-    $existing = Get-CaddyListener
+    $existing = Get-CaddyListener -LanIPv4 ([string]$Config.LanIPv4)
     if ($existing) { return $existing.Pid }
     New-Item -ItemType Directory -Force $logDir | Out-Null
     $outLog = Join-Path $logDir "caddy.out.log"
@@ -429,8 +476,8 @@ function Invoke-RefreshOnce {
 
 function Install-Task {
     param($Config)
-    if (-not (Test-Administrator)) { throw "Install must run from an elevated PowerShell." }
-    $powershell = Join-Path $PSHOME "powershell.exe"
+    $powershell = Join-Path $env:WINDIR "System32\WindowsPowerShell\v1.0\powershell.exe"
+    if (-not (Test-Path -LiteralPath $powershell)) { throw "Windows PowerShell host is missing: $powershell" }
     $quotedScript = '"{0}"' -f $scriptPath
     $quotedState = '"{0}"' -f $StateDir
     $taskAction = New-ScheduledTaskAction -Execute $powershell -Argument "-NoProfile -ExecutionPolicy Bypass -File $quotedScript -Action run -StateDir $quotedState"
@@ -451,6 +498,7 @@ function Install-Task {
     Start-ScheduledTask -TaskName $taskName
 }
 
+if ($MyInvocation.InvocationName -ne '.') {
 switch ($Action) {
     "install" {
         if (-not (Test-Administrator)) { throw "Run the install action from an elevated PowerShell." }
@@ -463,13 +511,15 @@ switch ($Action) {
         $caddyPath = [string]$caddyCommand.Source
         $caddyfilePath = Join-Path $env:USERPROFILE "DevSpaceIngress\Caddyfile"
         if ($RotateToken -or -not (Test-Path -LiteralPath $tokenPath)) { Save-DuckDnsToken }
-        Write-CaddyConfig -DomainName $normalizedDomain -UpstreamPort $GatewayPort -Path $caddyfilePath
+        $lan = Get-LanInfo -Alias $InterfaceAlias
+        Write-CaddyConfig -DomainName $normalizedDomain -UpstreamPort $GatewayPort -LanIPv4 $lan.LocalIPv4 -Path $caddyfilePath
         & $caddyPath validate --config $caddyfilePath --adapter caddyfile | Out-Null
         if ($LASTEXITCODE -ne 0) { throw "Generated Caddy configuration did not validate." }
         $config = [ordered]@{
             schemaVersion = 1
             domain = $normalizedDomain
             interfaceAlias = $InterfaceAlias
+            lanIPv4 = $lan.LocalIPv4
             gatewayPort = $GatewayPort
             caddyPath = $caddyPath
             caddyfilePath = $caddyfilePath
@@ -504,6 +554,25 @@ switch ($Action) {
             secretValuesLogged = $false
         } | ConvertTo-Json -Compress
     }
+    "adopt" {
+        $config = Read-Config
+        $lan = Get-LanInfo -Alias ([string]$config.InterfaceAlias)
+        Write-CaddyConfig -DomainName ([string]$config.Domain) -UpstreamPort ([int]$config.GatewayPort) -LanIPv4 $lan.LocalIPv4 -Path ([string]$config.CaddyfilePath)
+        & ([string]$config.CaddyPath) validate --config ([string]$config.CaddyfilePath) --adapter caddyfile | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "Generated Caddy configuration did not validate." }
+        $config | Add-Member -NotePropertyName lanIPv4 -NotePropertyValue $lan.LocalIPv4 -Force
+        Write-JsonFile -Path $configPath -Value $config
+        $caddyPid = Start-Caddy -Config $config
+        Install-Task -Config $config
+        [ordered]@{
+            ok = $true
+            state = "adopted"
+            domain = [string]$config.Domain
+            localIPv4 = $lan.LocalIPv4
+            caddyPid = $caddyPid
+            secretValuesLogged = $false
+        } | ConvertTo-Json -Compress
+    }
     "run" {
         $config = Read-Config
         $lastWanIp = $null
@@ -524,7 +593,7 @@ switch ($Action) {
         $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
         $runtime = $null
         if (Test-Path -LiteralPath $statusPath) {
-            try { $runtime = Get-Content -LiteralPath $statusPath -Raw | ConvertFrom-Json } catch {}
+            try { $runtime = [System.IO.File]::ReadAllText($statusPath, [System.Text.Encoding]::UTF8) | ConvertFrom-Json } catch {}
         }
         [ordered]@{
             ok = [bool]$config
@@ -562,4 +631,5 @@ switch ($Action) {
         Get-NetFirewallRule -DisplayName $firewallName -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction SilentlyContinue
         [ordered]@{ ok = $true; state = "removed"; taskName = $taskName; stateDirPreserved = $true; secretValuesLogged = $false } | ConvertTo-Json -Compress
     }
+}
 }

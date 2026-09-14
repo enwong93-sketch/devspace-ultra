@@ -71,6 +71,9 @@ const excluded = rankCapabilityRoutes("texture only retopology", candidates);
 const excludedSkill = excluded.candidates.find((candidate) => candidate.routeId === "skill:blender-suite:retopology");
 assert.match(excludedSkill.blockedReason, /^excluded-by:/);
 
+const maintenance = rankCapabilityRoutes("verify DevSpace source working tree scheduled startup canonical backend legacy artifacts", candidates);
+assert.equal(maintenance.primary, null, "long DevSpace maintenance queries must not route to an unrelated Blender candidate from one incidental term");
+
 const implicitReview = rankCapabilityRoutes("review these code changes", candidates);
 const reviewImplicit = implicitReview.candidates.find((candidate) => candidate.routeId === "skill:blender-suite:review-agent");
 assert.equal(reviewImplicit.eligible, false);

@@ -4,7 +4,9 @@ param(
     [string]$Action = "audit",
 
     [ValidateRange(0, 120)]
-    [int]$PrimaryLaunchWaitSeconds = 12
+    [int]$PrimaryLaunchWaitSeconds = 12,
+
+    [switch]$NoWindowActivation
 )
 
 $ErrorActionPreference = "Stop"
@@ -424,12 +426,13 @@ function Protect-MisroutedProtocolWorker {
 }
 
 function Ensure-PrimaryRunning {
+    param([switch]$NoWindowActivation)
     $primary = Get-PrimaryPackage
     if (-not $primary) { throw "Primary OpenAI.ChatGPT-Desktop package is not installed." }
     $root = Get-RootProcessForPackage -Package $primary
     $process = if ($root) { Get-Process -Id $root.ProcessId -ErrorAction SilentlyContinue } else { $null }
-    if ($process -and $process.MainWindowHandle -ne 0) {
-        return [pscustomobject]@{ State = "already-visible"; Pid = [int]$root.ProcessId; WindowHandle = [long]$process.MainWindowHandle }
+    if ($process -and ($NoWindowActivation -or $process.MainWindowHandle -ne 0)) {
+        return [pscustomobject]@{ State = if ($process.MainWindowHandle -ne 0) { "already-visible" } else { "already-running-no-activation" }; Pid = [int]$root.ProcessId; WindowHandle = [long]$process.MainWindowHandle }
     }
 
     # A background primary process is not enough: the original bug left Primary
@@ -438,15 +441,21 @@ function Ensure-PrimaryRunning {
     # without stopping any worker runtime.
     $alias = Join-Path $env:LOCALAPPDATA "Microsoft\WindowsApps\chatgpt-classic.exe"
     if (-not (Test-Path -LiteralPath $alias)) { throw "Primary ChatGPT execution alias is missing: $alias" }
-    Start-Process -FilePath $alias | Out-Null
+    $launchArguments = if ($NoWindowActivation) { @("--remote-debugging-address=127.0.0.1", "--remote-debugging-port=9721") } else { @() }
+    if ($NoWindowActivation) {
+        Start-Process -FilePath $alias -ArgumentList $launchArguments -WindowStyle Minimized | Out-Null
+    }
+    else {
+        Start-Process -FilePath $alias | Out-Null
+    }
     $deadline = (Get-Date).AddSeconds($PrimaryLaunchWaitSeconds)
     do {
         Start-Sleep -Milliseconds 350
         $root = Get-RootProcessForPackage -Package $primary
         $process = if ($root) { Get-Process -Id $root.ProcessId -ErrorAction SilentlyContinue } else { $null }
-    } while ((-not $process -or $process.MainWindowHandle -eq 0) -and (Get-Date) -lt $deadline)
-    if (-not $process -or $process.MainWindowHandle -eq 0) { throw "Primary ChatGPT did not expose a visible window before timeout." }
-    [pscustomobject]@{ State = "activated-primary-window"; Pid = [int]$root.ProcessId; WindowHandle = [long]$process.MainWindowHandle }
+    } while ((-not $process -or ((-not $NoWindowActivation) -and $process.MainWindowHandle -eq 0)) -and (Get-Date) -lt $deadline)
+    if (-not $process -or ((-not $NoWindowActivation) -and $process.MainWindowHandle -eq 0)) { throw "Primary ChatGPT did not expose the required process state before timeout." }
+    [pscustomobject]@{ State = if ($NoWindowActivation) { "started-primary-minimized" } else { "activated-primary-window" }; Pid = [int]$root.ProcessId; WindowHandle = [long]$process.MainWindowHandle }
 }
 
 function Repair-PrimaryProtocolChoice {
@@ -586,9 +595,9 @@ function Install-GuardTask {
     if ([string]::IsNullOrWhiteSpace($scriptSelf)) { throw "Unable to resolve runtime identity guard script path." }
     $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 3) -MultipleInstances IgnoreNew -StartWhenAvailable
 
-    $guardAction = New-ScheduledTaskAction -Execute "powershell.exe" -Argument ("-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"{0}`" -Action guard" -f $scriptSelf)
+    $guardAction = New-ScheduledTaskAction -Execute "powershell.exe" -Argument ("-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"{0}`" -Action guard -NoWindowActivation" -f $scriptSelf)
     $logonTrigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
-    Register-ScheduledTask -TaskName $taskName -Action $guardAction -Trigger $logonTrigger -Settings $settings -Description "Protect any misrouted ChatGPT worker and explicitly activate the Primary ChatGPT app after logon; never terminates running workers." -Force | Out-Null
+    Register-ScheduledTask -TaskName $taskName -Action $guardAction -Trigger $logonTrigger -Settings $settings -Description "Protect any misrouted ChatGPT worker and start the Primary ChatGPT app without foreground activation; never terminates running workers." -Force | Out-Null
 
     # Deferred self-heal is intentionally separate from the logon guard. It never
     # opens/closes ChatGPT windows; every ten minutes it only migrates dirty workers
@@ -623,7 +632,7 @@ switch ($Action) {
         # first so no later scale/repair path can terminate the user's interactive UI.
         $misroute = Protect-MisroutedProtocolWorker
         $repair = @(Repair-InstalledWorkers)
-        $primary = Ensure-PrimaryRunning
+        $primary = Ensure-PrimaryRunning -NoWindowActivation:$NoWindowActivation
         [pscustomobject]@{ ProtocolMisroute = $misroute; PrimaryGuard = $primary; Repair = $repair; Snapshot = Get-IdentitySnapshot } | ConvertTo-Json -Depth 10
     }
     "install-guard" {
