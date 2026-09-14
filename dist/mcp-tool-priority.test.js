@@ -9,20 +9,25 @@ const server = new McpServer({ name: "priority-test", version: "1" });
 for (let index = 0; index < 80; index += 1) {
   server.registerTool(`fixture_${String(index).padStart(3, "0")}`, { inputSchema: { value: z.string().optional() } }, async () => ({ content: [{ type: "text", text: "ok" }] }));
 }
-for (const name of ["blender_mcp", "devspace_progress_report", "blender_runtime", "devspace_route", "tool_search"]) {
+for (const name of ["blender_mcp", "devspace_progress_report", "blender_runtime", "devspace_route", "tool_search", "open_workspace", "write", "edit", "apply_patch", "exec_command", "write_stdin", "devspace_goal_start", "devspace_goal_control", "devspace_goal_turn_report"]) {
   server.registerTool(name, { inputSchema: {} }, async () => ({ content: [{ type: "text", text: "ok" }] }));
 }
 const result = prioritizeMcpTools(server);
 assert.equal(result.ok, true);
-assert.equal(result.toolCount, 85);
+assert.equal(result.toolCount, 94);
 const expectedFirst = [
+  "open_workspace",
+  "write",
+  "edit",
+  "apply_patch",
+  "exec_command",
+  "write_stdin",
   "devspace_progress_report",
-  "blender_runtime",
-  "blender_mcp",
-  "devspace_route",
-  "tool_search",
+  "devspace_goal_start",
+  "devspace_goal_turn_report",
+  "devspace_goal_control",
 ];
-assert.deepEqual(result.firstTools.slice(0, 5), expectedFirst);
+assert.deepEqual(result.firstTools.slice(0, expectedFirst.length), expectedFirst);
 assert.ok(result.firstTools.indexOf("blender_mcp") < 51);
 assert.ok(result.firstTools.indexOf("devspace_progress_report") < 51);
 
@@ -32,8 +37,8 @@ await server.connect(serverTransport);
 await client.connect(clientTransport);
 const listed = await client.listTools();
 const liveNames = listed.tools.map((tool) => tool.name);
-assert.deepEqual(liveNames.slice(0, 5), expectedFirst);
-assert.equal(liveNames.length, 85);
+assert.deepEqual(liveNames.slice(0, expectedFirst.length), expectedFirst);
+assert.equal(liveNames.length, 94);
 await client.close();
 await server.close();
 
