@@ -86,6 +86,10 @@ assert.match(identity, /MSFT_TaskLogonTrigger|New-ScheduledTaskTrigger -AtLogOn/
 assert.match(identity, /DevSpace-ChatGPT-Worker-Identity-Heal/);
 assert.match(identity, /RepetitionInterval.*Minutes 10|New-TimeSpan -Minutes 10/);
 assert.match(identity, /pending-running/);
+assert.match(identity, /function New-IdentityAuditContext/, "identity audits must take one shared Windows snapshot per request");
+assert.match(identity, /ChatGPTProcesses/, "identity audits must reuse one process-table snapshot for all package rows");
+assert.match(identity, /Registry\]::CurrentUser\.OpenSubKey/, "protocol claims must use a bounded read-only registry lookup");
+assert.match(identity, /Get-RootProcessForPackage -Package \$primary -Context \$context/, "primary and secondary identity rows must share the audit context");
 
 // CDP Session Seed transfers only allowlisted ChatGPT/OpenAI cookies in memory,
 // verifies source/target UI state, and never logs cookie values.
@@ -135,4 +139,6 @@ console.log(JSON.stringify({
   canonicalConversationPersistence: true,
   safeServerHandover: true,
   cachedToolSchemaContinuation: true,
+  identityAuditSnapshotReuse: true,
+  identityAuditProviderLookupsBounded: true,
 }));

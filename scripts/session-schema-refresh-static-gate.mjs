@@ -32,6 +32,8 @@ assert.match(proxy, /registry\.remove\?\./);
 assert.match(proxy, /statusCode = staleSchema \? 404 : 502/);
 assert.match(proxy, /readBackendToolSchema/);
 assert.match(proxy, /assertSessionSchemaCompatible/);
+assert.match(proxy, /assertSessionSchemaCompatible\(descriptor, currentSchema, \{ allowSchemaChange: true \}\)/,
+  "restored public sessions must refresh their schema in place instead of returning a namespace-disabling stale-session error");
 assert.match(proxy, /stampInitializedSessionSchema/);
 assert.match(proxy, /initializeRequest[\s\S]*stampInitializedSessionSchema/);
 assert.match(proxy, /schemaOverflow/);
@@ -58,7 +60,7 @@ console.log(JSON.stringify({
   routingAndUiMetadataFingerprint: true,
   proactiveInitializeSchemaStamp: true,
   boundedToolsListCapture: true,
-  staleSchemaForcesFreshInitialize: true,
+  restoredSchemaDriftRefreshesInPlace: true,
   activeHostToolListRefresh: true,
   credentialsPersisted: false,
 }));

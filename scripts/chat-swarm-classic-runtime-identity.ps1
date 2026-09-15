@@ -17,52 +17,123 @@ $healTaskName = "DevSpace-ChatGPT-Worker-Identity-Heal"
 $scriptSelf = $PSCommandPath
 
 function Get-PrimaryPackage {
+    param([psobject]$Context)
+    if ($Context -and $Context.Primary) { return $Context.Primary }
     Get-AppxPackage -Name "OpenAI.ChatGPT-Desktop" |
         Sort-Object Version -Descending |
         Select-Object -First 1
 }
 
 function Get-WorkerPackages {
+    param([psobject]$Context)
+    if ($Context -and $null -ne $Context.Workers) { return @($Context.Workers) }
     @(Get-AppxPackage |
         Where-Object { $_.Name -match '^OpenAI\.ChatGPT-Desktop\.Worker\d{2}$' } |
         Sort-Object Name)
 }
 
 function Get-InteractivePackages {
+    param([psobject]$Context)
+    if ($Context -and $null -ne $Context.Interactives) { return @($Context.Interactives) }
     @(Get-AppxPackage |
         Where-Object { $_.Name -match '^OpenAI\.ChatGPT-Desktop\.Interactive\d{2}$' } |
         Sort-Object Name)
 }
 
+function New-IdentityAuditContext {
+    # AppX, process, and Start Apps enumeration are expensive on Windows. The
+    # old audit repeated each query once per Worker/Main and routinely took
+    # 30-50 seconds, which exceeds some ChatGPT MCP connector deadlines.
+    $packages = @(Get-AppxPackage)
+    $primary = @($packages |
+        Where-Object { $_.Name -eq "OpenAI.ChatGPT-Desktop" } |
+        Sort-Object Version -Descending |
+        Select-Object -First 1)
+    $workers = @($packages |
+        Where-Object { $_.Name -match '^OpenAI\.ChatGPT-Desktop\.Worker\d{2}$' } |
+        Sort-Object Name)
+    $interactives = @($packages |
+        Where-Object { $_.Name -match '^OpenAI\.ChatGPT-Desktop\.Interactive\d{2}$' } |
+        Sort-Object Name)
+    $processes = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
+    $chatGPTProcesses = @($processes | Where-Object {
+        $_.Name -eq "ChatGPT Classic.exe" -and $_.ExecutablePath -and $_.CommandLine -notlike "*--type=*"
+    })
+    $startAppIds = @{}
+    foreach ($app in @(Get-StartApps)) {
+        $appId = [string]$app.AppID
+        if (-not [string]::IsNullOrWhiteSpace($appId)) { $startAppIds[$appId] = $true }
+    }
+    [pscustomobject]@{
+        Primary = if ($primary.Count -gt 0) { $primary[0] } else { $null }
+        Workers = $workers
+        Interactives = $interactives
+        Processes = $processes
+        ChatGPTProcesses = $chatGPTProcesses
+        StartAppIds = $startAppIds
+        ProtocolProgIds = @{}
+    }
+}
+
 function Get-RootProcessForPackage {
-    param([Parameter(Mandatory)]$Package)
-    Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
-        Where-Object {
-            $_.Name -eq "ChatGPT Classic.exe" -and
-            $_.ExecutablePath -and
-            $_.ExecutablePath.StartsWith($Package.InstallLocation, [System.StringComparison]::OrdinalIgnoreCase) -and
-            $_.CommandLine -notlike "*--type=*"
-        } |
-        Select-Object -First 1
+    param(
+        [Parameter(Mandatory)]$Package,
+        [psobject]$Context
+    )
+    $processes = if ($Context -and $null -ne $Context.ChatGPTProcesses) {
+        @($Context.ChatGPTProcesses)
+    } elseif ($Context -and $null -ne $Context.Processes) {
+        @($Context.Processes)
+    } else {
+        @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
+    }
+    foreach ($process in $processes) {
+        if ($process.Name -eq "ChatGPT Classic.exe" -and
+            $process.ExecutablePath -and
+            $process.ExecutablePath.StartsWith($Package.InstallLocation, [System.StringComparison]::OrdinalIgnoreCase) -and
+            $process.CommandLine -notlike "*--type=*") {
+            return $process
+        }
+    }
+    return $null
 }
 
 function Get-PackageProtocolProgId {
     param(
         [Parameter(Mandatory)]$Package,
-        [Parameter(Mandatory)][string]$ApplicationId
+        [Parameter(Mandatory)][string]$ApplicationId,
+        [psobject]$Context
     )
-    $path = "HKCU:\Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppModel\Repository\Packages\$($Package.PackageFullName)\$ApplicationId\Capabilities\URLAssociations"
-    if (-not (Test-Path -LiteralPath $path)) { return $null }
-    $value = [string](Get-ItemProperty -LiteralPath $path -Name chatgpt -ErrorAction SilentlyContinue).chatgpt
-    if ([string]::IsNullOrWhiteSpace($value)) { return $null }
+    $cacheKey = "$($Package.PackageFullName)|$ApplicationId"
+    if ($Context -and $Context.ProtocolProgIds -and $Context.ProtocolProgIds.ContainsKey($cacheKey)) {
+        return $Context.ProtocolProgIds[$cacheKey]
+    }
+    $subKeyPath = "Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppModel\Repository\Packages\$($Package.PackageFullName)\$ApplicationId\Capabilities\URLAssociations"
+    $value = $null
+    $key = $null
+    try {
+        # Registry provider Test-Path + Get-ItemProperty was the other major
+        # latency source: each of the 20 package/application probes crossed the
+        # PowerShell provider twice. Use the read-only .NET HKCU handle instead.
+        $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($subKeyPath)
+        if ($key) { $value = [string]$key.GetValue("chatgpt", $null) }
+    }
+    catch { $value = $null }
+    finally { if ($key) { $key.Dispose() } }
+    if ([string]::IsNullOrWhiteSpace($value)) {
+        if ($Context -and $Context.ProtocolProgIds) { $Context.ProtocolProgIds[$cacheKey] = $null }
+        return $null
+    }
+    if ($Context -and $Context.ProtocolProgIds) { $Context.ProtocolProgIds[$cacheKey] = $value }
     return $value
 }
 
 function Get-CurrentProtocolClaims {
+    param([psobject]$Context)
     $claims = @()
-    $primary = Get-PrimaryPackage
+    $primary = Get-PrimaryPackage -Context $Context
     if ($primary) {
-        $progId = Get-PackageProtocolProgId -Package $primary -ApplicationId "ChatGPT"
+        $progId = Get-PackageProtocolProgId -Package $primary -ApplicationId "ChatGPT" -Context $Context
         if ($progId) {
             $claims += [pscustomobject]@{
                 Role = "primary"
@@ -75,13 +146,13 @@ function Get-CurrentProtocolClaims {
             }
         }
     }
-    foreach ($package in Get-WorkerPackages) {
+    foreach ($package in (Get-WorkerPackages -Context $Context)) {
         $numberMatch = [regex]::Match($package.Name, 'Worker(\d{2})$')
         $number = if ($numberMatch.Success) { [int]$numberMatch.Groups[1].Value } else { 0 }
         # Check both identities during migration. New workers use DevSpaceWorker;
         # legacy packages may still be registered under !ChatGPT until re-register.
         foreach ($applicationId in @("DevSpaceWorker", "ChatGPT")) {
-            $progId = Get-PackageProtocolProgId -Package $package -ApplicationId $applicationId
+            $progId = Get-PackageProtocolProgId -Package $package -ApplicationId $applicationId -Context $Context
             if (-not $progId) { continue }
             $claims += [pscustomobject]@{
                 Role = "worker"
@@ -94,11 +165,11 @@ function Get-CurrentProtocolClaims {
             }
         }
     }
-    foreach ($package in Get-InteractivePackages) {
+    foreach ($package in (Get-InteractivePackages -Context $Context)) {
         $numberMatch = [regex]::Match($package.Name, 'Interactive(\d{2})$')
         $number = if ($numberMatch.Success) { [int]$numberMatch.Groups[1].Value } else { 0 }
         foreach ($applicationId in @("DevSpaceInteractive", "ChatGPT")) {
-            $progId = Get-PackageProtocolProgId -Package $package -ApplicationId $applicationId
+            $progId = Get-PackageProtocolProgId -Package $package -ApplicationId $applicationId -Context $Context
             if (-not $progId) { continue }
             $claims += [pscustomobject]@{
                 Role = "interactive"
@@ -158,10 +229,11 @@ function Invoke-PowerShellChild {
 }
 
 function Get-ProtocolOwner {
+    param([psobject]$Context)
     $choicePath = "HKCU:\Software\Microsoft\Windows\Shell\Associations\UrlAssociations\chatgpt\UserChoice"
-    $primary = Get-PrimaryPackage
+    $primary = Get-PrimaryPackage -Context $Context
     $primaryAumid = if ($primary) { "$($primary.PackageFamilyName)!ChatGPT" } else { $null }
-    $primaryProgId = if ($primary) { Get-PackageProtocolProgId -Package $primary -ApplicationId "ChatGPT" } else { $null }
+    $primaryProgId = if ($primary) { Get-PackageProtocolProgId -Package $primary -ApplicationId "ChatGPT" -Context $Context } else { $null }
     if (-not (Test-Path -LiteralPath $choicePath)) {
         return [pscustomobject]@{
             State = "unassigned"
@@ -181,7 +253,7 @@ function Get-ProtocolOwner {
     }
 
     $progId = [string](Get-ItemProperty -LiteralPath $choicePath -ErrorAction SilentlyContinue).ProgId
-    $claims = @(Get-CurrentProtocolClaims)
+    $claims = @(Get-CurrentProtocolClaims -Context $Context)
     $claim = @($claims | Where-Object { [string]::Equals([string]$_.ProgId, $progId, [System.StringComparison]::OrdinalIgnoreCase) } | Select-Object -First 1)
     if ($claim.Count -gt 0) {
         $current = $claim[0]
@@ -231,10 +303,13 @@ function Get-ProtocolOwner {
 }
 
 function Get-WorkerIdentityRow {
-    param([Parameter(Mandatory)]$Package)
+    param(
+        [Parameter(Mandatory)]$Package,
+        [psobject]$Context
+    )
     $manifestPath = Join-Path $Package.InstallLocation "AppxManifest.xml"
     $text = if (Test-Path -LiteralPath $manifestPath) { Get-Content -LiteralPath $manifestPath -Raw } else { "" }
-    $root = Get-RootProcessForPackage -Package $Package
+    $root = Get-RootProcessForPackage -Package $Package -Context $Context
     $numberMatch = [regex]::Match($Package.Name, 'Worker(\d{2})$')
     $number = if ($numberMatch.Success) { [int]$numberMatch.Groups[1].Value } else { 0 }
 
@@ -254,7 +329,11 @@ function Get-WorkerIdentityRow {
         "$($Package.PackageFamilyName)!ChatGPT",
         "$($Package.PackageFamilyName)!DevSpaceWorker"
     )
-    $registeredInAppList = [bool](Get-StartApps | Where-Object { $workerAumids -contains $_.AppID } | Select-Object -First 1)
+    $registeredInAppList = if ($Context -and $Context.StartAppIds) {
+        @($workerAumids | Where-Object { $Context.StartAppIds.ContainsKey([string]$_) }).Count -gt 0
+    } else {
+        [bool](Get-StartApps | Where-Object { $workerAumids -contains $_.AppID } | Select-Object -First 1)
+    }
 
     $manifestClean = ($applicationId -eq "DevSpaceWorker") -and (-not $text.Contains('windows.protocol')) -and (-not $text.Contains('windows.startupTask')) -and (-not $text.Contains('com.microsoft.windows.copilotkeyprovider')) -and ($text -match 'AppListEntry="none"')
     $registeredClean = (-not $registeredProtocol) -and (-not $registeredInAppList)
@@ -280,10 +359,13 @@ function Get-WorkerIdentityRow {
 }
 
 function Get-InteractiveIdentityRow {
-    param([Parameter(Mandatory)]$Package)
+    param(
+        [Parameter(Mandatory)]$Package,
+        [psobject]$Context
+    )
     $manifestPath = Join-Path $Package.InstallLocation "AppxManifest.xml"
     $text = if (Test-Path -LiteralPath $manifestPath) { Get-Content -LiteralPath $manifestPath -Raw } else { "" }
-    $root = Get-RootProcessForPackage -Package $Package
+    $root = Get-RootProcessForPackage -Package $Package -Context $Context
     $numberMatch = [regex]::Match($Package.Name, 'Interactive(\d{2})$')
     $number = if ($numberMatch.Success) { [int]$numberMatch.Groups[1].Value } else { 0 }
     $applicationMatch = [regex]::Match($text, '<Application\b[^>]*\bId="([^"]+)"')
@@ -300,7 +382,11 @@ function Get-InteractiveIdentityRow {
         "$($Package.PackageFamilyName)!DevSpaceInteractive",
         "$($Package.PackageFamilyName)!ChatGPT"
     )
-    $registeredInAppList = [bool](Get-StartApps | Where-Object { $interactiveAumids -contains $_.AppID } | Select-Object -First 1)
+    $registeredInAppList = if ($Context -and $Context.StartAppIds) {
+        @($interactiveAumids | Where-Object { $Context.StartAppIds.ContainsKey([string]$_) }).Count -gt 0
+    } else {
+        [bool](Get-StartApps | Where-Object { $interactiveAumids -contains $_.AppID } | Select-Object -First 1)
+    }
     $hiddenFromAppList = [bool]($text -match 'AppListEntry="none"')
     $manifestClean = ($applicationId -eq "DevSpaceInteractive") -and (-not $text.Contains('windows.protocol')) -and (-not $text.Contains('windows.startupTask')) -and (-not $text.Contains('com.microsoft.windows.copilotkeyprovider')) -and (-not $hiddenFromAppList)
     $registeredClean = -not $registeredProtocol
@@ -329,14 +415,15 @@ function Get-InteractiveIdentityRow {
 }
 
 function Get-IdentitySnapshot {
-    $primary = Get-PrimaryPackage
+    $context = New-IdentityAuditContext
+    $primary = Get-PrimaryPackage -Context $context
     if (-not $primary) { throw "Primary OpenAI.ChatGPT-Desktop package is not installed." }
-    $primaryRoot = Get-RootProcessForPackage -Package $primary
+    $primaryRoot = Get-RootProcessForPackage -Package $primary -Context $context
     $primaryProcess = if ($primaryRoot) { Get-Process -Id $primaryRoot.ProcessId -ErrorAction SilentlyContinue } else { $null }
     $primaryVisible = [bool]($primaryProcess -and $primaryProcess.MainWindowHandle -ne 0)
-    $workers = @(Get-WorkerPackages | ForEach-Object { Get-WorkerIdentityRow -Package $_ })
-    $interactives = @(Get-InteractivePackages | ForEach-Object { Get-InteractiveIdentityRow -Package $_ })
-    $protocol = Get-ProtocolOwner
+    $workers = @(Get-WorkerPackages -Context $context | ForEach-Object { Get-WorkerIdentityRow -Package $_ -Context $context })
+    $interactives = @(Get-InteractivePackages -Context $context | ForEach-Object { Get-InteractiveIdentityRow -Package $_ -Context $context })
+    $protocol = Get-ProtocolOwner -Context $context
     $dirty = @($workers | Where-Object { -not $_.Clean })
     $dirtyInteractives = @($interactives | Where-Object { -not $_.Clean })
     $runningWorkers = @($workers | Where-Object { $_.Running })
