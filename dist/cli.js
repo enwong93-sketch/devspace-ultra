@@ -53,6 +53,9 @@ async function main(argv) {
         case "agents":
             await runAgentsCommand(args);
             return;
+        case "update":
+            await runUpdateCommand(args);
+            return;
         case "help":
             printHelp();
             return;
@@ -64,7 +67,7 @@ async function main(argv) {
 function normalizeCommand(command) {
     if (!command || command === "serve" || command === "start")
         return "serve";
-    if (command === "setup" || command === "init" || command === "doctor" || command === "config" || command === "edge" || command === "context" || command === "agents")
+    if (command === "setup" || command === "init" || command === "doctor" || command === "config" || command === "edge" || command === "context" || command === "agents" || command === "update")
         return command;
     if (command === "help" || command === "--help" || command === "-h")
         return "help";
@@ -673,6 +676,48 @@ async function runContextCommand(args) {
         bridge?.close();
     }
 }
+async function runUpdateCommand(args) {
+    if (process.platform !== "win32") {
+        throw new Error("`devspace update` currently uses the transactional Windows updater. On macOS/Linux update with the documented npm/GitHub install command.");
+    }
+    const flag = (name) => args.includes(name);
+    const action = flag("--status")
+        ? "status"
+        : flag("--check")
+            ? "check"
+            : flag("--install-task")
+                ? "install-task"
+                : flag("--remove-task")
+                    ? "remove-task"
+                    : "apply";
+    const updaterPath = fileURLToPath(new URL("../update.ps1", import.meta.url));
+    const powershell = join(process.env.SystemRoot || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+    const invokeArgs = ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", updaterPath, "-Action", action];
+    if (flag("--force")) invokeArgs.push("-Force");
+    if (flag("--no-auto-update")) invokeArgs.push("-NoAutoUpdateTask");
+    if (action === "apply") {
+        const temporaryUpdater = join(tmpdir(), `devspace-ultra-update-${process.pid}.ps1`);
+        writeFileSync(temporaryUpdater, await readFile(updaterPath));
+        const detachedArgs = ["-NoProfile", "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass", "-File", temporaryUpdater, "-Action", "apply", "-WaitForProcessId", String(process.pid)];
+        if (flag("--force")) detachedArgs.push("-Force");
+        if (flag("--no-auto-update")) detachedArgs.push("-NoAutoUpdateTask");
+        const child = spawn(powershell, detachedArgs, { detached: true, stdio: "ignore", windowsHide: true });
+        child.unref();
+        console.log(JSON.stringify({
+            ok: true,
+            state: "scheduled",
+            action: "self-update",
+            note: "The transactional updater will start after this CLI process exits. Run `devspace update --status` to read the durable result.",
+        }, null, 2));
+        return;
+    }
+    const exitCode = await new Promise((resolvePromise, rejectPromise) => {
+        const child = spawn(powershell, invokeArgs, { stdio: "inherit", windowsHide: true });
+        child.once("error", rejectPromise);
+        child.once("exit", (code) => resolvePromise(code ?? 1));
+    });
+    if (exitCode !== 0) throw new Error(`DevSpace updater exited with code ${exitCode}.`);
+}
 function printHelp() {
     console.log([
         "DevSpace",
@@ -694,6 +739,9 @@ function printHelp() {
         "  devspace context codex list [--query <text>] [--project <path>]",
         "  devspace context codex import --thread <id>",
         "  devspace context codex latest --project <path>",
+        "  devspace update          Safely update to the latest stable GitHub release (Windows)",
+        "  devspace update --check  Check whether update/repair is needed",
+        "  devspace update --status Show the last durable update result and auto-update task state",
         "  devspace agents ls       List subagent sessions",
         "  devspace agents run <profile-or-provider-or-id> [--model <model>] <prompt>",
         "  devspace agents show <id>",

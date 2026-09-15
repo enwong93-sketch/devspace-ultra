@@ -71,6 +71,21 @@ Do not use an ephemeral Quick Tunnel as the production ChatGPT Connector URL. Ex
 
 Prefer the installed tagged release's root `install.ps1`. For a fresh machine, download the tagged installer to a temporary file, allow inspection, and execute the file rather than piping remote text directly into `Invoke-Expression`.
 
+For an **existing older DevSpace Ultra installation**, prefer the repository bootstrap updater instead of reinstalling over the live package in place. Older releases may not contain the updater yet, so download the current `update.ps1` once; after that migration the installed `devspace update` command and daily safe-update task own future upgrades:
+
+```powershell
+$r = irm 'https://api.github.com/repos/enwong93-sketch/devspace-ultra/releases/latest'
+$a = @($r.assets | Where-Object name -eq 'update.ps1')[0]
+if (-not $a) { throw 'Latest release has no update.ps1' }
+$p = Join-Path $env:TEMP 'devspace-ultra-update.ps1'
+iwr $a.browser_download_url -OutFile $p
+$expected = ([string]$a.digest -replace '^sha256:','').ToLowerInvariant()
+if ((Get-FileHash $p -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expected) { throw 'Updater checksum mismatch' }
+& $p
+```
+
+The updater must resolve the latest stable GitHub Release, verify the archive digest, stage/validate before replacing the live package, preserve config/auth/conversation/runtime state, defer automatic runs while Agent/tool work is active, and restore the previous package plus npm shims if verification fails. Do not replace this with a blind `npm install -g ...` on an already-running production backend.
+
 DuckDNS example:
 
 ```powershell

@@ -29,8 +29,18 @@
     return value?.structuredContent?.progressClaim ??
       value?.structured_content?.progressClaim ??
       value?.toolResult?.structuredContent?.progressClaim ??
+      value?.["devspace/progressClaim"] ??
+      value?._meta?.["devspace/progressClaim"] ??
       value?.progressClaim ??
       null;
+  };
+
+  const dispatchGlobals = () => {
+    void dispatch(window.openai?.toolOutput);
+    // Some ChatGPT Desktop builds expose tool-result _meta separately from
+    // structuredContent. The claim id is intentionally duplicated there so
+    // page-local ownership confirmation does not depend on one host binding.
+    void dispatch(window.openai?.toolResponseMetadata);
   };
 
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -53,7 +63,7 @@
   };
 
   window.addEventListener("openai:set_globals", () => {
-    void dispatch(window.openai?.toolOutput);
+    dispatchGlobals();
   }, { passive: true });
 
   window.addEventListener("message", (event) => {
@@ -65,7 +75,7 @@
     }
   }, { passive: true });
 
-  void dispatch(window.openai?.toolOutput);
+  dispatchGlobals();
 })();
 </script>
 </body>
