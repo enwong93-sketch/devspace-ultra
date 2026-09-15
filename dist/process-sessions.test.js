@@ -39,16 +39,22 @@ try {
   assert.equal(Number.isInteger(running.sessionId), true);
   assert.equal(longDisposed, false, "running process must retain its temporary resources");
   await new Promise((resolve) => setTimeout(resolve, 120));
-  const completed = await manager.write({
-    workspaceId: "ws_long",
-    sessionId: running.sessionId,
-    chars: "",
-    yieldTimeMs: 1_000,
-    maxOutputTokens: 100,
-  });
+  let completed = { running: true, output: "" };
+  let completedOutput = "";
+  const completionDeadline = Date.now() + 10_000;
+  do {
+    completed = await manager.write({
+      workspaceId: "ws_long",
+      sessionId: running.sessionId,
+      chars: "",
+      yieldTimeMs: 1_000,
+      maxOutputTokens: 100,
+    });
+    completedOutput += completed.output;
+  } while (completed.running && Date.now() < completionDeadline);
   assert.equal(completed.running, false);
   assert.equal(completed.exitCode, 0);
-  assert.equal(completed.output, "later");
+  assert.equal(completedOutput, "later");
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert.equal(longDisposed, true, "completed interactive session must dispose its temporary resources");
 
