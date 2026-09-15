@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Fixed progress-narration flicker when an orphan or standalone DevSpace Core is still attached to the same ChatGPT Classic page as the Stable Gateway Core. The page now arbitrates one producer before any DOM mutation: Stable Gateway active Core priority 100, ordinary standalone Core 10, candidate Core 0; equal-priority producers keep the current fresh owner and a dead owner expires after a bounded lease.
 - Added a mandatory interactive progress preflight to every Local Gateway model-instruction mode. Qualifying Main tasks must write a concise opening `devspace_progress_report` before substantive work; an unbound or pending claim is explicitly not treated as a successful card update, and the exact-conversation bridge is the verified fallback.
 - Fully discard persisted pre-v0.5.7 verified-direct-session authority rows on load. Clearing only their legacy flag left the stale session-to-conversation mapping reusable whenever its old page was generating; the real-Core canary now proves that replay fails closed while the page remains open.
 

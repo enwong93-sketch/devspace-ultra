@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { runtimeKeyForPort } from "./classic-stream-recovery-cdp.js";
 import { activeProgressRows } from "./goal-progress-narrator.js";
@@ -12,6 +13,7 @@ const LEGACY_INLINE_RESOURCE_TITLES = [
   "ui://devspace/plan-card.html",
 ];
 const LEASE_MS = 60_000;
+const PRODUCER_LEASE_MS = 2_500;
 const DEFAULT_POLL_MS = 500;
 const DEFAULT_MAX_MESSAGES = 48;
 const DEFAULT_MAX_AGE_MS = 30 * 60_000;
@@ -135,13 +137,19 @@ function serializeInline(value) {
     .replace(/\u2029/g, "\\u2029");
 }
 
-export function buildProgressNarrationScript(map) {
+export function buildProgressNarrationScript(map, {
+  producerId = "devspace-progress-default",
+  producerPriority = 0,
+} = {}) {
   const serialized = serializeInline(map && typeof map === "object" ? map : {});
   return `(() => {
     const ROOT_ID = ${JSON.stringify(ROOT_ID)};
     const STYLE_ID = ${JSON.stringify(STYLE_ID)};
     const LEASE_KEY = ${JSON.stringify(LEASE_KEY)};
     const UI_VERSION = ${JSON.stringify(UI_VERSION)};
+    const PRODUCER_ID = ${JSON.stringify(String(producerId || "devspace-progress-default"))};
+    const PRODUCER_PRIORITY = ${Math.max(0, Math.floor(number(producerPriority, 0)))};
+    const PRODUCER_LEASE_MS = ${PRODUCER_LEASE_MS};
     const LEGACY_INLINE_RESOURCE_TITLES = ${serializeInline(LEGACY_INLINE_RESOURCE_TITLES)};
     const LEASE_MS = ${LEASE_MS};
     const conversationId = location.pathname.match(/\\/c\\/([^/?#]+)/)?.[1] || null;
@@ -184,6 +192,43 @@ export function buildProgressNarrationScript(map) {
             messages:[],
           }
         : null;
+    const producerNow = Date.now();
+    const priorProducerLease = globalThis[LEASE_KEY];
+    const competingProducerFresh = Boolean(
+      conversationId
+      && priorProducerLease?.ownerId
+      && priorProducerLease.ownerId !== PRODUCER_ID
+      && producerNow - Number(priorProducerLease.lastSeenAt || 0) <= PRODUCER_LEASE_MS
+    );
+    const competingProducerWins = competingProducerFresh
+      && Number(priorProducerLease.priority || 0) >= PRODUCER_PRIORITY;
+    if (competingProducerWins) {
+      const existingRoot = document.getElementById(ROOT_ID);
+      return {
+        mounted:Boolean(existingRoot),
+        visible:Boolean(existingRoot?.dataset.visible === 'true'),
+        conversationId,
+        suppressedByProducerLease:true,
+        producerId:PRODUCER_ID,
+        producerPriority:PRODUCER_PRIORITY,
+        ownerProducerId:priorProducerLease.ownerId,
+        ownerProducerPriority:Number(priorProducerLease.priority || 0),
+        rootCount:document.querySelectorAll('#' + ROOT_ID).length,
+        pageMutationCount:0,
+        syntheticUserMessages:0,
+      };
+    }
+    if (conversationId) {
+      if (priorProducerLease?.ownerId && priorProducerLease.ownerId !== PRODUCER_ID && priorProducerLease?.timer) {
+        clearInterval(priorProducerLease.timer);
+      }
+      globalThis[LEASE_KEY] = {
+        ownerId:PRODUCER_ID,
+        priority:PRODUCER_PRIORITY,
+        lastSeenAt:producerNow,
+        timer:priorProducerLease?.ownerId === PRODUCER_ID ? priorProducerLease.timer : null,
+      };
+    }
     const retireNode = (node, marker) => {
       if (!node) return false;
       node.dataset[marker] = 'true';
@@ -533,20 +578,28 @@ html.dark #${ROOT_ID} .devspace-progress-scroll{scrollbar-color:rgba(220,220,220
     const previous = globalThis[LEASE_KEY];
     if (visible) {
       root.__devspaceProgressLastProjectionAt = Date.now();
-      if (!previous?.timer) {
+      if (previous?.ownerId === PRODUCER_ID) previous.lastSeenAt = Date.now();
+      if (previous?.ownerId === PRODUCER_ID && !previous?.timer) {
         const timer = setInterval(() => {
           const current = document.getElementById(ROOT_ID);
           const last = Number(current?.__devspaceProgressLastProjectionAt || 0);
+          const lease = globalThis[LEASE_KEY];
+          if (lease?.ownerId !== PRODUCER_ID) {
+            clearInterval(timer);
+            return;
+          }
           if (!current || Date.now() - last <= LEASE_MS) return;
           current.dataset.visible = 'false';
           clearInterval(timer);
-          delete globalThis[LEASE_KEY];
+          if (globalThis[LEASE_KEY]?.ownerId === PRODUCER_ID) delete globalThis[LEASE_KEY];
         }, 1_000);
-        globalThis[LEASE_KEY] = { timer };
+        previous.timer = timer;
       }
     } else {
-      if (previous?.timer) clearInterval(previous.timer);
-      delete globalThis[LEASE_KEY];
+      if (previous?.ownerId === PRODUCER_ID) {
+        if (previous?.timer) clearInterval(previous.timer);
+        delete globalThis[LEASE_KEY];
+      }
     }
     return {
       mounted:Boolean(root),
@@ -567,6 +620,9 @@ html.dark #${ROOT_ID} .devspace-progress-scroll{scrollbar-color:rgba(220,220,220
       retiredLegacyInlineApps,
       retiredLegacyInlineErrors,
       syntheticUserMessages:0,
+      suppressedByProducerLease:false,
+      producerId:PRODUCER_ID,
+      producerPriority:PRODUCER_PRIORITY,
     };
   })()`;
 }
@@ -617,6 +673,8 @@ export class ClassicProgressNarrationOverlay {
     goalStatePath = null,
     pollMs = DEFAULT_POLL_MS,
     now = () => Date.now(),
+    producerId = randomUUID(),
+    producerPriority = 0,
   } = {}) {
     if (!contextAdapter || typeof contextAdapter.status !== "function" || typeof contextAdapter.evaluateRuntime !== "function") {
       throw new Error("ClassicProgressNarrationOverlay requires the shared Context Guardian CDP adapter.");
@@ -631,6 +689,8 @@ export class ClassicProgressNarrationOverlay {
       this.goalStatePath = goalStatePath || null;
       this.pollMs = Math.max(250, number(pollMs, DEFAULT_POLL_MS));
       this.now = now;
+      this.producerId = String(producerId || randomUUID());
+      this.producerPriority = Math.max(0, Math.floor(number(producerPriority, 0)));
       this.timer = null;
       this.syncing = null;
       this.closed = false;
@@ -653,6 +713,8 @@ export class ClassicProgressNarrationOverlay {
     this.goalStatePath = goalStatePath || null;
     this.pollMs = Math.max(250, number(pollMs, DEFAULT_POLL_MS));
     this.now = now;
+    this.producerId = String(producerId || randomUUID());
+    this.producerPriority = Math.max(0, Math.floor(number(producerPriority, 0)));
     this.timer = null;
     this.syncing = null;
     this.closed = false;
@@ -681,7 +743,10 @@ export class ClassicProgressNarrationOverlay {
         this.goalStatePath ? readJson(this.goalStatePath) : Promise.resolve(null),
       ]);
       const map = conversationProgressNarrationMap({ humanProgress, goalProgress, planState, goalState, nowMs: this.now() });
-      const script = buildProgressNarrationScript(map);
+      const script = buildProgressNarrationScript(map, {
+        producerId: this.producerId,
+        producerPriority: this.producerPriority,
+      });
       const runtimes = this.contextAdapter.status()?.runtimes || [];
       const settled = await Promise.allSettled(runtimes.map(async (runtime) => ({
         runtimeKey: runtime.runtimeKey,
@@ -732,7 +797,10 @@ export class ClassicProgressNarrationOverlay {
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
     await this.syncing?.catch?.(() => {});
-    const script = buildProgressNarrationScript({});
+    const script = buildProgressNarrationScript({}, {
+      producerId: this.producerId,
+      producerPriority: this.producerPriority,
+    });
     const runtimes = this.contextAdapter.status()?.runtimes || [];
     await Promise.allSettled(runtimes.map((runtime) => this.contextAdapter.evaluateRuntime(runtime.runtimeKey, script)));
   }

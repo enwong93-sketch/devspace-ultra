@@ -180,6 +180,11 @@ export function loadConfig(env = process.env) {
     const host = env.HOST ?? files.config.host ?? "127.0.0.1";
     const port = parsePort(env.PORT ?? files.config.port);
     const publicBaseUrl = parsePublicBaseUrl(env.DEVSPACE_PUBLIC_BASE_URL ?? files.config.publicBaseUrl ?? localPublicBaseUrl(host, port));
+    const stableGatewayCorePorts = [
+        Number(files.config.stableGatewayCoreAPort),
+        Number(files.config.stableGatewayCoreBPort),
+    ].filter((value) => Number.isInteger(value) && value >= 1024 && value <= 65535);
+    const inferredClassicUiOwnerPriority = stableGatewayCorePorts.includes(port) ? 100 : 10;
     const conversationProgressReportSeconds = parsePositiveInteger(
         env.DEVSPACE_PROGRESS_REPORT_SECONDS
             ?? numberConfigValue(files.config.conversationProgressReportSeconds)
@@ -237,6 +242,12 @@ export function loadConfig(env = process.env) {
         classicHostOverlayEnabled: env.DEVSPACE_CLASSIC_HOST_OVERLAY === undefined
             ? files.config.classicHostOverlayEnabled !== false
             : parseBoolean(env.DEVSPACE_CLASSIC_HOST_OVERLAY),
+        classicUiOwnerPriority: parseNonNegativeInteger(
+            env.DEVSPACE_CLASSIC_UI_OWNER_PRIORITY,
+            inferredClassicUiOwnerPriority,
+            "DEVSPACE_CLASSIC_UI_OWNER_PRIORITY",
+            1000,
+        ),
         conversationProgressLivenessEnabled: env.DEVSPACE_PROGRESS_LIVENESS === undefined
             ? files.config.conversationProgressLivenessEnabled !== false
             : parseBoolean(env.DEVSPACE_PROGRESS_LIVENESS),

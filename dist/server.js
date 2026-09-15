@@ -2405,6 +2405,7 @@ export function createServer(config = loadConfig(), options = {}) {
         goalProgressStatePath: join(config.stateDir, "devspace-goal-run-live.json"),
         planStatePath: join(config.stateDir, "plan-state.json"),
         goalStatePath: join(config.stateDir, "goal-state.json"),
+        producerPriority: config.classicUiOwnerPriority,
     });
     conversationProgressLiveness = new ConversationProgressLivenessSupervisor({
         statePath: join(config.stateDir, "conversation-progress-liveness.json"),

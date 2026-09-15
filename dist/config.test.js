@@ -17,6 +17,7 @@ try {
   assert.equal(loadConfig(baseEnv).classicStreamRecoveryEnabled, true, "Classic Stream Recovery should be safe-on by default");
   assert.equal(loadConfig(baseEnv).contextGuardianEnabled, true, "Context Guardian should be safe-on by default");
   assert.equal(loadConfig(baseEnv).classicHostOverlayEnabled, true, "Classic Host Overlay should be safe-on by default");
+  assert.equal(loadConfig(baseEnv).classicUiOwnerPriority, 10, "ordinary standalone Core should use the low UI-owner priority");
   assert.equal(loadConfig(baseEnv).conversationProgressLivenessEnabled, true, "conversation-scoped progress liveness should be safe-on by default");
   assert.equal(loadConfig(baseEnv).conversationProgressReportSeconds, 600);
   assert.equal(loadConfig(baseEnv).conversationProgressReminderSeconds, 600);
@@ -35,6 +36,12 @@ try {
   assert.equal(loadConfig({ ...baseEnv, DEVSPACE_CLASSIC_STREAM_RECOVERY: "false" }).classicStreamRecoveryEnabled, false);
   assert.equal(loadConfig({ ...baseEnv, DEVSPACE_CONTEXT_GUARDIAN: "0" }).contextGuardianEnabled, false);
   assert.equal(loadConfig({ ...baseEnv, DEVSPACE_CLASSIC_HOST_OVERLAY: "false" }).classicHostOverlayEnabled, false);
+  assert.equal(loadConfig({ ...baseEnv, DEVSPACE_CLASSIC_UI_OWNER_PRIORITY: "100" }).classicUiOwnerPriority, 100);
+  writeFileSync(join(configDir, "config.json"), `${JSON.stringify({ stableGatewayCoreAPort: 7688, stableGatewayCoreBPort: 7689 })}\n`, "utf8");
+  assert.equal(loadConfig({ ...baseEnv, PORT: "7688" }).classicUiOwnerPriority, 100,
+    "a Stable Gateway private Core must infer canonical UI ownership even when an older long-lived Gateway process cannot inject the new override yet");
+  assert.equal(loadConfig({ ...baseEnv, PORT: "7676" }).classicUiOwnerPriority, 10,
+    "a standalone/orphan Core must not infer canonical UI ownership from the same config");
   assert.equal(loadConfig(baseEnv).passiveCore, false, "normal production Cores must keep Classic background safety guards enabled by default");
   assert.equal(loadConfig({ ...baseEnv, DEVSPACE_PASSIVE_CORE: "true" }).passiveCore, true, "canary/candidate Cores must be able to disable Classic background automation explicitly");
   assert.deepEqual(loadConfig(baseEnv).oauth.scopes, ["devspace", "offline_access"], "default OAuth scopes should advertise refresh-token compatibility");

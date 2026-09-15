@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 const source = await readFile(new URL("../dist/classic-progress-narration-overlay.js", import.meta.url), "utf8");
+assert.match(source, /PRODUCER_LEASE_MS/,
+  "progress narration must arbitrate one producer across concurrently running DevSpace Core processes");
+assert.match(source, /competingProducerWins[\s\S]*pageMutationCount:0/,
+  "a losing Core must return before mutating the shared progress card DOM");
+assert.match(source, /ownerId:\s*PRODUCER_ID[\s\S]*priority:\s*PRODUCER_PRIORITY/,
+  "the page-local lease must record the winning Core producer and priority");
 assert.match(source, /const UI_VERSION = "7"/);
 assert.match(source, /__devspaceProgressAnchor/);
 assert.match(source, /now - Number\(prior\.observedAt \|\| 0\) < 1_500/);
