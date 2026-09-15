@@ -1008,6 +1008,27 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
             claimId: z.string().min(16).max(200).optional()
                 .describe("Reserved for the hidden exact-page relay. Agents must not set this field."),
         },
+        // ChatGPT only hydrates an MCP App's toolOutput reliably when the
+        // tool declares its structured result shape. Without this schema the
+        // hidden claim relay can mount with window.openai.callTool available
+        // but toolOutput=null, leaving a legitimate pending claim stranded.
+        outputSchema: {
+            ok: z.boolean(),
+            pending: z.boolean().optional(),
+            claimed: z.boolean().optional(),
+            progressClaim: z.object({
+                claimId: z.string(),
+                expiresAt: z.string(),
+                state: z.string(),
+            }).optional(),
+            claimId: z.string().optional(),
+            conversationId: z.string().optional(),
+            runtimeKey: z.string().optional(),
+            kind: z.string().optional(),
+            messageCount: z.number().nullable().optional(),
+            updatedAt: z.string().nullable().optional(),
+            error: z.string().optional(),
+        },
         annotations: {
             readOnlyHint: false,
             destructiveHint: false,
@@ -1068,6 +1089,13 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
                         ok: true,
                         pending: true,
                         progressClaim,
+                    },
+                    // Tool-result metadata is delivered only to the MCP App,
+                    // not the model. Mirror only the opaque one-time claim
+                    // descriptor here so the relay can recover even on hosts
+                    // that omit structuredContent from window.openai.toolOutput.
+                    _meta: {
+                        "devspace/progressClaim": progressClaim,
                     },
                 };
             }

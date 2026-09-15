@@ -28,11 +28,14 @@ jobs:
           npm pack
           $archive = Get-ChildItem -Filter 'devspace-ultra-*.tgz' | Select-Object -First 1
           if (-not $archive) { throw 'npm pack did not create an archive.' }
-          $hash = Get-FileHash -Algorithm SHA256 -LiteralPath $archive.FullName
-          @(
-            "SHA256  $($archive.Name)  $($hash.Hash.ToLowerInvariant())",
-            "Tag      $env:GITHUB_REF_NAME"
-          ) | Set-Content -LiteralPath SHA256SUMS.txt -Encoding utf8
+          $assets = @($archive.FullName, 'install.ps1', 'install-skill.ps1', 'update.ps1')
+          $lines = foreach ($asset in $assets) {
+            $item = Get-Item -LiteralPath $asset
+            $hash = Get-FileHash -Algorithm SHA256 -LiteralPath $item.FullName
+            "SHA256  $($item.Name)  $($hash.Hash.ToLowerInvariant())"
+          }
+          $lines += "Tag      $env:GITHUB_REF_NAME"
+          $lines | Set-Content -LiteralPath SHA256SUMS.txt -Encoding utf8
       - name: Publish release assets
         uses: softprops/action-gh-release@v2
         with:
@@ -40,6 +43,7 @@ jobs:
           files: |
             install.ps1
             install-skill.ps1
+            update.ps1
             devspace-ultra-*.tgz
             SHA256SUMS.txt
           fail_on_unmatched_files: true

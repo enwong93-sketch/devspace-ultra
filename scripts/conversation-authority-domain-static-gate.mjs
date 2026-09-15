@@ -25,6 +25,10 @@ assert.match(server, /resourceUri:\s*PROGRESS_CLAIM_RELAY_URI,[\s\S]{0,800}visib
 assert.match(server, /progressClaimRegistry\.create\(\{ message:\s*reportMessage, kind \}\)/);
 assert.match(server, /claimId:\s*z\.string\(\)\.min\(16\)\.max\(200\)\.optional\(\)/);
 assert.match(server, /progressClaimRegistry\.claim\(/);
+assert.match(server, /outputSchema:[\s\S]{0,1200}progressClaim:\s*z\.object\(/,
+  "progress tool must declare the structured claim output so ChatGPT can hydrate the relay App");
+assert.match(server, /"devspace\/progressClaim":\s*progressClaim/,
+  "pending progress must mirror only the opaque claim descriptor into app-only result metadata");
 
 const progressResolverStart = server.indexOf("const resolveProgressConversationAuthority = async (extra) =>");
 const progressResolverEnd = server.indexOf("const resolveConversationAuthority = resolveCapabilityConversationAuthority", progressResolverStart);
@@ -50,6 +54,8 @@ assert.match(progressClaims, /exact page-verified conversation authority/);
 assert.match(progressClaims, /another conversation page/);
 assert.match(progressClaims, /durableConversationOwners:\s*0/);
 assert.match(progressRelay, /window\.openai\.callTool\("devspace_progress_report"/);
+assert.match(progressRelay, /window\.openai\?\.toolResponseMetadata/,
+  "claim relay must accept result metadata when toolOutput is null");
 assert.doesNotMatch(progressRelay, /sendFollowUpMessage|prompt-textarea|composer/);
 
 assert.doesNotMatch(server, /resolveVerifiedDirectSession\(|persistVerifiedDirectSessionIdentity|directRequestAuthorityRegistry/,

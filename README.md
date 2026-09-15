@@ -111,6 +111,29 @@ The MP4s are attached to the GitHub release instead of committed into Git histor
 
 ## One-click install
 
+### Existing installs — safe update to the latest stable release
+
+Users already running an older DevSpace Ultra build should bootstrap the transactional updater **once**. This works even for releases that predate the built-in `devspace update` command:
+
+```powershell
+$r=irm https://api.github.com/repos/enwong93-sketch/devspace-ultra/releases/latest
+$a=@($r.assets | ? name -eq 'update.ps1')[0]; if(-not $a){throw 'Latest release has no update.ps1'}
+$p=Join-Path $env:TEMP 'devspace-ultra-update.ps1'; iwr $a.browser_download_url -OutFile $p
+$expected=([string]$a.digest -replace '^sha256:','').ToLower(); if((Get-FileHash $p -Algorithm SHA256).Hash.ToLower() -ne $expected){throw 'Updater checksum mismatch'}; & $p
+```
+
+After that first migration, the installed package provides:
+
+```powershell
+devspace update --check
+devspace update
+devspace update --status
+```
+
+The updater resolves GitHub's latest non-prerelease Release, verifies the release archive SHA-256, stages and validates the new package before touching the live install, preserves DevSpace config/auth/ChatGPT runtime state, backs up the previous package and npm command shims, and rolls the package back if post-swap verification fails. Automatic updates are enabled with a daily `DevSpace-Ultra-Auto-Update` task; it **defers instead of interrupting active non-stream Agent/tool work**. Same-version maintenance refreshes are detected by the release archive digest, so a user on an older `0.5.8` payload can still receive a newer `0.5.8` maintenance build.
+
+Older releases cannot retroactively contain an updater they never shipped, so those users must run the bootstrap command above once. From that point onward the update path is installed locally and tracks the latest stable GitHub Release automatically.
+
 ### Windows (PowerShell)
 
 ```powershell
@@ -234,7 +257,13 @@ Ultra deliberately separates **runtime capacity** from **task routing**.
 
 When configured with a ChatGPT Project URL, new worker conversations are created inside the `sub-agents` Project instead of cluttering the general chat list. Project-scoped conversation URLs are persisted and accepted by the recovery path.
 
-## Update safety
+## DevSpace Ultra package update safety
+
+`update.ps1` and `devspace update` are the product/package updater. The update is staged outside the live global npm package, verified first, then swapped only after the Stable Gateway reports no active non-stream work (automatic runs defer when busy). The updater does not rewrite `~/.devspace`, `~/.devspace-tailscale-bootstrap`, ChatGPT profiles, conversation mappings, or the Chat Swarm controller state. It verifies those protected state files stayed unchanged, retains up to three on-volume package backups, restores old npm shims on rollback, refreshes the Agent setup Skill, and records a durable result under `%LOCALAPPDATA%\DevSpaceUltra\Updater`.
+
+The daily `DevSpace-Ultra-Auto-Update` task is user-scoped, starts when available, ignores overlapping runs, and installs only GitHub's latest stable (non-draft, non-prerelease) Release. It never treats a same semantic version as automatically current unless the installed release digest is already known to match, which supports maintenance republishing such as the current v0.5.8 refresh.
+
+### ChatGPT Classic worker package update safety
 
 `chat-swarm-classic-update-manager.ps1` is designed around a canary-first rollout:
 

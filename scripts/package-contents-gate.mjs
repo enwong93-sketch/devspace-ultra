@@ -21,6 +21,9 @@ const files = new Set((report?.[0]?.files || []).map((entry) => String(entry.pat
 for (const required of [
   "install.ps1",
   "install-skill.ps1",
+  "update.ps1",
+  "scripts/self-update-static-gate.mjs",
+  "scripts/self-update-sandbox-test.ps1",
   "skills/devspace-ultra-setup/SKILL.md",
   "skills/devspace-ultra-setup/agents/openai.yaml",
   "scripts/devspace-public-setup.ps1",

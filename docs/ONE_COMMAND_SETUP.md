@@ -2,7 +2,19 @@
 
 DevSpace Ultra uses one elevated Windows setup pass to install the package, create the Local Gateway/Core supervisor, write a user-local configuration, register restartable Scheduled Tasks, and configure one public ingress route.
 
-The same command is the supported upgrade/reconcile path. It reinstalls the selected tagged version, preserves compatible user state, rewrites generated tasks/configuration to the current safe defaults, and restarts the backend only after the new files are present.
+For an **existing** installation, use the transactional updater instead of reinstalling over the running global package. Builds old enough not to contain `devspace update` can bootstrap the current updater once from the latest stable GitHub Release; the updater verifies the release digest, stages the new package before replacement, migrates legacy package/task paths, preserves user state and rolls the old package/shims back if post-swap verification fails. After migration, `devspace update` and the daily safe-update task handle future stable releases automatically and defer while non-stream Agent/tool work is active.
+
+```powershell
+$r=irm https://api.github.com/repos/enwong93-sketch/devspace-ultra/releases/latest
+$a=$r.assets | Where-Object name -eq 'update.ps1' | Select-Object -First 1
+if (-not $a -or -not $a.digest) { throw 'Stable release updater/digest unavailable.' }
+$p=Join-Path $env:TEMP 'devspace-ultra-update.ps1'
+iwr $a.browser_download_url -OutFile $p
+if ((Get-FileHash $p -Algorithm SHA256).Hash.ToLowerInvariant() -ne ([string]$a.digest).Replace('sha256:','').ToLowerInvariant()) { throw 'Updater digest mismatch.' }
+& $p
+```
+
+Fresh-install `install.ps1` also detects an older official installation and routes it through this updater before reconciling Local Gateway/ingress configuration.
 
 ## Install the guided Agent Skill first
 

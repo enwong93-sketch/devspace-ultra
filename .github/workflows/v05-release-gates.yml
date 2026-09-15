@@ -16,6 +16,9 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
+      - name: Legacy self-update migration and rollback sandbox
+        shell: pwsh
+        run: ./scripts/self-update-sandbox-test.ps1
       - name: Public release safety gate
         run: npm run verify:public-release
       - name: Stable Gateway gates

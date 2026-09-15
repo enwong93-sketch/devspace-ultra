@@ -64,6 +64,7 @@ function Ensure-Git {
 }
 
 function Find-InstalledPackageRoot {
+    param([switch] $AllowMissing)
     $globalRoot = (& npm root --global).Trim()
     $candidates = @(
         (Join-Path $globalRoot "devspace-ultra"),
@@ -85,10 +86,40 @@ function Find-InstalledPackageRoot {
                 return $package.name -in @("devspace-ultra", "@waishnav/devspace")
             }
             catch { return $false }
-        } |
+    } |
         Select-Object -First 1
     if ($match) { return Split-Path -Parent $match.FullName }
+    if ($AllowMissing) { return $null }
     throw "DevSpace Ultra was installed, but its package directory could not be located."
+}
+
+function Invoke-LatestStableUpdater {
+    $api = "https://api.github.com/repos/enwong93-sketch/devspace-ultra/releases/latest"
+    $headers = @{ "User-Agent" = "DevSpace-Ultra-Installer"; "Accept" = "application/vnd.github+json" }
+    $release = Invoke-RestMethod -Uri $api -Headers $headers -Method Get -UseBasicParsing
+    if (-not $release -or $release.draft -eq $true -or $release.prerelease -eq $true) {
+        throw "GitHub did not return a stable DevSpace Ultra release for the upgrade bootstrap."
+    }
+    $asset = @($release.assets | Where-Object { [string]$_.name -eq "update.ps1" } | Select-Object -First 1)
+    if ($asset.Count -eq 0) {
+        throw "The latest stable DevSpace Ultra release does not contain update.ps1."
+    }
+    $asset = $asset[0]
+    $expected = ([string]$asset.digest).ToLowerInvariant() -replace '^sha256:', ''
+    if ($expected -notmatch '^[0-9a-f]{64}$') {
+        throw "The latest update.ps1 asset does not expose a valid SHA-256 digest."
+    }
+    $temporary = Join-Path $env:TEMP ("devspace-ultra-update-" + [guid]::NewGuid().ToString('N') + ".ps1")
+    try {
+        Invoke-WebRequest -Uri ([string]$asset.browser_download_url) -Headers $headers -OutFile $temporary -UseBasicParsing
+        $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $temporary).Hash.ToLowerInvariant()
+        if ($actual -ne $expected) { throw "Downloaded update.ps1 failed SHA-256 verification." }
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $temporary -Action apply
+        if ($LASTEXITCODE -ne 0) { throw "DevSpace Ultra transactional updater exited with code $LASTEXITCODE." }
+    }
+    finally {
+        Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
+    }
 }
 
 if ($env:OS -ne "Windows_NT") {
@@ -99,12 +130,19 @@ Write-Step "Checking prerequisites"
 Ensure-Node
 Ensure-Git
 
-Write-Step "Installing DevSpace Ultra from GitHub"
-$source = if ($Ref) { "$Repository#$Ref" } else { $Repository }
-& npm install --global $source --ignore-scripts --no-audit --no-fund
-if ($LASTEXITCODE -ne 0) { throw "npm installation failed with exit code $LASTEXITCODE." }
-
-$packageRoot = Find-InstalledPackageRoot
+$existingPackageRoot = Find-InstalledPackageRoot -AllowMissing
+if ($existingPackageRoot -and $Repository -eq "https://github.com/enwong93-sketch/devspace-ultra.git") {
+    Write-Step "Upgrading the existing DevSpace Ultra installation transactionally"
+    Invoke-LatestStableUpdater
+    $packageRoot = Find-InstalledPackageRoot
+}
+else {
+    Write-Step "Installing DevSpace Ultra from GitHub"
+    $source = if ($Ref) { "$Repository#$Ref" } else { $Repository }
+    & npm install --global $source --ignore-scripts --no-audit --no-fund
+    if ($LASTEXITCODE -ne 0) { throw "npm installation failed with exit code $LASTEXITCODE." }
+    $packageRoot = Find-InstalledPackageRoot
+}
 $setupScript = Join-Path $packageRoot "scripts\devspace-public-setup.ps1"
 if (-not (Test-Path -LiteralPath $setupScript)) {
     throw "Installed package is missing scripts\devspace-public-setup.ps1."
@@ -119,6 +157,16 @@ Write-Step "Installing the DevSpace Ultra guided setup Agent Skill"
 & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $skillInstaller -SourceRoot $packageRoot
 if ($LASTEXITCODE -ne 0) {
     throw "Agent Skill installation failed with exit code $LASTEXITCODE."
+}
+
+$updater = Join-Path $packageRoot "update.ps1"
+if (-not (Test-Path -LiteralPath $updater)) {
+    throw "Installed package is missing update.ps1."
+}
+Write-Step "Enabling safe automatic stable updates"
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $updater -Action install-task
+if ($LASTEXITCODE -ne 0) {
+    Write-Warning "DevSpace Ultra installed, but the automatic update task could not be enabled. You can retry later with: devspace update --install-task"
 }
 
 Write-Step "Configuring Local Gateway and public ingress"
