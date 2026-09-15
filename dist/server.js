@@ -1951,7 +1951,9 @@ export function createServer(config = loadConfig(), options = {}) {
     const classicCdpOptions = Array.isArray(config.classicMainDebugPorts)
         ? { ports: config.classicMainDebugPorts }
         : {};
-    const primaryDebugGuard = new ClassicPrimaryDebugGuard();
+    const primaryDebugGuard = process.platform === "win32"
+        ? new ClassicPrimaryDebugGuard()
+        : null;
     const hostOverlayOwnerStore = createClassicHostOverlayOwnerStore({ stateDir: config.stateDir });
     const turnDeliveryEvidence = new ClassicTurnDeliveryEvidenceStore({
         statePath: join(config.stateDir, "classic-turn-delivery-evidence.json"),
@@ -1995,7 +1997,9 @@ export function createServer(config = loadConfig(), options = {}) {
     };
     const goalHostBridge = new ClassicGoalHostBridge({
         ...classicCdpOptions,
-        beforeDispatch: config.passiveCore ? undefined : () => primaryDebugGuard.pollOnce(),
+        beforeDispatch: config.passiveCore || !primaryDebugGuard
+            ? undefined
+            : () => primaryDebugGuard.pollOnce(),
         sendRecovery: sendExactGoalRecovery,
     });
     const goalRoundCompletionGuard = new ClassicGoalRoundCompletionGuard({
@@ -2446,11 +2450,13 @@ export function createServer(config = loadConfig(), options = {}) {
                 error: error instanceof Error ? error.message : String(error),
             });
         });
-        void primaryDebugGuard.start().catch((error) => {
-            logEvent(config.logging, "warn", "primary_debug_guard_start_failed", {
-                error: error instanceof Error ? error.message : String(error),
+        if (primaryDebugGuard) {
+            void primaryDebugGuard.start().catch((error) => {
+                logEvent(config.logging, "warn", "primary_debug_guard_start_failed", {
+                    error: error instanceof Error ? error.message : String(error),
+                });
             });
-        });
+        }
         if (config.goalRoundRecoveryEnabled) {
             void goalRoundCompletionGuard.start().catch((error) => {
                 logEvent(config.logging, "warn", "goal_round_completion_guard_start_failed", {
@@ -3246,7 +3252,7 @@ export function createServer(config = loadConfig(), options = {}) {
                 await contextMetadataAdapter.close();
                 await turnTransportObserver.close();
                 await contextGuardian.close();
-                await primaryDebugGuard.close();
+                await primaryDebugGuard?.close?.();
                 await blenderRuntimeManager.close();
                 await capabilityRuntime.close();
                 await codexMcpBridge.close();

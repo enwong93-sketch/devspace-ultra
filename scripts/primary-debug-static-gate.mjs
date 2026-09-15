@@ -5,16 +5,18 @@ const server = await readFile(new URL("../dist/server.js", import.meta.url), "ut
 const script = await readFile(new URL("./chat-classic-primary-debug.ps1", import.meta.url), "utf8");
 
 assert.match(server, /import \{ ClassicPrimaryDebugGuard \} from "\.\/primary-debug-guard\.js";/);
-assert.match(server, /const primaryDebugGuard = new ClassicPrimaryDebugGuard\(\)/);
+assert.match(server, /const primaryDebugGuard = process\.platform === "win32"\s*\? new ClassicPrimaryDebugGuard\(\)\s*:\s*null;/,
+  "Primary Debug Guard must exist only on its supported Windows runtime");
 assert.match(server, /const\s+classicCdpOptions\s*=\s*Array\.isArray\(config\.classicMainDebugPorts\)[\s\S]{0,180}ports:\s*config\.classicMainDebugPorts/, "Primary/Host Bridge lifecycle must use the bounded configured Classic port set");
-assert.match(server, /new ClassicGoalHostBridge\(\{\s*\.\.\.classicCdpOptions,\s*beforeDispatch:\s*config\.passiveCore\s*\?\s*undefined\s*:\s*\(\) => primaryDebugGuard\.pollOnce\(\),\s*sendRecovery:\s*sendExactGoalRecovery,?\s*\}\)/s);
+assert.match(server, /new ClassicGoalHostBridge\(\{\s*\.\.\.classicCdpOptions,\s*beforeDispatch:\s*config\.passiveCore\s*\|\|\s*!primaryDebugGuard\s*\?\s*undefined\s*:\s*\(\) => primaryDebugGuard\.pollOnce\(\),\s*sendRecovery:\s*sendExactGoalRecovery,?\s*\}\)/s);
 const recoveryStart = server.indexOf("const sendExactGoalRecovery = async");
 const recoveryEnd = server.indexOf("const goalHostBridge = new ClassicGoalHostBridge", recoveryStart);
 assert.ok(recoveryStart >= 0 && recoveryEnd > recoveryStart);
 assert.doesNotMatch(server.slice(recoveryStart, recoveryEnd), /primaryDebugGuard|beforeDispatch/,
   "same-round Goal Recovery must never activate Primary debug repair");
-assert.match(server, /if\s*\(!config\.passiveCore\)[\s\S]*primaryDebugGuard\.start\(\)/, "production Core keeps Primary Debug Guard while passive canary Core suppresses it");
-assert.match(server, /await primaryDebugGuard\.close\(\)/);
+assert.match(server, /if\s*\(!config\.passiveCore\)[\s\S]*if\s*\(primaryDebugGuard\)[\s\S]*primaryDebugGuard\.start\(\)/,
+  "Windows production Core keeps Primary Debug Guard while passive/non-Windows Core suppresses it");
+assert.match(server, /await primaryDebugGuard\?\.close\?\.\(\)/);
 
 assert.match(script, /OpenAI\.ChatGPT-Desktop/);
 assert.match(script, /primaryDebugPort = 9721/);
