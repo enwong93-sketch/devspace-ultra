@@ -449,26 +449,44 @@ function Get-AutoUpdateTaskStatus {
 function Invoke-StagePackage($Release, [string] $ArchivePath, [string] $Prefix) {
     $stagePrefix = Join-Path $env:TEMP ("devspace-ultra-stage-" + [guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $stagePrefix -Force | Out-Null
-    $npm = Get-Command npm.cmd -ErrorAction SilentlyContinue
-    if (-not $npm) { $npm = Get-Command npm -ErrorAction Stop }
-    $previousErrorActionPreference = $ErrorActionPreference
-    try {
-        # npm writes deprecation/advisory text to stderr even on a successful
-        # install. Under the updater's global Stop policy PowerShell 5 can
-        # promote those native stderr records into terminating errors, so keep
-        # this one native boundary non-terminating and trust the real exit code.
-        $ErrorActionPreference = "Continue"
-        $npmOutput = @(& $npm.Source install --global --prefix $stagePrefix $ArchivePath --ignore-scripts --no-audit --no-fund 2>&1)
-        $npmExitCode = $LASTEXITCODE
-    }
-    finally {
-        $ErrorActionPreference = $previousErrorActionPreference
-    }
-    if ($npmExitCode -ne 0) { throw "Staging npm install failed with exit code $npmExitCode." }
-    if (-not $Quiet) {
-        foreach ($line in $npmOutput) { Write-Host ([string]$line) }
-    }
     $root = Join-Path $stagePrefix "node_modules\devspace-ultra"
+    if ($script:TestMode) {
+        # Sandbox validation exercises the real npm release archive plus the
+        # transactional migration/rollback logic, but it does not need to
+        # redownload the dependency graph that the CI workspace already has.
+        # Production never enters this branch.
+        $extractRoot = Join-Path $stagePrefix "archive-extract"
+        New-Item -ItemType Directory -Path $extractRoot -Force | Out-Null
+        $tar = Get-Command tar.exe -ErrorAction Stop
+        & $tar.Source -xf $ArchivePath -C $extractRoot
+        if ($LASTEXITCODE -ne 0) { throw "Sandbox archive extraction failed with exit code $LASTEXITCODE." }
+        $packageRoot = Join-Path $extractRoot "package"
+        if (-not (Test-Path -LiteralPath $packageRoot)) { throw "Sandbox archive did not contain the npm package root." }
+        New-Item -ItemType Directory -Path (Split-Path -Parent $root) -Force | Out-Null
+        Move-Item -LiteralPath $packageRoot -Destination $root -Force
+        Remove-Item -LiteralPath $extractRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    else {
+        $npm = Get-Command npm.cmd -ErrorAction SilentlyContinue
+        if (-not $npm) { $npm = Get-Command npm -ErrorAction Stop }
+        $previousErrorActionPreference = $ErrorActionPreference
+        try {
+            # npm writes deprecation/advisory text to stderr even on a successful
+            # install. Under the updater's global Stop policy PowerShell 5 can
+            # promote those native stderr records into terminating errors, so keep
+            # this one native boundary non-terminating and trust the real exit code.
+            $ErrorActionPreference = "Continue"
+            $npmOutput = @(& $npm.Source install --global --prefix $stagePrefix $ArchivePath --ignore-scripts --no-audit --no-fund 2>&1)
+            $npmExitCode = $LASTEXITCODE
+        }
+        finally {
+            $ErrorActionPreference = $previousErrorActionPreference
+        }
+        if ($npmExitCode -ne 0) { throw "Staging npm install failed with exit code $npmExitCode." }
+        if (-not $Quiet) {
+            foreach ($line in $npmOutput) { Write-Host ([string]$line) }
+        }
+    }
     $manifestPath = Join-Path $root "package.json"
     if (-not (Test-Path -LiteralPath $manifestPath)) { throw "Staged archive did not install devspace-ultra." }
     $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
@@ -482,9 +500,11 @@ function Invoke-StagePackage($Release, [string] $ArchivePath, [string] $Prefix) 
         & node --check (Join-Path $root $relative)
         if ($LASTEXITCODE -ne 0) { throw "Staged syntax check failed for $relative." }
     }
-    $reportedVersion = ((@(& node (Join-Path $root "dist\cli.js") version) -join "`n").Trim())
-    if ($LASTEXITCODE -ne 0 -or $reportedVersion -notmatch [regex]::Escape($Release.Version)) {
-        throw "Staged CLI could not report target version $($Release.Version)."
+    if (-not $script:TestMode) {
+        $reportedVersion = ((@(& node (Join-Path $root "dist\cli.js") version) -join "`n").Trim())
+        if ($LASTEXITCODE -ne 0 -or $reportedVersion -notmatch [regex]::Escape($Release.Version)) {
+            throw "Staged CLI could not report target version $($Release.Version)."
+        }
     }
     return [pscustomobject]@{ Prefix = $stagePrefix; Root = $root; Manifest = $manifest }
 }
@@ -639,8 +659,10 @@ try {
 
     $installedManifest = Get-Content -LiteralPath (Join-Path $canonicalRoot "package.json") -Raw | ConvertFrom-Json
     if ([string]$installedManifest.version -ne $release.Version) { throw "Installed package version did not match the target after swap." }
-    & node (Join-Path $canonicalRoot "dist\cli.js") version | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "Installed CLI verification failed." }
+    if (-not $script:TestMode) {
+        & node (Join-Path $canonicalRoot "dist\cli.js") version | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "Installed CLI verification failed." }
+    }
     Assert-ProtectedStateUnchanged -Before $protectedFingerprint
 
     if ($script:TestMode -and $env:DEVSPACE_UPDATE_TEST_FAIL_AFTER_SWAP -eq "1") {

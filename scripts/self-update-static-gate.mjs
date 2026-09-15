@@ -45,6 +45,10 @@ assert.match(updater, /function Install-AutoUpdateTask[\s\S]*if \(\$script:TestM
   "test mode must never register the production auto-update task");
 assert.match(updater, /if \(-not \$script:TestMode\)[\s\S]*install-skill\.ps1/s,
   "test mode must not rewrite the operator's installed Agent Skill");
+assert.match(updater, /if \(\$script:TestMode\)[\s\S]*archive-extract[\s\S]*Get-Command tar\.exe/s,
+  "sandbox must validate the real tgz without reinstalling the dependency tree");
+assert.match(updater, /else \{[\s\S]*npmOutput = @\(& \$npm\.Source install --global --prefix \$stagePrefix \$ArchivePath --ignore-scripts/s,
+  "production staging must continue to use a real isolated npm install");
 assert.match(updater, /Get-GatewayBusyState/);
 assert.match(updater, /if \(\$busy\.Known -and \$busy\.Busy -and -not \$Force\)/,
   "automatic update must defer instead of interrupting active Agent/tool work");
