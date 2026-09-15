@@ -12,7 +12,7 @@ export const RETIRED_BROWSER_TOOLS = Object.freeze([
 
 const RETIRED_BROWSER_TOOL_SET = new Set(RETIRED_BROWSER_TOOLS);
 
-export function retiredToolCallResult(toolName, { currentProductionVersion = "0.5.7" } = {}) {
+export function retiredToolCallResult(toolName, { currentProductionVersion = "0.5.8" } = {}) {
   const selected = String(toolName || "").trim();
   if (!RETIRED_BROWSER_TOOL_SET.has(selected)) return null;
   const message = `DevSpace tool ${selected} was removed from the current production schema. This conversation is using a cached legacy tool list; other DevSpace tools remain available. Refresh the MCP tool list or start a fresh turn, then use codex_computer_use.`;

@@ -749,7 +749,7 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
     const server = new McpServer({
         name: "devspace",
         title: "DevSpace",
-        version: "0.5.7",
+         version: "0.5.8",
         description: "Secure local coding workspace for MCP clients. Provides workspace-scoped file, search, edit, write, process, capability, and Codex-parity tools.",
     }, {
         instructions: modelInstructions,
