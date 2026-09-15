@@ -855,7 +855,49 @@ async function testReplayDropsSessionWhenRoutingDescriptionChanges() {
   }
 }
 
-async function testLegacyDescriptorWithoutSchemaRequiresFreshInitialize() {
+async function testRestoredPublicSessionSchemaDriftDoesNotDisableNamespace() {
+  const core = await createFakeCore("core-schema-refresh", { tools: CHANGED_TOOLS });
+  const registry = new StableGatewaySessionRegistry();
+  const publicSessionId = "42345678-1234-1234-1234-123456789abc";
+  registry.restoreDescriptors([{
+    publicSessionId,
+    initializeBody: { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-11-25" } },
+    initialized: true,
+    lastActivityAt: Date.now(),
+    schemaFingerprint: schemaFingerprint(FAKE_TOOLS),
+    toolCount: FAKE_TOOLS.length,
+  }]);
+  const gateway = createStableGatewayProxy({ activeCore: { id: core.id, baseUrl: core.baseUrl }, publicBaseUrl: "https://devspace-gateway.example.test", registry });
+  const gatewayServer = createServer(gateway.handler);
+  const gatewayBaseUrl = await listen(gatewayServer);
+  try {
+    const response = await postJson(gatewayBaseUrl, { jsonrpc: "2.0", id: 10, method: "tools/list", params: {} }, {
+      authorization: "Bearer current-token",
+      "mcp-session-id": publicSessionId,
+    });
+    assert.equal(response.status, 200, "schema drift on a restored public session must not become a namespace-disabling 404");
+    assert.equal(response.headers["mcp-session-id"], publicSessionId);
+    assert.deepEqual(JSON.parse(response.body).result.tools, CHANGED_TOOLS);
+    assert.equal(registry.lookup(publicSessionId)?.coreId, "core-schema-refresh");
+    assert.equal(registry.lookup(publicSessionId)?.toolCount, CHANGED_TOOLS.length);
+    assert.equal(core.observed.filter((entry) => entry.method === "initialize").length, 1);
+    const firstToolCall = await postJson(gatewayBaseUrl, {
+      jsonrpc: "2.0",
+      id: 11,
+      method: "tools/call",
+      params: { name: "read", arguments: { path: "README.md" } },
+    }, {
+      authorization: "Bearer current-token",
+      "mcp-session-id": publicSessionId,
+    });
+    assert.equal(firstToolCall.status, 200, "the first real tool call after schema refresh must remain executable");
+  } finally {
+    await close(gatewayServer);
+    await close(core.server);
+  }
+}
+
+async function testLegacyDescriptorWithoutSchemaCanRefreshInPlace() {
   const core = await createFakeCore("core-legacy", { tools: FAKE_TOOLS });
   const registry = new StableGatewaySessionRegistry();
   const publicSessionId = "32345678-1234-1234-1234-123456789abc";
@@ -875,9 +917,10 @@ async function testLegacyDescriptorWithoutSchemaRequiresFreshInitialize() {
       authorization: "Bearer current-token",
       "mcp-session-id": publicSessionId,
     });
-    assert.equal(response.status, 404);
-    assert.match(response.body, /schema changed|reinitialize/i);
-    assert.equal(registry.lookup(publicSessionId), undefined);
+    assert.equal(response.status, 200, "legacy restored descriptors must refresh in place instead of disabling the MCP namespace");
+    assert.equal(response.headers["mcp-session-id"], publicSessionId);
+    assert.equal(registry.lookup(publicSessionId)?.coreId, "core-legacy");
+    assert.equal(registry.lookup(publicSessionId)?.toolCount, FAKE_TOOLS.length);
     assert.equal(core.observed.filter((entry) => entry.method === "initialize").length, 1);
     assert.equal(core.observed.filter((entry) => entry.id === "devspace-schema-fingerprint").length, 1);
   } finally {
@@ -904,6 +947,7 @@ await testNon404CoreFailureIsNeverResurrected();
 await testRestoredPublicSessionLazyResurrectionIsSingleFlight();
 await testReplayDropsSessionWhenToolSchemaChanges();
 await testReplayDropsSessionWhenRoutingDescriptionChanges();
-await testLegacyDescriptorWithoutSchemaRequiresFreshInitialize();
+await testRestoredPublicSessionSchemaDriftDoesNotDisableNamespace();
+await testLegacyDescriptorWithoutSchemaCanRefreshInPlace();
 
-console.log(JSON.stringify({ ok: true, gate: "stable-gateway-proxy", lazyResurrection: true, replayedMain01FingerprintPreserved: true, idleAgeNeverDuplicatesHealthySession: true, downstreamSseDisconnectClosesUpstream: true, resurrectionSingleFlight: true, exact404RetryOnce: true, no5xxReplay: true, schemaFingerprintCaptured: true, routingDescriptionDriftForcesFreshInitialize: true, staleSchemaForcesFreshInitialize: true }));
+console.log(JSON.stringify({ ok: true, gate: "stable-gateway-proxy", lazyResurrection: true, replayedMain01FingerprintPreserved: true, idleAgeNeverDuplicatesHealthySession: true, downstreamSseDisconnectClosesUpstream: true, resurrectionSingleFlight: true, exact404RetryOnce: true, no5xxReplay: true, schemaFingerprintCaptured: true, routingDescriptionDriftForcesFreshInitialize: true, restoredSchemaDriftRefreshesInPlace: true, legacyDescriptorRefreshesInPlace: true }));

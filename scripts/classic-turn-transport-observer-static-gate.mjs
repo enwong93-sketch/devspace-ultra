@@ -16,6 +16,7 @@ assert.match(observer, /Network\.getRequestPostData/);
 assert.match(observer, /Network\.streamResourceContent/);
 assert.match(observer, /Network\.dataReceived/);
 assert.match(observer, /isNativeCallMcpRequest/);
+assert.match(observer, /\/backend-api\/f\/conversation\/resume/, "hidden Goal continuation turns must remain observable through the native resume transport");
 assert.doesNotMatch(observer, /Runtime\.enable|Runtime\.evaluate|client\.call\("Page\.(?:reload|navigate)"|Network\.getResponseBody/, "always-on delivery observer must stay network-only and low-memory");
 assert.match(observer, /maxPending/);
 assert.match(observer, /pendingTtlMs/);
@@ -30,6 +31,10 @@ assert.match(server, /ClassicMcpCallCorrelator/);
 assert.match(server, /fingerprintMcpToolCall\(req\?\.body\)/);
 assert.match(guard, /DEFAULT_NATIVE_COMPLETE_GRACE_MS/);
 assert.match(guard, /nativeCompleteStableMs/);
+assert.match(guard, /currentTurnTransportFinished/,
+  "stale GUI generating may be overridden only by current-round transport-finished evidence");
+assert.match(guard, /sawCurrentRoundAssistant/,
+  "stale GUI generating may be overridden only after the current round produced an assistant message");
 assert.match(guard, /safetyCheckVisible !== true/);
 
 console.log(JSON.stringify({
@@ -41,6 +46,7 @@ console.log(JSON.stringify({
   automaticGoalConversationBinding: true,
   nativeCallMcpCorrelation: true,
   streamedToolInvocationCorrelation: true,
-  staleGuiGeneratingCannotBlockForever: true,
+  goalContinuationResumeObserved: true,
+  staleGuiGeneratingRequiresCurrentTurnProof: true,
   safetyCheckFailsClosed: true,
 }));

@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>DevSpace Progress Claim Relay</title>
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: 1px;
+      height: 1px;
+      min-width: 0;
+      min-height: 0;
+      overflow: hidden;
+      background: transparent;
+      color: transparent;
+      pointer-events: none;
+    }
+  </style>
+</head>
+<body aria-hidden="true">
+<script>
+(() => {
+  let dispatchStarted = false;
+
+  const claimFrom = (value) => {
+    if (!value || typeof value !== "object") return null;
+    return value?.structuredContent?.progressClaim ??
+      value?.structured_content?.progressClaim ??
+      value?.toolResult?.structuredContent?.progressClaim ??
+      value?.progressClaim ??
+      null;
+  };
+
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  const dispatch = async (value) => {
+    const claim = claimFrom(value);
+    if (!claim?.claimId || dispatchStarted) return;
+    dispatchStarted = true;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        if (typeof window.openai?.callTool !== "function") throw new Error("tool bridge unavailable");
+        const result = await window.openai.callTool("devspace_progress_report", { claimId: claim.claimId });
+        const structured = result?.structuredContent ?? result?.structured_content ?? result;
+        if (structured?.ok === true && structured?.claimed === true) return;
+        throw new Error("progress claim was not completed");
+      } catch {
+        if (attempt < 2) await sleep(250 * (attempt + 1));
+      }
+    }
+  };
+
+  window.addEventListener("openai:set_globals", () => {
+    void dispatch(window.openai?.toolOutput);
+  }, { passive: true });
+
+  window.addEventListener("message", (event) => {
+    if (event.source !== window.parent) return;
+    const message = event.data;
+    if (!message || message.jsonrpc !== "2.0") return;
+    if (message.method === "ui/notifications/tool-result") {
+      void dispatch(message.params?.structuredContent ?? message.params);
+    }
+  }, { passive: true });
+
+  void dispatch(window.openai?.toolOutput);
+})();
+</script>
+</body>
+</html>

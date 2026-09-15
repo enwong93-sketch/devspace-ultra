@@ -39,6 +39,7 @@ export function createMemoryDiagnostics({
   turnTransportObserver,
   mcpCallCorrelator,
   activeTurnRegistry,
+  progressClaimRegistry,
   contextMetadataAdapter,
   streamRecoveryAdapter,
   config = {},
@@ -55,6 +56,7 @@ export function createMemoryDiagnostics({
   const turn = safeStatus(turnTransportObserver);
   const callCorrelation = safeDiagnostics(mcpCallCorrelator);
   const activeTurnCorrelation = safeDiagnostics(activeTurnRegistry);
+  const progressClaims = safeDiagnostics(progressClaimRegistry);
   const context = safeStatus(contextMetadataAdapter);
   const stream = safeStatus(streamRecoveryAdapter);
   const contextRuntimes = Array.isArray(context?.runtimes) ? context.runtimes : [];
@@ -115,6 +117,13 @@ export function createMemoryDiagnostics({
       classicToolInvocationResponseBuffers: finiteNumber(turn?.toolInvocations?.responseBuffers),
       classicToolInvocationResponseBufferChars: finiteNumber(turn?.toolInvocations?.responseBufferChars),
       durableDirectRequestAuthorities: 0,
+      progressClaimsPending: finiteNumber(progressClaims?.pending),
+      progressClaimsClaiming: finiteNumber(progressClaims?.claiming),
+      progressClaimsRetainedCompleted: finiteNumber(progressClaims?.retainedCompleted),
+      progressClaimsCreated: finiteNumber(progressClaims?.created),
+      progressClaimsCompleted: finiteNumber(progressClaims?.completed),
+      progressClaimsExpired: finiteNumber(progressClaims?.expired),
+      progressClaimsRejected: finiteNumber(progressClaims?.rejected),
     },
     capabilities: {
       enabled: capabilities?.enabled === true,

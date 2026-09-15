@@ -10,7 +10,7 @@ assert.match(source, /const GOAL_DOCK_URI = "ui:\/\/devspace\/goal-dock\.html";/
 assert.match(source, /const GOAL_RELAY_URI = "ui:\/\/devspace\/goal-continuation-relay\.html";/);
 assert.match(source, /new GoalRuntime\(\{\s*stateDir: config\.stateDir,?\s*\}\)/s);
 assert.match(source, /const\s+classicCdpOptions\s*=\s*Array\.isArray\(config\.classicMainDebugPorts\)[\s\S]{0,180}ports:\s*config\.classicMainDebugPorts/, "Goal Host Bridge must share the configured bounded Classic port set");
-assert.match(source, /new ClassicGoalHostBridge\(\{\s*\.\.\.classicCdpOptions,\s*beforeDispatch:\s*config\.passiveCore\s*\?\s*undefined\s*:\s*\(\) => primaryDebugGuard\.pollOnce\(\),\s*sendRecovery:\s*sendExactGoalRecovery,?\s*\}\)/s);
+assert.match(source, /new ClassicGoalHostBridge\(\{\s*\.\.\.classicCdpOptions,\s*beforeDispatch:\s*config\.passiveCore\s*\|\|\s*!primaryDebugGuard\s*\?\s*undefined\s*:\s*\(\) => primaryDebugGuard\.pollOnce\(\),\s*sendRecovery:\s*sendExactGoalRecovery,?\s*\}\)/s);
 assert.match(source, /const sendExactGoalRecovery = async \([\s\S]*progressLivenessAdapter\.sendGoalRecovery\(\{/,
   "Goal Recovery must use the exact current conversation page-composer sender");
 assert.match(source, /registerAppResource\(server, "DevSpace Goal Dock", GOAL_DOCK_URI,/);
@@ -21,7 +21,11 @@ assert.match(source, /const resolveCapabilityConversationAuthority = async \(ext
 assert.doesNotMatch(source, /const resolveCapabilityConversationAuthority = async \(extra\) => \{[\s\S]*conversationAuthority\.resolveMcpExtra\(extra\)/, "Goal tools must not revive stale durable session authority inside the handler");
 assert.match(source, /mcpCallCorrelator\.noteGateway\(\{[\s\S]*callFingerprint[\s\S]*gatewayRequestId:\s*gatewayCorrelationId/, "the Core HTTP request must establish one exact canonical page-invocation join before entering Goal tools");
 assert.match(source, /progressLivenessAdapter\.find\(\{[\s\S]*conversationId:\s*candidate\.conversationId/, "the joined invocation must be re-verified against one exact live conversation page");
-assert.doesNotMatch(source, /activeTurnRegistry\.(?:resolveGatewayCall|waitForIdentity)\(/, "Goal tools must not use Runtime, session, or browser-turn trace fallback as conversation authority");
+assert.match(source, /activeTurnRegistry\.resolveGatewayCall\(\{[\s\S]*sessionCorrelationFingerprintsHint:\s*sessionCorrelationFingerprints/, "Goal tools may use only the current request's hashed session aliases to select one unique active browser turn");
+assert.match(source, /activeTurnRegistry\.waitForIdentity\(\{[\s\S]*timeoutMs:\s*MCP_CONVERSATION_CORRELATION_TIMEOUT_MS/, "active-turn fallback must remain bounded to the current MCP request");
+assert.match(source, /page\.runtimeKey !== candidateRuntimeKey[\s\S]*page\.generating !== true/, "active-turn evidence must still be re-verified against one exact generating conversation page");
+assert.match(source, /conversationAuthority\.resolveFingerprint\(sessionFingerprint\)[\s\S]*classic-native-session-page-verified/, "an exact native ChatGPT session mapping may recover a direct Goal call only through current page verification");
+assert.doesNotMatch(source, /resolveVerifiedDirectSession|persistVerifiedDirectSessionIdentity|conversationAuthority\.waitForFingerprint/, "Goal tools must not revive durable or cross-request session ownership");
 const progressResolverStart = source.indexOf("const resolveProgressConversationAuthority = async (extra) =>");
 const progressResolverEnd = source.indexOf("const resolveConversationAuthority = resolveCapabilityConversationAuthority", progressResolverStart);
 assert.ok(progressResolverStart >= 0 && progressResolverEnd > progressResolverStart, "progress authority resolver must exist");

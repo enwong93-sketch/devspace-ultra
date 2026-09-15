@@ -64,13 +64,33 @@ assert.equal(moduleUnderTest.shouldRecoverWorkingRound(baseGoal, {
   streamStatus: "COMPLETE",
   safetyCheckVisible: false,
   nativeCompleteStableMs: 5_000,
-}, { nowMs: Date.parse("2026-09-05T03:00:05.000Z") }), true, "stable native COMPLETE must override a stale GUI generating flag after grace");
+}, { nowMs: Date.parse("2026-09-05T03:00:05.000Z") }), false,
+"stable native COMPLETE alone must not consume recovery attempts while the current assistant turn is still visibly generating");
+assert.equal(moduleUnderTest.shouldRecoverWorkingRound(baseGoal, {
+  ...eligibleRoute,
+  chatMode: true,
+  generating: true,
+  streamStatus: "COMPLETE",
+  safetyCheckVisible: false,
+  nativeCompleteStableMs: 5_000,
+  latestMessageRole: "assistant",
+  latestAssistantText: "The current Goal round has visibly completed.",
+  turnRequestObservedAt: "2026-09-05T03:00:00.100Z",
+  turnFinishedObservedAt: "2026-09-05T03:00:04.000Z",
+  recoverySession: { sawCurrentRoundAssistant: true },
+}, { nowMs: Date.parse("2026-09-05T03:00:05.000Z") }), true,
+"a stale GUI stop control may be overridden only after current-round assistant and transport-finished evidence are both proven");
 assert.equal(moduleUnderTest.shouldRecoverWorkingRound(baseGoal, {
   chatMode: true,
   generating: true,
   streamStatus: "COMPLETE",
   safetyCheckVisible: true,
   nativeCompleteStableMs: 20_000,
+  latestMessageRole: "assistant",
+  latestAssistantText: "The current Goal round has visibly completed.",
+  turnRequestObservedAt: "2026-09-05T03:00:00.100Z",
+  turnFinishedObservedAt: "2026-09-05T03:00:04.000Z",
+  recoverySession: { sawCurrentRoundAssistant: true },
 }, { nowMs: Date.parse("2026-09-05T03:00:25.000Z") }), false, "an active additional-safety-check notice must still fail closed even when native COMPLETE is stable");
 assert.equal(moduleUnderTest.shouldRecoverWorkingRound(baseGoal, {
   chatMode: false,
@@ -184,6 +204,34 @@ assert.match(calls.dispatch[0].prompt, /GOAL_ROUND_RECOVERY/);
 assert.equal(calls.acks.length, 1);
 assert.equal(calls.releases.length, 0);
 
+let prematureClaims = 0;
+const prematureCompleteGuard = new moduleUnderTest.ClassicGoalRoundCompletionGuard({
+  goalRuntime: {
+    async recoverableWorkingRounds() { return [baseGoal]; },
+    async claimRoundRecovery() { prematureClaims += 1; return { claimed: false, reason: "must-not-claim" }; },
+    async roundRecovery() {},
+  },
+  now: () => Date.parse("2026-09-05T03:00:12.000Z"),
+  inspect: async () => ({
+    ...stablePageRoute,
+    chatMode: true,
+    generating: true,
+    streamStatus: "COMPLETE",
+    latestMessageRole: "user",
+    latestAssistantText: "This assistant report belongs to the previous round.",
+    latestAssistantMessageId: "assistant-previous-round",
+    turnRequestObservedAt: "2026-09-05T03:00:01.000Z",
+    turnFinishedObservedAt: null,
+  }),
+  dispatch: async () => { throw new Error("a still-generating turn must not dispatch recovery"); },
+  pollMs: 0,
+});
+await prematureCompleteGuard.pollOnce();
+const prematureComplete = await prematureCompleteGuard.pollOnce();
+assert.equal(prematureComplete.recovered, 0);
+assert.equal(prematureClaims, 0,
+  "stale COMPLETE plus the previous assistant report must not burn all recovery attempts during the current generation");
+
 const failedRuntimeCalls = { release: 0 };
 const failedGuard = new moduleUnderTest.ClassicGoalRoundCompletionGuard({
   goalRuntime: {
@@ -273,6 +321,7 @@ assert.equal(reentryClaims, 0, "a route entered after the old turn request must 
 assert.equal(reentry.results[0].reason, "reentry-or-unobserved-turn");
 
 await guard.close();
+await prematureCompleteGuard.close();
 await failedGuard.close();
 await uncertainGuard.close();
 await reentryGuard.close();

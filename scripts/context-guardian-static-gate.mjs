@@ -22,5 +22,6 @@ assert.doesNotMatch(cdp, /from\s+["']node:fs/, "Context Guardian CDP observer mu
 assert.doesNotMatch(cdp, /cookie\s*:/i, "Context Guardian observer must not construct or persist cookies");
 assert.doesNotMatch(cdp, /conduit_token|resume_conversation_token/i, "Context Guardian observer must not persist transient ChatGPT transport tokens");
 assert.doesNotMatch(cdp, /[,{]\s*accessToken\s*:|credentialsReturned\s*:\s*true|rawContentReturned\s*:\s*true/, "ephemeral access tokens and raw conversation content must never leave the in-page descriptor fetch");
+assert.match(cdp, /\/backend-api\/f\/conversation\/resume/, "Context Guardian must recognize hidden Goal continuation resume turns as native conversation requests");
 
-console.log(JSON.stringify({ ok: true, gate: "context-guardian-static", nativeCatalog: true, sanitizedAuthenticatedDescriptor: true, credentialsPersisted: false, rawContentReturned: false }));
+console.log(JSON.stringify({ ok: true, gate: "context-guardian-static", nativeCatalog: true, goalContinuationResumeObserved: true, sanitizedAuthenticatedDescriptor: true, credentialsPersisted: false, rawContentReturned: false }));

@@ -13,6 +13,10 @@ param(
 
     [switch]$NoPrimaryFallback,
 
+    [switch]$AllowControlledPrimarySnapshot,
+
+    [switch]$StartMinimized,
+
     [ValidateRange(5, 60)]
     [int]$VerifyTimeoutSeconds = 30
 )
@@ -185,7 +189,12 @@ function Start-InteractiveRuntime {
         "--remote-debugging-address=127.0.0.1",
         "--remote-debugging-port=$($Runtime.DebugPort)"
     )
-    Start-Process -FilePath $Runtime.AliasPath -ArgumentList $args | Out-Null
+    if ($StartMinimized) {
+        Start-Process -FilePath $Runtime.AliasPath -ArgumentList $args -WindowStyle Minimized | Out-Null
+    }
+    else {
+        Start-Process -FilePath $Runtime.AliasPath -ArgumentList $args | Out-Null
+    }
     $deadline = (Get-Date).AddSeconds($VerifyTimeoutSeconds)
     $current = Get-InteractiveRuntime -Number $Runtime.Number
     do {
@@ -486,17 +495,26 @@ switch ($Action) {
                         $sessionSourceLabel = "Main-01"
                     }
                     elseif ([string]$seed.reason -eq "source-locked") {
-                        $controlled = Invoke-ControlledPrimarySnapshot -Runtime $runtime -TimeoutSeconds $VerifyTimeoutSeconds
-                        $primaryRestarted = [bool]$controlled.PrimaryRestarted
-                        $primaryRestored = [bool]$controlled.PrimaryRestored
-                        $seededThisRun = [bool]$controlled.SessionSeeded
-                        $provisioningMode = "primary-controlled-snapshot"
-                        $sessionSourceRole = "primary"
-                        $sessionSourceLabel = "Main-01"
+                        if (-not $AllowControlledPrimarySnapshot) {
+                            $authRequired = $true
+                            $sessionSourceRole = "primary"
+                            $sessionSourceLabel = "Main-01"
+                        }
+                        else {
+                            $controlled = Invoke-ControlledPrimarySnapshot -Runtime $runtime -TimeoutSeconds $VerifyTimeoutSeconds
+                            $primaryRestarted = [bool]$controlled.PrimaryRestarted
+                            $primaryRestored = [bool]$controlled.PrimaryRestored
+                            $seededThisRun = [bool]$controlled.SessionSeeded
+                            $provisioningMode = "primary-controlled-snapshot"
+                            $sessionSourceRole = "primary"
+                            $sessionSourceLabel = "Main-01"
+                        }
                     }
-                    $runtime = Start-InteractiveRuntime -Runtime (Get-InteractiveRuntime -Number $MainNumber)
-                    $session = Test-InteractiveSignedIn -Runtime $runtime
-                    if (-not $session.SignedIn) { $authRequired = $true }
+                    if (-not $authRequired) {
+                        $runtime = Start-InteractiveRuntime -Runtime (Get-InteractiveRuntime -Number $MainNumber)
+                        $session = Test-InteractiveSignedIn -Runtime $runtime
+                        if (-not $session.SignedIn) { $authRequired = $true }
+                    }
                 }
             }
         }

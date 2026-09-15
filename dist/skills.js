@@ -7,6 +7,26 @@ import { expandHomePath, isPathInsideRoot } from "./roots.js";
 import { installedCapabilitySkillPaths } from "./capability-runtime.js";
 const SUBAGENT_DELEGATION_NAME = "subagent-delegation";
 const SUBAGENT_DELEGATION_SKILL = join(SUBAGENT_DELEGATION_NAME, "SKILL.md");
+function isNonBlockingSkillCollision(collision) {
+    if (collision?.resourceType !== "skill")
+        return false;
+    const winner = String(collision.winnerPath || "").replace(/\\/g, "/").toLowerCase();
+    const loser = String(collision.loserPath || "").replace(/\\/g, "/").toLowerCase();
+    const mirror = (value) => value.replace(/\/(?:\.claude|\.cursor)\/skills\//, "/<platform-mirror>/skills/");
+    // arjun988 packages intentionally mirror the same immutable skill tree for
+    // Claude and Cursor. The deterministic winner remains the .claude copy.
+    if (mirror(winner) === mirror(loser) && /\/<platform-mirror>\/skills\//.test(mirror(winner)))
+        return true;
+    // A user-installed skill deliberately takes precedence over a bundled or
+    // cached plugin copy. It is an authority decision, not a parse failure.
+    const userWinner = /\/(?:\.codex|\.agents)\/skills\//.test(winner);
+    const managedLoser = /\/(?:plugins\/packages|\.codex\/plugins\/cache)\//.test(loser);
+    if (userWinner && managedLoser)
+        return true;
+    // The local .agents tree is the explicit primary layer. The parallel
+    // .codex copy is a compatibility mirror, not an ambiguous authority.
+    return /\/\.agents\/skills\//.test(winner) && /\/\.codex\/skills\//.test(loser);
+}
 function bundledSkillsDir() {
     return fileURLToPath(new URL("../skills", import.meta.url));
 }
@@ -54,7 +74,8 @@ export function loadWorkspaceSkills(config, cwd) {
         skills: result.skills.filter((skill) => skill.name !== SUBAGENT_DELEGATION_NAME),
         diagnostics: result.diagnostics.filter((diagnostic) => {
             const collision = diagnostic.collision;
-            return !(collision?.resourceType === "skill" && collision.name === SUBAGENT_DELEGATION_NAME);
+            return !(collision?.resourceType === "skill" && collision.name === SUBAGENT_DELEGATION_NAME)
+                && !isNonBlockingSkillCollision(collision);
         }),
     };
 }

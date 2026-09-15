@@ -28,6 +28,22 @@ assert.match(server, /page\.generating !== true/,
   "stale idle pages cannot authorize a new direct tool call");
 assert.match(server, /mcpCallCorrelator\.waitForIdentity\(/,
   "late page-local invocation evidence may satisfy only the current bounded request waiter");
+assert.match(server, /activeTurnRegistry\.resolveGatewayCall\(/,
+  "one unique request-owned active-turn session alias may resolve direct tools when browser trace headers are absent");
+assert.match(server, /activeTurnRegistry\.waitForIdentity\(/,
+  "active-turn session correlation must remain bounded to the current request");
+assert.match(server, /sessionCorrelationFingerprintsFromHeaders\(req\?\.headers \|\| \{\}\)/,
+  "the direct request must contribute only hashed session aliases to active-turn correlation");
+assert.match(server, /const nativeSession = conversationAuthority\.resolveFingerprint\(sessionFingerprint\)/,
+  "a previously exact native ChatGPT session mapping may recover server-side connector calls");
+assert.match(server, /source:\s*"classic-native-session-page-verified"/,
+  "native session recovery must still pass exact live-page verification");
+const nativeSessionRecoveryStart = server.indexOf("const nativeSession = conversationAuthority.resolveFingerprint(sessionFingerprint)");
+const nativeSessionRecoveryEnd = server.indexOf("if (!capabilityAuthority?.conversationId && !progressAuthority?.conversationId)", nativeSessionRecoveryStart + 1);
+assert.ok(nativeSessionRecoveryStart >= 0 && nativeSessionRecoveryEnd > nativeSessionRecoveryStart);
+const nativeSessionRecovery = server.slice(nativeSessionRecoveryStart, nativeSessionRecoveryEnd);
+assert.doesNotMatch(nativeSessionRecovery, /observeNativeTurn|waitForFingerprint|observeVerifiedDirectSession/,
+  "a direct Gateway request must never create, refresh, or wait for native session ownership");
 assert.match(server, /requestConversationContext\.run\(/,
   "verified authority must remain request-scoped through AsyncLocalStorage");
 assert.match(server, /EXACT_CONVERSATION_REQUEST_PROOF/,
@@ -45,8 +61,6 @@ assert.doesNotMatch(server, /conversationAuthority\.waitForFingerprint\(sessionF
   "progress must not wait for or adopt a durable session mapping");
 assert.doesNotMatch(server, /runtimeKeyHint:\s*persistedRuntimeKey/,
   "a persisted Runtime must not select conversation ownership");
-assert.doesNotMatch(server, /activeTurnRegistry\.(?:resolveGatewayCall|waitForIdentity)\(/,
-  "browser-turn trace telemetry remains useful for liveness but cannot authorize a direct MCP tool request");
 
 assert.match(observer, /Network\.webSocketFrameReceived/,
   "the observer must consume ChatGPT's exact page-local tool stream");
@@ -66,11 +80,13 @@ assert.match(correlation, /candidatePairs/,
   "identical concurrent invocations require deterministic mutual-nearest matching");
 assert.match(correlation, /candidatePairs\[0\]\.skewMs === candidatePairs\[1\]\.skewMs/,
   "equal-distance ambiguity must fail closed");
-assert.match(correlation, /if \(!distributedTraces\.length && !trace\) return null/,
-  "active-turn authority requires an exact trace");
+assert.match(correlation, /requestSessionAliases/,
+  "active-turn authority may use only request-owned hashed session aliases");
+assert.match(correlation, /entry\.finishedAtMs !== null && entry\.finishedAtMs !== undefined/,
+  "session-only authority must expire immediately when the assistant turn completes");
 assert.doesNotMatch(correlation, /ClassicDirectRequestAuthorityRegistry/);
-assert.doesNotMatch(correlation, /correlationKind = "session"|correlationKind = "session-alias"/,
-  "session-only correlation is retired");
+assert.match(correlation, /correlationKind = "active-session-alias"/,
+  "a unique active-turn session alias must be explicit and request-scoped");
 assert.doesNotMatch(correlation, /correlationKind = "runtime-tool"|deferred-placeholder-correlation/,
   "Runtime and placeholder-only correlation are retired");
 
@@ -94,6 +110,8 @@ console.log(JSON.stringify({
   exactPageToolInvocationAuthority: true,
   canonicalArgumentsHashedOnly: true,
   requestScopedAuthority: true,
+  activeTurnSessionAliasBounded: true,
+  exactNativeSessionPageRecovery: true,
   durableDirectSessionAuthorityRetired: true,
   durableDirectTraceAuthorityRetired: true,
   runtimeAuthorityRetired: true,

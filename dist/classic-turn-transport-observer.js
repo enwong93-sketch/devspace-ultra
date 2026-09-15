@@ -21,7 +21,8 @@ function observedAt(ms = Date.now()) { return new Date(ms).toISOString(); }
 function isTurnUrl(url) {
   try {
     const parsed = new URL(String(url || ""));
-    return parsed.hostname === "chatgpt.com" && parsed.pathname === "/backend-api/f/conversation";
+    return parsed.hostname === "chatgpt.com"
+      && ["/backend-api/f/conversation", "/backend-api/f/conversation/resume"].includes(parsed.pathname);
   } catch { return false; }
 }
 

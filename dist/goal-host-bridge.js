@@ -276,10 +276,14 @@ export async function inspectVisibleReportCommit(candidate, options = {}) {
           if (!text || text.length > 260) return false;
           return /^(?:This request requires additional safety checks|Additional safety checks|此請求需要額外安全檢查|此请求需要额外安全检查|需要進行額外安全檢查|需要进行额外安全检查)/i.test(text);
         });
-        const assistants = [...document.querySelectorAll('[data-message-author-role="assistant"]')]
+        const messageNodes = [...document.querySelectorAll('[data-message-author-role]')];
+        const latestMessageNode = messageNodes.at(-1) || null;
+        const assistantNodes = messageNodes.filter((el) => el.getAttribute('data-message-author-role') === 'assistant');
+        const assistants = assistantNodes
           .map((el) => (el.innerText || '').trim())
           .filter(Boolean);
-        const latestAssistantText = assistants.at(-1) || '';
+        const latestAssistantNode = assistantNodes.at(-1) || null;
+        const latestAssistantText = String(latestAssistantNode?.innerText || '').trim();
         const match = location.pathname.match(/\\/c\\/([^/?#]+)/);
         const conversationId = match?.[1] || null;
         const lifecycleNow = Date.now();
@@ -327,6 +331,9 @@ export async function inspectVisibleReportCommit(candidate, options = {}) {
           retryVisible: retryButtons.length > 0,
           safetyCheckVisible,
           latestAssistantText,
+          latestMessageRole: latestMessageNode?.getAttribute('data-message-author-role') || null,
+          latestMessageId: latestMessageNode?.getAttribute('data-message-id') || null,
+          latestAssistantMessageId: latestAssistantNode?.getAttribute('data-message-id') || null,
           assistantCount: assistants.length,
           visibleMessageCount,
           conversationId,

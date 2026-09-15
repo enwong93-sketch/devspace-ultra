@@ -18,9 +18,10 @@ assert.match(source, /Ten minutes is a maximum silent interval for the working A
 assert.match(source, /rescue may emit only the exact visible text `- 繼續`/i);
 assert.match(source, /Write the card text yourself in natural language/i);
 assert.match(source, /never show generated step counters, heartbeat prose, generic program status/i);
-assert.match(source, /server\.registerTool\("devspace_progress_report"/);
+assert.match(source, /registerAppTool\(server, "devspace_progress_report"/);
 assert.match(source, /conversation-bound update to the floating DEV Space progress narration card in your own natural language/i);
-assert.match(source, /fails promptly and removes its request waiter when identity is unavailable or ambiguous/i);
+assert.match(source, /exact ChatGPT Classic page that received this result confirms a one-time claim/i);
+assert.match(source, /claimId:\s*z\.string\(\)\.min\(16\)\.max\(200\)\.optional\(\)/);
 assert.doesNotMatch(source, /after roughly ten substantive tool operations/i);
 
 assert.match(agents, /Call `devspace_progress_report` when a meaningful medium-sized step has completed/i);

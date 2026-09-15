@@ -10,13 +10,21 @@ const progressOverlay = await readFile(new URL("../dist/classic-progress-narrati
 const liveness = await readFile(new URL("../dist/conversation-progress-liveness.js", import.meta.url), "utf8");
 const livenessCdp = await readFile(new URL("../dist/conversation-progress-liveness-cdp.js", import.meta.url), "utf8");
 const transportObserver = await readFile(new URL("../dist/classic-turn-transport-observer.js", import.meta.url), "utf8");
+const progressClaims = await readFile(new URL("../dist/progress-claim-registry.js", import.meta.url), "utf8");
+const progressRelay = await readFile(new URL("../dist/ui/progress-claim-relay.html", import.meta.url), "utf8");
 
 assert.match(server, /const resolveCapabilityConversationAuthority = async \(extra\) =>/);
 assert.match(server, /const resolveProgressConversationAuthority = async \(extra\) =>/);
 assert.match(server, /const resolveConversationAuthority = resolveCapabilityConversationAuthority;/);
 assert.match(server, /const resolveConversation = resolveCapabilityConversationAuthority;/);
 assert.match(server, /const resolveProgressConversation = resolveProgressConversationAuthority;/);
-assert.match(server, /server\.registerTool\("devspace_progress_report"[\s\S]*const resolved = await resolveProgressConversation\(extra\);/);
+assert.match(server, /registerAppTool\(server, "devspace_progress_report"[\s\S]*const resolved = await resolveProgressConversation\(extra\);/);
+assert.match(server, /resourceUri:\s*PROGRESS_CLAIM_RELAY_URI/);
+assert.match(server, /resourceUri:\s*PROGRESS_CLAIM_RELAY_URI,[\s\S]{0,800}visibility:\s*\["model",\s*"app"\]/,
+  "the progress relay must be callable by the exact page MCP App as well as the model");
+assert.match(server, /progressClaimRegistry\.create\(\{ message:\s*reportMessage, kind \}\)/);
+assert.match(server, /claimId:\s*z\.string\(\)\.min\(16\)\.max\(200\)\.optional\(\)/);
+assert.match(server, /progressClaimRegistry\.claim\(/);
 
 const progressResolverStart = server.indexOf("const resolveProgressConversationAuthority = async (extra) =>");
 const progressResolverEnd = server.indexOf("const resolveConversationAuthority = resolveCapabilityConversationAuthority", progressResolverStart);
@@ -38,15 +46,28 @@ assert.match(server, /page\.progressCardMounted === true && page\.progressConver
 assert.match(server, /resolved\?\.pageVerified !== true \|\| !resolved\?\.runtimeKey \|\| !resolved\?\.callFingerprint/,
   "progress writes require exact page plus canonical tool invocation proof");
 assert.match(server, /ownershipProof:\s*EXACT_CONVERSATION_REQUEST_PROOF/);
+assert.match(progressClaims, /exact page-verified conversation authority/);
+assert.match(progressClaims, /another conversation page/);
+assert.match(progressClaims, /durableConversationOwners:\s*0/);
+assert.match(progressRelay, /window\.openai\.callTool\("devspace_progress_report"/);
+assert.doesNotMatch(progressRelay, /sendFollowUpMessage|prompt-textarea|composer/);
 
 assert.doesNotMatch(server, /resolveVerifiedDirectSession\(|persistVerifiedDirectSessionIdentity|directRequestAuthorityRegistry/,
   "durable direct-session and direct-trace authority is retired");
 assert.doesNotMatch(server, /conversationAuthority\.waitForFingerprint\(sessionFingerprint/,
   "progress must not wait for a reusable session owner");
-assert.doesNotMatch(server, /runtimeKeyHint:\s*persistedRuntimeKey|sessionFingerprintHint:\s*sessionFingerprint/,
-  "Runtime and host session are not conversation owners");
-assert.doesNotMatch(server, /activeTurnRegistry\.(?:resolveGatewayCall|waitForIdentity)\(/,
-  "browser turn traces cannot authorize direct MCP tools; exact page-local tool invocation evidence is required");
+assert.doesNotMatch(server, /runtimeKeyHint:\s*persistedRuntimeKey/,
+  "Runtime is not a conversation owner");
+assert.match(server, /activeTurnRegistry\.resolveGatewayCall\(/,
+  "the request may correlate to one unique currently active browser turn");
+assert.match(server, /activeTurnRegistry\.waitForIdentity\(/,
+  "active-turn correlation must remain bounded to the current request");
+assert.match(server, /sessionCorrelationFingerprintsFromHeaders\(req\?\.headers \|\| \{\}\)/,
+  "only request-owned hashed session aliases may be used as fallback evidence");
+assert.match(server, /conversationAuthority\.resolveFingerprint\(sessionFingerprint\)/,
+  "exact native ChatGPT session history may be reused only as an input to current page verification");
+assert.match(server, /requireCurrentSession:\s*true[\s\S]*source:\s*"classic-native-session-page-verified"/,
+  "native session recovery must verify the current request and exact page before entering any authority domain");
 assert.doesNotMatch(server, /verifyProgressConversationAuthority/,
   "the retired session/page fallback module must not remain wired");
 
@@ -54,8 +75,9 @@ assert.match(requestContext, /capabilityAuthority/);
 assert.match(requestContext, /progressAuthority/);
 assert.match(requestContext, /progressAuthorityPromise/);
 assert.match(requestContext, /AsyncLocalStorage/);
-assert.match(correlation, /if \(!distributedTraces\.length && !trace\) return null/);
-assert.doesNotMatch(correlation, /correlationKind = "session"|correlationKind = "session-alias"|correlationKind = "runtime-tool"/);
+assert.match(correlation, /requestSessionAliases/);
+assert.match(correlation, /correlationKind = "active-session-alias"/);
+assert.doesNotMatch(correlation, /correlationKind = "runtime-tool"/);
 assert.doesNotMatch(correlation, /ClassicDirectRequestAuthorityRegistry/);
 assert.match(correlation, /gatewayRequestId/,
   "resolved canonical calls may be reused only by the exact Gateway request that created them");
@@ -102,6 +124,9 @@ console.log(JSON.stringify({
   capabilityAuthorityIsolated: true,
   exactPageInvocationJoin: true,
   exactGatewayRequestBinding: true,
+  exactPageClaimRelay: true,
+  activeTurnSessionAliasBounded: true,
+  exactNativeSessionPageRecovery: true,
   durableSessionAuthorityRetired: true,
   runtimeAuthorityRetired: true,
   legacyProgressRowsDiagnosticOnly: true,

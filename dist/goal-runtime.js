@@ -652,7 +652,20 @@ export class GoalRuntime {
       return { goal: clone(goal), claimed: false, reason: "recovery-cooldown" };
     }
 
-    const attempt = Number(recovery.attempts ?? 0) + 1;
+    let priorAttempts = Number(recovery.attempts ?? 0);
+    // The attempt cap is a burst guard, not a permanent dead state. A round
+    // that reached the cap because the page was still genuinely generating
+    // must become recoverable again after the bounded cooldown once the
+    // terminal evidence is safe. Successfully dispatched episodes remain
+    // permanently closed by the distinct `dispatched` state above.
+    if (
+      recovery.state === "idle"
+      && priorAttempts >= MAX_ROUND_RECOVERY_ATTEMPTS
+      && (!Number.isFinite(retryAfterMs) || this.now() >= retryAfterMs)
+    ) {
+      priorAttempts = 0;
+    }
+    const attempt = priorAttempts + 1;
     if (attempt > MAX_ROUND_RECOVERY_ATTEMPTS) {
       return { goal: clone(goal), claimed: false, reason: "recovery-attempt-limit", exhausted: true };
     }

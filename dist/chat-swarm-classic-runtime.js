@@ -14,6 +14,7 @@ const identityScript = resolve(packageRoot, "scripts", "chat-swarm-classic-runti
 const interactiveRuntimeScript = resolve(packageRoot, "scripts", "chat-classic-interactive-runtime.ps1");
 const interactiveOrchestratorScript = resolve(packageRoot, "scripts", "chat-classic-main-orchestrator.ps1");
 const interactiveAuthScript = resolve(packageRoot, "scripts", "chat-classic-interactive-auth-live-gate.ps1");
+const classicOperationsScript = resolve(packageRoot, "scripts", "chat-swarm-classic-operations.ps1");
 const MAX_OUTPUT = 4 * 1024 * 1024;
 
 const READ_ONLY = {
@@ -239,6 +240,20 @@ async function runUpdateManager(action, input = {}, timeoutMs = 300_000) {
   try { parsed = output ? JSON.parse(output) : {}; }
   catch { throw new Error(`Update manager returned invalid JSON: ${output}`); }
   return { ...parsed, stderr: errorText || undefined };
+}
+
+async function runClassicOperations(action, input = {}, timeoutMs = 90_000) {
+  if (process.platform !== "win32") throw new Error("ChatGPT Classic operations are currently supported only on Windows.");
+  const args = ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", classicOperationsScript, "-Action", action];
+  if (input.worker !== undefined) args.push("-Worker", String(input.worker));
+  if (input.label !== undefined) args.push("-Label", String(input.label));
+  if (input.specialization !== undefined) args.push("-Specialization", String(input.specialization));
+  const { stdout, stderr } = await execFileAsync("powershell.exe", args, { cwd: packageRoot, windowsHide: true, timeout: timeoutMs, maxBuffer: MAX_OUTPUT, encoding: "utf8" });
+  const output = String(stdout || "").trim();
+  let parsed;
+  try { parsed = output ? JSON.parse(output) : {}; }
+  catch { throw new Error(`Classic operations returned invalid JSON: ${output.slice(0, 2_000)}`); }
+  return { ...parsed, stderr: String(stderr || "").trim() || undefined };
 }
 
 const poolSchema = {
@@ -715,6 +730,67 @@ export function registerChatSwarmClassicRuntimeTools(server, coordinator) {
     try {
       const result = await runController("status", input, 45_000);
       return textResult(result, result.output || "Runtime status completed.");
+    }
+    catch (error) { return errorResult(error); }
+  });
+
+  server.registerTool("chat_swarm_classic_overview", {
+    title: "ChatGPT Classic Operations Overview",
+    description: "Read a sanitized Classic Chat operations overview: provisioned and parked Worker runtimes, live health when present, optional operator labels/specializations, and no Worker autostart. This never launches, minimizes, navigates, or repairs a runtime.",
+    inputSchema: {},
+    annotations: READ_ONLY,
+  }, async () => {
+    try {
+      const result = await runClassicOperations("overview");
+      return textResult(result, `Classic overview: provisioned=${result.summary?.provisioned ?? 0}, online=${result.summary?.online ?? 0}, parked=${result.summary?.parked ?? 0}, needs-login=${result.summary?.needsLogin ?? 0}.`);
+    }
+    catch (error) { return errorResult(error); }
+  });
+
+  server.registerTool("chat_swarm_classic_diagnostics", {
+    title: "ChatGPT Classic Sanitized Diagnostics",
+    description: "Produce a sanitized, read-only diagnostic snapshot for Classic Chat runtime/task configuration. It excludes cookies, tokens, conversation content, profile paths, and raw PowerShell errors.",
+    inputSchema: {},
+    annotations: READ_ONLY,
+  }, async () => {
+    try {
+      const result = await runClassicOperations("diagnostics");
+      return textResult(result, "Classic Chat diagnostics collected without changing any runtime.");
+    }
+    catch (error) { return errorResult(error); }
+  });
+
+  server.registerTool("chat_swarm_classic_worker_metadata", {
+    title: "Configure Classic Chat Worker Label",
+    description: "Store or clear an optional local display label and specialization for one Worker. Metadata affects only operator diagnostics; it never changes routing, Worker priority, credentials, package registration, or autostart.",
+    inputSchema: {
+      worker: z.number().int().min(1).max(32),
+      label: z.string().max(80).default(""),
+      specialization: z.string().max(240).default(""),
+    },
+    annotations: MUTATING,
+  }, async (input) => {
+    try {
+      const result = await runClassicOperations("metadata-set", input);
+      return textResult(result, `Worker-${String(input.worker).padStart(2, "0")} metadata saved. Routing remains unchanged.`);
+    }
+    catch (error) { return errorResult(error); }
+  });
+
+  server.registerTool("chat_swarm_classic_quick_action", {
+    title: "Run Classic Chat Quick Action",
+    description: "Single-action controller shortcut for already configured Worker runtimes. Start, minimize, repair, and stop retain the existing controller's Main-01 and protected-runtime safeguards; this tool never changes autostart policy.",
+    inputSchema: {
+      action: z.enum(["start", "minimize", "repair", "stop"]),
+      workers: z.array(z.number().int().min(1).max(32)).max(32).optional(),
+      worker: z.number().int().min(1).max(32).optional(),
+    },
+    annotations: MUTATING,
+  }, async (input) => {
+    try {
+      if (input.action === "repair" && input.worker === undefined) throw new Error("repair requires one worker number.");
+      const result = await runController(input.action, input, input.action === "repair" ? 180_000 : 120_000);
+      return textResult(result, `Classic Chat ${input.action} action completed through the protected controller.`);
     }
     catch (error) { return errorResult(error); }
   });

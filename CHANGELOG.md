@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## 0.5.8 — 2026-09-15
+
+- Kept direct DevSpace tools bound to the active native ChatGPT turn across deferred calls, schema refreshes and Stable Gateway session resurrection. A stale MCP transport, previous tool call or prior conversation can no longer borrow the current turn, while the owning conversation keeps its writable tools without repeated correlation stalls.
+- Added exact-page progress claims and a bounded relay so Agent-authored narration, Goal/Plan ownership and automatic Goal continuation survive renderer reloads without Runtime-only authority, foreground activation, page navigation or cross-conversation projection.
+- Stabilized hidden Goal resume observation and completion recovery. A resumed round is accepted only from the exact owning conversation, duplicate recovery is suppressed, and normal completion or cancellation disarms the episode.
+- Prioritized writable DevSpace workspace tools ahead of read-only or compatibility surfaces after tool-list refresh, preventing a refreshed host from selecting a weaker alias when the native mutation tool is available.
+- Added the canonical Windows logon startup task for Stable Gateway plus Main-01 through Main-05. Secondary Mains start minimized with verified signed-in sessions; Worker runtimes are explicitly excluded from autostart.
+- Hardened local ingress startup, canonical Main runtime recovery, progress-overlay remounting and MCP session persistence, with regression gates for exact claims, schema refresh, no-navigation recovery, Main/Worker isolation and canonical startup.
+- Fixed cross-platform CI to install native dependencies with `npm ci`, so the real `better-sqlite3` OAuth/state boundary is tested instead of failing from an intentionally incomplete install. The Windows-only local-ingress regression now runs through a platform gate instead of invoking `powershell.exe` on macOS or Linux.
+- Kept the canonical Main-01 debug guard Windows-only at server construction time. macOS and Linux now run the portable HTTP/OAuth release tests without requiring Windows snapshot/repair adapters, while Windows production still starts, polls and closes the real guard.
+- Removed a cross-platform timing assumption from the process-session cleanup gate. The test now follows the documented streaming contract—output may arrive just before the process-close event—and polls within a bounded deadline before asserting final disposal.
+- Made workspace-identity regression assertions follow host filesystem semantics: exact-root reuse is tested everywhere, while case-insensitive path aliasing is asserted only on Windows where that behavior is required.
+- Added the white 26-second Traditional Chinese v0.5 launch video as a GitHub release asset.
+
 ## 0.5.7 — 2026-09-13
 
 - Replaced reusable direct-session, direct-trace, Runtime-only, and deferred-placeholder ownership with an exact page-local tool-invocation join. DevSpace now observes the owning ChatGPT conversation response/WebSocket stream, hashes the canonical tool name and arguments, joins that evidence to one bounded Gateway request, re-verifies the unique live page, and discards the authority when that request ends.

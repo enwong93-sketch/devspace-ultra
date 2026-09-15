@@ -21,7 +21,12 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
-      - run: npm install --ignore-scripts --no-audit --no-fund
+          cache: npm
+      # DevSpace uses better-sqlite3 in its real OAuth/state boundary.  CI must
+      # install the native binding instead of suppressing dependency scripts;
+      # otherwise every platform reaches the OAuth tests with a deliberately
+      # incomplete node_modules tree and reports a false product failure.
+      - run: npm ci --no-audit --no-fund
       - run: npm run build
       - run: npm pack --dry-run
       - name: Validate shell installer

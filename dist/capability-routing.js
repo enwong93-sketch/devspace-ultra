@@ -240,6 +240,11 @@ function scoreCandidate(queryPhrase, queryTerms, candidate) {
   score += Math.round(coverage * 24);
   score += candidate.priority;
   score += KIND_BONUS[candidate.kind] ?? 0;
+  // A long maintenance query that happens to contain one ecosystem word (for
+  // example "DevSpace") must not be hijacked by an unrelated high-priority
+  // Blender/runtime route. Preserve concise one-keyword discovery, but require
+  // meaningful semantic coverage before implicitly selecting from rich queries.
+  if (!explicit && queryTerms.length >= 4 && coverage < 0.18) score = 0;
   if (!explicit && matchedTerms === 0 && matchedFields.size === 0) score = 0;
 
   let blockedReason = null;

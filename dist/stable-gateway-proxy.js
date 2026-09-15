@@ -187,11 +187,13 @@ export function createStableGatewayProxy({
     };
   };
 
-  const assertSessionSchemaCompatible = (descriptor, current) => {
-    if (!descriptor?.initialized) return;
+  const assertSessionSchemaCompatible = (descriptor, current, { allowSchemaChange = false } = {}) => {
+    if (!descriptor?.initialized) return false;
     if (!descriptor.schemaFingerprint || descriptor.schemaFingerprint !== current.schemaFingerprint) {
+      if (allowSchemaChange) return true;
       throw new StaleSessionSchemaError();
     }
+    return false;
   };
 
   const stampInitializedSessionSchema = async (core, publicSessionId, authorization) => {
@@ -301,16 +303,18 @@ export function createStableGatewayProxy({
         authorization: currentAuthorization,
         backendSessionId,
       });
-      try {
-        assertSessionSchemaCompatible(descriptor, currentSchema);
-      } catch (error) {
-        registry.remove?.(id);
-        throw error;
-      }
+      // A restored public session may legitimately carry a descriptor from an
+      // older Core build. Returning 404 here made ChatGPT disable the entire
+      // MCP namespace instead of issuing a fresh tools/list. Keep the stable
+      // public session, adopt the current Core schema, and let the initialized
+      // notification/tool-list refresh bring the host catalog forward. Strict
+      // schema rejection remains in replaySessionsToCore, where a handover is
+      // explicitly validating a candidate build before promotion.
+      const schemaChanged = assertSessionSchemaCompatible(descriptor, currentSchema, { allowSchemaChange: true });
       registry.commitMappings([{ publicSessionId: id, coreId: currentCore.id, backendSessionId }]);
       registry.updateAuthorization(id, currentAuthorization);
       registry.updateSchema?.(id, currentSchema);
-      return registry.lookup(id);
+      return { ...registry.lookup(id), schemaChanged };
     })().finally(() => resurrectionLocks.delete(id));
     resurrectionLocks.set(id, promise);
     return await promise;
