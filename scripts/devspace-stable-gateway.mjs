@@ -282,7 +282,15 @@ export function stableGatewayOptionsFromEnvironment(env = process.env) {
       },
       dependencies: {
         createCandidateSnapshot,
-        startCoreSlot: (options) => startCoreSlot({ ...options, nodeArgs: coreNodeArgs, allowDiagnosticGc: true }),
+        startCoreSlot: (options) => startCoreSlot({
+          ...options,
+          runtimeEnvOverrides: {
+            ...(options.runtimeEnvOverrides ?? {}),
+            DEVSPACE_CLASSIC_UI_OWNER_PRIORITY: "100",
+          },
+          nodeArgs: coreNodeArgs,
+          allowDiagnosticGc: true,
+        }),
         stopCoreSlot,
         probeCandidate,
         readCoreSchemaFingerprint,

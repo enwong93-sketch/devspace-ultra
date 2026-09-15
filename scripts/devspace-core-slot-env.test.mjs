@@ -11,6 +11,7 @@ const contaminated = {
   DEVSPACE_TOOL_MODE: "minimal",
   DEVSPACE_CONTEXT_GUARDIAN: "false",
   DEVSPACE_CLASSIC_HOST_OVERLAY: "false",
+  DEVSPACE_CLASSIC_UI_OWNER_PRIORITY: "999",
   DEVSPACE_CLASSIC_STREAM_RECOVERY: "false",
   DEVSPACE_AUTO_COMPACT: "false",
   DEVSPACE_PLUGIN_PATHS: "C:\\wrong\\plugins",
@@ -42,6 +43,7 @@ for (const key of [
   "DEVSPACE_TOOL_MODE",
   "DEVSPACE_CONTEXT_GUARDIAN",
   "DEVSPACE_CLASSIC_HOST_OVERLAY",
+  "DEVSPACE_CLASSIC_UI_OWNER_PRIORITY",
   "DEVSPACE_CLASSIC_STREAM_RECOVERY",
   "DEVSPACE_AUTO_COMPACT",
   "DEVSPACE_PLUGIN_PATHS",
@@ -54,6 +56,7 @@ const candidate = buildCoreEnvironment({ ...common, candidate: true });
 assert.equal(candidate.DEVSPACE_PASSIVE_CORE, "true");
 assert.equal(candidate.DEVSPACE_CONTEXT_GUARDIAN, "false");
 assert.equal(candidate.DEVSPACE_CLASSIC_HOST_OVERLAY, "false");
+assert.equal(candidate.DEVSPACE_CLASSIC_UI_OWNER_PRIORITY, "0");
 assert.equal(candidate.DEVSPACE_CLASSIC_STREAM_RECOVERY, "false");
 assert.equal(candidate.DEVSPACE_AUTO_COMPACT, "false");
 for (const key of [
@@ -74,10 +77,12 @@ const explicit = buildCoreEnvironment({
   runtimeEnvOverrides: {
     DEVSPACE_TOOL_MODE: "codex",
     DEVSPACE_PLUGINS: "false",
+    DEVSPACE_CLASSIC_UI_OWNER_PRIORITY: "100",
   },
 });
 assert.equal(explicit.DEVSPACE_TOOL_MODE, "codex", "isolated tests may pass explicit feature overrides");
 assert.equal(explicit.DEVSPACE_PLUGINS, "false");
+assert.equal(explicit.DEVSPACE_CLASSIC_UI_OWNER_PRIORITY, "100");
 
 console.log(JSON.stringify({
   ok: true,

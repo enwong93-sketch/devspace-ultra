@@ -11,6 +11,10 @@ const [source, agents, toolProgress, gateway, productionJournal, livenessCdp] = 
 ]);
 
 assert.match(source, /exactly one conversation-scoped floating progress narration card/i);
+assert.match(source, /MANDATORY INTERACTIVE PROGRESS PREFLIGHT/);
+assert.match(source, /call devspace_progress_report before the first substantive work tool/i);
+assert.match(source, /pending claim, unbound identity, unavailable recipient, timeout, or omitted tool is not proof that the card was updated/i);
+assert.match(source, /never falsely claim that the card was updated/i);
 assert.match(source, /neither tool events nor timers may author visible narration/i);
 assert.match(source, /personally judge that a meaningful medium-sized step has completed/i);
 assert.match(source, /never leave more than ten minutes between Agent-authored reports/i);
@@ -23,7 +27,16 @@ assert.match(source, /conversation-bound update to the floating DEV Space progre
 assert.match(source, /exact ChatGPT Classic page that received this result confirms a one-time claim/i);
 assert.match(source, /claimId:\s*z\.string\(\)\.min\(16\)\.max\(200\)\.optional\(\)/);
 assert.doesNotMatch(source, /after roughly ten substantive tool operations/i);
+assert.equal(
+  (source.match(/return `\$\{mandatoryProgressPreflightInstruction\} Use DevSpace as a local coding workspace/g) || []).length,
+  3,
+  "every Codex, Ultra, and minimal server-instruction branch must lead with the mandatory progress preflight",
+);
 
+assert.match(agents, /## Mandatory interactive progress preflight/);
+assert.match(agents, /call `devspace_progress_report` \*\*before the first substantive work tool\*\*/i);
+assert.match(agents, /A `pending` claim, unresolved or unbound conversation identity, unavailable recipient, omitted tool, or timeout is not proof/i);
+assert.match(agents, /never claim that the card was updated/i);
 assert.match(agents, /Call `devspace_progress_report` when a meaningful medium-sized step has completed/i);
 assert.match(agents, /ten minutes is an Agent reporting ceiling only/i);
 assert.match(agents, /No timer, supervisor, overlay, or hidden relay may send a ten-minute reminder/i);
@@ -50,6 +63,9 @@ console.log(JSON.stringify({
   ok: true,
   gate: "interactive-progress-instructions",
   explicitProgressEntryPoint: "devspace_progress_report",
+  openingPreflightRequired: true,
+  pendingClaimIsNotSuccess: true,
+  allToolModesPrependPreflight: true,
   agentAuthoredOnly: true,
   timerDrivenNarration: false,
   fixedCountNarration: false,

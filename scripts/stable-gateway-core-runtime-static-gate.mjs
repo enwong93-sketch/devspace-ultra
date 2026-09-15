@@ -16,7 +16,8 @@ assert.match(coreSlot, /pathSource:\s*preparedEnvironment\.pathSource/);
 assert.match(gateway, /DEVSPACE_STABLE_GATEWAY_CORE_HEAP_PROFILE/);
 assert.match(gateway, /stableGatewayCoreHeapProfile/);
 assert.match(gateway, /nodeArgsForCoreHeapProfile/);
-assert.match(gateway, /startCoreSlot:\s*\(options\)\s*=>\s*startCoreSlot\(\{\s*\.\.\.options,\s*nodeArgs:\s*coreNodeArgs,\s*allowDiagnosticGc:\s*true\s*\}\)/s);
+assert.match(gateway, /startCoreSlot:\s*\(options\)\s*=>\s*startCoreSlot\(\{[\s\S]*\.\.\.options,[\s\S]*DEVSPACE_CLASSIC_UI_OWNER_PRIORITY:\s*"100"[\s\S]*nodeArgs:\s*coreNodeArgs,[\s\S]*allowDiagnosticGc:\s*true[\s\S]*\}\)/s,
+  "Stable Gateway must wire system heap settings and the canonical Classic UI owner priority into every active Core slot");
 assert.match(heap, /system:\s*Object\.freeze\(\["--expose-gc"\]\)/);
 assert.match(heap, /LEGACY_UNBOUNDED_ALIASES/);
 assert.match(heap, /memory caps are forbidden/);

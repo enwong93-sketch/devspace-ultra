@@ -98,10 +98,10 @@ try {
   }), "utf8");
   const legacyDirectRegistry = new ClassicConversationAuthorityRegistry({ statePath: legacyDirectPath });
   await legacyDirectRegistry.load();
-  const retiredDirect = legacyDirectRegistry.snapshot().sessions[0];
-  assert.equal(retiredDirect.verifiedDirectSession, false,
-    "legacy persisted direct-session ownership must be retired on load");
-  assert.equal(retiredDirect.verifiedDirectSessionAt, null);
+  assert.equal(legacyDirectRegistry.snapshot().sessions.length, 0,
+    "legacy persisted direct-session ownership must be removed completely on load");
+  assert.equal(legacyDirectRegistry.resolveFingerprint(directFingerprint), null,
+    "retiring the legacy flag must not leave its stale conversation mapping reusable");
   assert.equal(typeof legacyDirectRegistry.observeVerifiedDirectSession, "undefined");
   assert.equal(typeof legacyDirectRegistry.resolveVerifiedDirectSession, "undefined");
   assert.equal(legacyDirectRegistry.diagnostics().verifiedDirectSessions, 0);

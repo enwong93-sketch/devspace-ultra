@@ -35,6 +35,8 @@ assert.match(stableGateway, /stableGatewayPublicBaseUrl[\s\S]*edgePublicBaseUrl/
 assert.match(stableGateway, /stableGatewayStateDir[\s\S]*edgeFixedStateDir/, "Stable Gateway must prefer generic production state ownership while retaining legacy edge fallback");
 assert.match(stableGateway, /stableGatewayPort[\s\S]*edgeBackendPort/, "Stable Gateway must prefer generic production listener config while retaining legacy edge fallback");
 assert.match(stableGateway, /stableGatewayCoreAPort[\s\S]*stableGatewayCoreBPort/, "Stable Gateway must allow explicit private Core A/B ports");
+assert.match(stableGateway, /DEVSPACE_CLASSIC_UI_OWNER_PRIORITY:\s*"100"/, "Stable Gateway active Core must outrank ordinary standalone Core UI projection");
+assert.match(coreSlot, /candidate[\s\S]*DEVSPACE_CLASSIC_UI_OWNER_PRIORITY:\s*"0"/i, "candidate Core must never compete for the Classic UI owner lease");
 assert.match(stableGateway, /readCoreSchemaFingerprint/, "runtime wiring must probe active-Core schema through a fresh ephemeral MCP session instead of trusting a stale backend session id");
 assert.match(stableGateway, /probeCandidate/, "runtime wiring must provide candidate compatibility probing");
 assert.match(stableGateway, /__devspace\/gateway\/handover/, "Gateway must expose a private handover control endpoint");

@@ -108,6 +108,15 @@ export class ClassicConversationAuthorityRegistry {
     try { parsed = JSON.parse((await readFile(this.statePath, "utf8")).replace(/^\uFEFF/, "")); } catch {}
     this.entries.clear();
     for (const item of Array.isArray(parsed?.sessions) ? parsed.sessions : []) {
+      if (item?.verifiedDirectSession === true || item?.verifiedDirectSessionAt) {
+        // Pre-v0.5.7 direct-session rows were reusable ownership grants, not
+        // native browser observations. Retiring only their boolean flag while
+        // retaining the conversation mapping would let the same stale session
+        // regain authority whenever that old page happens to be generating.
+        // Drop the whole legacy row; a real native ChatGPT turn can repopulate
+        // the fingerprint through observeNativeTurn.
+        continue;
+      }
       const fingerprint = String(item?.fingerprint || "").trim();
       if (!/^[a-f0-9]{64}$/i.test(fingerprint)) continue;
       this.entries.set(fingerprint, cleanEntry(fingerprint, item));

@@ -141,6 +141,10 @@ assert.match(script, /legacyFrames\.some\(\(frame\) => ancestor\.contains\(frame
 assert.match(script, /retiredLegacyInlineApps/);
 assert.match(script, /retiredLegacyInlineErrors/);
 assert.match(script, /LEASE_MS/);
+assert.match(script, /PRODUCER_LEASE_MS/);
+assert.match(script, /suppressedByProducerLease/);
+assert.match(script, /ownerProducerPriority/);
+assert.match(script, /pageMutationCount:0/);
 assert.match(script, /devspace-progress-scroll/);
 assert.match(script, /data-action = 'older'|dataset\.action = 'older'/);
 assert.match(script, /data-action = 'newer'|dataset\.action = 'newer'/);
@@ -192,6 +196,8 @@ try {
     goalStatePath,
     pollMs: 1_000,
     now: () => now,
+    producerId: "stable-gateway-core",
+    producerPriority: 100,
   });
   const synced = await overlay.start({ schedule: false });
   assert.equal(synced.connected, 2);
@@ -200,6 +206,8 @@ try {
   assert.equal(evaluations.every((item) => item.expression.includes("我已核對 SSE reconnect")), true);
   assert.equal(evaluations.every((item) => item.expression.includes("我已完成 Main 01 角色輪廓修正")), true);
   assert.equal(evaluations.every((item) => !item.expression.includes("第 10 個已驗證工具步驟")), true);
+  assert.equal(evaluations.every((item) => item.expression.includes('const PRODUCER_ID = "stable-gateway-core"')), true);
+  assert.equal(evaluations.every((item) => item.expression.includes("const PRODUCER_PRIORITY = 100")), true);
   const inspected = await overlay.inspect("main-02");
   assert.equal(inspected.visible, true);
   await overlay.close();
