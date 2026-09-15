@@ -153,3 +153,7 @@ finally {
     Remove-Item Env:DEVSPACE_UPDATE_TEST_FAIL_AFTER_SWAP -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $temp -Recurse -Force -ErrorAction SilentlyContinue
 }
+
+# PowerShell 7 otherwise propagates the expected injected child failure's
+# native exit code even though the rollback assertions above succeeded.
+$global:LASTEXITCODE = 0
