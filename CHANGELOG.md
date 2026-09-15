@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Added a mandatory interactive progress preflight to every Local Gateway model-instruction mode. Qualifying Main tasks must write a concise opening `devspace_progress_report` before substantive work; an unbound or pending claim is explicitly not treated as a successful card update, and the exact-conversation bridge is the verified fallback.
+- Fully discard persisted pre-v0.5.7 verified-direct-session authority rows on load. Clearing only their legacy flag left the stale session-to-conversation mapping reusable whenever its old page was generating; the real-Core canary now proves that replay fails closed while the page remains open.
+
 ## 0.5.8 — 2026-09-15
 
 - Kept direct DevSpace tools bound to the active native ChatGPT turn across deferred calls, schema refreshes and Stable Gateway session resurrection. A stale MCP transport, previous tool call or prior conversation can no longer borrow the current turn, while the owning conversation keeps its writable tools without repeated correlation stalls.
