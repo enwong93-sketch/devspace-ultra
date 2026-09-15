@@ -13,7 +13,18 @@ for (let index = 1; index <= 6; index += 1) assert.ok(registry.workspaces.has(`w
 
 const shared = { id: "ws-shared", root: "C:/Project/Same", mode: "checkout", skills: [], skillDiagnostics: [] };
 registry.rememberWorkspace(shared);
-assert.equal(registry.workspaceIdentities.get(registry.workspaceIdentity("c:/project/same", "checkout")), shared, "Windows path identity must be case-insensitive");
+assert.equal(
+  registry.workspaceIdentities.get(registry.workspaceIdentity("C:/Project/Same", "checkout")),
+  shared,
+  "same-root identity must be stable on every platform",
+);
+if (process.platform === "win32") {
+  assert.equal(
+    registry.workspaceIdentities.get(registry.workspaceIdentity("c:/project/same", "checkout")),
+    shared,
+    "Windows path identity must be case-insensitive",
+  );
+}
 
 const aliasStore = {
   touchSession() {},

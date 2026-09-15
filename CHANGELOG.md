@@ -13,6 +13,7 @@
 - Fixed cross-platform CI to install native dependencies with `npm ci`, so the real `better-sqlite3` OAuth/state boundary is tested instead of failing from an intentionally incomplete install. The Windows-only local-ingress regression now runs through a platform gate instead of invoking `powershell.exe` on macOS or Linux.
 - Kept the canonical Main-01 debug guard Windows-only at server construction time. macOS and Linux now run the portable HTTP/OAuth release tests without requiring Windows snapshot/repair adapters, while Windows production still starts, polls and closes the real guard.
 - Removed a cross-platform timing assumption from the process-session cleanup gate. The test now follows the documented streaming contract—output may arrive just before the process-close event—and polls within a bounded deadline before asserting final disposal.
+- Made workspace-identity regression assertions follow host filesystem semantics: exact-root reuse is tested everywhere, while case-insensitive path aliasing is asserted only on Windows where that behavior is required.
 - Added the white 26-second Traditional Chinese v0.5 launch video as a GitHub release asset.
 
 ## 0.5.7 — 2026-09-13
