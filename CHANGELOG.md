@@ -10,7 +10,7 @@
 - Prioritized writable DevSpace workspace tools ahead of read-only or compatibility surfaces after tool-list refresh, preventing a refreshed host from selecting a weaker alias when the native mutation tool is available.
 - Added the canonical Windows logon startup task for Stable Gateway plus Main-01 through Main-05. Secondary Mains start minimized with verified signed-in sessions; Worker runtimes are explicitly excluded from autostart.
 - Hardened local ingress startup, canonical Main runtime recovery, progress-overlay remounting and MCP session persistence, with regression gates for exact claims, schema refresh, no-navigation recovery, Main/Worker isolation and canonical startup.
-- Fixed cross-platform CI to install native dependencies with `npm ci`, so the real `better-sqlite3` OAuth/state boundary is tested instead of failing from an intentionally incomplete install.
+- Fixed cross-platform CI to install native dependencies with `npm ci`, so the real `better-sqlite3` OAuth/state boundary is tested instead of failing from an intentionally incomplete install. The Windows-only local-ingress regression now runs through a platform gate instead of invoking `powershell.exe` on macOS or Linux.
 - Added the white 26-second Traditional Chinese v0.5 launch video as a GitHub release asset.
 
 ## 0.5.7 — 2026-09-13
