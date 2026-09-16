@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { createConnection, createServer as createNetServer } from "node:net";
 import { closeSync, existsSync, openSync } from "node:fs";
 import { mkdir, readFile } from "node:fs/promises";
@@ -22,6 +22,10 @@ function normalizeRuntimeId(value) {
   const text = clean(value, 120) || `blender-${randomUUID().slice(0, 8)}`;
   if (!/^[A-Za-z0-9._-]+$/.test(text)) throw new Error("runtimeId may contain only letters, numbers, dot, underscore, and hyphen.");
   return text;
+}
+
+function runtimeConnectionOwnerId(runtimeId) {
+  return `blender-runtime:${normalizeRuntimeId(runtimeId)}`;
 }
 
 function normalizePort(value) {
@@ -155,11 +159,16 @@ async function discoverBlenderExecutable(explicit) {
   throw new Error("Blender executable was not found. Start Blender once, set BLENDER_EXECUTABLE, or pass executable explicitly.");
 }
 
-function publicRuntime(runtime) {
+function publicRuntime(runtime, currentConversationId = null) {
+  const currentConversation = clean(currentConversationId, 200);
   return {
     runtimeId: runtime.runtimeId,
-    ownerConversationId: runtime.ownerConversationId,
+    ownerConversationId: null,
+    lastConversationId: runtime.lastConversationId || null,
     ownerLabel: runtime.ownerLabel,
+    conversationLocked: false,
+    identityBasis: "runtime-process-port",
+    preferredByCurrentConversation: Boolean(currentConversation && runtime.lastConversationId === currentConversation),
     state: runtime.state,
     host: LOOPBACK,
     port: runtime.port,
@@ -167,7 +176,7 @@ function publicRuntime(runtime) {
     processAlive: processAlive(runtime.processId),
     portOnline: runtime.portOnline === true,
     managedProcess: runtime.managedProcess === true,
-    defaultForOwner: runtime.defaultForOwner === true,
+    defaultForOwner: false,
     blendFile: runtime.blendFile || null,
     executable: runtime.executable || null,
     createdAt: runtime.createdAt,
@@ -236,12 +245,11 @@ export class BlenderRuntimeManager {
         const port = normalizePort(source.port);
         const runtime = {
           runtimeId,
-          ownerConversationId: clean(source.ownerConversationId, 200),
+          lastConversationId: clean(source.lastConversationId ?? source.ownerConversationId, 200),
           ownerLabel: clean(source.ownerLabel, 120) || "agent",
           port,
           processId: Number.isInteger(Number(source.processId)) ? Number(source.processId) : null,
           managedProcess: source.managedProcess === true,
-          defaultForOwner: source.defaultForOwner === true,
           blendFile: clean(source.blendFile, 4000),
           executable: clean(source.executable, 4000),
           createdAt: clean(source.createdAt, 80) || new Date().toISOString(),
@@ -257,21 +265,20 @@ export class BlenderRuntimeManager {
       }
     } catch {}
     await this.persist();
-    return [...this.runtimes.values()].map(publicRuntime);
+    return [...this.runtimes.values()].map((runtime) => publicRuntime(runtime));
   }
 
   async persist() {
     const payload = {
-      version: 2,
+      version: 3,
       updatedAt: new Date().toISOString(),
       runtimes: [...this.runtimes.values()].map((runtime) => ({
         runtimeId: runtime.runtimeId,
-        ownerConversationId: runtime.ownerConversationId,
+        lastConversationId: runtime.lastConversationId || null,
         ownerLabel: runtime.ownerLabel,
         port: runtime.port,
         processId: runtime.processId,
         managedProcess: runtime.managedProcess,
-        defaultForOwner: runtime.defaultForOwner === true,
         blendFile: runtime.blendFile,
         executable: runtime.executable,
         createdAt: runtime.createdAt,
@@ -282,44 +289,57 @@ export class BlenderRuntimeManager {
     return await this.persistQueue;
   }
 
-  assertOwner(runtime, ownerConversationId) {
-    const owner = clean(ownerConversationId, 200);
-    if (!owner) throw new Error("A ChatGPT conversation identity is required for Blender runtime ownership.");
-    if (runtime.ownerConversationId && runtime.ownerConversationId !== owner) {
-      throw new Error(`Blender runtime ${runtime.runtimeId} belongs to another ChatGPT conversation.`);
+  noteConversationAccess(runtime, conversationId, ownerLabel = null) {
+    const conversation = clean(conversationId, 200);
+    if (!conversation) return null;
+    for (const other of this.runtimes.values()) {
+      if (other.runtimeId !== runtime.runtimeId && other.lastConversationId === conversation) {
+        other.lastConversationId = null;
+      }
     }
-    return owner;
+    runtime.lastConversationId = conversation;
+    const label = clean(ownerLabel, 120);
+    if (label) runtime.ownerLabel = label;
+    return conversation;
   }
 
-  ownedRuntimes(ownerConversationId) {
-    const owner = clean(ownerConversationId, 200);
-    if (!owner) throw new Error("A ChatGPT conversation identity is required for Blender runtime ownership.");
-    return [...this.runtimes.values()].filter((runtime) => runtime.ownerConversationId === owner);
+  connectionOwnerId(runtimeId) {
+    return runtimeConnectionOwnerId(runtimeId);
   }
 
-  selectDefaultRuntime(ownerConversationId) {
-    const owned = this.ownedRuntimes(ownerConversationId);
-    const explicit = owned.filter((runtime) => runtime.defaultForOwner === true);
-    if (explicit.length === 1) return explicit[0];
-    if (explicit.length > 1) {
-      throw new Error("Multiple Blender runtimes are marked as the default for this conversation; pass runtimeId explicitly.");
+  async selectDefaultRuntime(conversationId = null) {
+    await this.ready;
+    const conversation = clean(conversationId, 200);
+    const online = [];
+    for (const runtime of this.runtimes.values()) {
+      runtime.portOnline = await portAccepting(runtime.port);
+      runtime.state = runtime.portOnline ? "online" : processAlive(runtime.processId) ? "starting" : "offline";
+      if (runtime.portOnline) online.push(runtime);
     }
-    if (owned.length === 1) return owned[0];
-    if (!owned.length) {
-      throw new Error("This conversation has no assigned Blender runtime. Start or attach one before using Blender MCP.");
+    const preferred = conversation
+      ? online.filter((runtime) => runtime.lastConversationId === conversation)
+      : [];
+    if (preferred.length === 1) return preferred[0];
+    if (preferred.length > 1) {
+      throw new Error("This conversation previously used multiple online Blender runtimes; pass runtimeId explicitly so DevSpace never guesses between projects.");
     }
-    throw new Error("This conversation owns multiple Blender runtimes; pass runtimeId explicitly.");
+    if (online.length === 1) return online[0];
+    if (!online.length) {
+      throw new Error("No online Blender runtime is currently registered. Start or attach one before using Blender MCP.");
+    }
+    throw new Error("More than one Blender runtime is online; pass runtimeId explicitly so DevSpace never guesses between projects.");
   }
 
   async ensureInstance(runtime) {
     if (runtime.instanceToken) return runtime.instanceToken;
+    const connectionOwnerId = runtimeConnectionOwnerId(runtime.runtimeId);
     const claimed = await this.capabilityRuntime.claimInstance({
       pluginId: "blender-local",
       serverId: "blender",
       instanceId: runtime.runtimeId,
       runtimeId: runtime.runtimeId,
       ownerLabel: runtime.ownerLabel,
-      ownerConversationId: runtime.ownerConversationId,
+      ownerConversationId: connectionOwnerId,
       env: {
         BLENDER_MCP_HOST: LOOPBACK,
         BLENDER_MCP_PORT: String(runtime.port),
@@ -346,14 +366,14 @@ export class BlenderRuntimeManager {
         "blender-local",
         "blender",
         runtime.instanceToken,
-        runtime.ownerConversationId,
+        connectionOwnerId,
       );
       runtime.state = "online";
       runtime.connectedAt ||= new Date().toISOString();
       runtime.lastError = null;
       return runtime.instanceToken;
     } catch (error) {
-      await this.capabilityRuntime.releaseInstance(runtime.instanceToken, runtime.ownerConversationId).catch(() => {});
+      await this.capabilityRuntime.releaseInstance(runtime.instanceToken, connectionOwnerId).catch(() => {});
       runtime.instanceToken = null;
       runtime.state = "failed";
       runtime.lastError = error instanceof Error ? error.message : String(error);
@@ -372,8 +392,11 @@ export class BlenderRuntimeManager {
         port,
         accepting: true,
         runtimeId: managedByPort.get(port)?.runtimeId || null,
-        ownerConversationId: managedByPort.get(port)?.ownerConversationId || null,
-        ownedByCurrentConversation: Boolean(owner && managedByPort.get(port)?.ownerConversationId === owner),
+        ownerConversationId: null,
+        lastConversationId: managedByPort.get(port)?.lastConversationId || null,
+        ownedByCurrentConversation: false,
+        preferredByCurrentConversation: Boolean(owner && managedByPort.get(port)?.lastConversationId === owner),
+        conversationLocked: false,
       })),
     }));
   }
@@ -381,27 +404,20 @@ export class BlenderRuntimeManager {
   async resolveOrAdoptExisting({ ownerConversationId, ownerLabel = "agent" } = {}) {
     await this.ready;
     const owner = clean(ownerConversationId, 200);
-    if (!owner) throw new Error("ownerConversationId is required.");
-
-    const owned = [];
-    for (const runtime of this.runtimes.values()) {
-      if (runtime.ownerConversationId !== owner) continue;
-      runtime.portOnline = await portAccepting(runtime.port);
-      runtime.state = runtime.portOnline ? "online" : processAlive(runtime.processId) ? "starting" : "offline";
-      if (runtime.portOnline) owned.push(runtime);
-    }
-    if (owned.length === 1) {
-      await this.ensureInstance(owned[0]);
+    try {
+      const existing = await this.selectDefaultRuntime(owner);
+      this.noteConversationAccess(existing, owner, ownerLabel);
+      await this.ensureInstance(existing);
       await this.persist();
       return {
         ok: true,
         adopted: false,
-        runtime: publicRuntime(owned[0]),
-        instanceToken: owned[0].instanceToken,
+        runtime: publicRuntime(existing, owner),
+        instanceToken: existing.instanceToken,
       };
-    }
-    if (owned.length > 1) {
-      throw new Error("This conversation already owns more than one online Blender runtime; pass runtimeId explicitly so DevSpace never guesses between projects.");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!/No online Blender runtime is currently registered/i.test(message)) throw error;
     }
 
     const claimedPorts = new Map([...this.runtimes.values()].map((runtime) => [runtime.port, runtime]));
@@ -421,21 +437,21 @@ export class BlenderRuntimeManager {
       }
     }
 
-    if (!candidates.some((candidate) => candidate.port === DEFAULT_PORT_START)
-        && !claimedPorts.has(DEFAULT_PORT_START)
-        && await portAccepting(DEFAULT_PORT_START)) {
-      candidates.push({ port: DEFAULT_PORT_START, processId: null, executable: null, commandLine: null });
+    if (!candidates.some((candidate) => candidate.port === this.defaultPort)
+        && !claimedPorts.has(this.defaultPort)
+        && await portAccepting(this.defaultPort)) {
+      candidates.push({ port: this.defaultPort, processId: null, executable: null, commandLine: null });
     }
 
     const uniqueByPort = [...new Map(candidates.map((candidate) => [candidate.port, candidate])).values()]
       .sort((a, b) => a.port - b.port);
-    const preferred = uniqueByPort.find((candidate) => candidate.port === DEFAULT_PORT_START);
+    const preferred = uniqueByPort.find((candidate) => candidate.port === this.defaultPort);
     const selected = preferred || (uniqueByPort.length === 1 ? uniqueByPort[0] : null);
     if (!selected) {
       if (uniqueByPort.length > 1) {
-        throw new Error(`More than one unclaimed Blender MCP runtime is online (${uniqueByPort.map((item) => item.port).join(", ")}); pass runtimeId or use blender_runtime(action=attach) so DevSpace never steals another Agent's work.`);
+        throw new Error(`More than one unregistered Blender MCP runtime is online (${uniqueByPort.map((item) => item.port).join(", ")}); pass runtimeId or use blender_runtime(action=attach) so DevSpace never guesses between Blender processes.`);
       }
-      throw new Error("No unclaimed existing Blender MCP runtime is online. Start or attach a conversation-owned runtime before calling Blender.");
+      throw new Error("No existing Blender MCP runtime is online. Start Blender or attach a runtime before calling Blender.");
     }
 
     const runtimeId = `adopted-${selected.processId || "external"}-${selected.port}`;
@@ -460,30 +476,25 @@ export class BlenderRuntimeManager {
     await this.ready;
     const id = normalizeRuntimeId(runtimeId);
     const owner = clean(ownerConversationId, 200);
-    if (!owner) throw new Error("ownerConversationId is required.");
     if (this.runtimes.has(id)) {
       const existing = this.runtimes.get(id);
-      this.assertOwner(existing, owner);
+      this.noteConversationAccess(existing, owner, ownerLabel);
       return await this.status(id, owner);
     }
     const normalizedPort = normalizePort(port);
     const portOwner = [...this.runtimes.values()].find((runtime) => runtime.port === normalizedPort);
     if (portOwner) {
-      if (portOwner.ownerConversationId !== owner) {
-        throw new Error(`Blender MCP port ${normalizedPort} belongs to another conversation runtime.`);
-      }
+      this.noteConversationAccess(portOwner, owner, ownerLabel);
       return await this.status(portOwner.runtimeId, owner);
     }
     if (!(await portAccepting(normalizedPort))) throw new Error(`No Blender MCP endpoint is accepting connections on ${LOOPBACK}:${normalizedPort}.`);
-    const ownerHasRuntime = this.ownedRuntimes(owner).length > 0;
     const runtime = {
       runtimeId: id,
-      ownerConversationId: owner,
+      lastConversationId: owner,
       ownerLabel: clean(ownerLabel, 120) || "agent",
       port: normalizedPort,
       processId: Number.isInteger(Number(processId)) ? Number(processId) : null,
       managedProcess: false,
-      defaultForOwner: defaultForOwner == null ? !ownerHasRuntime : defaultForOwner === true,
       blendFile: clean(blendFile, 4000),
       executable: null,
       createdAt: new Date().toISOString(),
@@ -515,23 +526,23 @@ export class BlenderRuntimeManager {
   } = {}) {
     await this.ready;
     const owner = clean(ownerConversationId, 200);
-    if (!owner) throw new Error("ownerConversationId is required.");
-    const owned = this.ownedRuntimes(owner);
-    if (owned.length) return await this.defaultRuntime(owner);
+    try {
+      return await this.defaultRuntime(owner);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!/No online Blender runtime is currently registered/i.test(message)) throw error;
+    }
     const normalizedPort = normalizePort(port);
     const existing = [...this.runtimes.values()].find((runtime) => runtime.port === normalizedPort);
     if (existing) {
-      if (existing.ownerConversationId !== owner) {
-        throw new Error(`The default Blender MCP endpoint on ${LOOPBACK}:${normalizedPort} is already assigned to another conversation.`);
-      }
+      this.noteConversationAccess(existing, owner, ownerLabel);
       return await this.status(existing.runtimeId, owner);
     }
     if (!(await portAccepting(normalizedPort))) {
-      throw new Error(`This conversation has no assigned Blender runtime and no user-opened Blender MCP endpoint is accepting connections on ${LOOPBACK}:${normalizedPort}. Start or attach a runtime before using Blender MCP.`);
+      throw new Error(`No registered Blender runtime is online and no user-opened Blender MCP endpoint is accepting connections on ${LOOPBACK}:${normalizedPort}. Start or attach a runtime before using Blender MCP.`);
     }
-    const suffix = createHash("sha256").update(owner).digest("hex").slice(0, 12);
     return await this.adoptExisting({
-      runtimeId: `adopted-default-${suffix}`,
+      runtimeId: `adopted-default-${normalizedPort}`,
       ownerConversationId: owner,
       ownerLabel,
       port: normalizedPort,
@@ -543,10 +554,9 @@ export class BlenderRuntimeManager {
     await this.ready;
     const id = normalizeRuntimeId(runtimeId);
     const owner = clean(ownerConversationId, 200);
-    if (!owner) throw new Error("ownerConversationId is required.");
     if (this.runtimes.has(id)) {
       const existing = this.runtimes.get(id);
-      this.assertOwner(existing, owner);
+      this.noteConversationAccess(existing, owner, ownerLabel);
       return await this.status(id, owner);
     }
     const usedPorts = new Set([...this.runtimes.values()].map((runtime) => runtime.port));
@@ -554,7 +564,6 @@ export class BlenderRuntimeManager {
     if (usedPorts.has(selectedPort) || await portAccepting(selectedPort)) throw new Error(`Port ${selectedPort} is already in use.`);
     const blenderExecutable = await discoverBlenderExecutable(executable);
     const normalizedBlendFile = blendFile ? resolve(String(blendFile)) : null;
-    const ownerHasRuntime = this.ownedRuntimes(owner).length > 0;
     if (normalizedBlendFile && !existsSync(normalizedBlendFile)) {
       throw new Error(`Blend file does not exist: ${blendFile}`);
     }
@@ -589,12 +598,11 @@ export class BlenderRuntimeManager {
     child.unref();
     const runtime = {
       runtimeId: id,
-      ownerConversationId: owner,
+      lastConversationId: owner,
       ownerLabel: clean(ownerLabel, 120) || "agent",
       port: selectedPort,
       processId: child.pid,
       managedProcess: true,
-      defaultForOwner: defaultForOwner == null ? !ownerHasRuntime : defaultForOwner === true,
       blendFile: normalizedBlendFile,
       executable: blenderExecutable,
       createdAt: new Date().toISOString(),
@@ -626,7 +634,7 @@ export class BlenderRuntimeManager {
     await this.ready;
     const runtime = this.runtimes.get(normalizeRuntimeId(runtimeId));
     if (!runtime) throw new Error(`Unknown Blender runtime: ${runtimeId}`);
-    this.assertOwner(runtime, ownerConversationId);
+    this.noteConversationAccess(runtime, ownerConversationId);
     const blendFile = observedBlendFile(value);
     if (!blendFile) {
       return { ok: true, runtimeId: runtime.runtimeId, updated: false, blendFile: runtime.blendFile || null };
@@ -642,6 +650,7 @@ export class BlenderRuntimeManager {
 
   async refreshLiveBlendFile(runtime) {
     if (!runtime?.instanceToken || typeof this.capabilityRuntime.call !== "function") return null;
+    const connectionOwnerId = runtimeConnectionOwnerId(runtime.runtimeId);
     const response = await this.capabilityRuntime.call({
       pluginId: "blender-local",
       kind: "mcp",
@@ -649,20 +658,25 @@ export class BlenderRuntimeManager {
       toolName: "get_blendfile_summary_path_info",
       arguments: {},
       instanceToken: runtime.instanceToken,
-    }, { ownerConversationId: runtime.ownerConversationId });
-    return await this.observeMcpResult(runtime.runtimeId, runtime.ownerConversationId, response);
+    }, { ownerConversationId: connectionOwnerId });
+    return await this.observeMcpResult(runtime.runtimeId, runtime.lastConversationId, response);
   }
 
   async access(runtimeId, ownerConversationId) {
     await this.ready;
     const runtime = this.runtimes.get(normalizeRuntimeId(runtimeId));
     if (!runtime) throw new Error(`Unknown Blender runtime: ${runtimeId}`);
-    this.assertOwner(runtime, ownerConversationId);
+    this.noteConversationAccess(runtime, ownerConversationId);
     runtime.portOnline = await portAccepting(runtime.port);
     runtime.state = runtime.portOnline ? "online" : processAlive(runtime.processId) ? "starting" : "offline";
     if (!runtime.portOnline) throw new Error(`Blender runtime ${runtime.runtimeId} is not accepting MCP connections on ${LOOPBACK}:${runtime.port}.`);
     await this.ensureInstance(runtime);
-    return { runtime, instanceToken: runtime.instanceToken };
+    await this.persist();
+    return {
+      runtime,
+      instanceToken: runtime.instanceToken,
+      connectionOwnerId: runtimeConnectionOwnerId(runtime.runtimeId),
+    };
   }
 
   async instanceToken(runtimeId, ownerConversationId) {
@@ -673,18 +687,18 @@ export class BlenderRuntimeManager {
   async defaultInstanceToken(ownerConversationId) {
     let runtime;
     try {
-      runtime = this.selectDefaultRuntime(ownerConversationId);
+      runtime = await this.selectDefaultRuntime(ownerConversationId);
     } catch (error) {
-      if (!/no assigned Blender runtime/i.test(error instanceof Error ? error.message : String(error))) throw error;
+      if (!/No online Blender runtime is currently registered/i.test(error instanceof Error ? error.message : String(error))) throw error;
       await this.adoptDefaultEndpoint({ ownerConversationId, ownerLabel: "adopted user-opened Blender", port: this.defaultPort });
-      runtime = this.selectDefaultRuntime(ownerConversationId);
+      runtime = await this.selectDefaultRuntime(ownerConversationId);
     }
     const access = await this.access(runtime.runtimeId, ownerConversationId);
     return access.instanceToken;
   }
 
   async defaultRuntime(ownerConversationId) {
-    const runtime = this.selectDefaultRuntime(ownerConversationId);
+    const runtime = await this.selectDefaultRuntime(ownerConversationId);
     return await this.status(runtime.runtimeId, ownerConversationId);
   }
 
@@ -692,7 +706,7 @@ export class BlenderRuntimeManager {
     await this.ready;
     const runtime = this.runtimes.get(normalizeRuntimeId(runtimeId));
     if (!runtime) throw new Error(`Unknown Blender runtime: ${runtimeId}`);
-    this.assertOwner(runtime, ownerConversationId);
+    this.noteConversationAccess(runtime, ownerConversationId);
     runtime.portOnline = await portAccepting(runtime.port);
     runtime.state = runtime.portOnline ? "online" : processAlive(runtime.processId) ? "starting" : "offline";
     if (runtime.portOnline) {
@@ -700,7 +714,7 @@ export class BlenderRuntimeManager {
       await this.refreshLiveBlendFile(runtime).catch(() => null);
     }
     await this.persist();
-    return { ok: true, runtime: publicRuntime(runtime), instanceToken: runtime.instanceToken };
+    return { ok: true, runtime: publicRuntime(runtime, ownerConversationId), instanceToken: runtime.instanceToken };
   }
 
   async list(ownerConversationId = null) {
@@ -708,10 +722,9 @@ export class BlenderRuntimeManager {
     const owner = clean(ownerConversationId, 200);
     const rows = [];
     for (const runtime of this.runtimes.values()) {
-      if (owner && runtime.ownerConversationId !== owner) continue;
       runtime.portOnline = await portAccepting(runtime.port);
       runtime.state = runtime.portOnline ? "online" : processAlive(runtime.processId) ? "starting" : "offline";
-      rows.push(publicRuntime(runtime));
+      rows.push(publicRuntime(runtime, owner));
     }
     return rows.sort((a, b) => a.runtimeId.localeCompare(b.runtimeId));
   }
@@ -721,9 +734,9 @@ export class BlenderRuntimeManager {
     const id = normalizeRuntimeId(runtimeId);
     const runtime = this.runtimes.get(id);
     if (!runtime) throw new Error(`Unknown Blender runtime: ${id}`);
-    this.assertOwner(runtime, ownerConversationId);
+    this.noteConversationAccess(runtime, ownerConversationId);
     if (runtime.instanceToken) {
-      await this.capabilityRuntime.releaseInstance(runtime.instanceToken, runtime.ownerConversationId).catch(() => {});
+      await this.capabilityRuntime.releaseInstance(runtime.instanceToken, runtimeConnectionOwnerId(runtime.runtimeId)).catch(() => {});
       runtime.instanceToken = null;
     }
     if (terminateProcess && runtime.processId && processAlive(runtime.processId)) {
@@ -746,7 +759,7 @@ export class BlenderRuntimeManager {
       runtimes: runtimes.length,
       online: runtimes.filter((runtime) => runtime.state === "online").length,
       managedProcesses: runtimes.filter((runtime) => runtime.managedProcess).length,
-      defaultRuntimes: runtimes.filter((runtime) => runtime.defaultForOwner).length,
+      transferableAcrossConversations: true,
       ports: runtimes.map((runtime) => runtime.port),
     };
   }
@@ -757,7 +770,7 @@ export class BlenderRuntimeManager {
       if (runtime.instanceToken) {
         await this.capabilityRuntime.releaseInstance(
           runtime.instanceToken,
-          runtime.ownerConversationId,
+          runtimeConnectionOwnerId(runtime.runtimeId),
         ).catch(() => {});
         runtime.instanceToken = null;
       }

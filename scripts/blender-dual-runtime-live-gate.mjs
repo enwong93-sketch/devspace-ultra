@@ -79,7 +79,7 @@ try {
       code: `import bpy\nname=${JSON.stringify(marker)}\nobj=bpy.data.objects.get(name)\nif obj is None:\n    mesh=bpy.data.meshes.new(name+'_Mesh')\n    obj=bpy.data.objects.new(name, mesh)\n    bpy.context.scene.collection.objects.link(obj)\nresult={'runtime_marker': name, 'filepath': bpy.data.filepath}`,
     },
     runtimeB.instanceToken,
-    ownerB,
+    manager.connectionOwnerId("dual-live-b"),
   );
 
   const summaryA = await capabilityRuntime.callMcp(
@@ -88,7 +88,7 @@ try {
     "get_objects_summary",
     {},
     runtimeA.instanceToken,
-    ownerA,
+    manager.connectionOwnerId("dual-live-a"),
   );
   const summaryB = await capabilityRuntime.callMcp(
     "blender-local",
@@ -96,15 +96,14 @@ try {
     "get_objects_summary",
     {},
     runtimeB.instanceToken,
-    ownerB,
+    manager.connectionOwnerId("dual-live-b"),
   );
 
   assert.equal(objectNames(summaryA).includes(marker), false, "runtime A must not observe runtime B's test object");
   assert.equal(objectNames(summaryB).includes(marker), true, "runtime B must observe its own test object");
-  await assert.rejects(
-    () => manager.access("dual-live-a", ownerB),
-    /belongs to another ChatGPT conversation/,
-  );
+  const handedOff = await manager.access("dual-live-a", ownerB);
+  assert.equal(handedOff.instanceToken, runtimeA.instanceToken, "a later conversation must be able to continue runtime A without reopening Blender");
+  assert.equal((await manager.status("dual-live-a", ownerB)).runtime.lastConversationId, ownerB);
 
   console.log(JSON.stringify({
     ok: true,
@@ -114,7 +113,8 @@ try {
     distinctPorts: true,
     distinctMcpInstances: true,
     sceneIsolation: true,
-    conversationIsolation: true,
+    conversationTransfer: true,
+    conversationOwnershipLock: false,
   }));
 } finally {
   if (runtimeB) {
