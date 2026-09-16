@@ -135,6 +135,11 @@ export function registerCodexComputerUseRouter(server, {
       return Number(grant?.expiresAt || 0) > now
         && (grant?.riskLevel === "low" || grant?.explicitUserAuthorization === true);
     };
+    const releaseHostUnsupportedApproval = (app) => {
+      const appKey = approvalGrantApp(app);
+      if (!appKey) return false;
+      return hostUnsupportedApprovalGrants.delete(`${ownerConversationId}\0${appKey}`);
+    };
     return {
       capabilityRuntime,
       codexMcpBridge,
@@ -143,6 +148,7 @@ export function registerCodexComputerUseRouter(server, {
       computerUseActivity: computerUseOverlay,
       elicitationHandler,
       allowHostUnsupportedApproval,
+      releaseHostUnsupportedApproval,
     };
   };
 
@@ -158,7 +164,7 @@ export function registerCodexComputerUseRouter(server, {
 
   server.registerTool("codex_computer_use", {
     title: "OpenAI Codex Computer Use",
-    description: "Use automatically for Windows GUI work, including ordinary Chrome and Edge browser-window automation, that requires seeing or operating a visible app. This is a thin gate over the installed OpenAI bundled Computer Use runtime: persistent Codex node_repl imports @oai/sky, and all window discovery, screenshots, accessibility, clicks, typing, scrolling and dragging are executed by sky itself. DevSpace has no second GUI or browser driver; the legacy custom Chrome-extension path has been removed. Follow observe→decide→one action→re-observe. When the MCP host explicitly cannot render the native approval prompt and the user has explicitly requested or confirmed control of this app in the current turn, pass input.user_authorized_app_control=true on the read-only observation; the resulting exact-conversation grant permits one subsequent action for that app. Never infer this flag from general task context. Do not automate terminals, authentication/password/security UI, or ChatGPT/Codex app UI.",
+    description: "Use automatically for Windows GUI work, including ordinary Chrome and Edge browser-window automation, that requires seeing or operating a visible app. This is a thin gate over the installed OpenAI bundled Computer Use runtime: persistent Codex node_repl imports @oai/sky, and all window discovery, screenshots, accessibility, clicks, typing, scrolling and dragging are executed by sky itself. DevSpace has no second GUI or browser driver; the legacy custom Chrome-extension path has been removed. Follow observe→decide→one action→re-observe. On the final read-only re-observation before returning control to the user, pass input.release_control=true so the visible Computer Use takeover state is cleared immediately; never end a Computer Use turn while the takeover state is still held. When the MCP host explicitly cannot render the native approval prompt and the user has explicitly requested or confirmed control of this app in the current turn, pass input.user_authorized_app_control=true on the read-only observation; the resulting exact-conversation grant permits one subsequent action for that app. Never infer this flag from general task context. Do not automate terminals, authentication/password/security UI, or ChatGPT/Codex app UI.",
     inputSchema: {
       action: z.enum([
         "list_apps",

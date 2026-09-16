@@ -219,7 +219,7 @@ export function clearComputerUseOverlayScript(record, {
     const root = document.getElementById(ROOT_ID);
     if (root && (!operationId || root.dataset.operationId === operationId)) root.remove();
     const controller = globalThis[CONTROLLER_KEY];
-    if (controller?.operationId === operationId) {
+    if (!operationId || controller?.operationId === operationId) {
       if (controller.timer) clearTimeout(controller.timer);
       delete globalThis[CONTROLLER_KEY];
     }
@@ -342,6 +342,48 @@ export class ClassicComputerUseOverlay {
       state: "idle-clear-scheduled",
       clearAfterMs: this.idleGraceMs,
     });
+  }
+
+  async release({ conversationId, operationId = null, state = "released" } = {}) {
+    const id = cleanConversationId(conversationId);
+    if (!id) return { ok: false, state: "invalid-conversation" };
+    const record = this.records.get(id) || null;
+    if (record && operationId && record.operationId !== operationId) {
+      return { ok: false, state: "overlay-session-mismatch" };
+    }
+    if (record) {
+      record.activeCount = 0;
+      record.updatedAtMs = Number(this.now());
+      record.lastState = clean(state, 80) || "released";
+      const snapshot = publicRecord(record);
+      await this.#dispose(record).catch(() => null);
+      return {
+        ...snapshot,
+        ok: true,
+        state: "released",
+        cleared: true,
+        explicitRelease: true,
+      };
+    }
+    const located = await this.adapter.find({ conversationId: id });
+    if (!located?.exact || located?.ambiguous || !located?.target?.webSocketDebuggerUrl) {
+      return { ok: false, state: located?.state || "conversation-page-not-open" };
+    }
+    const page = await this.adapter.connect(located.target);
+    try {
+      const cleared = await page.evaluate(clearComputerUseOverlayScript({
+        conversationId: id,
+        operationId: null,
+      }, { producerId: this.producerId }));
+      return {
+        ...cleared,
+        ok: cleared?.ok === true,
+        state: cleared?.ok === true ? "released" : cleared?.state || "release-failed",
+        explicitRelease: true,
+      };
+    } finally {
+      page.close();
+    }
   }
 
   async inspect({ conversationId } = {}) {

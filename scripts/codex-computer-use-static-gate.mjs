@@ -34,9 +34,11 @@ assert.match(router, /callCodexComputerUse/);
 assert.match(router, /persistent Codex node_repl imports @oai\/sky/i);
 assert.match(router, /ordinary Chrome and Edge browser-window automation/i);
 assert.match(router, /legacy custom Chrome-extension path has been removed/i);
+assert.match(router, /input\.release_control=true/i);
 assert.match(router, /elicitation\/create/);
 assert.match(router, /ElicitResultSchema/);
 assert.match(router, /computerUseActivity:\s*computerUseOverlay/);
+assert.match(router, /releaseHostUnsupportedApproval/);
 assert.match(adapter, /callJsReplCompatibility/);
 assert.match(adapter, /CODEX_COMPUTER_USE_RUNTIME = "@oai\/sky"/);
 assert.match(adapter, /CODEX_COMPUTER_USE_PLUGIN_ID = "computer-use@openai-bundled"/);
@@ -51,8 +53,12 @@ assert.match(adapter, /sky\.\$\{method\}/);
 assert.match(adapter, /devspaceGuiDriver:\s*false/);
 assert.match(adapter, /validateComputerUseElicitation/);
 assert.match(adapter, /approvalRelay/);
+assert.match(adapter, /release_control/);
+assert.match(adapter, /final read-only observation/);
 assert.match(adapter, /computerUseActivity\.begin/);
 assert.match(adapter, /computerUseActivity\.end/);
+assert.match(adapter, /computerUseActivity\.release/);
+assert.match(adapter, /releaseHostUnsupportedApproval/);
 assert.match(adapter, /PROHIBITED_APP_PATTERN/);
 assert.doesNotMatch(adapter, /spawn\(|child_process|Selenium|Playwright|UIAutomation|SendInput/i,
   "the adapter may name prohibited apps, but must not implement a second GUI process or driver");
@@ -63,6 +69,8 @@ assert.match(overlay, /pointer-events:none/);
 assert.match(overlay, /只限目前對話/);
 assert.match(overlay, /suppressed-by-producer-lease/);
 assert.match(overlay, /idle-clear-scheduled/);
+assert.match(overlay, /async release\(/);
+assert.match(overlay, /explicitRelease:\s*true/);
 assert.doesNotMatch(overlay, /@keyframes|animation:/,
   "the takeover status should remain a static, reduced-motion-safe control surface");
 assert.equal(plugin.id, "codex-computer-use");
@@ -73,6 +81,7 @@ assert.match(skill, /Use `codex_computer_use` automatically/);
 assert.match(skill, /shared persistent Codex `node_repl` importing `@oai\/sky`/);
 assert.match(skill, /ordinary Chrome or Edge browser window/);
 assert.match(skill, /obsolete custom Chrome-extension driver has been removed/);
+assert.match(skill, /release_control=true/);
 assert.equal(packageJson.files.includes("capabilities"), true);
 assert.equal(packageJson.files.includes("browser-control-bridge"), false);
 for (const removed of [
@@ -101,6 +110,8 @@ console.log(JSON.stringify({
   exactConversationFirstCallFallback: true,
   blueTakeoverOverlay: true,
   overlayAutoClear: true,
+  explicitAgentRelease: true,
+  errorFailSafeRelease: true,
   ordinaryBrowserWindowAutomation: true,
   customChromeExtensionRemoved: true,
   structuredActionsOnly: true,
