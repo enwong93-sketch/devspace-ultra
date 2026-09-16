@@ -158,6 +158,17 @@ const pages = new Map([
     normalCompletion: false,
     incompleteUserTurn: false,
   }],
+  ["conversation-restart-already-overdue", {
+    runtimeKey: "main-04",
+    port: 9734,
+    hydrated: true,
+    generating: true,
+    composerEmpty: true,
+    latestMessageRole: "user",
+    hasTurnError: false,
+    normalCompletion: false,
+    incompleteUserTurn: false,
+  }],
 ]);
 const duplicateConversations = new Set();
 const rescueHooks = new Map();
@@ -309,6 +320,8 @@ assert.equal(supervisor.status().tenMinuteAgentReportSloOnly, true);
 assert.equal(supervisor.status().twentyMinuteInterruptedTurnRescueOnly, true);
 assert.equal(supervisor.status().normalCompletionDisarms, true);
 assert.equal(supervisor.status().restartRestoresActiveEpisodeAsInterrupted, true);
+assert.equal(supervisor.status().stalledGeneratingSilenceRescue, true);
+assert.equal(supervisor.status().substantiveToolActivityResetsRescueClock, true);
 assert.equal(supervisor.status().maxContinueAttempts, 1);
 
 await supervisor.noteTurn({ kind: "started", conversationId: "conversation-running", runtimeKey: "main-01", observedAtMs: now });
@@ -591,6 +604,16 @@ await writeFile(restartStatePath, JSON.stringify({
       lastReportAt: new Date(now - 2 * 60_000).toISOString(),
       continueAttempts: 0,
     },
+    "conversation-restart-already-overdue": {
+      conversationId: "conversation-restart-already-overdue",
+      armed: true,
+      turnState: "running",
+      episodeRevision: 6,
+      startedAt: new Date(now - 35 * 60_000).toISOString(),
+      lastActivityAt: new Date(now - 25 * 60_000).toISOString(),
+      lastReportAt: new Date(now - 30 * 60_000).toISOString(),
+      continueAttempts: 0,
+    },
     "conversation-restart-rescued": {
       conversationId: "conversation-restart-rescued",
       armed: true,
@@ -627,6 +650,7 @@ await restartSupervisor.start({ schedule: false });
 let restartInterrupted = restartSupervisor.status().records.find((row) => row.conversationId === "conversation-restart-interrupted");
 const restartComplete = restartSupervisor.status().records.find((row) => row.conversationId === "conversation-restart-complete");
 let restartRunningStale = restartSupervisor.status().records.find((row) => row.conversationId === "conversation-restart-running-stale");
+let restartAlreadyOverdue = restartSupervisor.status().records.find((row) => row.conversationId === "conversation-restart-already-overdue");
 const restartRescued = restartSupervisor.status().records.find((row) => row.conversationId === "conversation-restart-rescued");
 const restartFuture = restartSupervisor.status().records.find((row) => row.conversationId === "conversation-restart-future");
 assert.equal(restartInterrupted.armed, true);
@@ -637,6 +661,15 @@ assert.equal(restartRunningStale.armed, true);
 assert.equal(restartRunningStale.turnState, "restart-interrupted");
 assert.equal(restartRunningStale.rescueEvidence, "core-restart");
 assert.ok(restartRunningStale.restartObservedAt);
+assert.equal(restartAlreadyOverdue.turnState, "restart-interrupted");
+assert.equal(restartAlreadyOverdue.rescuePending, true,
+  "Core replacement must preserve already elapsed silence instead of restarting the twenty-minute rescue clock");
+assert.equal(restartAlreadyOverdue.lastDispatchState, "stale-generating-interruption-confirmation-armed");
+assert.equal(
+  Date.parse(restartAlreadyOverdue.interruptedAt),
+  Date.parse(restartAlreadyOverdue.lastActivityAt),
+  "restart evidence must be stored separately from the pre-restart rescue clock anchor",
+);
 assert.equal(restartRescued.armed, false);
 assert.equal(restartRescued.turnState, "startup-disarmed");
 assert.equal(restartFuture.armed, false, "future-dated state must never arm rescue after restart");
@@ -782,6 +815,138 @@ assert.equal(staleRecord.continueAttempts, 1);
 await staleSupervisor.close();
 await rm(staleDir, { recursive: true, force: true });
 
+// A page can remain visually "generating" forever without surfacing a
+// transport error. After twenty minutes with neither an Agent report nor a
+// newly observed substantive tool call, an exact hydrated page whose latest
+// message is still the user's request is treated as a stalled generation.
+// Two observations are required before resetting the stale Stop affordance,
+// and multiple Mains remain isolated by exact conversation id.
+const silentDir = await mkdtemp(join(tmpdir(), "devspace-liveness-silent-generating-test-"));
+const silentStatePath = join(silentDir, "liveness.json");
+const silentPlanPath = join(silentDir, "plans.json");
+const silentProgressPath = join(silentDir, "progress.json");
+await writeFile(silentPlanPath, JSON.stringify({ plans: {} }), "utf8");
+await writeFile(silentProgressPath, JSON.stringify({ messages: [] }), "utf8");
+let silentNow = Date.parse("2026-09-16T14:00:00.000Z");
+const silentCalls = [];
+const silentPages = new Map([
+  ["conversation-silent-main-01", {
+    runtimeKey: "main-01", port: 9721, hydrated: true, generating: true,
+    composerEmpty: true, latestMessageRole: "user", hasTurnError: false,
+    normalCompletion: false, incompleteUserTurn: false,
+  }],
+  ["conversation-silent-main-04", {
+    runtimeKey: "main-04", port: 9734, hydrated: true, generating: true,
+    composerEmpty: true, latestMessageRole: "user", hasTurnError: false,
+    normalCompletion: false, incompleteUserTurn: false,
+  }],
+]);
+let silentSupervisor;
+const silentAdapter = {
+  async find({ conversationId }) {
+    const page = silentPages.get(conversationId);
+    return page ? locatedPage(conversationId, page) : { exact: false, state: "conversation-page-not-open", conversationId };
+  },
+  async clearReminder() { return { ok: true }; },
+  async resetInterruptedGeneration(input) {
+    silentCalls.push({
+      action: "resetInterruptedGeneration",
+      conversationId: input.conversationId,
+      locatedRuntimeKey: input.target?.runtimeKey || null,
+      rescueEvidence: input.rescueEvidence,
+    });
+    await silentSupervisor.noteTurn({
+      kind: "failed",
+      conversationId: input.conversationId,
+      runtimeKey: input.target?.runtimeKey,
+      canceled: true,
+      observedAtMs: silentNow,
+    });
+    const page = silentPages.get(input.conversationId);
+    silentPages.set(input.conversationId, {
+      ...page,
+      generating: false,
+      hasTurnError: true,
+      incompleteUserTurn: true,
+    });
+    return { ok: true, state: "stale-generating-stop-clicked", resetCommitted: true };
+  },
+  async sendContinue(input) {
+    silentCalls.push({
+      action: "sendContinue",
+      conversationId: input.conversationId,
+      locatedRuntimeKey: input.target?.runtimeKey || null,
+      rescueEvidence: input.rescueEvidence,
+    });
+    return { ok: true };
+  },
+};
+silentSupervisor = new ConversationProgressLivenessSupervisor({
+  statePath: silentStatePath,
+  planStatePath: silentPlanPath,
+  progressStatePath: silentProgressPath,
+  adapter: silentAdapter,
+  reportIntervalMs: 10 * 60_000,
+  continueMs: 20 * 60_000,
+  pollMs: 1_000,
+  now: () => silentNow,
+});
+await silentSupervisor.start({ schedule: false });
+for (const [conversationId, page] of silentPages) {
+  await silentSupervisor.noteTurn({
+    kind: "started",
+    conversationId,
+    runtimeKey: page.runtimeKey,
+    observedAtMs: silentNow,
+  });
+}
+silentNow += 15 * 60_000;
+await silentSupervisor.noteActivity({
+  conversationId: "conversation-silent-main-01",
+  observedAtMs: silentNow,
+});
+silentNow += 6 * 60_000;
+await silentSupervisor.tick();
+let silentMain01 = silentSupervisor.status().records.find((row) => row.conversationId === "conversation-silent-main-01");
+let silentMain04 = silentSupervisor.status().records.find((row) => row.conversationId === "conversation-silent-main-04");
+assert.equal(silentMain01.rescuePending, false,
+  "fresh substantive tool activity must reset the rescue clock for only that conversation");
+assert.equal(silentMain04.rescuePending, true);
+assert.equal(silentMain04.rescueEvidence, "stalled-generating");
+assert.equal(silentMain04.lastDispatchState, "stale-generating-interruption-confirmation-armed");
+silentNow += 30_000;
+await silentSupervisor.tick();
+assert.deepEqual(
+  silentCalls.filter((row) => row.action === "resetInterruptedGeneration"),
+  [{
+    action: "resetInterruptedGeneration",
+    conversationId: "conversation-silent-main-04",
+    locatedRuntimeKey: "main-04",
+    rescueEvidence: "stalled-generating",
+  }],
+);
+silentNow += 30_000;
+await silentSupervisor.tick();
+silentNow += 30_000;
+await silentSupervisor.tick();
+assert.deepEqual(
+  silentCalls.filter((row) => row.action === "sendContinue"),
+  [{
+    action: "sendContinue",
+    conversationId: "conversation-silent-main-04",
+    locatedRuntimeKey: "main-04",
+    rescueEvidence: "stalled-generating",
+  }],
+  "the rescue must be sent once to the exact stalled conversation and never borrowed by another Main",
+);
+silentMain01 = silentSupervisor.status().records.find((row) => row.conversationId === "conversation-silent-main-01");
+silentMain04 = silentSupervisor.status().records.find((row) => row.conversationId === "conversation-silent-main-04");
+assert.equal(silentMain01.armed, true);
+assert.equal(silentMain04.armed, false);
+assert.equal(silentMain04.turnState, "rescue-dispatched");
+await silentSupervisor.close();
+await rm(silentDir, { recursive: true, force: true });
+
 const persisted = JSON.parse(await readFile(statePath, "utf8"));
 assert.equal(persisted.version, 4);
 assert.equal(persisted.identityKey, "conversationId");
@@ -791,6 +956,8 @@ assert.equal(persisted.tenMinuteAgentReportSloOnly, true);
 assert.equal(persisted.twentyMinuteInterruptedTurnRescueOnly, true);
 assert.equal(persisted.normalCompletionDisarms, true);
 assert.equal(persisted.restartRestoresActiveEpisodeAsInterrupted, true);
+assert.equal(persisted.stalledGeneratingSilenceRescue, true);
+assert.equal(persisted.substantiveToolActivityResetsRescueClock, true);
 assert.equal(JSON.stringify(persisted).includes("lastReminderAt"), false);
 assert.equal(JSON.stringify(persisted).includes("lastReminderProjectedAt"), false);
 assert.equal(JSON.stringify(persisted).includes("reminderPending"), false);
@@ -1064,6 +1231,8 @@ console.log(JSON.stringify({
   twentyMinuteInterruptedTurnRescueOnly: true,
   normalCompletionDisarms: true,
   restartRestoresActiveEpisodeAsInterrupted: true,
+  stalledGeneratingSilenceRescue: true,
+  substantiveToolActivityResetsRescueClock: true,
   completionRevokesActiveTurnAuthority: true,
   exactPageGoalRecovery: true,
   goalRecoveryForegroundActivation: false,
@@ -1079,6 +1248,9 @@ console.log(JSON.stringify({
   persistedOldEpisodeDisarmed: true,
   interruptedEpisodeRestartRecoveredByPageEvidence: true,
   runningEpisodeRestartRecoveredByCoreRestartEvidence: true,
+  coreRestartDoesNotResetRescueClock: true,
+  stalledGeneratingWithoutTransportFailureRecovered: true,
+  multiMainStalledRescueExactConversationOnly: true,
   completedEpisodeRestartDisarmed: true,
   rescuedEpisodeRestartDisarmed: true,
   futureTimestampRestartDisarmed: true,
