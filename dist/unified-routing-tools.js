@@ -122,7 +122,7 @@ const BUILTIN_ROUTES = [
     kind: "workflow",
     name: "agent-authored-progress",
     title: "Agent-authored progress narration",
-    description: "Publish one natural-language progress update after a coherent medium-sized milestone, verification, direction change, or blocker.",
+    description: "Publish one natural-language progress update before substantive multi-step Main work and after a coherent medium-sized milestone, verification, direction change, blocker, or stale long phase. The Local Gateway rejects a second substantive unplanned tool, active-Plan work without preflight, stale continuation, and Plan completion until the exact Main conversation has a verified Agent-authored report.",
     phrases: ["progress narration", "progress card", "旁白卡", "匯報進度", "report progress"],
     aliases: ["milestone", "verification", "blocker", "direction change", "floating progress"],
     priority: 18,

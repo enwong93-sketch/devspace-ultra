@@ -60,7 +60,8 @@ assert.match(skill, /DuckDNS\/DDNS \+ Caddy direct ingress/);
 assert.match(skill, /stable Cloudflare named tunnel/);
 assert.match(skill, /user must personally complete account actions/i);
 assert.match(skill, /router-administration actions/i);
-assert.match(skill, /Use `devspace_progress_report` after each meaningful medium-sized setup step/);
+assert.match(skill, /Use `devspace_progress_report` before substantive work on a multi-step setup and after each meaningful medium-sized setup step/);
+assert.match(skill, /devspace_progress_preflight_required/);
 assert.match(skill, /do not repeatedly reconnect ChatGPT/i);
 
 const parsedPackage = JSON.parse(packageJson);

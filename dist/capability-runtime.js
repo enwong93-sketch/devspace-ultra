@@ -1193,7 +1193,7 @@ function builtinCapabilityRouteCandidates() {
       kind: "workflow",
       name: "agent-progress-report",
       title: "Agent-authored progress narration",
-      description: "Write a useful conversation-bound progress update only after a meaningful medium-sized step, important verification result, material direction change, or genuine blocker. There is no fixed time or tool-count cadence, and program telemetry must not become visible prose.",
+      description: "Write a useful conversation-bound progress update before substantive multi-step Main work and after a meaningful medium-sized step, important verification result, material direction change, or genuine blocker. The Local Gateway hard-gates an active Plan, a second substantive unplanned tool, stale continuation, and Plan completion until the exact Main conversation has a verified Agent-authored report. There is no fixed time or tool-count narration cadence, and program telemetry must not become visible prose.",
       aliases: [
         "progress narration",
         "progress card",
@@ -1218,7 +1218,7 @@ function builtinCapabilityRouteCandidates() {
       nextAction: {
         tool: "devspace_progress_report",
         arguments: { message: "<agent-authored useful progress update>", kind: "milestone" },
-        then: "Use only when the Agent judges that the update is useful; do not invoke on a fixed cadence.",
+        then: "For multi-step Main work, satisfy the mandatory opening preflight before substantive tools; afterwards report only at useful medium boundaries, before a stale long phase, and before Plan completion. Do not invoke on a mechanical per-tool cadence.",
       },
     },
     {
