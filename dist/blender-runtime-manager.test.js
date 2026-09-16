@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "node:net";
@@ -56,7 +56,7 @@ const capabilityRuntime = {
   },
   async getMcpClient(_pluginId, _serverId, instanceToken, ownerConversationId) {
     assert.match(instanceToken, /^token-/);
-    assert.match(ownerConversationId, /^conversation-/);
+    assert.match(ownerConversationId, /^blender-runtime:/);
     return { client: {} };
   },
   async call(input, { ownerConversationId }) {
@@ -100,8 +100,10 @@ try {
 
   assert.equal(runtimeA.runtime.port, first.port);
   assert.equal(runtimeB.runtime.port, second.port);
-  assert.equal(runtimeA.runtime.defaultForOwner, true);
-  assert.equal(runtimeB.runtime.defaultForOwner, true);
+  assert.equal(runtimeA.runtime.conversationLocked, false);
+  assert.equal(runtimeB.runtime.conversationLocked, false);
+  assert.equal(runtimeA.runtime.lastConversationId, "conversation-a");
+  assert.equal(runtimeB.runtime.lastConversationId, "conversation-b");
   assert.notEqual(runtimeA.instanceToken, runtimeB.instanceToken);
   assert.equal(claims.length, 2);
   assert.equal(adoptions.length, 2);
@@ -109,13 +111,11 @@ try {
   assert.deepEqual(claims.map((claim) => claim.env.BLENDER_MCP_HOST), ["127.0.0.1", "127.0.0.1"]);
   assert.deepEqual(claims.map((claim) => claim.env.BLENDER_MCP_PORT), [String(first.port), String(second.port)]);
   assert.deepEqual(claims.map((claim) => claim.env.BLENDER_PORT), [String(first.port), String(second.port)]);
-  assert.deepEqual((await manager.list("conversation-a")).map((runtime) => runtime.runtimeId), ["agent-a"]);
-  assert.deepEqual((await manager.list("conversation-b")).map((runtime) => runtime.runtimeId), ["agent-b"]);
+  assert.deepEqual((await manager.list("conversation-a")).map((runtime) => runtime.runtimeId), ["agent-a", "agent-b"]);
+  assert.deepEqual((await manager.list("conversation-b")).map((runtime) => runtime.runtimeId), ["agent-a", "agent-b"]);
+  assert.equal((await manager.list("conversation-a")).find((runtime) => runtime.runtimeId === "agent-a").preferredByCurrentConversation, true);
+  assert.equal((await manager.list("conversation-b")).find((runtime) => runtime.runtimeId === "agent-b").preferredByCurrentConversation, true);
 
-  await assert.rejects(
-    () => manager.access("agent-a", "conversation-b"),
-    /belongs to another ChatGPT conversation/,
-  );
   const accessA = await manager.access("agent-a", "conversation-a");
   assert.equal(accessA.instanceToken, runtimeA.instanceToken);
   assert.equal(await manager.defaultInstanceToken("conversation-a"), runtimeA.instanceToken);
@@ -123,14 +123,18 @@ try {
   assert.equal(defaultB.runtime.runtimeId, "agent-b");
   assert.equal(defaultB.runtime.blendFile, join(stateDir, "agent-b-live.blend"));
 
-  await assert.rejects(
-    () => manager.attach({
-      runtimeId: "agent-c",
-      ownerConversationId: "conversation-c",
-      port: second.port,
-    }),
-    /belongs to another conversation runtime/,
-  );
+  const transferredA = await manager.access("agent-a", "conversation-b");
+  assert.equal(transferredA.instanceToken, runtimeA.instanceToken, "a later conversation must continue the same Blender MCP runtime");
+  assert.equal((await manager.status("agent-a", "conversation-b")).runtime.lastConversationId, "conversation-b");
+  assert.equal(await manager.defaultInstanceToken("conversation-b"), runtimeA.instanceToken, "the latest explicit runtime becomes only an advisory default for that conversation");
+
+  const reusedByPort = await manager.attach({
+    runtimeId: "agent-c",
+    ownerConversationId: "conversation-c",
+    port: second.port,
+  });
+  assert.equal(reusedByPort.runtime.runtimeId, "agent-b", "an already-registered Blender port must be reused rather than rejected by conversation identity");
+  assert.equal(reusedByPort.runtime.lastConversationId, "conversation-c");
 
   const adoptedStateDir = await mkdtemp(join(tmpdir(), "devspace-blender-runtime-adopt-test-"));
   try {
@@ -145,27 +149,70 @@ try {
     assert.match(adoptedToken, /^token-adopted-default-/);
     assert.equal(adoptedRuntime.runtime.port, third.port);
     assert.equal(adoptedRuntime.runtime.managedProcess, false);
-    assert.equal(adoptedRuntime.runtime.defaultForOwner, true);
-    assert.equal(adoptedRuntime.runtime.ownerConversationId, "conversation-existing");
+    assert.equal(adoptedRuntime.runtime.defaultForOwner, false);
+    assert.equal(adoptedRuntime.runtime.ownerConversationId, null);
+    assert.equal(adoptedRuntime.runtime.lastConversationId, "conversation-existing");
+    assert.equal(adoptedRuntime.runtime.conversationLocked, false);
   } finally {
     await rm(adoptedStateDir, { recursive: true, force: true });
   }
 
-  await manager.stop({ runtimeId: "agent-a", ownerConversationId: "conversation-a" });
-  assert.equal(releases.length, 1);
-  assert.equal(releases[0].ownerConversationId, "conversation-a");
-  assert.deepEqual((await manager.list("conversation-a")), []);
+  const legacy = await listen();
+  const legacyStateDir = await mkdtemp(join(tmpdir(), "devspace-blender-runtime-v2-migration-"));
+  try {
+    await writeFile(join(legacyStateDir, "blender-runtimes.json"), JSON.stringify({
+      version: 2,
+      runtimes: [{
+        runtimeId: "legacy-runtime",
+        ownerConversationId: "conversation-old",
+        ownerLabel: "Legacy Agent",
+        port: legacy.port,
+        processId: null,
+        managedProcess: false,
+        defaultForOwner: true,
+        blendFile: join(legacyStateDir, "legacy.blend"),
+        executable: null,
+        createdAt: new Date().toISOString(),
+        connectedAt: new Date().toISOString(),
+      }],
+    }, null, 2), "utf8");
+    const legacyManager = new BlenderRuntimeManager({ stateDir: legacyStateDir, capabilityRuntime });
+    await legacyManager.ready;
+    const visibleFromNewConversation = await legacyManager.list("conversation-new");
+    assert.equal(visibleFromNewConversation.length, 1, "a new conversation must see a persisted v2 Blender runtime owned by an older conversation");
+    assert.equal(visibleFromNewConversation[0].runtimeId, "legacy-runtime");
+    assert.equal(visibleFromNewConversation[0].conversationLocked, false);
+    assert.equal(visibleFromNewConversation[0].lastConversationId, "conversation-old");
+    const legacyAccess = await legacyManager.access("legacy-runtime", "conversation-new");
+    assert.match(legacyAccess.instanceToken, /^token-legacy-runtime-/);
+    const migrated = JSON.parse(await readFile(join(legacyStateDir, "blender-runtimes.json"), "utf8"));
+    assert.equal(migrated.version, 3);
+    assert.equal(migrated.runtimes[0].ownerConversationId, undefined, "v3 persistence must remove the hard conversation owner field");
+    assert.equal(migrated.runtimes[0].lastConversationId, "conversation-new", "the new conversation becomes only the latest-use hint");
+    await legacyManager.close();
+  } finally {
+    await close(legacy.server, legacy.sockets).catch(() => {});
+    await rm(legacyStateDir, { recursive: true, force: true });
+  }
+
+  await manager.stop({ runtimeId: "agent-a", ownerConversationId: "conversation-handoff" });
+  assert.equal(releases.filter((item) => item.ownerConversationId === "blender-runtime:agent-a").length, 1);
+  assert.ok(releases.some((item) => item.ownerConversationId === "blender-runtime:agent-a"));
+  assert.deepEqual((await manager.list("conversation-a")).map((runtime) => runtime.runtimeId), ["agent-b"]);
   assert.deepEqual((await manager.list("conversation-b")).map((runtime) => runtime.runtimeId), ["agent-b"]);
 
   await manager.close();
-  assert.equal(releases.length, 2, "manager close must release remaining MCP connections without terminating Blender");
-  assert.equal(releases[1].ownerConversationId, "conversation-b");
+  assert.equal(releases.filter((item) => item.ownerConversationId === "blender-runtime:agent-b").length, 1, "manager close must release the remaining MCP connection without terminating Blender");
+  assert.ok(releases.some((item) => item.ownerConversationId === "blender-runtime:agent-b"));
 
   console.log(JSON.stringify({
     ok: true,
     gate: "blender-runtime-manager",
     dualRuntimePorts: [first.port, second.port],
-    conversationIsolation: true,
+    runtimeIsolation: true,
+    conversationTransfer: true,
+    conversationOwnershipLock: false,
+    legacyV2OwnerMigratedToAdvisoryHint: true,
     uniqueDefaultRuntime: true,
     existingRuntimeAdoption: true,
     implicitDefaultEndpointAdoption: true,

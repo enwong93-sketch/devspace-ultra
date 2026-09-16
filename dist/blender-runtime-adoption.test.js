@@ -34,6 +34,22 @@ function capabilityRuntime() {
       claims.set(token, structuredClone(input));
       return { ok: true, instanceToken: token, runtimeId: input.runtimeId };
     },
+    findInstanceByToken(token) {
+      const input = claims.get(token);
+      return input ? {
+        pluginId: input.pluginId,
+        serverId: input.serverId,
+        instanceId: input.instanceId,
+        runtimeId: input.runtimeId,
+        ownerConversationId: input.ownerConversationId,
+        ownerLabel: input.ownerLabel,
+      } : null;
+    },
+    connectionManager: {
+      async adoptLegacySharedConnection() {
+        return { adopted: false, reason: "test-has-no-legacy-holder" };
+      },
+    },
     async getMcpClient(_pluginId, _serverId, token) {
       assert.ok(claims.has(token));
       return { connected: true };
@@ -53,15 +69,7 @@ function capabilityRuntime() {
     const manager = new BlenderRuntimeManager({
       stateDir,
       capabilityRuntime: capability,
-      portStart: listener.port,
-      portEnd: listener.port,
-      discoverProcesses: async () => [{
-        processId: 4242,
-        parentProcessId: 1,
-        executable: "C:/Blender/blender.exe",
-        commandLine: "blender.exe existing-work.blend",
-        ports: [listener.port],
-      }],
+      defaultPort: listener.port,
     });
     await manager.ready;
     const first = await manager.resolveOrAdoptExisting({
@@ -82,11 +90,12 @@ function capabilityRuntime() {
     assert.equal(second.adopted, false);
     assert.equal(second.runtime.runtimeId, first.runtime.runtimeId);
     assert.equal((await manager.list("conversation-right-agent")).length, 1);
-    assert.equal((await manager.list("conversation-other-agent")).length, 0);
-    await assert.rejects(
-      () => manager.resolveOrAdoptExisting({ ownerConversationId: "conversation-other-agent" }),
-      /No unclaimed existing Blender MCP runtime is online/,
-    );
+    assert.equal((await manager.list("conversation-other-agent")).length, 1);
+    const handedOff = await manager.resolveOrAdoptExisting({ ownerConversationId: "conversation-other-agent" });
+    assert.equal(handedOff.adopted, false);
+    assert.equal(handedOff.runtime.runtimeId, first.runtime.runtimeId);
+    assert.equal(handedOff.runtime.lastConversationId, "conversation-other-agent");
+    assert.equal(handedOff.runtime.conversationLocked, false);
 
     await manager.stop({
       runtimeId: first.runtime.runtimeId,
@@ -109,19 +118,15 @@ function capabilityRuntime() {
     const manager = new BlenderRuntimeManager({
       stateDir,
       capabilityRuntime: capabilityRuntime(),
-      portStart: Math.min(first.port, second.port),
-      portEnd: Math.max(first.port, second.port),
-      discoverProcesses: async () => [
-        { processId: 5001, ports: [first.port] },
-        { processId: 5002, ports: [second.port] },
-      ],
     });
     await manager.ready;
+    await manager.attach({ runtimeId: "ambiguous-a", ownerConversationId: "conversation-old-a", port: first.port });
+    await manager.attach({ runtimeId: "ambiguous-b", ownerConversationId: "conversation-old-b", port: second.port });
     await assert.rejects(
-      () => manager.resolveOrAdoptExisting({ ownerConversationId: "conversation-agent" }),
-      /More than one unclaimed Blender MCP runtime is online/,
+      () => manager.defaultInstanceToken("conversation-agent"),
+      /More than one Blender runtime is online/,
     );
-    assert.equal((await manager.list("conversation-agent")).length, 0);
+    assert.equal((await manager.list("conversation-agent")).length, 2);
   }
   finally {
     await close(first).catch(() => {});
@@ -134,7 +139,8 @@ console.log(JSON.stringify({
   ok: true,
   gate: "blender-runtime-adoption",
   existingProcessPreserved: true,
-  ownerConversationBound: true,
-  otherConversationRejected: true,
+  conversationTransfer: true,
+  ownerConversationBound: false,
+  otherConversationRejected: false,
   ambiguousCandidatesRejected: true,
 }));

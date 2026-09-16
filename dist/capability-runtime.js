@@ -1146,13 +1146,13 @@ function mcpToolNextAction(plugin, server, tool) {
       runtimeRoute: {
         kind: "runtime",
         managerTool: "blender_runtime",
-        owner: "current-conversation",
-        strategy: "reuse-owned-runtime-or-start-isolated",
+        owner: "blender-runtime",
+        strategy: "reuse-runtime-process-port-across-conversations-or-start-separate",
         discovery: { tool: "blender_runtime", arguments: { action: "list" } },
-        start: { tool: "blender_runtime", arguments: { action: "start", runtimeId: "<conversation-project-runtime>" } },
+        start: { tool: "blender_runtime", arguments: { action: "start", runtimeId: "<project-runtime>" } },
         bindArgument: "runtimeId",
       },
-      then: "Execute the selected Blender MCP tool against the owned runtimeId and verify through Blender readback.",
+      then: "Execute the selected Blender MCP tool against the selected runtimeId and verify through Blender readback. The same runtimeId remains valid after a ChatGPT conversation handoff.",
     };
   }
   const nextAction = {
@@ -1225,8 +1225,8 @@ function builtinCapabilityRouteCandidates() {
       routeId: "runtime:blender-isolated",
       kind: "runtime",
       name: "blender-runtime",
-      title: "Conversation-owned Blender runtime",
-      description: "Start or attach an isolated Blender application runtime for one conversation and project. Use this before Blender MCP when multiple agents, projects, Blender processes, or loopback ports must run concurrently without crossing files or connection state.",
+      title: "Transferable Blender runtime",
+      description: "Start or attach an isolated Blender application runtime identified by runtimeId/process/port. The same open Blender runtime can be continued by a later ChatGPT conversation; use explicit runtimeId whenever multiple Blender runtimes are online so projects never cross-route.",
       aliases: [
         "multiple blender runtime",
         "two blender instances",
@@ -1246,11 +1246,11 @@ function builtinCapabilityRouteCandidates() {
       },
       pluginId: "blender-local",
       serverId: "blender",
-      requires: ["one-runtime-per-concurrent-project", "conversation-owner", "loopback-port"],
+      requires: ["one-runtime-per-concurrent-project", "runtime-process-port-identity", "loopback-port"],
       nextAction: {
         tool: "blender_runtime",
         arguments: { action: "list" },
-        then: "Preserve work already in progress: reuse the matching conversation-owned runtime, otherwise adopt the one unclaimed existing Blender runtime without restarting it. Start a new runtime only for a future project, then call blender_mcp through that conversation-isolated runtime.",
+        then: "Preserve work already in progress: reuse the matching runtimeId/process/port even when the current ChatGPT conversation is new. If exactly one Blender runtime is online, it may be continued directly; when several are online, choose runtimeId explicitly. Start a new runtime only for a genuinely separate Blender project, then call blender_mcp.",
       },
     },
     {
@@ -3060,7 +3060,7 @@ export function registerCapabilityTools(server, runtime, {
 
   server.registerTool("devspace_connection_isolation_status", {
     title: "Inspect Conversation Connection Isolation",
-    description: "Verify that the current ChatGPT conversation owns only its isolated Plugin/MCP connections and Blender runtimes. Reports legacy shared entries as retired diagnostics; they are never returned as executable routes. Use this after tool-schema refresh, runtime adoption, reconnect, or Core restart.",
+    description: "Verify that ordinary Plugin/MCP transports remain conversation-isolated while Blender application runtimes remain process/runtime-isolated and transferable across conversations. Reports legacy shared entries as retired diagnostics; they are never returned as executable routes. Use this after tool-schema refresh, runtime adoption, reconnect, or Core restart.",
     inputSchema: {},
     annotations: READ_ONLY,
     ...routingMeta,
@@ -3076,7 +3076,7 @@ export function registerCapabilityTools(server, runtime, {
         : [];
       return textResult({
         ok: legacySharedConnections.length === 0,
-        policy: "conversation-isolated",
+        policy: "conversation-isolated-capabilities-with-transferable-blender-runtimes",
         ownerConversationId,
         isolatedConnections,
         legacySharedConnections: legacySharedConnections.map((connection) => ({
@@ -3088,7 +3088,7 @@ export function registerCapabilityTools(server, runtime, {
         blenderRuntimes,
         instruction: legacySharedConnections.length
           ? "Restart/reconcile the Core to retire pre-policy shared clients; do not route Agent work through them."
-          : "All currently visible Agent connections are conversation-isolated.",
+          : "Ordinary capability MCP transports are conversation-isolated. Blender runtimes are intentionally transferable by runtimeId/process/port so a new conversation can continue the same open Blender session.",
       });
     }
     catch (error) { return errorResult(error); }
@@ -3160,7 +3160,7 @@ export function registerCapabilityTools(server, runtime, {
 
   server.registerTool("blender_runtime", {
     title: "Manage Isolated Blender Runtimes",
-    description: "Start, adopt, attach, inspect, release, or stop a conversation-owned Blender application runtime. Each runtime receives its own runtimeId, loopback MCP port, Blender process binding and isolated blender-local MCP connection, allowing multiple agents to operate different Blender projects concurrently without cross-routing. discover finds running Blender processes and listener ports; start launches a new visible Blender process; adopt/attach binds an already-running addon endpoint without reopening Blender or replacing its current file; release removes only DevSpace's connection while leaving Blender open; stop gracefully closes only a DevSpace-managed Blender process. No lease or wall-clock timeout is applied.",
+    description: "Start, adopt, attach, inspect, release, or stop a Blender application runtime identified by runtimeId + Blender process + loopback MCP port. Blender runtimes are deliberately transferable across ChatGPT conversations so a new conversation can continue the same open .blend/MCP session after context handoff. Conversation identity is only an advisory default hint and is never an ownership lock. When multiple Blender runtimes are online, pass runtimeId explicitly so DevSpace never guesses between projects. release removes only DevSpace's connection while leaving Blender open; stop gracefully closes only a DevSpace-managed Blender process.",
     inputSchema: {
       action: z.enum(["discover", "list", "status", "start", "adopt", "attach", "release", "stop"]).default("list"),
       runtimeId: z.string().min(1).max(120).optional(),
@@ -3176,12 +3176,11 @@ export function registerCapabilityTools(server, runtime, {
     try {
       if (!blenderRuntimeManager) throw new Error("Blender Runtime Manager is unavailable.");
       const ownerConversationId = await currentConversation(extra);
-      if (!ownerConversationId) throw new Error("Blender Runtime Manager requires the current ChatGPT conversation identity.");
       if (input.action === "discover") {
-        return textResult({ ok: true, ownerConversationId, processes: await blenderRuntimeManager.discover(ownerConversationId) });
+        return textResult({ ok: true, currentConversationId: ownerConversationId, conversationLocked: false, processes: await blenderRuntimeManager.discover(ownerConversationId) });
       }
       if (input.action === "list") {
-        return textResult({ ok: true, ownerConversationId, runtimes: await blenderRuntimeManager.list(ownerConversationId) });
+        return textResult({ ok: true, currentConversationId: ownerConversationId, conversationLocked: false, runtimes: await blenderRuntimeManager.list(ownerConversationId) });
       }
       if (!input.runtimeId) throw new Error(`runtimeId is required for action=${input.action}.`);
       if (input.action === "status") return textResult(await blenderRuntimeManager.status(input.runtimeId, ownerConversationId));
@@ -3221,7 +3220,7 @@ export function registerCapabilityTools(server, runtime, {
 
   server.registerTool("blender_mcp", {
     title: "Operate Live Blender via MCP",
-    description: "Actual execution entry point for Blender. Omitting runtimeId resolves only the current conversation's unique/default assigned runtime, including an adopted user-opened Blender that is already mid-work; it never falls back to a backend-wide shared Blender connection. When a conversation owns multiple runtimes, pass runtimeId explicitly. Do not stop after capability discovery: action=list reads the selected runtime's live schema and action=call invokes one returned tool. Use execute_blender_code for mutations and screenshot/summary tools for readback.",
+    description: "Actual execution entry point for Blender. Blender runtime identity is runtimeId/process/port, not ChatGPT conversation identity: a later conversation may continue the same already-open Blender MCP runtime. Omitting runtimeId is allowed only when exactly one online runtime exists or this conversation has one unambiguous recent runtime hint; when multiple runtimes are online, pass runtimeId explicitly. Do not stop after capability discovery: action=list reads the selected runtime's live schema and action=call invokes one returned tool. Use execute_blender_code for mutations and screenshot/summary tools for readback.",
     inputSchema: {
       action: z.enum(["list", "call"]).default("list"),
       toolName: z.string().min(1).max(220).optional(),
@@ -3235,17 +3234,35 @@ export function registerCapabilityTools(server, runtime, {
     try {
       const ownerConversationId = await currentConversation(extra);
       if (input.instanceToken && input.runtimeId) throw new Error("Pass either runtimeId or instanceToken, not both.");
-      if (!ownerConversationId) throw new Error("Blender MCP requires the current ChatGPT conversation identity.");
       if (!blenderRuntimeManager) throw new Error("Blender Runtime Manager is unavailable.");
-      const instanceToken = input.runtimeId
-        ? await blenderRuntimeManager.instanceToken(input.runtimeId, ownerConversationId)
-        : input.instanceToken || await blenderRuntimeManager.defaultInstanceToken(ownerConversationId);
+      let instanceToken = input.instanceToken || null;
+      let connectionOwnerId = null;
+      let resolvedRuntimeId = input.runtimeId || null;
+      if (input.runtimeId) {
+        const access = await blenderRuntimeManager.access(input.runtimeId, ownerConversationId);
+        instanceToken = access.instanceToken;
+        connectionOwnerId = access.connectionOwnerId;
+        resolvedRuntimeId = access.runtime.runtimeId;
+      } else if (instanceToken) {
+        const instance = runtime.findInstanceByToken(instanceToken);
+        if (instance.pluginId !== "blender-local" || instance.serverId !== "blender") {
+          throw new Error("Blender MCP instanceToken belongs to a different capability.");
+        }
+        connectionOwnerId = instance.ownerConversationId;
+        resolvedRuntimeId = instance.runtimeId || null;
+      } else {
+        instanceToken = await blenderRuntimeManager.defaultInstanceToken(ownerConversationId);
+        const instance = runtime.findInstanceByToken(instanceToken);
+        connectionOwnerId = instance.ownerConversationId;
+        resolvedRuntimeId = instance.runtimeId || null;
+      }
       if (input.action === "list") {
-        const listed = await runtime.listMcpTools("blender-local", "blender", instanceToken, ownerConversationId);
+        const listed = await runtime.listMcpTools("blender-local", "blender", instanceToken, connectionOwnerId);
         return textResult({
           ...listed,
           executionTool: "blender_mcp",
-          instruction: "Select one returned tool and immediately call blender_mcp with action=call, the same runtimeId when visible in your schema, that toolName, and schema-valid arguments. Cached clients may omit runtimeId only because the backend has already bound this conversation to its unique default runtime.",
+          runtimeId: resolvedRuntimeId,
+          instruction: "Select one returned tool and immediately call blender_mcp with action=call, the same runtimeId, that toolName, and schema-valid arguments. A new conversation may keep using that runtimeId; only multiple online Blender runtimes require an explicit selection.",
         });
       }
       if (!input.toolName) throw new Error("toolName is required when action=call.");
@@ -3256,10 +3273,7 @@ export function registerCapabilityTools(server, runtime, {
         toolName: input.toolName,
         arguments: input.arguments,
         instanceToken,
-      }, { ownerConversationId });
-      const resolvedRuntimeId = input.runtimeId
-        || runtime.findInstanceByToken(instanceToken)?.runtimeId
-        || null;
+      }, { ownerConversationId: connectionOwnerId });
       if (resolvedRuntimeId && typeof blenderRuntimeManager.observeMcpResult === "function") {
         await blenderRuntimeManager.observeMcpResult(resolvedRuntimeId, ownerConversationId, called).catch(() => null);
       }
@@ -3270,7 +3284,7 @@ export function registerCapabilityTools(server, runtime, {
 
   server.registerTool("capability_call", {
     title: "Call Agent Capability Tool",
-    description: "Invoke a capability through the DevSpace backend. Every MCP call/resource/prompt is conversation-isolated by default: when runtimeId or instanceToken is omitted, DevSpace creates or reuses an implicit connection owned only by the current ChatGPT conversation. Stateful application MCPs should still use their dedicated runtime manager so each project also receives its own process/port; Blender must use blender_runtime/blender_mcp. kind=tool invokes an explicitly declared command adapter with JSON on stdin. Use capability_search/inspect first to discover names, URIs, and schemas.",
+    description: "Invoke a capability through the DevSpace backend. Ordinary MCP calls/resources/prompts are conversation-isolated by default. Stateful application MCPs should use their dedicated runtime manager; Blender is the explicit exception and is isolated by runtimeId/process/port rather than ChatGPT conversation so later conversations can continue the same open Blender session through blender_runtime/blender_mcp. kind=tool invokes an explicitly declared command adapter with JSON on stdin. Use capability_search/inspect first to discover names, URIs, and schemas.",
     inputSchema: {
       pluginId: z.string().min(1).max(180),
       kind: z.enum(["mcp", "mcp-resource", "mcp-prompt", "tool"]),
