@@ -126,6 +126,32 @@ assert.equal(overlay.status().activeConversations.length, 0);
 assert.ok(evaluations.some((expression) => expression.includes("Computer Use 正在使用你的電腦")));
 assert.ok(evaluations.some((expression) => expression.includes("cleared:true")));
 
+now += 1_000;
+const releaseSession = await overlay.begin({
+  conversationId: "conversation-computer-use",
+  runtimeKey: "main-01",
+  app: "process:C:\\Apps\\Discord.exe",
+  action: "get_window_state",
+  timeoutMs: 20_000,
+});
+assert.equal(overlay.status().activeConversations.length, 1);
+const released = await overlay.release({
+  conversationId: "conversation-computer-use",
+  operationId: releaseSession.operationId,
+  state: "agent-released",
+});
+assert.equal(released.state, "released");
+assert.equal(released.explicitRelease, true);
+assert.equal(released.cleared, true);
+assert.equal(overlay.status().activeConversations.length, 0, "explicit release must remove takeover ownership immediately");
+
+const staleRelease = await overlay.release({
+  conversationId: "conversation-computer-use",
+  state: "agent-released",
+});
+assert.equal(staleRelease.state, "released", "release must also clear a stale DOM overlay after Core-local session state is gone");
+assert.equal(staleRelease.explicitRelease, true);
+
 console.log(JSON.stringify({
   ok: true,
   gate: "classic-computer-use-overlay",
@@ -134,6 +160,8 @@ console.log(JSON.stringify({
   pointerEventsBlocked: false,
   producerLease: true,
   sharedActionSession: true,
+  explicitAgentRelease: true,
+  staleOverlayRelease: true,
   idleAutoClear: true,
   hardExpiry: true,
   staticReducedMotionSafe: true,

@@ -10,7 +10,9 @@ const calls = [];
 const elicitationRequests = [];
 const overlayBegins = [];
 const overlayEnds = [];
+const overlayReleases = [];
 let nextRiskLevel = "low";
+let failNextCall = false;
 const fakeBridge = {
   async probe(serverId, ownerConversationId) {
     assert.equal(serverId, "node_repl");
@@ -31,6 +33,10 @@ const fakeBridge = {
   async callTool(input, ownerConversationId, executionOptions = {}) {
     assert.equal(ownerConversationId, "conversation-a");
     calls.push(input);
+    if (failNextCall) {
+      failNextCall = false;
+      throw new Error("simulated Computer Use transport failure");
+    }
     const code = String(input.arguments.code || "");
     let payload = code.includes("runtime:")
       ? { ok: true, target: "windows", runtime: "@oai/sky", pluginId: "computer-use@openai-bundled" }
@@ -72,6 +78,10 @@ const computerUseOverlay = {
   async end(input) {
     overlayEnds.push(structuredClone(input));
     return { ok: true, state: "idle-clear-scheduled" };
+  },
+  async release(input) {
+    overlayReleases.push(structuredClone(input));
+    return { ok: true, state: "released", explicitRelease: true, cleared: true };
   },
 };
 registerCodexComputerUseRouter({
@@ -143,6 +153,44 @@ assert.equal(fallbackAction.structuredContent.nativeRuntimeEvidence.approvalRela
 assert.equal(fallbackAction.structuredContent.nativeRuntimeEvidence.approvalRelay.fallback,
   "host-elicitation-unsupported-exact-conversation-observe-action");
 
+const finalObservation = await registrations[1].handler({
+  action: "get_window_state",
+  input: {
+    window: { app: "app-a", id: 1, title: "Window" },
+    include_text: true,
+    release_control: true,
+  },
+  timeoutMs: 20_000,
+}, unsupportedExtra);
+assert.equal(finalObservation.structuredContent.nativeRuntimeEvidence.computerUseOverlay.releaseRequested, true);
+assert.equal(finalObservation.structuredContent.nativeRuntimeEvidence.computerUseOverlay.released, true);
+assert.equal(finalObservation.structuredContent.nativeRuntimeEvidence.computerUseOverlay.approvalGrantReleased, true);
+assert.equal(finalObservation.structuredContent.nativeRuntimeEvidence.computerUseOverlay.cleanup.state, "released");
+assert.equal(overlayReleases.at(-1).conversationId, "conversation-a");
+assert.equal(overlayReleases.at(-1).operationId, "overlay-operation-a");
+
+const releaseOnMutationRejected = await registrations[1].handler({
+  action: "press_key",
+  input: {
+    window: { app: "app-a", id: 1, title: "Window" },
+    key: "F6",
+    release_control: true,
+  },
+  timeoutMs: 20_000,
+}, unsupportedExtra);
+assert.equal(releaseOnMutationRejected.isError, true);
+assert.match(releaseOnMutationRejected.content[0].text, /final read-only observation/i);
+
+failNextCall = true;
+const failedObservation = await registrations[1].handler({
+  action: "list_windows",
+  input: {},
+  timeoutMs: 20_000,
+}, unsupportedExtra);
+assert.equal(failedObservation.isError, true);
+assert.match(failedObservation.content[0].text, /simulated Computer Use transport failure/);
+assert.equal(overlayReleases.at(-1).state, "failed", "failed Computer Use calls must immediately release the takeover state");
+
 const rejectedSecondAction = await registrations[1].handler({
   action: "press_key",
   input: { window: { app: "app-a", id: 1, title: "Window" }, key: "F6" },
@@ -195,6 +243,8 @@ console.log(JSON.stringify({
   oneMutationPerObservation: true,
   highRiskRequiresExplicitCurrentUserAuthorization: true,
   conversationScopedTakeoverOverlay: true,
+  explicitFinalRelease: true,
+  mutationCannotSkipFinalReobserve: true,
   persistentNodeRepl: true,
   fullAccessOnly: true,
   noDevSpaceGuiDriver: true,

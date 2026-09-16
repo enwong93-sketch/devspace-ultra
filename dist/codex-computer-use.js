@@ -248,6 +248,10 @@ export async function callCodexComputerUse(dependencies, {
 } = {}) {
   const info = codexComputerUseActionInfo(action);
   const explicitUserAuthorization = input?.user_authorized_app_control === true;
+  const releaseControl = input?.release_control === true || input?.releaseControl === true;
+  if (releaseControl && info.mutating) {
+    throw new Error("Computer Use release_control is allowed only on the final read-only observation after the last state-changing action.");
+  }
   const normalized = normalizeInput(info.action, input);
   const app = targetApp(info.action, normalized);
   assertAllowedApp(app);
@@ -306,6 +310,9 @@ export async function callCodexComputerUse(dependencies, {
       }))
     : { ok: true, state: info.action === "status" ? "status-read-only" : "overlay-unavailable" };
   let operationState = "failed";
+  let result = null;
+  let overlayCleanup = null;
+  let approvalGrantReleased = false;
   try {
     const response = await callJsReplCompatibility(dependencies, {
       code,
@@ -314,7 +321,7 @@ export async function callCodexComputerUse(dependencies, {
     });
     const parsed = parseNodeReplPayload(response);
     operationState = "completed";
-    return {
+    result = {
       ok: true,
       ...info,
       source: response.source,
@@ -332,14 +339,36 @@ export async function callCodexComputerUse(dependencies, {
       executionPolicy: executionPolicySnapshot(),
     };
   } finally {
-    if (activity?.operationId && typeof dependencies?.computerUseActivity?.end === "function") {
-      await dependencies.computerUseActivity.end({
-        conversationId: dependencies.ownerConversationId,
-        operationId: activity.operationId,
-        state: operationState,
-      }).catch(() => null);
+    if (activity?.operationId) {
+      const mustRelease = releaseControl || operationState !== "completed";
+      if (mustRelease && typeof dependencies?.computerUseActivity?.release === "function") {
+        overlayCleanup = await dependencies.computerUseActivity.release({
+          conversationId: dependencies.ownerConversationId,
+          operationId: activity.operationId,
+          state: releaseControl ? "agent-released" : operationState,
+        }).catch(() => null);
+      } else if (typeof dependencies?.computerUseActivity?.end === "function") {
+        overlayCleanup = await dependencies.computerUseActivity.end({
+          conversationId: dependencies.ownerConversationId,
+          operationId: activity.operationId,
+          state: operationState,
+        }).catch(() => null);
+      }
+      if (mustRelease && typeof dependencies?.releaseHostUnsupportedApproval === "function") {
+        approvalGrantReleased = dependencies.releaseHostUnsupportedApproval(app) === true;
+      }
     }
   }
+  if (result?.nativeRuntimeEvidence) {
+    result.nativeRuntimeEvidence.computerUseOverlay = {
+      ...activity,
+      cleanup: overlayCleanup,
+      released: overlayCleanup?.explicitRelease === true || overlayCleanup?.state === "released",
+      releaseRequested: releaseControl,
+      approvalGrantReleased,
+    };
+  }
+  return result;
 }
 
 export async function codexComputerUseStatus(dependencies) {
