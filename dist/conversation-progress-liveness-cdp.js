@@ -277,6 +277,42 @@ export class ConversationProgressLivenessCdpAdapter {
     }
   }
 
+  async resetInterruptedGeneration({ conversationId, target = null } = {}) {
+    const resolved = await this.#resolveExactTarget(conversationId, target);
+    if (!resolved.ok) return resolved;
+    const page = await this.connect(resolved.target);
+    try {
+      const result = await page.evaluate(`(() => {
+        const expected = ${JSON.stringify(resolved.conversationId)};
+        const actual = location.pathname.match(/\\/c\\/([^/?#]+)/)?.[1] || null;
+        const visible = (element) => {
+          if (!(element instanceof HTMLElement)) return false;
+          const rect = element.getBoundingClientRect();
+          const style = getComputedStyle(element);
+          return rect.width > 5 && rect.height > 5 && style.display !== 'none' && style.visibility !== 'hidden';
+        };
+        if (actual !== expected) return { ok:false, state:'route-changed' };
+        const stop = [...document.querySelectorAll('button')]
+          .filter(visible)
+          .find((button) => button.matches('[data-testid="stop-button"]') || /stop|停止|中止/i.test(String(button.getAttribute('aria-label') || '')));
+        if (!stop) return { ok:true, state:'already-idle', resetCommitted:false };
+        stop.click();
+        return { ok:true, state:'stale-generating-stop-clicked', resetCommitted:true };
+      })()`);
+      return {
+        ...result,
+        conversationId: resolved.conversationId,
+        locatedRuntimeKey: resolved.runtimeKey,
+        locatedPort: resolved.port,
+        runtimeBinding: false,
+        foregroundActivation: false,
+        pageNavigation: false,
+      };
+    } finally {
+      page.close();
+    }
+  }
+
   async sendContinue({ conversationId, target = null, attempt = 1 } = {}) {
     const resolved = await this.#resolveExactTarget(conversationId, target);
     if (!resolved.ok) return resolved;

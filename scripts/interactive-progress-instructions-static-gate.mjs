@@ -19,6 +19,8 @@ assert.match(source, /neither tool events nor timers may author visible narratio
 assert.match(source, /personally judge that a meaningful medium-sized step has completed/i);
 assert.match(source, /never leave more than ten minutes between Agent-authored reports/i);
 assert.match(source, /Ten minutes is a maximum silent interval for the working Agent, not a timer cadence/i);
+assert.match(source, /Before entering any external wait, process watch, CI watch/i);
+assert.match(source, /after the wait returns, report the material result before starting another long phase/i);
 assert.match(source, /rescue may emit only the exact visible text `- 繼續`/i);
 assert.match(source, /Write the card text yourself in natural language/i);
 assert.match(source, /never show generated step counters, heartbeat prose, generic program status/i);
@@ -40,6 +42,8 @@ assert.match(agents, /never claim that the card was updated/i);
 assert.match(agents, /Call `devspace_progress_report` when a meaningful medium-sized step has completed/i);
 assert.match(agents, /ten minutes is an Agent reporting ceiling only/i);
 assert.match(agents, /No timer, supervisor, overlay, or hidden relay may send a ten-minute reminder/i);
+assert.match(agents, /Before entering any long external wait, process watch, CI watch/i);
+assert.match(agents, /When that wait returns, report the material result before starting another long phase/i);
 assert.match(agents, /only after at least twenty minutes/i);
 assert.match(agents, /normally completed or explicitly cancelled turn must disarm rescue immediately/i);
 assert.match(agents, /only visible text emitted by a verified twenty-minute interrupted-turn rescue is exactly `- 繼續`/i);
@@ -70,6 +74,7 @@ console.log(JSON.stringify({
   timerDrivenNarration: false,
   fixedCountNarration: false,
   tenMinuteAgentReportCeilingFromWorkspaceInstructions: true,
+  longWaitBoundaryReportsRequired: true,
   tenMinuteAutomaticReminder: false,
   twentyMinuteInterruptedTurnRescueOnly: true,
   interruptedTurnRescueText: "- 繼續",

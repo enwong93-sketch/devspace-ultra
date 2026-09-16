@@ -70,6 +70,28 @@ const pages = new Map([
     normalCompletion: false,
     incompleteUserTurn: true,
   }],
+  ["conversation-transport-only", {
+    runtimeKey: "main-03",
+    port: 9733,
+    hydrated: true,
+    generating: true,
+    composerEmpty: true,
+    latestMessageRole: "user",
+    hasTurnError: false,
+    normalCompletion: false,
+    incompleteUserTurn: false,
+  }],
+  ["conversation-stale-generating", {
+    runtimeKey: "main-03",
+    port: 9733,
+    hydrated: true,
+    generating: true,
+    composerEmpty: true,
+    latestMessageRole: "user",
+    hasTurnError: false,
+    normalCompletion: false,
+    incompleteUserTurn: false,
+  }],
   ["conversation-uncertain", {
     runtimeKey: "main-03",
     port: 9733,
@@ -168,6 +190,24 @@ const adapter = {
       locatedRuntimeKey: input.target?.runtimeKey || null,
     });
     return { ok: true };
+  },
+  async resetInterruptedGeneration(input) {
+    calls.push({
+      action: "resetInterruptedGeneration",
+      conversationId: input.conversationId,
+      locatedRuntimeKey: input.target?.runtimeKey || null,
+      rescueEvidence: input.rescueEvidence,
+    });
+    const page = pages.get(input.conversationId);
+    if (page) {
+      pages.set(input.conversationId, {
+        ...page,
+        generating: false,
+        hasTurnError: true,
+        incompleteUserTurn: true,
+      });
+    }
+    return { ok: true, state: "stale-generating-stop-clicked", resetCommitted: true };
   },
   async sendContinue(input) {
     calls.push({
@@ -273,6 +313,19 @@ await supervisor.noteTurn({
   errorText: "net::ERR_CONNECTION_RESET",
   observedAtMs: now + 2_000,
 });
+await supervisor.noteTurn({
+  kind: "started",
+  conversationId: "conversation-transport-only",
+  runtimeKey: "main-03",
+  observedAtMs: now,
+});
+await supervisor.noteTurn({
+  kind: "finished",
+  transportOnly: true,
+  conversationId: "conversation-transport-only",
+  runtimeKey: "main-03",
+  observedAtMs: now + 2_500,
+});
 await supervisor.noteTurn({ kind: "started", conversationId: "conversation-cancelled", runtimeKey: "main-04", observedAtMs: now });
 await supervisor.noteTurn({
   kind: "failed",
@@ -285,11 +338,18 @@ await supervisor.noteTurn({
 let completeRecord = supervisor.status().records.find((row) => row.conversationId === "conversation-complete");
 let finishPendingRecord = supervisor.status().records.find((row) => row.conversationId === "conversation-finish-pending");
 let cancelledRecord = supervisor.status().records.find((row) => row.conversationId === "conversation-cancelled");
+const transportOnlyRecord = supervisor.status().records.find((row) => row.conversationId === "conversation-transport-only");
 assert.equal(completeRecord.armed, false, "normal native completion must immediately disarm rescue");
 assert.equal(completeRecord.turnState, "completed");
 assert.equal(finishPendingRecord.armed, true,
   "a transport boundary may not claim normal completion while the exact page is still generating");
 assert.equal(finishPendingRecord.turnState, "completion-pending");
+assert.equal(transportOnlyRecord.armed, true,
+  "HTTP loadingFinished is only a transport boundary and must keep a tool-using assistant turn armed");
+assert.equal(transportOnlyRecord.turnState, "running");
+assert.equal(transportOnlyRecord.interruptedAt, null,
+  "transport-only completion must not start the interruption/rescue clock");
+assert.equal(transportOnlyRecord.lastDispatchState, "conversation-turn-transport-finished-nonterminal");
 assert.equal(cancelledRecord.armed, false, "an explicit user cancellation must not be auto-rescued");
 assert.equal(cancelledRecord.turnState, "cancelled");
 assert.equal(settled.some((event) => event.conversationId === "conversation-complete" && event.turnState === "completed"), true);
@@ -565,6 +625,115 @@ assert.equal(
 await restartSupervisor.close();
 await rm(restartDir, { recursive: true, force: true });
 
+// A real transport failure can leave the ChatGPT page with a stale Stop
+// affordance even though the prior turn is already dead. Rescue must not be
+// blocked forever by that stale `generating` signal: after the full twenty
+// minute boundary and a second idle confirmation, reset it exactly once, then
+// use the ordinary exact-page one-shot `- 繼續` path on a later tick.
+const staleDir = await mkdtemp(join(tmpdir(), "devspace-liveness-stale-generating-test-"));
+const staleStatePath = join(staleDir, "liveness.json");
+const stalePlanPath = join(staleDir, "plans.json");
+const staleProgressPath = join(staleDir, "progress.json");
+await writeFile(stalePlanPath, JSON.stringify({ plans: {} }), "utf8");
+await writeFile(staleProgressPath, JSON.stringify({ messages: [] }), "utf8");
+let staleNow = now;
+const staleCalls = [];
+const stalePages = new Map([["conversation-stale-generating", {
+  runtimeKey: "main-03",
+  port: 9733,
+  hydrated: true,
+  generating: true,
+  composerEmpty: true,
+  latestMessageRole: "user",
+  hasTurnError: false,
+  normalCompletion: false,
+  incompleteUserTurn: false,
+}]]);
+let staleSupervisor;
+const staleAdapter = {
+  async find({ conversationId }) {
+    const page = stalePages.get(conversationId);
+    return page ? locatedPage(conversationId, page) : { exact: false, state: "conversation-page-not-open", conversationId };
+  },
+  async clearReminder() { return { ok: true }; },
+  async resetInterruptedGeneration(input) {
+    staleCalls.push({ action: "resetInterruptedGeneration", conversationId: input.conversationId, rescueEvidence: input.rescueEvidence });
+    await staleSupervisor.noteTurn({
+      kind: "failed",
+      conversationId: input.conversationId,
+      runtimeKey: "main-03",
+      canceled: true,
+      observedAtMs: staleNow,
+    });
+    const page = stalePages.get(input.conversationId);
+    stalePages.set(input.conversationId, {
+      ...page,
+      generating: false,
+      hasTurnError: true,
+      incompleteUserTurn: true,
+    });
+    return { ok: true, state: "stale-generating-stop-clicked", resetCommitted: true };
+  },
+  async sendContinue(input) {
+    staleCalls.push({ action: "sendContinue", conversationId: input.conversationId, rescueEvidence: input.rescueEvidence });
+    return { ok: true };
+  },
+};
+staleSupervisor = new ConversationProgressLivenessSupervisor({
+  statePath: staleStatePath,
+  planStatePath: stalePlanPath,
+  progressStatePath: staleProgressPath,
+  adapter: staleAdapter,
+  reportIntervalMs: 10 * 60_000,
+  continueMs: 20 * 60_000,
+  pollMs: 1_000,
+  now: () => staleNow,
+});
+await staleSupervisor.start({ schedule: false });
+await staleSupervisor.noteTurn({
+  kind: "started",
+  conversationId: "conversation-stale-generating",
+  runtimeKey: "main-03",
+  observedAtMs: staleNow,
+});
+await staleSupervisor.noteTurn({
+  kind: "failed",
+  conversationId: "conversation-stale-generating",
+  runtimeKey: "main-03",
+  canceled: false,
+  observedAtMs: staleNow + 1_000,
+});
+staleNow += 21 * 60_000;
+await staleSupervisor.tick();
+let staleRecord = staleSupervisor.status().records.find((row) => row.conversationId === "conversation-stale-generating");
+assert.equal(staleRecord.lastDispatchState, "stale-generating-interruption-confirmation-armed");
+assert.equal(staleCalls.length, 0, "stale generating state needs a second exact-page confirmation before any mutation");
+staleNow += 30_000;
+await staleSupervisor.tick();
+staleRecord = staleSupervisor.status().records.find((row) => row.conversationId === "conversation-stale-generating");
+assert.deepEqual(staleCalls, [{
+  action: "resetInterruptedGeneration",
+  conversationId: "conversation-stale-generating",
+  rescueEvidence: "transport-failure",
+}]);
+assert.ok(staleRecord.generationResetAt, "the stale generating reset must be recorded so the same episode cannot click Stop twice");
+assert.equal(staleRecord.continueAttempts, 0);
+staleNow += 30_000;
+await staleSupervisor.tick();
+assert.equal(staleCalls.filter((row) => row.action === "resetInterruptedGeneration").length, 1);
+assert.equal(staleCalls.filter((row) => row.action === "sendContinue").length, 0,
+  "after resetting stale generation, rescue still requires the ordinary idle confirmation");
+staleNow += 30_000;
+await staleSupervisor.tick();
+staleRecord = staleSupervisor.status().records.find((row) => row.conversationId === "conversation-stale-generating");
+assert.equal(staleCalls.filter((row) => row.action === "resetInterruptedGeneration").length, 1);
+assert.equal(staleCalls.filter((row) => row.action === "sendContinue").length, 1);
+assert.equal(staleRecord.armed, false);
+assert.equal(staleRecord.turnState, "rescue-dispatched");
+assert.equal(staleRecord.continueAttempts, 1);
+await staleSupervisor.close();
+await rm(staleDir, { recursive: true, force: true });
+
 const persisted = JSON.parse(await readFile(statePath, "utf8"));
 assert.equal(persisted.version, 4);
 assert.equal(persisted.identityKey, "conversationId");
@@ -643,6 +812,51 @@ assert.equal(wrongRuntime.exact, false);
 assert.equal(wrongRuntime.state, "conversation-not-in-runtime");
 assert.equal(typeof runtime03Adapter.sendReminder, "undefined", "the ten-minute reminder API must not exist");
 assert.equal(typeof runtime03Adapter.projectReminder, "undefined", "the ten-minute reminder banner API must not exist");
+
+let resetExpression = "";
+const staleResetTarget = {
+  id: "main-03-stale-reset",
+  type: "page",
+  url: "https://chatgpt.com/c/conversation-stale-reset",
+  webSocketDebuggerUrl: "ws://main-03-stale-reset",
+};
+const staleResetAdapter = new ConversationProgressLivenessCdpAdapter({
+  runtimeKeys: ["main-03"],
+  listTargets: async () => [staleResetTarget],
+  connect: async () => ({
+    evaluate: async (expression) => {
+      resetExpression = expression;
+      return { ok: true, state: "stale-generating-stop-clicked", resetCommitted: true };
+    },
+    close() {},
+  }),
+});
+const staleResetResult = await staleResetAdapter.resetInterruptedGeneration({
+  conversationId: "conversation-stale-reset",
+  target: {
+    exact: true,
+    conversationId: "conversation-stale-reset",
+    runtimeKey: "main-03",
+    port: 9733,
+    target: {
+      runtimeKey: "main-03",
+      port: 9733,
+      targetId: staleResetTarget.id,
+      url: staleResetTarget.url,
+      webSocketDebuggerUrl: staleResetTarget.webSocketDebuggerUrl,
+    },
+  },
+});
+assert.equal(staleResetResult.ok, true);
+assert.equal(staleResetResult.resetCommitted, true);
+assert.equal(staleResetResult.locatedRuntimeKey, "main-03");
+assert.equal(staleResetResult.runtimeBinding, false);
+assert.equal(staleResetResult.foregroundActivation, false);
+assert.equal(staleResetResult.pageNavigation, false);
+assert.match(resetExpression, /data-testid=\\"stop-button\\"|data-testid="stop-button"/);
+assert.match(resetExpression, /stop\.click\(\)/);
+assert.doesNotMatch(resetExpression, /location\.(?:href|assign|replace)|window\.focus|activate/i,
+  "stale generating reset must stay on the exact current page without navigation or foreground activation");
 
 const exactRecoveryTarget = {
   id: "main-03-goal-recovery",
@@ -805,7 +1019,10 @@ console.log(JSON.stringify({
   goalRecoveryForegroundActivation: false,
   goalRecoveryPageNavigation: false,
   transportFinishRequiresPageCompletion: true,
+  transportOnlyFinishNonTerminal: true,
   cancelledTurnDisarms: true,
+  staleGeneratingInterruptedTurnResetOnce: true,
+  resetGeneratedCancellationPreservesRescue: true,
   oneRescuePerInterruptionEpisode: true,
   committedRescueNeverRetried: true,
   rescueStartRaceProtected: true,
