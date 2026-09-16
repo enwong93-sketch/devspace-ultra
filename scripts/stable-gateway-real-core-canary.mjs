@@ -314,7 +314,6 @@ try {
       return port;
     }
   };
-  const offlineBlenderPort = await nextDistinctPort();
   const coreAPort = await nextDistinctPort();
   const coreBPort = await nextDistinctPort();
   // Seed a legacy verified-direct-session row deliberately. v0.5.7 must retire
@@ -323,7 +322,6 @@ try {
   const liveReplayConversationId = await exactConversationAtPort(9721);
   const replayConversationId = liveReplayConversationId || "canary-main-01-conversation";
   const replayPageAvailable = Boolean(liveReplayConversationId);
-  const replayRuntimeId = "rosa-main-01-existing";
   const replayOpenAiSessionId = "stable-gateway-replayed-main01-session";
   const replaySessionFingerprint = createHash("sha256").update(replayOpenAiSessionId).digest("hex");
   await writeFile(join(stateDir, "classic-conversation-authority.json"), `${JSON.stringify({
@@ -336,23 +334,6 @@ try {
       updatedAt: new Date().toISOString(),
       verifiedDirectSession: true,
       verifiedDirectSessionAt: new Date().toISOString(),
-    }],
-  }, null, 2)}\n`, "utf8");
-  await writeFile(join(stateDir, "blender-runtimes.json"), `${JSON.stringify({
-    version: 2,
-    updatedAt: new Date().toISOString(),
-    runtimes: [{
-      runtimeId: replayRuntimeId,
-      ownerConversationId: replayConversationId,
-      ownerLabel: "replayed Main-01 canary",
-      port: offlineBlenderPort,
-      processId: null,
-      managedProcess: false,
-      defaultForOwner: true,
-      blendFile: null,
-      executable: null,
-      createdAt: new Date().toISOString(),
-      connectedAt: null,
     }],
   }, null, 2)}\n`, "utf8");
 
@@ -567,8 +548,8 @@ try {
     id: 4,
     method: "tools/call",
     params: {
-      name: "blender_runtime",
-      arguments: { action: "status", runtimeId: replayRuntimeId },
+      name: "devspace_connection_isolation_status",
+      arguments: {},
     },
   }, { accessToken: refreshA.access_token, sessionId: publicSessionId, protocolVersion });
   assert.equal(replayedDirectStatus.status, 200,
@@ -578,7 +559,7 @@ try {
     "legacy direct-session authority must fail closed even when its old page is still open");
   assert.match(
     String(replayedDirectPayload?.result?.content?.[0]?.text || ""),
-    /conversation identity is unavailable|conversation authority|requires the current ChatGPT conversation identity/i,
+    /conversation identity is unavailable|conversation authority|requires the current ChatGPT conversation identity|verified ChatGPT conversation identity is required/i,
     "the stale-session failure must be an explicit identity error, not a timeout or unrelated tool failure",
   );
 
