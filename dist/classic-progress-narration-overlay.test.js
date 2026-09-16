@@ -92,7 +92,7 @@ const goalProgress = { active: rowA, runs: [rowA, rowB], updatedAt: new Date(now
 const planState = { plans: { "plan-b": { id: "plan-b", status: "active", conversationId: "conversation-b", updatedAt: new Date(now).toISOString(), steps: [{ id: "step-b", text: "完成角色建模", status: "in_progress" }] } } };
 const goalState = { goals: { "goal-a": { id: "goal-a", status: "active", round: 2, conversationId: "conversation-a" } } };
 const map = conversationProgressNarrationMap({ humanProgress, goalProgress, planState, goalState, nowMs: now });
-assert.deepEqual(Object.keys(map).sort(), ["conversation-a", "conversation-b"]);
+assert.deepEqual(Object.keys(map).sort(), ["conversation-a", "conversation-b", "conversation-history"]);
 assert.deepEqual(map["conversation-a"].messages.map((item) => item.text), [
   "我已核對 SSE reconnect，同一條 conversation 連續呼叫 Plan、Blender 同旁白工具都冇再 502。",
   "我已完成雙 Runtime 單元隔離；而家會用兩個真實 Blender port 做交叉驗證。",
@@ -101,7 +101,9 @@ assert.deepEqual(map["conversation-b"].messages.map((item) => item.text), [
   "我已完成 Main 01 角色輪廓修正，四個角度讀回一致；下一步處理眼睛比例。",
 ]);
 assert.equal(map["conversation-b"].progressKind, "plan");
-assert.equal(map["conversation-history"], undefined, "expired narration must remain diagnostic-only and never remount a stale card");
+assert.deepEqual(map["conversation-history"].messages.map((item) => item.text), [
+  "即使冇 active Goal 或 Plan，Agent 親自寫嘅訊息仍然要留喺自己 conversation。",
+], "conversation-bound narration must survive later turns and Core restarts instead of expiring by wall clock");
 assert.deepEqual(
   conversationProgressNarrationMap({
     humanProgress: { messages: humanProgress.messages.filter((item) => item.source === "goal-run-events") },

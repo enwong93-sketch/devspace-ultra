@@ -121,6 +121,7 @@ function serializableRecord(record) {
     lastActivityAt: record.lastActivityAt || null,
     lastReportAt: record.lastReportAt || null,
     lastContinueAt: record.lastContinueAt || null,
+    restartObservedAt: record.restartObservedAt || null,
     generationResetAt: record.generationResetAt || null,
     continueAttempts: Number(record.continueAttempts || 0),
     idleObservedAt: record.idleObservedAt || null,
@@ -199,6 +200,7 @@ export class ConversationProgressLivenessSupervisor {
       record.planRevision = Number(value?.planRevision || 0);
       record.lastReportAt = value?.lastReportAt || null;
       record.lastContinueAt = value?.lastContinueAt || null;
+      record.restartObservedAt = finiteTime(value?.restartObservedAt) ? value.restartObservedAt : null;
       record.generationResetAt = finiteTime(value?.generationResetAt) ? value.generationResetAt : null;
       const persistedTurnState = cleanText(value?.turnState, 80);
       const startedAtMs = finiteTime(value?.startedAt) || 0;
@@ -213,14 +215,24 @@ export class ConversationProgressLivenessSupervisor {
         && latestEpisodeAt <= startupNow + 5_000
         && startupNow - latestEpisodeAt <= this.armWindowMs;
       if (restorable) {
+        const restartObservedAt = new Date(startupNow).toISOString();
+        const alreadyInterrupted = persistedTurnState === "interrupted";
         record.episodeRevision = Math.max(1, Number(value?.episodeRevision || 1));
         record.armed = true;
-        record.turnState = persistedTurnState;
+        // A replacement Core cannot continue an in-flight MCP/tool request
+        // owned by its predecessor. Preserve the episode but make the restart
+        // explicit interruption evidence. The exact page still has the full
+        // twenty-minute grace period to complete normally, and any fresh
+        // native turn replaces this episode before rescue.
+        record.turnState = alreadyInterrupted ? "interrupted" : "restart-interrupted";
         record.startedAt = value?.startedAt || null;
-        record.interruptedAt = value?.interruptedAt || null;
+        record.interruptedAt = value?.interruptedAt || restartObservedAt;
         record.lastActivityAt = value?.lastActivityAt || null;
-        record.rescueEvidence = cleanText(value?.rescueEvidence, 120);
-        record.lastDispatchState = "startup-episode-awaiting-page-verification";
+        record.restartObservedAt = restartObservedAt;
+        record.rescueEvidence = alreadyInterrupted
+          ? cleanText(value?.rescueEvidence, 120) || "transport-failure"
+          : "core-restart";
+        record.lastDispatchState = "startup-interrupted-episode-awaiting-page-verification";
         record.uiCleanupPending = false;
       } else {
         // Legacy state and terminal/rescued episodes cannot be trusted after a
@@ -264,6 +276,7 @@ export class ConversationProgressLivenessSupervisor {
       record.completedAt = null;
       record.lastReportAt = null;
       record.lastContinueAt = null;
+      record.restartObservedAt = null;
       record.generationResetAt = null;
       record.generationResetPending = false;
       record.continueAttempts = 0;
@@ -325,6 +338,7 @@ export class ConversationProgressLivenessSupervisor {
       record.idleObservedAt = null;
       record.rescuePending = false;
       record.rescueEvidence = "transport-failure";
+      record.restartObservedAt = null;
       record.generationResetAt = null;
       record.lastDispatchState = "conversation-turn-interrupted";
     } else if (["expired", "evicted"].includes(kind) && record.armed) {
@@ -441,7 +455,7 @@ export class ConversationProgressLivenessSupervisor {
         continue;
       }
 
-      const explicitInterruption = record.turnState === "interrupted";
+      const explicitInterruption = ["interrupted", "restart-interrupted"].includes(record.turnState);
       const pageInterruption = page.hasTurnError === true || page.incompleteUserTurn === true;
       if (page.generating) {
         // A failed native transport or a visible page error is authoritative
@@ -464,7 +478,11 @@ export class ConversationProgressLivenessSupervisor {
             : "user-composer-not-empty";
           continue;
         }
-        record.rescueEvidence = explicitInterruption ? "transport-failure" : "visible-turn-error";
+        record.rescueEvidence = record.turnState === "restart-interrupted"
+          ? "core-restart"
+          : explicitInterruption
+            ? "transport-failure"
+            : "visible-turn-error";
         if (finiteTime(record.generationResetAt)) {
           record.lastDispatchState = "stale-generating-reset-already-requested";
           continue;
@@ -512,8 +530,10 @@ export class ConversationProgressLivenessSupervisor {
         record.lastDispatchState = "no-interruption-evidence-no-rescue";
         continue;
       }
-      record.rescueEvidence = explicitInterruption
-        ? "transport-failure"
+      record.rescueEvidence = record.turnState === "restart-interrupted"
+        ? "core-restart"
+        : explicitInterruption
+          ? "transport-failure"
         : page.hasTurnError
           ? "visible-turn-error"
           : "incomplete-user-turn";
@@ -591,6 +611,7 @@ export class ConversationProgressLivenessSupervisor {
       tenMinuteAgentReportSloOnly: true,
       twentyMinuteInterruptedTurnRescueOnly: true,
       normalCompletionDisarms: true,
+      restartRestoresActiveEpisodeAsInterrupted: true,
       oneRescuePerInterruptionEpisode: true,
       activePlansDoNotArmRescue: true,
       legacyEpisodesRestartDisarmed: true,
@@ -618,6 +639,7 @@ export class ConversationProgressLivenessSupervisor {
       lastActivityAt: null,
       lastReportAt: null,
       lastContinueAt: null,
+      restartObservedAt: null,
       generationResetAt: null,
       generationResetPending: false,
       continueAttempts: 0,
@@ -647,6 +669,7 @@ export class ConversationProgressLivenessSupervisor {
     record.completedAt = at;
     record.lastActivityAt = at;
     record.idleObservedAt = null;
+    record.restartObservedAt = null;
     record.generationResetAt = null;
     record.generationResetPending = false;
     record.reportOverdue = false;
@@ -676,6 +699,7 @@ export class ConversationProgressLivenessSupervisor {
       tenMinuteAgentReportSloOnly: true,
       twentyMinuteInterruptedTurnRescueOnly: true,
       normalCompletionDisarms: true,
+      restartRestoresActiveEpisodeAsInterrupted: true,
       updatedAt: new Date(this.now()).toISOString(),
       reportIntervalMs: this.reportIntervalMs,
       continueMs: this.continueMs,

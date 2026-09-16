@@ -109,7 +109,11 @@ export function conversationProgressNarrationMap({
   const normalized = (Array.isArray(humanProgress?.messages) ? humanProgress.messages : [])
     .map(normalizeMessage)
     .filter(Boolean)
-    .filter((item) => Date.parse(item.at) >= nowMs - maxAgeMs)
+    // Human-authored narration is durable conversation history, not a live
+    // heartbeat. Age only bounds the active Goal/Plan telemetry above; it must
+    // not erase a conversation's card because the next assistant turn starts
+    // later or a Core restarts. The persisted store and maxMessages still
+    // provide hard size bounds.
     .sort((left, right) => Date.parse(left.at) - Date.parse(right.at));
   const result = {};
   const conversationIds = new Set(normalized.map((item) => item.conversationId));

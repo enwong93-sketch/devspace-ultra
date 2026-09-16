@@ -147,6 +147,17 @@ const pages = new Map([
     normalCompletion: true,
     incompleteUserTurn: false,
   }],
+  ["conversation-restart-running-stale", {
+    runtimeKey: "main-03",
+    port: 9733,
+    hydrated: true,
+    generating: true,
+    composerEmpty: true,
+    latestMessageRole: "user",
+    hasTurnError: false,
+    normalCompletion: false,
+    incompleteUserTurn: false,
+  }],
 ]);
 const duplicateConversations = new Set();
 const rescueHooks = new Map();
@@ -297,6 +308,7 @@ assert.equal(supervisor.status().tenMinuteSyntheticUserTurn, false);
 assert.equal(supervisor.status().tenMinuteAgentReportSloOnly, true);
 assert.equal(supervisor.status().twentyMinuteInterruptedTurnRescueOnly, true);
 assert.equal(supervisor.status().normalCompletionDisarms, true);
+assert.equal(supervisor.status().restartRestoresActiveEpisodeAsInterrupted, true);
 assert.equal(supervisor.status().maxContinueAttempts, 1);
 
 await supervisor.noteTurn({ kind: "started", conversationId: "conversation-running", runtimeKey: "main-01", observedAtMs: now });
@@ -569,6 +581,16 @@ await writeFile(restartStatePath, JSON.stringify({
       lastActivityAt: new Date(now - 21 * 60_000).toISOString(),
       continueAttempts: 0,
     },
+    "conversation-restart-running-stale": {
+      conversationId: "conversation-restart-running-stale",
+      armed: true,
+      turnState: "running",
+      episodeRevision: 3,
+      startedAt: new Date(now - 5 * 60_000).toISOString(),
+      lastActivityAt: new Date(now - 2 * 60_000).toISOString(),
+      lastReportAt: new Date(now - 2 * 60_000).toISOString(),
+      continueAttempts: 0,
+    },
     "conversation-restart-rescued": {
       conversationId: "conversation-restart-rescued",
       armed: true,
@@ -604,12 +626,17 @@ const restartSupervisor = new ConversationProgressLivenessSupervisor({
 await restartSupervisor.start({ schedule: false });
 let restartInterrupted = restartSupervisor.status().records.find((row) => row.conversationId === "conversation-restart-interrupted");
 const restartComplete = restartSupervisor.status().records.find((row) => row.conversationId === "conversation-restart-complete");
+let restartRunningStale = restartSupervisor.status().records.find((row) => row.conversationId === "conversation-restart-running-stale");
 const restartRescued = restartSupervisor.status().records.find((row) => row.conversationId === "conversation-restart-rescued");
 const restartFuture = restartSupervisor.status().records.find((row) => row.conversationId === "conversation-restart-future");
 assert.equal(restartInterrupted.armed, true);
 assert.equal(restartInterrupted.lastDispatchState, "interrupted-turn-idle-confirmation-armed");
 assert.equal(restartComplete.armed, false);
 assert.equal(restartComplete.turnState, "completed");
+assert.equal(restartRunningStale.armed, true);
+assert.equal(restartRunningStale.turnState, "restart-interrupted");
+assert.equal(restartRunningStale.rescueEvidence, "core-restart");
+assert.ok(restartRunningStale.restartObservedAt);
 assert.equal(restartRescued.armed, false);
 assert.equal(restartRescued.turnState, "startup-disarmed");
 assert.equal(restartFuture.armed, false, "future-dated state must never arm rescue after restart");
@@ -622,6 +649,27 @@ assert.equal(
   calls.filter((row) => row.action === "sendContinue" && row.conversationId === "conversation-restart-interrupted").length,
   1,
 );
+now += 21 * 60_000;
+await restartSupervisor.tick();
+restartRunningStale = restartSupervisor.status().records.find((row) => row.conversationId === "conversation-restart-running-stale");
+assert.equal(restartRunningStale.lastDispatchState, "stale-generating-interruption-confirmation-armed");
+now += 30_000;
+await restartSupervisor.tick();
+assert.equal(
+  calls.filter((row) => row.action === "resetInterruptedGeneration" && row.conversationId === "conversation-restart-running-stale").length,
+  1,
+);
+now += 30_000;
+await restartSupervisor.tick();
+now += 30_000;
+await restartSupervisor.tick();
+restartRunningStale = restartSupervisor.status().records.find((row) => row.conversationId === "conversation-restart-running-stale");
+assert.equal(
+  calls.filter((row) => row.action === "sendContinue" && row.conversationId === "conversation-restart-running-stale").length,
+  1,
+);
+assert.equal(restartRunningStale.armed, false);
+assert.equal(restartRunningStale.turnState, "rescue-dispatched");
 await restartSupervisor.close();
 await rm(restartDir, { recursive: true, force: true });
 
@@ -742,6 +790,7 @@ assert.equal(persisted.tenMinuteAutomaticReminder, false);
 assert.equal(persisted.tenMinuteAgentReportSloOnly, true);
 assert.equal(persisted.twentyMinuteInterruptedTurnRescueOnly, true);
 assert.equal(persisted.normalCompletionDisarms, true);
+assert.equal(persisted.restartRestoresActiveEpisodeAsInterrupted, true);
 assert.equal(JSON.stringify(persisted).includes("lastReminderAt"), false);
 assert.equal(JSON.stringify(persisted).includes("lastReminderProjectedAt"), false);
 assert.equal(JSON.stringify(persisted).includes("reminderPending"), false);
@@ -1014,6 +1063,7 @@ console.log(JSON.stringify({
   tenMinuteSyntheticUserTurn: false,
   twentyMinuteInterruptedTurnRescueOnly: true,
   normalCompletionDisarms: true,
+  restartRestoresActiveEpisodeAsInterrupted: true,
   completionRevokesActiveTurnAuthority: true,
   exactPageGoalRecovery: true,
   goalRecoveryForegroundActivation: false,
@@ -1028,6 +1078,7 @@ console.log(JSON.stringify({
   rescueStartRaceProtected: true,
   persistedOldEpisodeDisarmed: true,
   interruptedEpisodeRestartRecoveredByPageEvidence: true,
+  runningEpisodeRestartRecoveredByCoreRestartEvidence: true,
   completedEpisodeRestartDisarmed: true,
   rescuedEpisodeRestartDisarmed: true,
   futureTimestampRestartDisarmed: true,

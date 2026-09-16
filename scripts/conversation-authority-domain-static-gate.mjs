@@ -126,6 +126,9 @@ assert.match(liveness, /tenMinuteAutomaticReminder:\s*false/);
 assert.match(liveness, /tenMinuteSyntheticUserTurn:\s*false/);
 assert.match(liveness, /twentyMinuteInterruptedTurnRescueOnly:\s*true/);
 assert.match(liveness, /normalCompletionDisarms:\s*true/);
+assert.match(liveness, /restart-interrupted/,
+  "an active exact-conversation episode restored after Core replacement must carry restart interruption evidence");
+assert.match(liveness, /restartRestoresActiveEpisodeAsInterrupted:\s*true/);
 assert.match(liveness, /event\?\.transportOnly === true[\s\S]{0,500}conversation-turn-transport-finished-nonterminal/,
   "HTTP transport completion must remain non-terminal for long tool-using assistant turns");
 assert.match(liveness, /resetInterruptedGeneration/,
@@ -156,6 +159,7 @@ console.log(JSON.stringify({
   twentyMinuteInterruptedTurnRescueOnly: true,
   transportOnlyCompletionNonTerminal: true,
   staleGeneratingInterruptedTurnRecoverable: true,
+  restartRestoresActiveEpisodeAsInterrupted: true,
   rescueText: "- 繼續",
   normalCompletionDisarms: true,
 }));
