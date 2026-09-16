@@ -374,6 +374,8 @@ assert.equal(transportOnlyRecord.armed, true,
 assert.equal(transportOnlyRecord.turnState, "running");
 assert.equal(transportOnlyRecord.interruptedAt, null,
   "transport-only completion must not start the interruption/rescue clock");
+assert.equal(transportOnlyRecord.lastActivityAt, new Date(now).toISOString(),
+  "transport-only completion must not advance the rescue clock beyond the native turn start");
 assert.equal(transportOnlyRecord.lastDispatchState, "conversation-turn-transport-finished-nonterminal");
 assert.equal(cancelledRecord.armed, false, "an explicit user cancellation must not be auto-rescued");
 assert.equal(cancelledRecord.turnState, "cancelled");

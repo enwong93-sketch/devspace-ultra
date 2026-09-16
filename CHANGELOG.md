@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Tightened the twenty-minute interrupted-turn rescue clock so only substantive DevSpace tool requests actually admitted by the Local Gateway after the progress preflight reset silence. Raw page-observed tool attempts that are later blocked by the ten-minute narration gate no longer postpone rescue, and transport-only HTTP `loadingFinished` boundaries no longer advance `lastActivityAt` despite remaining non-terminal.
+
 ## 0.5.8 — 2026-09-15
 
 - Removed the hard ChatGPT-conversation ownership lock from Blender runtimes. Blender continuity is now keyed by `runtimeId` + Blender process + loopback MCP port, so a later conversation can continue the same already-open `.blend`/MCP session after context handoff. Persisted v2 `ownerConversationId` values migrate to an advisory `lastConversationId` hint; ordinary capability MCPs remain conversation-isolated, and multiple online Blender runtimes still fail closed until an explicit `runtimeId` is selected.

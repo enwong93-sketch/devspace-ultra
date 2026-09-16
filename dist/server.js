@@ -2470,15 +2470,10 @@ export function createServer(config = loadConfig(), options = {}) {
             // The exact ChatGPT page response/WebSocket stream carries the
             // conversation route plus canonical DevSpace tool arguments. This
             // is request-scoped evidence only; it must never become a durable
-            // session/conversation mapping.
+            // session/conversation mapping. Liveness is advanced only after
+            // the Local Gateway admits a substantive tool request below; a
+            // preflight-blocked invocation must never postpone rescue.
             mcpCallCorrelator.noteNative(event);
-            // A real new tool invocation is positive liveness evidence for
-            // this exact conversation. Persist only its bounded timestamp;
-            // raw arguments/output stay outside the liveness state. Progress
-            // reports use their own verified noteReport path.
-            if (event?.toolName !== "devspace_progress_report") {
-                void conversationProgressLiveness?.noteActivity?.(event).catch(() => null);
-            }
         },
         onTurnTransportEvent: async (event) => {
             await turnDeliveryEvidenceReady;
@@ -3295,6 +3290,12 @@ export function createServer(config = loadConfig(), options = {}) {
                             },
                         });
                         return;
+                    }
+                    if (progressGate?.activityAccepted === true) {
+                        await conversationProgressLiveness?.noteActivity?.({
+                            conversationId: gateConversationId,
+                            observedAtMs: Date.now(),
+                        }).catch(() => null);
                     }
                 }
             }
