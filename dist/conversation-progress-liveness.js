@@ -272,7 +272,8 @@ export class ConversationProgressLivenessSupervisor {
     const generatedResetCancellation = kind === "failed"
       && event?.canceled === true
       && record.generationResetPending === true;
-    if (!generatedResetCancellation) record.lastActivityAt = at;
+    const transportOnlyFinish = kind === "finished" && event?.transportOnly === true;
+    if (!generatedResetCancellation && !transportOnlyFinish) record.lastActivityAt = at;
     record.updatedAt = new Date(this.now()).toISOString();
 
     if (kind === "started") {

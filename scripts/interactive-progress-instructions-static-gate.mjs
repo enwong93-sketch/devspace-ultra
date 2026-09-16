@@ -30,6 +30,12 @@ assert.match(source, /conversation-bound update to the floating DEV Space progre
 assert.match(source, /exact ChatGPT Classic page that received this result confirms a one-time claim/i);
 assert.match(source, /devspace_progress_preflight_required/);
 assert.match(source, /interactiveProgressGate\.beforeTool/);
+assert.match(source, /progressGate\?\.activityAccepted === true/,
+  "rescue liveness may advance only after the Local Gateway admits a substantive tool request");
+assert.match(source, /conversationProgressLiveness\?\.noteActivity/,
+  "an admitted substantive tool request must advance the exact conversation rescue clock");
+assert.doesNotMatch(source, /onToolInvocation:\s*\(event\)\s*=>\s*\{[\s\S]{0,900}conversationProgressLiveness\?\.noteActivity/,
+  "raw ChatGPT tool-invocation observation happens before progress preflight and must not postpone rescue");
 assert.match(source, /interactiveProgressGate\?\.noteReport/);
 assert.match(source, /interactiveProgressGate\.noteTurn/);
 assert.match(source, /claimId:\s*z\.string\(\)\.min\(16\)\.max\(200\)\.optional\(\)/);
@@ -62,6 +68,10 @@ assert.match(enforcement, /progress-preflight-required/);
 assert.match(enforcement, /final-progress-required/);
 assert.match(enforcement, /final-progress-stale/);
 assert.match(enforcement, /maxSilentMs/);
+assert.match(enforcement, /activityAccepted:\s*false/,
+  "blocked/setup calls must explicitly stay outside rescue-clock activity");
+assert.match(enforcement, /activityAccepted:\s*true/,
+  "admitted substantive calls must explicitly qualify as rescue-clock activity");
 assert.match(enforcement, /runtime.*main-/is,
   "hard enforcement must remain restricted to user-facing Main runtimes rather than backend workers");
 assert.doesNotMatch(enforcement, /append\(|message:\s*["'`]/,
@@ -102,4 +112,5 @@ console.log(JSON.stringify({
   secondSubstantiveToolBlockedUntilNarration: true,
   activePlanRequiresOpeningNarration: true,
   planCompletionRequiresFreshNarration: true,
+  onlyAdmittedSubstantiveToolsResetRescueClock: true,
 }));

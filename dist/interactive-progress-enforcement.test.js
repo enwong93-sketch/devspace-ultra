@@ -11,10 +11,14 @@ const gate = new InteractiveProgressEnforcementGate({
 
 const main = { conversationId: "conversation-main-01", runtimeKey: "main-01" };
 gate.noteTurn({ ...main, kind: "started", observedAtMs: now, turnTraceFingerprint: "a".repeat(64) });
-assert.equal((await gate.beforeTool({ ...main, toolName: "read" })).ok, true, "one substantive tool remains a valid atomic exception");
+const firstAtomic = await gate.beforeTool({ ...main, toolName: "read" });
+assert.equal(firstAtomic.ok, true, "one substantive tool remains a valid atomic exception");
+assert.equal(firstAtomic.activityAccepted, true, "an admitted substantive tool is positive rescue-clock activity");
 let result = await gate.beforeTool({ ...main, toolName: "grep" });
 assert.equal(result.ok, false);
 assert.equal(result.reason, "second-substantive-tool-requires-progress");
+assert.equal(result.activityAccepted, false,
+  "a progress-preflight-blocked tool attempt must never postpone interrupted-turn rescue");
 
 gate.noteReport({ conversationId: main.conversationId, observedAtMs: now + 1_000 });
 assert.equal((await gate.beforeTool({ ...main, toolName: "grep" })).ok, true);
@@ -30,10 +34,17 @@ const activePlan = { id: "plan-a", createdAt: new Date(now).toISOString() };
 result = await gate.beforeTool({ ...planned, toolName: "read", activePlan });
 assert.equal(result.ok, false);
 assert.equal(result.reason, "progress-preflight-required", "starting a Plan proves the task is multi-step, so the first substantive tool must wait for narration");
-assert.equal((await gate.beforeTool({ ...planned, toolName: "devspace_plan_status", activePlan })).ok, true);
+assert.equal(result.activityAccepted, false,
+  "an active-Plan preflight rejection must not count as substantive liveness");
+const planStatus = await gate.beforeTool({ ...planned, toolName: "devspace_plan_status", activePlan });
+assert.equal(planStatus.ok, true);
+assert.equal(planStatus.activityAccepted, false, "progress/setup tools do not reset interrupted-turn rescue");
 
 durable.set(planned.conversationId, new Date(now + 500).toISOString());
-assert.equal((await gate.beforeTool({ ...planned, toolName: "read", activePlan })).ok, true, "the exact compatibility bridge must satisfy the gate through durable progress state");
+const admittedPlannedRead = await gate.beforeTool({ ...planned, toolName: "read", activePlan });
+assert.equal(admittedPlannedRead.ok, true, "the exact compatibility bridge must satisfy the gate through durable progress state");
+assert.equal(admittedPlannedRead.activityAccepted, true,
+  "only the substantive call admitted after the verified progress preflight may reset the rescue clock");
 
 result = await gate.beforeTool({
   ...planned,
@@ -79,6 +90,7 @@ console.log(JSON.stringify({
   durableBridgeNarrationAccepted: true,
   tenMinuteCeilingEnforced: true,
   planCompletionRequiresFreshNarration: true,
+  onlyAdmittedSubstantiveToolsCountAsActivity: true,
   main01Through05Covered: true,
   backendWorkersExcluded: true,
   syntheticNarration: false,

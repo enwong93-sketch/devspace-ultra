@@ -54,7 +54,7 @@ export function isProgressSetupTool(toolName, args) {
 }
 
 function block(reason, message, extra = {}) {
-  return { ok: false, blocked: true, reason, message, ...extra };
+  return { ok: false, blocked: true, activityAccepted: false, reason, message, ...extra };
 }
 
 export class InteractiveProgressEnforcementGate {
@@ -106,8 +106,8 @@ export class InteractiveProgressEnforcementGate {
     const id = cleanConversationId(conversationId);
     const runtime = cleanRuntimeKey(runtimeKey);
     const name = String(toolName || "").trim();
-    if (!id || !runtime) return { ok: true, enforced: false, reason: "not-exact-main" };
-    if (name === "devspace_progress_report") return { ok: true, enforced: true, reason: "progress-tool" };
+    if (!id || !runtime) return { ok: true, enforced: false, activityAccepted: false, reason: "not-exact-main" };
+    if (name === "devspace_progress_report") return { ok: true, enforced: true, activityAccepted: false, reason: "progress-tool" };
 
     const nowMs = this.now();
     const row = this.#ensureTurn(id);
@@ -130,10 +130,10 @@ export class InteractiveProgressEnforcementGate {
           { reportAgeMs, maxSilentMs: this.maxSilentMs },
         );
       }
-      return { ok: true, enforced: true, reason: "plan-completion-progress-current", reportAgeMs };
+      return { ok: true, enforced: true, activityAccepted: false, reason: "plan-completion-progress-current", reportAgeMs };
     }
 
-    if (isProgressSetupTool(name, args)) return { ok: true, enforced: true, reason: "setup-tool" };
+    if (isProgressSetupTool(name, args)) return { ok: true, enforced: true, activityAccepted: false, reason: "setup-tool" };
 
     if (activePlan) {
       if (!reportFresh) {
@@ -146,7 +146,7 @@ export class InteractiveProgressEnforcementGate {
         );
       }
       row.substantiveCalls += 1;
-      return { ok: true, enforced: true, reason: "active-plan-progress-current", substantiveCalls: row.substantiveCalls, reportAgeMs };
+      return { ok: true, enforced: true, activityAccepted: true, reason: "active-plan-progress-current", substantiveCalls: row.substantiveCalls, reportAgeMs };
     }
 
     if (hasCurrentReport && !reportFresh) {
@@ -167,6 +167,7 @@ export class InteractiveProgressEnforcementGate {
     return {
       ok: true,
       enforced: true,
+      activityAccepted: true,
       reason: reportFresh ? "progress-current" : "atomic-first-substantive-tool",
       substantiveCalls: row.substantiveCalls,
       reportAgeMs,
