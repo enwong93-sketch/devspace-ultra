@@ -17,7 +17,7 @@ Use this Skill as an interactive installation and recovery runbook. The Agent ex
 - Never write secrets to Git, `config.json`, logs, generated status JSON, shell history, Task Scheduler arguments, or progress narration.
 - Do not impose a Core heap cap, workspace limit, MCP-session count limit, or work timeout. Production Core uses the system-managed heap profile.
 - Keep `autoCompactEnabled=false`. Enable `goalRoundRecoveryEnabled=true` only when the installed release contains the exact-conversation page-composer recovery gate: one successful recovery per Goal round, no Primary repair, no window activation, no page navigation/reload, and duplicate conversations fail closed. Retain `DEVSPACE_GOAL_ROUND_RECOVERY=0` as the explicit operator hold.
-- Use `devspace_progress_report` after each meaningful medium-sized setup step, not after every command and not only at the very end.
+- Use `devspace_progress_report` before substantive work on a multi-step setup and after each meaningful medium-sized setup step, not after every command and not only at the very end. The Local Gateway may reject a second substantive tool, stale-report continuation, or Plan completion with `devspace_progress_preflight_required`; when that happens, author the progress update yourself, verify the current conversation owns it, and retry the blocked operation.
 
 ## Phase 1 — inspect before changing anything
 

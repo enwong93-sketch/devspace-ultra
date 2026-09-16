@@ -1,13 +1,14 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 
-const [source, agents, toolProgress, gateway, productionJournal, livenessCdp] = await Promise.all([
+const [source, agents, toolProgress, gateway, productionJournal, livenessCdp, enforcement] = await Promise.all([
   readFile(new URL("../dist/server.js", import.meta.url), "utf8"),
   readFile(new URL("../AGENTS.md", import.meta.url), "utf8"),
   readFile(new URL("../dist/goal-tool-progress.js", import.meta.url), "utf8"),
   readFile(new URL("./devspace-stable-gateway.mjs", import.meta.url), "utf8"),
   readFile(new URL("../dist/agent-authored-progress-journal.js", import.meta.url), "utf8"),
   readFile(new URL("../dist/conversation-progress-liveness-cdp.js", import.meta.url), "utf8"),
+  readFile(new URL("../dist/interactive-progress-enforcement.js", import.meta.url), "utf8"),
 ]);
 
 assert.match(source, /exactly one conversation-scoped floating progress narration card/i);
@@ -27,6 +28,10 @@ assert.match(source, /never show generated step counters, heartbeat prose, gener
 assert.match(source, /registerAppTool\(server, "devspace_progress_report"/);
 assert.match(source, /conversation-bound update to the floating DEV Space progress narration card in your own natural language/i);
 assert.match(source, /exact ChatGPT Classic page that received this result confirms a one-time claim/i);
+assert.match(source, /devspace_progress_preflight_required/);
+assert.match(source, /interactiveProgressGate\.beforeTool/);
+assert.match(source, /interactiveProgressGate\?\.noteReport/);
+assert.match(source, /interactiveProgressGate\.noteTurn/);
 assert.match(source, /claimId:\s*z\.string\(\)\.min\(16\)\.max\(200\)\.optional\(\)/);
 assert.doesNotMatch(source, /after roughly ten substantive tool operations/i);
 assert.equal(
@@ -48,7 +53,19 @@ assert.match(agents, /only after at least twenty minutes/i);
 assert.match(agents, /normally completed or explicitly cancelled turn must disarm rescue immediately/i);
 assert.match(agents, /only visible text emitted by a verified twenty-minute interrupted-turn rescue is exactly `- 繼續`/i);
 assert.match(agents, /Write the update yourself in natural language/i);
+assert.match(agents, /This is a product gate, not only a prompt preference/i);
+assert.match(agents, /second substantive tool is rejected until the Agent reports/i);
 assert.doesNotMatch(agents, /batches of roughly ten steps/i);
+
+assert.match(enforcement, /second-substantive-tool-requires-progress/);
+assert.match(enforcement, /progress-preflight-required/);
+assert.match(enforcement, /final-progress-required/);
+assert.match(enforcement, /final-progress-stale/);
+assert.match(enforcement, /maxSilentMs/);
+assert.match(enforcement, /runtime.*main-/is,
+  "hard enforcement must remain restricted to user-facing Main runtimes rather than backend workers");
+assert.doesNotMatch(enforcement, /append\(|message:\s*["'`]/,
+  "the enforcement gate must block and instruct the Agent; it must never synthesize narration prose into the card");
 
 assert.doesNotMatch(toolProgress, /noteToolStart|noteToolBoundary|setTimeout|Promise\.race/,
   "raw MCP tool traffic must remain internal telemetry and must not generate visible narration");
@@ -81,4 +98,8 @@ console.log(JSON.stringify({
   normalCompletionDisarms: true,
   rawToolNarration: false,
   boundedCorrelationDeadline: true,
+  hardProgressGate: true,
+  secondSubstantiveToolBlockedUntilNarration: true,
+  activePlanRequiresOpeningNarration: true,
+  planCompletionRequiresFreshNarration: true,
 }));

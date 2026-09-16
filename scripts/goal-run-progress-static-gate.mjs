@@ -12,7 +12,7 @@ assert.match(server, /goalRunProgress\.start\(\)/);
 assert.match(server, /goalRunProgress\.noteConversationTurn/);
 assert.doesNotMatch(server, /installGoalToolProgress\(server|supervisor:\s*goalRunProgress/,
   "production must not wrap raw MCP tool handlers into automatic narration boundaries");
-assert.match(server, /conversationAuthorityReady, goalRunProgress, requestConversationContext, progressClaimRegistry, conversationProgressLiveness\)/);
+assert.match(server, /conversationAuthorityReady, goalRunProgress, requestConversationContext, progressClaimRegistry, interactiveProgressGate, conversationProgressLiveness\)/);
 assert.doesNotMatch(server, /conversationProgressLiveness\.noteToolActivity|consumeToolReminder/,
   "progress liveness must never wrap or gate arbitrary MCP tools");
 assert.doesNotMatch(server, /success:\s*res\.statusCode\s*</);
