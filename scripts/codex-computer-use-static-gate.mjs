@@ -2,11 +2,12 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 
-const [server, runtime, router, adapter, pluginText, skill, packageText, canary, replCompat] = await Promise.all([
+const [server, runtime, router, adapter, overlay, pluginText, skill, packageText, canary, replCompat] = await Promise.all([
   readFile("dist/server.js", "utf8"),
   readFile("dist/capability-runtime.js", "utf8"),
   readFile("dist/codex-computer-use-router.js", "utf8"),
   readFile("dist/codex-computer-use.js", "utf8"),
+  readFile("dist/classic-computer-use-overlay.js", "utf8"),
   readFile("capabilities/codex-computer-use/devspace-plugin.json", "utf8"),
   readFile("capabilities/codex-computer-use/skills/computer-use/SKILL.md", "utf8"),
   readFile("package.json", "utf8"),
@@ -17,7 +18,14 @@ const packageJson = JSON.parse(packageText);
 const plugin = JSON.parse(pluginText);
 
 assert.match(server, /BUILTIN_CODEX_COMPUTER_USE_PLUGIN/);
-assert.match(server, /registerCodexComputerUseRouter\(server, \{ capabilityRuntime, codexMcpBridge, resolveConversation: resolveConversationAuthority \}\)/);
+assert.match(server, /registerCodexComputerUseRouter\(server, \{[\s\S]*computerUseOverlay[\s\S]*\}\)/);
+assert.match(server, /new ClassicComputerUseOverlay\(/);
+assert.match(server, /findUniqueActiveConversation\(\{[\s\S]*requireGenerating:\s*true[\s\S]*requireProgressCard:\s*true/,
+  "Computer Use first-call fallback must require one unique actively generating exact page that owns its progress card");
+assert.match(server, /computerUseTool && callFingerprint/,
+  "the unique-page fallback must be scoped to a real Computer Use tool call fingerprint");
+assert.doesNotMatch(server, /computerUseTool[\s\S]{0,1600}conversationAuthority\.observeNativeTurn/,
+  "the first-call fallback must remain request-scoped and never create durable session authority");
 assert.doesNotMatch(server, /BrowserControlCoordinator|registerBrowserControlTools/);
 assert.match(server, /ordinary Chrome, Edge, and browser-window automation[\s\S]*codex_computer_use/);
 assert.doesNotMatch(server, /CodexSandboxRuntime|registerCodexSandboxTools|request_permissions|exec_sandboxed/);
@@ -28,6 +36,7 @@ assert.match(router, /ordinary Chrome and Edge browser-window automation/i);
 assert.match(router, /legacy custom Chrome-extension path has been removed/i);
 assert.match(router, /elicitation\/create/);
 assert.match(router, /ElicitResultSchema/);
+assert.match(router, /computerUseActivity:\s*computerUseOverlay/);
 assert.match(adapter, /callJsReplCompatibility/);
 assert.match(adapter, /CODEX_COMPUTER_USE_RUNTIME = "@oai\/sky"/);
 assert.match(adapter, /CODEX_COMPUTER_USE_PLUGIN_ID = "computer-use@openai-bundled"/);
@@ -42,10 +51,20 @@ assert.match(adapter, /sky\.\$\{method\}/);
 assert.match(adapter, /devspaceGuiDriver:\s*false/);
 assert.match(adapter, /validateComputerUseElicitation/);
 assert.match(adapter, /approvalRelay/);
+assert.match(adapter, /computerUseActivity\.begin/);
+assert.match(adapter, /computerUseActivity\.end/);
 assert.match(adapter, /PROHIBITED_APP_PATTERN/);
 assert.doesNotMatch(adapter, /spawn\(|child_process|Selenium|Playwright|UIAutomation|SendInput/i,
   "the adapter may name prohibited apps, but must not implement a second GUI process or driver");
 assert.match(replCompat, /linked Codex runtime is used directly/i);
+assert.match(overlay, /Computer Use 正在使用你的電腦/);
+assert.match(overlay, /rgba\(37,99,235,\.16\)/);
+assert.match(overlay, /pointer-events:none/);
+assert.match(overlay, /只限目前對話/);
+assert.match(overlay, /suppressed-by-producer-lease/);
+assert.match(overlay, /idle-clear-scheduled/);
+assert.doesNotMatch(overlay, /@keyframes|animation:/,
+  "the takeover status should remain a static, reduced-motion-safe control surface");
 assert.equal(plugin.id, "codex-computer-use");
 assert.equal(Object.hasOwn(plugin, "tools"), false);
 assert.deepEqual(plugin.skills, ["skills"]);
@@ -64,6 +83,7 @@ for (const removed of [
 ]) assert.equal(existsSync(removed), false, `removed custom browser source still exists: ${removed}`);
 assert.equal(Object.hasOwn(packageJson.scripts, "verify:codex-sandbox"), false);
 assert.match(packageJson.scripts["verify:ultra"], /verify:computer-use/);
+assert.match(packageJson.scripts["verify:computer-use"], /classic-computer-use-overlay\.test\.js/);
 assert.doesNotMatch(runtime, /MAX_TOOL_TIMEOUT_MS|Promise\.race\(|setTimeout\(/,
   "capability execution must not impose an artificial wall-clock termination deadline");
 assert.match(canary, /"codex_computer_use_status"/);
@@ -78,6 +98,9 @@ console.log(JSON.stringify({
   persistentCodexNodeRepl: true,
   officialSkyRuntime: true,
   officialApprovalRelay: true,
+  exactConversationFirstCallFallback: true,
+  blueTakeoverOverlay: true,
+  overlayAutoClear: true,
   ordinaryBrowserWindowAutomation: true,
   customChromeExtensionRemoved: true,
   structuredActionsOnly: true,

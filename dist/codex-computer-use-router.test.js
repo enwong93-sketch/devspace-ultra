@@ -8,6 +8,8 @@ assert.equal(codexComputerUseRoute("Edit the source code and run unit tests").us
 
 const calls = [];
 const elicitationRequests = [];
+const overlayBegins = [];
+const overlayEnds = [];
 let nextRiskLevel = "low";
 const fakeBridge = {
   async probe(serverId, ownerConversationId) {
@@ -56,12 +58,29 @@ const fakeBridge = {
 };
 
 const registrations = [];
+const computerUseOverlay = {
+  async begin(input) {
+    overlayBegins.push(structuredClone(input));
+    return {
+      ok: true,
+      operationId: "overlay-operation-a",
+      conversationId: input.conversationId,
+      app: input.app,
+      action: input.action,
+    };
+  },
+  async end(input) {
+    overlayEnds.push(structuredClone(input));
+    return { ok: true, state: "idle-clear-scheduled" };
+  },
+};
 registerCodexComputerUseRouter({
   registerTool(name, definition, handler) { registrations.push({ name, definition, handler }); },
 }, {
   codexMcpBridge: fakeBridge,
   capabilityRuntime: null,
-  resolveConversation: async () => ({ conversationId: "conversation-a" }),
+  resolveConversation: async () => ({ conversationId: "conversation-a", runtimeKey: "main-01" }),
+  computerUseOverlay,
 });
 
 assert.deepEqual(registrations.map((entry) => entry.name), ["codex_computer_use_status", "codex_computer_use"]);
@@ -71,12 +90,19 @@ const status = await registrations[0].handler({});
 assert.equal(status.structuredContent.payload.target, "windows");
 assert.equal(status.structuredContent.nativeRuntimeEvidence.runtime, "@oai/sky");
 assert.equal(status.structuredContent.executionPolicy.mode, "danger-full-access");
+assert.equal(overlayBegins.length, 0, "read-only runtime status must not show the desktop takeover state");
 
 const observed = await registrations[1].handler({ action: "list_apps", input: {}, timeoutMs: 20_000 });
 assert.equal(Array.isArray(observed.structuredContent.payload), true);
 assert.equal(observed.structuredContent.readOnly, true);
 assert.match(calls.at(-1).arguments.code, /sky\.list_apps/);
 assert.equal(calls.at(-1).arguments.timeout_ms, 20_000);
+assert.equal(overlayBegins.at(-1).conversationId, "conversation-a");
+assert.equal(overlayBegins.at(-1).runtimeKey, "main-01");
+assert.equal(overlayBegins.at(-1).action, "list_apps");
+assert.equal(overlayBegins.at(-1).app, "Windows desktop");
+assert.equal(overlayEnds.at(-1).operationId, "overlay-operation-a");
+assert.equal(observed.structuredContent.nativeRuntimeEvidence.computerUseOverlay.operationId, "overlay-operation-a");
 
 const state = await registrations[1].handler({
   action: "get_window_state",
@@ -168,6 +194,7 @@ console.log(JSON.stringify({
   hostUnsupportedObserveActionFallback: true,
   oneMutationPerObservation: true,
   highRiskRequiresExplicitCurrentUserAuthorization: true,
+  conversationScopedTakeoverOverlay: true,
   persistentNodeRepl: true,
   fullAccessOnly: true,
   noDevSpaceGuiDriver: true,

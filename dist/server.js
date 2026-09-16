@@ -53,6 +53,7 @@ import { ClassicStreamRecoveryGuard } from "./classic-stream-recovery-guard.js";
 import { ClassicStreamRecoveryCdpAdapter, runtimeKeyForPort } from "./classic-stream-recovery-cdp.js";
 import { ClassicHostOverlayContextAdapter, ClassicHostOverlayProjection, createClassicHostOverlayOwnerStore, resolveClassicHostOverlayOwner } from "./classic-host-overlay.js";
 import { ClassicProgressNarrationOverlay } from "./classic-progress-narration-overlay.js";
+import { ClassicComputerUseOverlay } from "./classic-computer-use-overlay.js";
 import { ConversationProgressLivenessSupervisor } from "./conversation-progress-liveness.js";
 import { ConversationProgressLivenessCdpAdapter } from "./conversation-progress-liveness-cdp.js";
 import { ContextGuardianRuntime, registerContextGuardianTools } from "./context-guardian.js";
@@ -743,7 +744,7 @@ function registerCodexProcessTools(server, config, workspaces, processSessions) 
         });
     });
 }
-function createMcpServer(config, workspaces, reviewCheckpoints, processSessions, localAgentProviders, incomingArtifactAdapters, chatSwarm, capabilityRuntime, blenderRuntimeManager, codexMcpBridge, conversationContinuity, contextGuardian, exactUsageAuthority, codexContextBridge, planRuntime, goalRuntime, goalHostBridge, hostOverlayProjection, conversationAuthority, conversationAuthorityReady, goalRunProgress, requestConversationContext, progressClaimRegistry, conversationProgressLiveness = null) {
+function createMcpServer(config, workspaces, reviewCheckpoints, processSessions, localAgentProviders, incomingArtifactAdapters, chatSwarm, capabilityRuntime, blenderRuntimeManager, codexMcpBridge, conversationContinuity, contextGuardian, exactUsageAuthority, codexContextBridge, planRuntime, goalRuntime, goalHostBridge, hostOverlayProjection, computerUseOverlay, conversationAuthority, conversationAuthorityReady, goalRunProgress, requestConversationContext, progressClaimRegistry, conversationProgressLiveness = null) {
     const toolSurface = toolModeCapabilities(config.toolMode);
     const modelInstructions = serverInstructions(config);
     const modelInstructionsFingerprint = createHash("sha256").update(modelInstructions).digest("hex");
@@ -938,7 +939,12 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
         blenderRuntimeManager,
         codexMcpBridge,
     });
-    registerCodexComputerUseRouter(server, { capabilityRuntime, codexMcpBridge, resolveConversation: resolveConversationAuthority });
+    registerCodexComputerUseRouter(server, {
+        capabilityRuntime,
+        codexMcpBridge,
+        resolveConversation: resolveConversationAuthority,
+        computerUseOverlay,
+    });
     registerJsReplCompatibilityTool(server, { capabilityRuntime, codexMcpBridge, resolveConversation: resolveConversationAuthority });
     registerToolchainTools(server);
     registerCodexMcpBridgeTools(server, codexMcpBridge, { resolveConversation: resolveConversationAuthority });
@@ -2133,6 +2139,8 @@ export function createServer(config = loadConfig(), options = {}) {
         const toolName = String(req?.body?.params?.name || "").trim() || null;
         await conversationAuthorityReady;
         const progressOnlyTool = toolName === "devspace_progress_report";
+        const computerUseTool = toolName === "codex_computer_use"
+            || toolName === "codex_computer_use_status";
         const progressClaimTool = progressOnlyTool
             && typeof req?.body?.params?.arguments?.claimId === "string"
             && String(req.body.params.arguments.claimId).trim().length > 0;
@@ -2304,6 +2312,39 @@ export function createServer(config = loadConfig(), options = {}) {
                 }
             }
         }
+        if (!capabilityAuthority?.conversationId && !progressAuthority?.conversationId && computerUseTool && callFingerprint) {
+            // Computer Use may be the first direct tool called after a fresh
+            // schema/session bind, before the native call_mcp correlation row
+            // reaches the Core.  Fail closed unless exactly one hydrated Main
+            // page is visibly generating, owns its own progress card, and has
+            // an empty composer.  Runtime is only the physical locator; the
+            // page's exact conversation id remains the request authority.
+            const uniqueActivePage = await progressLivenessAdapter.findUniqueActiveConversation({
+                requireGenerating: true,
+                allowIncompleteUserTurn: false,
+                requireProgressCard: true,
+            }).catch(() => null);
+            if (
+                uniqueActivePage?.exact
+                && uniqueActivePage?.pageVerified === true
+                && uniqueActivePage?.conversationId
+                && uniqueActivePage?.runtimeKey
+            ) {
+                capabilityAuthority = {
+                    conversationId: uniqueActivePage.conversationId,
+                    sessionFingerprint,
+                    runtimeKeys: [uniqueActivePage.runtimeKey],
+                    runtimeKey: uniqueActivePage.runtimeKey,
+                    observedAt: new Date().toISOString(),
+                    source: "classic-computer-use-unique-active-page-verified",
+                    callFingerprint,
+                    invocationFingerprint: null,
+                    ephemeral: true,
+                    pageVerified: true,
+                    authorityDomain: "capability",
+                };
+            }
+        }
         if (!capabilityAuthority?.conversationId && !progressAuthority?.conversationId) {
             const waits = [];
             if (callFingerprint) {
@@ -2438,6 +2479,10 @@ export function createServer(config = loadConfig(), options = {}) {
         goalProgressStatePath: join(config.stateDir, "devspace-goal-run-live.json"),
         planStatePath: join(config.stateDir, "plan-state.json"),
         goalStatePath: join(config.stateDir, "goal-state.json"),
+        producerPriority: config.classicUiOwnerPriority,
+    });
+    const computerUseOverlay = new ClassicComputerUseOverlay({
+        adapter: progressLivenessAdapter,
         producerPriority: config.classicUiOwnerPriority,
     });
     conversationProgressLiveness = new ConversationProgressLivenessSupervisor({
@@ -2665,7 +2710,7 @@ export function createServer(config = loadConfig(), options = {}) {
     const localAgentProviders = config.subagents
         ? getLocalAgentProviderAvailabilitySnapshot()
         : [];
-    const mcpServerTemplate = createMcpServer(config, workspaces, reviewCheckpoints, processSessions, localAgentProviders, incomingArtifactAdapters, chatSwarm, capabilityRuntime, blenderRuntimeManager, codexMcpBridge, conversationContinuity, contextGuardian, exactUsageAuthority, codexContextBridge, planRuntime, goalRuntime, goalHostBridge, hostOverlayProjection, conversationAuthority, conversationAuthorityReady, goalRunProgress, requestConversationContext, progressClaimRegistry, conversationProgressLiveness);
+    const mcpServerTemplate = createMcpServer(config, workspaces, reviewCheckpoints, processSessions, localAgentProviders, incomingArtifactAdapters, chatSwarm, capabilityRuntime, blenderRuntimeManager, codexMcpBridge, conversationContinuity, contextGuardian, exactUsageAuthority, codexContextBridge, planRuntime, goalRuntime, goalHostBridge, hostOverlayProjection, computerUseOverlay, conversationAuthority, conversationAuthorityReady, goalRunProgress, requestConversationContext, progressClaimRegistry, conversationProgressLiveness);
     const mcpTemplateDiagnostics = mcpServerTemplateDiagnostics(mcpServerTemplate);
     logEvent(config.logging, "info", "mcp_server_template_ready", mcpTemplateDiagnostics);
     const createSessionMcpServer = () => createMcpSessionServerFromTemplate(mcpServerTemplate);
@@ -3275,6 +3320,7 @@ export function createServer(config = loadConfig(), options = {}) {
                 await conversationContinuity.close();
                 await conversationProgressLiveness?.close?.();
                 conversationProgressLiveness = null;
+                await computerUseOverlay.close();
                 await progressNarrationOverlay.close();
                 await hostOverlayProjection.close();
                 await planRuntime.close();
