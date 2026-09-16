@@ -331,8 +331,16 @@ async function testSessionBoundRequestTranslation() {
 
     assert.equal(response.status, 200);
     assert.equal(response.headers["mcp-session-id"], publicSessionId, "Core backend id must be rewritten back to the stable public id");
-    assert.equal(core.observed.at(-1).sessionId, "core-a-backend-1", "Gateway must translate public id to Core backend id");
-    assert.equal(core.observed.at(-1).authorization, "Bearer refreshed-replay-secret", "Gateway must forward the latest OAuth access token");
+    const translatedRequests = core.observed.filter((entry) => entry.id === 2);
+    assert.equal(translatedRequests.length, 1,
+      "the translated tools/list request must reach the Core exactly once");
+    const translatedRequest = translatedRequests[0];
+    // Schema-fingerprint capture is intentionally asynchronous and may append
+    // another Core observation after the user request completes, especially on
+    // arm64 macOS runners. Assert the exact request id instead of racing on the
+    // last diagnostic row.
+    assert.equal(translatedRequest.sessionId, "core-a-backend-1", "Gateway must translate public id to Core backend id");
+    assert.equal(translatedRequest.authorization, "Bearer refreshed-replay-secret", "Gateway must forward the latest OAuth access token");
     assert.deepEqual(JSON.parse(response.body).result, {
       core: "core-a",
       backendSessionId: "core-a-backend-1",
