@@ -291,28 +291,55 @@ export async function callCodexComputerUse(dependencies, {
       }
     : null;
   const code = operationCode(info.action, normalized);
-  const response = await callJsReplCompatibility(dependencies, {
-    code,
-    timeoutMs: Math.max(1_000, Math.min(120_000, Number(timeoutMs) || 30_000)),
-    elicitationHandler,
-  });
-  const parsed = parseNodeReplPayload(response);
-  return {
-    ok: true,
-    ...info,
-    source: response.source,
-    serverId: response.serverId,
-    toolName: response.toolName,
-    payload: parsed.structured,
-    content: parsed.content,
-    nativeRuntimeEvidence: {
-      nodeRepl: true,
-      runtime: CODEX_COMPUTER_USE_RUNTIME,
-      devspaceGuiDriver: false,
-      approvalRelay: approvalEvidence,
-    },
-    executionPolicy: executionPolicySnapshot(),
-  };
+  const boundedTimeoutMs = Math.max(1_000, Math.min(120_000, Number(timeoutMs) || 30_000));
+  const activity = info.action !== "status" && typeof dependencies?.computerUseActivity?.begin === "function"
+    ? await dependencies.computerUseActivity.begin({
+        conversationId: dependencies.ownerConversationId,
+        runtimeKey: dependencies.ownerRuntimeKey,
+        app: app || (info.action === "list_apps" || info.action === "list_windows" ? "Windows desktop" : "Windows"),
+        action: info.action,
+        timeoutMs: boundedTimeoutMs,
+      }).catch((error) => ({
+        ok: false,
+        state: "overlay-begin-failed",
+        error: error instanceof Error ? error.message : String(error),
+      }))
+    : { ok: true, state: info.action === "status" ? "status-read-only" : "overlay-unavailable" };
+  let operationState = "failed";
+  try {
+    const response = await callJsReplCompatibility(dependencies, {
+      code,
+      timeoutMs: boundedTimeoutMs,
+      elicitationHandler,
+    });
+    const parsed = parseNodeReplPayload(response);
+    operationState = "completed";
+    return {
+      ok: true,
+      ...info,
+      source: response.source,
+      serverId: response.serverId,
+      toolName: response.toolName,
+      payload: parsed.structured,
+      content: parsed.content,
+      nativeRuntimeEvidence: {
+        nodeRepl: true,
+        runtime: CODEX_COMPUTER_USE_RUNTIME,
+        devspaceGuiDriver: false,
+        approvalRelay: approvalEvidence,
+        computerUseOverlay: activity,
+      },
+      executionPolicy: executionPolicySnapshot(),
+    };
+  } finally {
+    if (activity?.operationId && typeof dependencies?.computerUseActivity?.end === "function") {
+      await dependencies.computerUseActivity.end({
+        conversationId: dependencies.ownerConversationId,
+        operationId: activity.operationId,
+        state: operationState,
+      }).catch(() => null);
+    }
+  }
 }
 
 export async function codexComputerUseStatus(dependencies) {

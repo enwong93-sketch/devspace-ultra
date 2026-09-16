@@ -253,6 +253,58 @@ export class ConversationProgressLivenessCdpAdapter {
     }
   }
 
+  async findUniqueActiveConversation({
+    requireGenerating = true,
+    allowIncompleteUserTurn = false,
+    requireProgressCard = true,
+  } = {}) {
+    const candidates = [];
+    for (const runtimeKey of this.runtimeKeys) {
+      const port = runtimePort(runtimeKey);
+      try {
+        const targets = await this.listTargets(port);
+        for (const target of Array.isArray(targets) ? targets : []) {
+          if (target?.type !== "page" || !target?.webSocketDebuggerUrl) continue;
+          const conversationId = cleanConversationId(conversationIdFromUrl(target.url));
+          if (!conversationId) continue;
+          const inspected = await this.#inspectMatch({ runtimeKey, port, target }, conversationId);
+          if (!inspected?.exact || !inspected?.hydrated || !inspected?.composerFound || !inspected?.composerEmpty) continue;
+          if (requireProgressCard && (
+            inspected.progressCardMounted !== true
+            || inspected.progressConversationId !== conversationId
+          )) continue;
+          const active = inspected.generating === true
+            || (allowIncompleteUserTurn && inspected.incompleteUserTurn === true);
+          if (requireGenerating && !active) continue;
+          candidates.push(inspected);
+        }
+      } catch {
+        // Offline runtimes and transient CDP failures are ignored. A fallback
+        // is valid only when exactly one remaining page proves itself active.
+      }
+    }
+    if (candidates.length !== 1) {
+      return {
+        exact: false,
+        ambiguous: candidates.length > 1,
+        state: candidates.length > 1
+          ? "multiple-active-conversation-pages"
+          : "no-active-conversation-page",
+        matchCount: candidates.length,
+        pageVerified: false,
+        runtimeBinding: false,
+      };
+    }
+    return {
+      ...candidates[0],
+      exact: true,
+      uniqueActiveConversation: true,
+      pageVerified: true,
+      runtimeBinding: false,
+      locatorOnly: true,
+    };
+  }
+
   // Compatibility alias. runtimeKey is deliberately ignored: Runtime is a
   // locator, never the durable progress identity or authorization key.
   async inspect({ conversationId } = {}) {

@@ -79,6 +79,7 @@ export function registerCodexComputerUseRouter(server, {
   capabilityRuntime,
   codexMcpBridge,
   resolveConversation = null,
+  computerUseOverlay = null,
 } = {}) {
   if (!codexMcpBridge && !capabilityRuntime) throw new Error("Linked Codex node_repl or Capability Runtime is required for Computer Use.");
   const hostUnsupportedApprovalGrants = new Map();
@@ -138,6 +139,8 @@ export function registerCodexComputerUseRouter(server, {
       capabilityRuntime,
       codexMcpBridge,
       ownerConversationId,
+      ownerRuntimeKey: String(resolved?.runtimeKey || "").trim() || null,
+      computerUseActivity: computerUseOverlay,
       elicitationHandler,
       allowHostUnsupportedApproval,
     };
