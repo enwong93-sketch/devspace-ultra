@@ -121,6 +121,7 @@ function serializableRecord(record) {
     lastActivityAt: record.lastActivityAt || null,
     lastReportAt: record.lastReportAt || null,
     lastContinueAt: record.lastContinueAt || null,
+    generationResetAt: record.generationResetAt || null,
     continueAttempts: Number(record.continueAttempts || 0),
     idleObservedAt: record.idleObservedAt || null,
     reportOverdue: record.reportOverdue === true,
@@ -198,6 +199,7 @@ export class ConversationProgressLivenessSupervisor {
       record.planRevision = Number(value?.planRevision || 0);
       record.lastReportAt = value?.lastReportAt || null;
       record.lastContinueAt = value?.lastContinueAt || null;
+      record.generationResetAt = finiteTime(value?.generationResetAt) ? value.generationResetAt : null;
       const persistedTurnState = cleanText(value?.turnState, 80);
       const startedAtMs = finiteTime(value?.startedAt) || 0;
       const interruptedAtMs = finiteTime(value?.interruptedAt) || 0;
@@ -262,6 +264,8 @@ export class ConversationProgressLivenessSupervisor {
       record.completedAt = null;
       record.lastReportAt = null;
       record.lastContinueAt = null;
+      record.generationResetAt = null;
+      record.generationResetPending = false;
       record.continueAttempts = 0;
       record.idleObservedAt = null;
       record.reportOverdue = false;
@@ -270,6 +274,12 @@ export class ConversationProgressLivenessSupervisor {
       record.duplicatePageObserved = false;
       record.uiCleanupPending = true;
       record.lastDispatchState = "conversation-turn-started";
+    } else if (kind === "finished" && event?.transportOnly === true) {
+      // Network.loadingFinished closes only the browser HTTP transport. A
+      // ChatGPT tool-using assistant turn can continue for many more MCP calls
+      // after this boundary, so it must never become completion/interruption
+      // evidence or advance the rescue clock.
+      record.lastDispatchState = "conversation-turn-transport-finished-nonterminal";
     } else if (kind === "finished") {
       // Network loadingFinished is not, by itself, proof that the user-visible
       // assistant turn has settled. Verify the exact conversation page before
@@ -290,6 +300,20 @@ export class ConversationProgressLivenessSupervisor {
           ? "transport-finished-page-still-generating"
           : "transport-finished-awaiting-page-completion";
       }
+    } else if (kind === "failed" && event?.canceled === true && record.generationResetPending === true) {
+      // The rescue guard may deliberately click a stale Stop affordance after
+      // authoritative interruption evidence and the full twenty-minute gate.
+      // That click can surface as a native `canceled` event. It is not a new
+      // user cancellation and must not disarm the already-proven interrupted
+      // episode before the one-shot `- 繼續` send can run.
+      record.armed = true;
+      record.turnState = "interrupted";
+      record.interruptedAt ||= at;
+      record.completedAt = null;
+      record.idleObservedAt = null;
+      record.rescuePending = false;
+      record.rescueEvidence ||= "transport-failure";
+      record.lastDispatchState = "stale-generating-reset-cancel-observed";
     } else if (kind === "failed" && event?.canceled === true) {
       this.#disarm(record, "cancelled", atMs, "conversation-turn-cancelled");
     } else if (kind === "failed") {
@@ -301,6 +325,7 @@ export class ConversationProgressLivenessSupervisor {
       record.idleObservedAt = null;
       record.rescuePending = false;
       record.rescueEvidence = "transport-failure";
+      record.generationResetAt = null;
       record.lastDispatchState = "conversation-turn-interrupted";
     } else if (["expired", "evicted"].includes(kind) && record.armed) {
       // Expiry is not proof of failure: a legitimate long turn may still be
@@ -314,7 +339,7 @@ export class ConversationProgressLivenessSupervisor {
       record.lastDispatchState = `turn-observer-${kind}`;
     }
 
-    if (["finished", "failed"].includes(kind)) {
+    if ((kind === "finished" && event?.transportOnly !== true) || kind === "failed") {
       await this.adapter?.clearReminder?.({ conversationId }).catch?.(() => {});
       record.uiCleanupPending = false;
     }
@@ -416,23 +441,71 @@ export class ConversationProgressLivenessSupervisor {
         continue;
       }
 
+      const explicitInterruption = record.turnState === "interrupted";
+      const pageInterruption = page.hasTurnError === true || page.incompleteUserTurn === true;
+      if (page.generating) {
+        // A failed native transport or a visible page error is authoritative
+        // interruption evidence even when ChatGPT leaves a stale Stop button
+        // behind. After the full twenty-minute rescue boundary and a second
+        // idle confirmation, reset that stale generating affordance once. The
+        // next tick performs the normal exact-page `- 繼續` send.
+        const staleGeneratingInterruption = record.rescuePending
+          && this.maxContinueAttempts > 0
+          && (explicitInterruption || page.hasTurnError === true);
+        if (!staleGeneratingInterruption) {
+          record.idleObservedAt = null;
+          record.lastDispatchState = "active-turn-still-generating";
+          continue;
+        }
+        if (!page.hydrated || !page.composerEmpty) {
+          record.idleObservedAt = null;
+          record.lastDispatchState = !page.hydrated
+            ? "waiting-for-conversation-hydration"
+            : "user-composer-not-empty";
+          continue;
+        }
+        record.rescueEvidence = explicitInterruption ? "transport-failure" : "visible-turn-error";
+        if (finiteTime(record.generationResetAt)) {
+          record.lastDispatchState = "stale-generating-reset-already-requested";
+          continue;
+        }
+        const staleIdleAtMs = finiteTime(record.idleObservedAt);
+        if (!staleIdleAtMs) {
+          record.idleObservedAt = new Date(now).toISOString();
+          record.lastDispatchState = "stale-generating-interruption-confirmation-armed";
+          continue;
+        }
+        if (now - staleIdleAtMs < Math.min(30_000, this.pollMs * 2)) continue;
+        const resetEpisodeRevision = Number(record.episodeRevision || 0);
+        record.generationResetPending = true;
+        const reset = await this.adapter?.resetInterruptedGeneration?.({
+          conversationId,
+          target: page,
+          rescueEvidence: record.rescueEvidence,
+        }).catch((error) => ({ ok: false, state: error instanceof Error ? error.message : String(error) }));
+        if (Number(record.episodeRevision || 0) !== resetEpisodeRevision) continue;
+        record.generationResetPending = false;
+        if (reset?.ok) {
+          record.generationResetAt = new Date(now).toISOString();
+          record.idleObservedAt = null;
+          record.lastDispatchState = "stale-generating-reset-requested";
+        } else {
+          record.lastDispatchState = cleanText(reset?.state, 120) || "stale-generating-reset-failed";
+        }
+        continue;
+      }
+      if (!page.hydrated || !page.composerEmpty) {
+        record.idleObservedAt = null;
+        record.lastDispatchState = !page.hydrated
+          ? "waiting-for-conversation-hydration"
+          : "user-composer-not-empty";
+        continue;
+      }
       if (!record.rescuePending || this.maxContinueAttempts === 0) continue;
       if (record.continueAttempts >= this.maxContinueAttempts) {
         this.#disarm(record, "rescue-exhausted", now, "single-rescue-already-used");
         continue;
       }
-      if (page.generating || !page.hydrated || !page.composerEmpty) {
-        record.idleObservedAt = null;
-        record.lastDispatchState = page.generating
-          ? "active-turn-still-generating"
-          : !page.hydrated
-            ? "waiting-for-conversation-hydration"
-            : "user-composer-not-empty";
-        continue;
-      }
-
-      const explicitInterruption = record.turnState === "interrupted";
-      const pageInterruption = page.hasTurnError === true || page.incompleteUserTurn === true;
       if (!explicitInterruption && !pageInterruption) {
         record.idleObservedAt = null;
         record.rescueEvidence = null;
@@ -545,6 +618,8 @@ export class ConversationProgressLivenessSupervisor {
       lastActivityAt: null,
       lastReportAt: null,
       lastContinueAt: null,
+      generationResetAt: null,
+      generationResetPending: false,
       continueAttempts: 0,
       idleObservedAt: null,
       reportOverdue: false,
@@ -572,6 +647,8 @@ export class ConversationProgressLivenessSupervisor {
     record.completedAt = at;
     record.lastActivityAt = at;
     record.idleObservedAt = null;
+    record.generationResetAt = null;
+    record.generationResetPending = false;
     record.reportOverdue = false;
     record.rescuePending = false;
     record.rescueEvidence = null;

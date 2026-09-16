@@ -44,6 +44,12 @@ assert.match(server, /mcpCallCorrelator\.noteNative\(event\)/);
 assert.match(server, /const gatewayCorrelationId = callFingerprint \? randomUUID\(\) : null/,
   "resolved call evidence must stay attached to one exact Gateway request");
 assert.match(server, /gatewayRequestId:\s*gatewayCorrelationId/);
+assert.match(server, /acceptVerifiedAuthority\(await verifyCorrelatedIdentity\(correlated, \{ requireGenerating: false \}\)\)/,
+  "an exact canonical page-local tool invocation must not be rejected only because the visible generating affordance dropped at a tool boundary");
+assert.match(server, /acceptVerifiedAuthority\(await verifyCorrelatedIdentity\(activeTurn, \{ requireGenerating: true \}\)\)/,
+  "weaker active-turn/session fallback evidence must still require a currently generating exact page");
+assert.match(server, /mcpCallCorrelator\.waitForIdentity\([\s\S]{0,700}verifyCorrelatedIdentity\(identity, \{ requireGenerating: false \}\)/,
+  "a delayed exact invocation join must use the same idle-tool-boundary rule as the immediate join");
 assert.match(server, /progressLivenessAdapter\.find\(\{[\s\S]*conversationId:\s*candidate\.conversationId/);
 assert.match(server, /page\.runtimeKey !== candidateRuntimeKey/);
 assert.match(server, /page\.progressCardMounted === true && page\.progressConversationId !== candidate\.conversationId/);
@@ -120,6 +126,12 @@ assert.match(liveness, /tenMinuteAutomaticReminder:\s*false/);
 assert.match(liveness, /tenMinuteSyntheticUserTurn:\s*false/);
 assert.match(liveness, /twentyMinuteInterruptedTurnRescueOnly:\s*true/);
 assert.match(liveness, /normalCompletionDisarms:\s*true/);
+assert.match(liveness, /event\?\.transportOnly === true[\s\S]{0,500}conversation-turn-transport-finished-nonterminal/,
+  "HTTP transport completion must remain non-terminal for long tool-using assistant turns");
+assert.match(liveness, /resetInterruptedGeneration/,
+  "an authoritative interrupted turn may reset one stale generating affordance only after the twenty-minute rescue gate");
+assert.match(livenessCdp, /async resetInterruptedGeneration\(/);
+assert.match(livenessCdp, /stale-generating-stop-clicked/);
 assert.match(livenessCdp, /export const INTERRUPTED_TURN_RESCUE_TEXT = "- 繼續"/);
 assert.match(transportObserver, /kind:\s*"failed"[\s\S]{0,300}canceled:\s*params\?\.canceled === true/);
 
@@ -130,6 +142,7 @@ console.log(JSON.stringify({
   capabilityAuthorityIsolated: true,
   exactPageInvocationJoin: true,
   exactGatewayRequestBinding: true,
+  exactInvocationMayCrossIdleToolBoundary: true,
   exactPageClaimRelay: true,
   activeTurnSessionAliasBounded: true,
   exactNativeSessionPageRecovery: true,
@@ -141,6 +154,8 @@ console.log(JSON.stringify({
   narrationRuntimeBinding: false,
   tenMinuteAutomaticReminder: false,
   twentyMinuteInterruptedTurnRescueOnly: true,
+  transportOnlyCompletionNonTerminal: true,
+  staleGeneratingInterruptedTurnRecoverable: true,
   rescueText: "- 繼續",
   normalCompletionDisarms: true,
 }));
