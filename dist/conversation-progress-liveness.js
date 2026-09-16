@@ -101,6 +101,7 @@ function reportAnchor(record, now) {
 function rescueAnchor(record, now) {
   return Math.max(
     finiteTime(record.lastReportAt) || 0,
+    finiteTime(record.lastActivityAt) || 0,
     finiteTime(record.interruptedAt) || 0,
     finiteTime(record.startedAt) || 0,
   ) || now;
@@ -226,7 +227,11 @@ export class ConversationProgressLivenessSupervisor {
         // native turn replaces this episode before rescue.
         record.turnState = alreadyInterrupted ? "interrupted" : "restart-interrupted";
         record.startedAt = value?.startedAt || null;
-        record.interruptedAt = value?.interruptedAt || restartObservedAt;
+        record.interruptedAt = value?.interruptedAt
+          || value?.lastActivityAt
+          || value?.lastReportAt
+          || value?.startedAt
+          || restartObservedAt;
         record.lastActivityAt = value?.lastActivityAt || null;
         record.restartObservedAt = restartObservedAt;
         record.rescueEvidence = alreadyInterrupted
@@ -264,7 +269,10 @@ export class ConversationProgressLivenessSupervisor {
     const at = new Date(atMs).toISOString();
     const kind = String(event?.kind || "").toLowerCase();
     const record = this.#record(conversationId);
-    record.lastActivityAt = at;
+    const generatedResetCancellation = kind === "failed"
+      && event?.canceled === true
+      && record.generationResetPending === true;
+    if (!generatedResetCancellation) record.lastActivityAt = at;
     record.updatedAt = new Date(this.now()).toISOString();
 
     if (kind === "started") {
@@ -313,7 +321,7 @@ export class ConversationProgressLivenessSupervisor {
           ? "transport-finished-page-still-generating"
           : "transport-finished-awaiting-page-completion";
       }
-    } else if (kind === "failed" && event?.canceled === true && record.generationResetPending === true) {
+    } else if (generatedResetCancellation) {
       // The rescue guard may deliberately click a stale Stop affordance after
       // authoritative interruption evidence and the full twenty-minute gate.
       // That click can surface as a native `canceled` event. It is not a new
@@ -321,7 +329,7 @@ export class ConversationProgressLivenessSupervisor {
       // episode before the one-shot `- 繼續` send can run.
       record.armed = true;
       record.turnState = "interrupted";
-      record.interruptedAt ||= at;
+      record.interruptedAt ||= record.lastActivityAt || record.lastReportAt || record.startedAt || at;
       record.completedAt = null;
       record.idleObservedAt = null;
       record.rescuePending = false;
@@ -369,11 +377,30 @@ export class ConversationProgressLivenessSupervisor {
     record.lastReportAt = new Date(atMs).toISOString();
     record.lastActivityAt = record.lastReportAt;
     record.reportOverdue = false;
-    if (record.armed) record.rescuePending = false;
+    if (record.armed) {
+      record.rescuePending = false;
+      record.idleObservedAt = null;
+    }
     record.lastDispatchState = record.armed ? "agent-progress-report-observed" : "idle-report-observed";
     record.updatedAt = new Date(this.now()).toISOString();
     await this.adapter?.clearReminder?.({ conversationId: id }).catch?.(() => {});
     record.uiCleanupPending = false;
+    await this.#persist();
+    return serializableRecord(record);
+  }
+
+  async noteActivity({ conversationId, observedAtMs } = {}) {
+    const id = cleanConversationId(conversationId);
+    if (!id) return null;
+    const record = this.#record(id);
+    if (!record.armed) return serializableRecord(record);
+    const atMs = finiteTime(observedAtMs) || this.now();
+    const existingMs = finiteTime(record.lastActivityAt) || 0;
+    if (atMs >= existingMs) record.lastActivityAt = new Date(atMs).toISOString();
+    record.rescuePending = false;
+    record.idleObservedAt = null;
+    record.lastDispatchState = "substantive-tool-activity-observed";
+    record.updatedAt = new Date(this.now()).toISOString();
     await this.#persist();
     return serializableRecord(record);
   }
@@ -463,9 +490,12 @@ export class ConversationProgressLivenessSupervisor {
         // behind. After the full twenty-minute rescue boundary and a second
         // idle confirmation, reset that stale generating affordance once. The
         // next tick performs the normal exact-page `- 繼續` send.
+        const silentGeneratingInterruption = record.rescuePending
+          && page.latestMessageRole === "user"
+          && ["running", "completion-pending", "uncertain"].includes(record.turnState);
         const staleGeneratingInterruption = record.rescuePending
           && this.maxContinueAttempts > 0
-          && (explicitInterruption || page.hasTurnError === true);
+          && (explicitInterruption || page.hasTurnError === true || silentGeneratingInterruption);
         if (!staleGeneratingInterruption) {
           record.idleObservedAt = null;
           record.lastDispatchState = "active-turn-still-generating";
@@ -482,7 +512,9 @@ export class ConversationProgressLivenessSupervisor {
           ? "core-restart"
           : explicitInterruption
             ? "transport-failure"
-            : "visible-turn-error";
+            : page.hasTurnError === true
+              ? "visible-turn-error"
+              : "stalled-generating";
         if (finiteTime(record.generationResetAt)) {
           record.lastDispatchState = "stale-generating-reset-already-requested";
           continue;
@@ -530,7 +562,7 @@ export class ConversationProgressLivenessSupervisor {
         record.lastDispatchState = "no-interruption-evidence-no-rescue";
         continue;
       }
-      record.rescueEvidence = record.turnState === "restart-interrupted"
+      record.rescueEvidence ||= record.turnState === "restart-interrupted"
         ? "core-restart"
         : explicitInterruption
           ? "transport-failure"
@@ -612,6 +644,8 @@ export class ConversationProgressLivenessSupervisor {
       twentyMinuteInterruptedTurnRescueOnly: true,
       normalCompletionDisarms: true,
       restartRestoresActiveEpisodeAsInterrupted: true,
+      stalledGeneratingSilenceRescue: true,
+      substantiveToolActivityResetsRescueClock: true,
       oneRescuePerInterruptionEpisode: true,
       activePlansDoNotArmRescue: true,
       legacyEpisodesRestartDisarmed: true,
@@ -700,6 +734,8 @@ export class ConversationProgressLivenessSupervisor {
       twentyMinuteInterruptedTurnRescueOnly: true,
       normalCompletionDisarms: true,
       restartRestoresActiveEpisodeAsInterrupted: true,
+      stalledGeneratingSilenceRescue: true,
+      substantiveToolActivityResetsRescueClock: true,
       updatedAt: new Date(this.now()).toISOString(),
       reportIntervalMs: this.reportIntervalMs,
       continueMs: this.continueMs,

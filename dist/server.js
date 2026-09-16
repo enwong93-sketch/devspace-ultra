@@ -2472,6 +2472,13 @@ export function createServer(config = loadConfig(), options = {}) {
             // is request-scoped evidence only; it must never become a durable
             // session/conversation mapping.
             mcpCallCorrelator.noteNative(event);
+            // A real new tool invocation is positive liveness evidence for
+            // this exact conversation. Persist only its bounded timestamp;
+            // raw arguments/output stay outside the liveness state. Progress
+            // reports use their own verified noteReport path.
+            if (event?.toolName !== "devspace_progress_report") {
+                void conversationProgressLiveness?.noteActivity?.(event).catch(() => null);
+            }
         },
         onTurnTransportEvent: async (event) => {
             await turnDeliveryEvidenceReady;

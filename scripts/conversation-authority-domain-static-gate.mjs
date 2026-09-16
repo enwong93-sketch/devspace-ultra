@@ -129,6 +129,13 @@ assert.match(liveness, /normalCompletionDisarms:\s*true/);
 assert.match(liveness, /restart-interrupted/,
   "an active exact-conversation episode restored after Core replacement must carry restart interruption evidence");
 assert.match(liveness, /restartRestoresActiveEpisodeAsInterrupted:\s*true/);
+assert.match(liveness, /stalledGeneratingSilenceRescue:\s*true/,
+  "twenty minutes of exact-page generating silence must become bounded stalled-generation rescue evidence");
+assert.match(liveness, /substantiveToolActivityResetsRescueClock:\s*true/,
+  "fresh substantive tool activity must reset only that conversation's rescue clock");
+assert.match(liveness, /"stalled-generating"/);
+assert.match(liveness, /record\.interruptedAt = value\?\.interruptedAt[\s\S]{0,260}value\?\.lastActivityAt/,
+  "Core restart evidence must preserve the pre-restart activity anchor instead of restarting the twenty-minute clock");
 assert.match(liveness, /event\?\.transportOnly === true[\s\S]{0,500}conversation-turn-transport-finished-nonterminal/,
   "HTTP transport completion must remain non-terminal for long tool-using assistant turns");
 assert.match(liveness, /resetInterruptedGeneration/,
@@ -159,6 +166,9 @@ console.log(JSON.stringify({
   twentyMinuteInterruptedTurnRescueOnly: true,
   transportOnlyCompletionNonTerminal: true,
   staleGeneratingInterruptedTurnRecoverable: true,
+  stalledGeneratingSilenceRecoverable: true,
+  substantiveToolActivityResetsRescueClock: true,
+  coreRestartPreservesElapsedRescueClock: true,
   restartRestoresActiveEpisodeAsInterrupted: true,
   rescueText: "- 繼續",
   normalCompletionDisarms: true,
