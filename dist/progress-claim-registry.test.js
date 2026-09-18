@@ -66,6 +66,22 @@ await assert.rejects(
   /exact page-verified/,
 );
 
+const cdpClaim = registry.create({ message: "Recovered from exact claim iframe", kind: "milestone" });
+const cdpCompleted = await registry.claim({
+  claimId: cdpClaim.claimId,
+  authority: {
+    conversationId: "conversation-progress-cdp",
+    runtimeKey: "main-03",
+    claimId: cdpClaim.claimId,
+    observedAt: new Date(now).toISOString(),
+    source: "classic-exact-page-progress-claim-cdp-page-verified",
+    pageVerified: true,
+  },
+  complete: async ({ authority }) => ({ pageVerified: authority.pageVerified }),
+});
+assert.equal(cdpCompleted.conversationId, "conversation-progress-cdp");
+assert.equal(cdpCompleted.pageVerified, true);
+
 const expired = registry.create({ message: "Expire without write", kind: "progress" });
 now += 5_001;
 registry.prune();

@@ -1,9 +1,11 @@
 export const EXACT_CONVERSATION_REQUEST_PROOF = "exact-conversation-request-v1";
 export const EXACT_PAGE_BRIDGE_PROOF = "exact-page-compatibility-bridge-v1";
+export const EXACT_PAGE_CLAIM_PROOF = "exact-page-progress-claim-v1";
 
 const PROOFS = new Set([
   EXACT_CONVERSATION_REQUEST_PROOF,
   EXACT_PAGE_BRIDGE_PROOF,
+  EXACT_PAGE_CLAIM_PROOF,
 ]);
 
 function cleanText(value, max = 500) {
@@ -47,6 +49,7 @@ export function normalizeProgressOwnershipProof(value) {
     if (!/-page-verified$/.test(ownershipSource)) return null;
   }
   if (proof === EXACT_PAGE_BRIDGE_PROOF && ownershipSource !== "devspace-conversation-bridge") return null;
+  if (proof === EXACT_PAGE_CLAIM_PROOF && ownershipSource !== "classic-exact-page-progress-claim-cdp-page-verified") return null;
 
   return {
     ownershipProof: proof,

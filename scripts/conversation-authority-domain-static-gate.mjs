@@ -12,6 +12,7 @@ const livenessCdp = await readFile(new URL("../dist/conversation-progress-livene
 const transportObserver = await readFile(new URL("../dist/classic-turn-transport-observer.js", import.meta.url), "utf8");
 const progressClaims = await readFile(new URL("../dist/progress-claim-registry.js", import.meta.url), "utf8");
 const progressRelay = await readFile(new URL("../dist/ui/progress-claim-relay.html", import.meta.url), "utf8");
+const progressClaimCdp = await readFile(new URL("../dist/conversation-start-claim-cdp.js", import.meta.url), "utf8");
 
 assert.match(server, /const resolveCapabilityConversationAuthority = async \(extra\) =>/);
 assert.match(server, /const resolveProgressConversationAuthority = async \(extra\) =>/);
@@ -25,6 +26,10 @@ assert.match(server, /resourceUri:\s*PROGRESS_CLAIM_RELAY_URI,[\s\S]{0,800}visib
 assert.match(server, /progressClaimRegistry\.create\(\{ message:\s*reportMessage, kind \}\)/);
 assert.match(server, /claimId:\s*z\.string\(\)\.min\(16\)\.max\(200\)\.optional\(\)/);
 assert.match(server, /progressClaimRegistry\.claim\(/);
+assert.match(server, /ProgressClaimCdpResolver/,
+  "pending narration must recover exact page ownership from the mounted claim iframe when app callTool has no request correlation");
+assert.match(server, /resolveProgressClaimPage\?\.\(relayClaimId\)/);
+assert.match(server, /EXACT_PAGE_CLAIM_PROOF/);
 assert.match(server, /outputSchema:[\s\S]{0,1200}progressClaim:\s*z\.object\(/,
   "progress tool must declare the structured claim output so ChatGPT can hydrate the relay App");
 assert.match(server, /"devspace\/progressClaim":\s*progressClaim/,
@@ -53,15 +58,18 @@ assert.match(server, /mcpCallCorrelator\.waitForIdentity\([\s\S]{0,700}verifyCor
 assert.match(server, /progressLivenessAdapter\.find\(\{[\s\S]*conversationId:\s*candidate\.conversationId/);
 assert.match(server, /page\.runtimeKey !== candidateRuntimeKey/);
 assert.match(server, /page\.progressCardMounted === true && page\.progressConversationId !== candidate\.conversationId/);
-assert.match(server, /resolved\?\.pageVerified !== true \|\| !resolved\?\.runtimeKey \|\| !resolved\?\.callFingerprint/,
-  "progress writes require exact page plus canonical tool invocation proof");
-assert.match(server, /ownershipProof:\s*EXACT_CONVERSATION_REQUEST_PROOF/);
+assert.match(server, /const exactPageClaim = Boolean\(/);
+assert.match(server, /const exactRequest = Boolean\(/);
+assert.match(server, /ownershipProof,\s*ownershipSource:\s*resolved\.source/);
 assert.match(progressClaims, /exact page-verified conversation authority/);
 assert.match(progressClaims, /another conversation page/);
 assert.match(progressClaims, /durableConversationOwners:\s*0/);
 assert.match(progressRelay, /window\.openai\.callTool\("devspace_progress_report"/);
 assert.match(progressRelay, /window\.openai\?\.toolResponseMetadata/,
   "claim relay must accept result metadata when toolOutput is null");
+assert.match(progressClaimCdp, /chooseAppContext/);
+assert.match(progressClaimCdp, /classic-exact-page-progress-claim-cdp-page-verified/);
+assert.match(progressClaimCdp, /parentId/);
 assert.doesNotMatch(progressRelay, /sendFollowUpMessage|prompt-textarea|composer/);
 
 assert.doesNotMatch(server, /resolveVerifiedDirectSession\(|persistVerifiedDirectSessionIdentity|directRequestAuthorityRegistry/,

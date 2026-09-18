@@ -37,13 +37,25 @@ function publicClaim(record) {
   };
 }
 
-function verifiedAuthority(value) {
+function verifiedAuthority(value, expectedClaimId = null) {
   const conversationId = cleanConversationId(value?.conversationId);
   const runtimeKey = cleanRuntimeKey(value?.runtimeKey);
   const callFingerprint = cleanFingerprint(value?.callFingerprint);
   const invocationFingerprint = cleanFingerprint(value?.invocationFingerprint);
   const source = cleanText(value?.source, 240);
   const observedAt = cleanObservedAt(value?.observedAt);
+  const claimId = cleanText(value?.claimId, 200);
+  if (
+    conversationId
+    && runtimeKey
+    && source === "classic-exact-page-progress-claim-cdp-page-verified"
+    && observedAt
+    && value?.pageVerified === true
+    && expectedClaimId
+    && claimId === expectedClaimId
+  ) {
+    return { conversationId, runtimeKey, claimId, source, observedAt, pageVerified: true };
+  }
   if (
     !conversationId
     || !runtimeKey
@@ -60,6 +72,7 @@ function verifiedAuthority(value) {
     ...(invocationFingerprint ? { invocationFingerprint } : {}),
     source,
     observedAt,
+    pageVerified: true,
   };
 }
 
@@ -123,7 +136,7 @@ export class ProgressClaimRegistry {
     const id = cleanText(claimId, 200);
     const record = id ? this.records.get(id) : null;
     if (!record) throw new Error("Progress claim is unavailable or expired.");
-    const owner = verifiedAuthority(authority);
+    const owner = verifiedAuthority(authority, record.claimId);
     if (!owner) {
       this.rejected += 1;
       throw new Error("Progress claim requires exact page-verified conversation authority.");

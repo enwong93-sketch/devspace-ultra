@@ -80,8 +80,9 @@ import { registerJsReplCompatibilityTool } from "./js-repl-compat.js";
 import { registerToolchainTools } from "./toolchain-tools.js";
 import { registerUnifiedRoutingTool } from "./unified-routing-tools.js";
 import { retiredToolCallResult } from "./retired-tool-compat.js";
-import { EXACT_CONVERSATION_REQUEST_PROOF, isProjectableProgressMessage } from "./progress-ownership-proof.js";
+import { EXACT_CONVERSATION_REQUEST_PROOF, EXACT_PAGE_CLAIM_PROOF, isProjectableProgressMessage } from "./progress-ownership-proof.js";
 import { ProgressClaimRegistry } from "./progress-claim-registry.js";
+import { ProgressClaimCdpResolver } from "./conversation-start-claim-cdp.js";
 import { InteractiveProgressEnforcementGate } from "./interactive-progress-enforcement.js";
 // ChatGPT/OpenAI MCP clients may reconnect without sending DELETE. Core session
 // lifetime is therefore tied to the actual standalone SSE connection: when that
@@ -745,7 +746,7 @@ function registerCodexProcessTools(server, config, workspaces, processSessions) 
         });
     });
 }
-function createMcpServer(config, workspaces, reviewCheckpoints, processSessions, localAgentProviders, incomingArtifactAdapters, chatSwarm, capabilityRuntime, blenderRuntimeManager, codexMcpBridge, conversationContinuity, contextGuardian, exactUsageAuthority, codexContextBridge, planRuntime, goalRuntime, goalHostBridge, hostOverlayProjection, computerUseOverlay, conversationAuthority, conversationAuthorityReady, goalRunProgress, requestConversationContext, progressClaimRegistry, interactiveProgressGate, conversationProgressLiveness = null) {
+function createMcpServer(config, workspaces, reviewCheckpoints, processSessions, localAgentProviders, incomingArtifactAdapters, chatSwarm, capabilityRuntime, blenderRuntimeManager, codexMcpBridge, conversationContinuity, contextGuardian, exactUsageAuthority, codexContextBridge, planRuntime, goalRuntime, goalHostBridge, hostOverlayProjection, computerUseOverlay, conversationAuthority, conversationAuthorityReady, goalRunProgress, requestConversationContext, progressClaimRegistry, resolveProgressClaimPage, interactiveProgressGate, conversationProgressLiveness = null) {
     const toolSurface = toolModeCapabilities(config.toolMode);
     const modelInstructions = serverInstructions(config);
     const modelInstructionsFingerprint = createHash("sha256").update(modelInstructions).digest("hex");
@@ -967,9 +968,22 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
         const conversationId = String(resolved?.conversationId || "").trim();
         if (!conversationId)
             throw new Error("ChatGPT Classic conversation identity is unavailable for this MCP request.");
-        if (resolved?.pageVerified !== true || !resolved?.runtimeKey || !resolved?.callFingerprint) {
+        const exactPageClaim = Boolean(
+            resolved?.pageVerified === true
+            && resolved?.runtimeKey
+            && resolved?.claimId
+            && resolved?.source === "classic-exact-page-progress-claim-cdp-page-verified"
+        );
+        const exactRequest = Boolean(
+            resolved?.pageVerified === true
+            && resolved?.runtimeKey
+            && resolved?.callFingerprint
+            && String(resolved?.source || "").endsWith("-page-verified")
+        );
+        if (!exactRequest && !exactPageClaim) {
             throw new Error("Progress narration requires an exact page-verified tool invocation for the current conversation.");
         }
+        const ownershipProof = exactPageClaim ? EXACT_PAGE_CLAIM_PROOF : EXACT_CONVERSATION_REQUEST_PROOF;
         const gatewayPort = Number(config.stableGatewayPort ?? config.edgeBackendPort ?? 7678);
         if (!Number.isInteger(gatewayPort) || gatewayPort < 1024 || gatewayPort > 65535)
             throw new Error("Stable Gateway progress endpoint port is invalid.");
@@ -982,7 +996,7 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
                 source: "agent-progress-tool",
                 kind,
                 ...(dedupeKey ? { dedupeKey } : {}),
-                ownershipProof: EXACT_CONVERSATION_REQUEST_PROOF,
+                ownershipProof,
                 ownershipSource: resolved.source,
                 ownershipObservedAt: resolved.observedAt || new Date().toISOString(),
                 ownershipRuntimeKey: resolved.runtimeKey,
@@ -1065,9 +1079,12 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
             }
             const resolved = await resolveProgressConversation(extra);
             if (relayClaimId) {
+                const relayAuthority = resolved?.conversationId
+                    ? resolved
+                    : await resolveProgressClaimPage?.(relayClaimId);
                 const result = await progressClaimRegistry.claim({
                     claimId: relayClaimId,
-                    authority: resolved,
+                    authority: relayAuthority,
                     complete: async ({ message: claimedMessage, kind: claimedKind, authority }) => await writeVerifiedProgress({
                         message: claimedMessage,
                         kind: claimedKind,
@@ -2134,6 +2151,8 @@ export function createServer(config = loadConfig(), options = {}) {
     const mcpCallCorrelator = new ClassicMcpCallCorrelator();
     const activeTurnRegistry = new ClassicActiveTurnRegistry();
     const progressClaimRegistry = new ProgressClaimRegistry();
+    const progressClaimCdp = new ProgressClaimCdpResolver({ ports: classicCdpOptions.ports });
+    const resolveProgressClaimPage = async (claimId) => progressClaimCdp.find({ claimId });
     const mcpRequestCorrelationDiagnostics = new McpRequestCorrelationDiagnostics();
     const requestConversationContext = new McpConversationRequestContext();
     let conversationProgressLiveness = null;
@@ -2737,7 +2756,7 @@ export function createServer(config = loadConfig(), options = {}) {
     const localAgentProviders = config.subagents
         ? getLocalAgentProviderAvailabilitySnapshot()
         : [];
-    const mcpServerTemplate = createMcpServer(config, workspaces, reviewCheckpoints, processSessions, localAgentProviders, incomingArtifactAdapters, chatSwarm, capabilityRuntime, blenderRuntimeManager, codexMcpBridge, conversationContinuity, contextGuardian, exactUsageAuthority, codexContextBridge, planRuntime, goalRuntime, goalHostBridge, hostOverlayProjection, computerUseOverlay, conversationAuthority, conversationAuthorityReady, goalRunProgress, requestConversationContext, progressClaimRegistry, interactiveProgressGate, conversationProgressLiveness);
+    const mcpServerTemplate = createMcpServer(config, workspaces, reviewCheckpoints, processSessions, localAgentProviders, incomingArtifactAdapters, chatSwarm, capabilityRuntime, blenderRuntimeManager, codexMcpBridge, conversationContinuity, contextGuardian, exactUsageAuthority, codexContextBridge, planRuntime, goalRuntime, goalHostBridge, hostOverlayProjection, computerUseOverlay, conversationAuthority, conversationAuthorityReady, goalRunProgress, requestConversationContext, progressClaimRegistry, resolveProgressClaimPage, interactiveProgressGate, conversationProgressLiveness);
     const mcpTemplateDiagnostics = mcpServerTemplateDiagnostics(mcpServerTemplate);
     logEvent(config.logging, "info", "mcp_server_template_ready", mcpTemplateDiagnostics);
     const createSessionMcpServer = () => createMcpSessionServerFromTemplate(mcpServerTemplate);

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import {
   EXACT_CONVERSATION_REQUEST_PROOF,
   EXACT_PAGE_BRIDGE_PROOF,
+  EXACT_PAGE_CLAIM_PROOF,
   hasVerifiedProgressOwnership,
   isProjectableProgressMessage,
   normalizeProgressOwnershipProof,
@@ -46,6 +47,16 @@ const bridge = {
 assert.equal(hasVerifiedProgressOwnership(bridge), true);
 assert.equal(isProjectableProgressMessage(bridge), true);
 assert.equal(hasVerifiedProgressOwnership({ ...bridge, ownershipSource: "another-bridge" }), false);
+const claim = {
+  conversationId: "conversation-proof-claim",
+  source: "agent-progress-tool",
+  ownershipProof: EXACT_PAGE_CLAIM_PROOF,
+  ownershipSource: "classic-exact-page-progress-claim-cdp-page-verified",
+  ownershipObservedAt: "2026-09-13T04:02:00.000Z",
+  ownershipRuntimeKey: "main-04",
+};
+assert.equal(hasVerifiedProgressOwnership(claim), true);
+assert.equal(isProjectableProgressMessage(claim), true);
 assert.equal(isProjectableProgressMessage({
   conversationId: "conversation-proof-goal",
   source: "goal-round-report",
