@@ -964,6 +964,29 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
     registerCodexContextBridgeTools(server, codexContextBridge);
     const resolveConversation = resolveCapabilityConversationAuthority;
     const resolveProgressConversation = resolveProgressConversationAuthority;
+    const claimPendingProgressFromExactPage = async (progressClaim) => {
+        const claimId = String(progressClaim?.claimId || "").trim();
+        if (!claimId || typeof resolveProgressClaimPage !== "function") return null;
+        for (const delayMs of [120, 250, 500, 900, 1500]) {
+            await new Promise((resolve) => {
+                const timer = setTimeout(resolve, delayMs);
+                timer.unref?.();
+            });
+            const authority = await resolveProgressClaimPage(claimId).catch(() => null);
+            if (!authority?.conversationId) continue;
+            return await progressClaimRegistry.claim({
+                claimId,
+                authority,
+                complete: async ({ message: claimedMessage, kind: claimedKind, authority: claimedAuthority }) => await writeVerifiedProgress({
+                    message: claimedMessage,
+                    kind: claimedKind,
+                    resolved: claimedAuthority,
+                    dedupeKey: `progress-claim:${claimId}`,
+                }),
+            }).catch(() => null);
+        }
+        return null;
+    };
     const writeVerifiedProgress = async ({ message, kind, resolved, dedupeKey = null }) => {
         const conversationId = String(resolved?.conversationId || "").trim();
         if (!conversationId)
@@ -1108,6 +1131,13 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
             if (!reportMessage) throw new Error("Progress report message is required.");
             if (!resolved?.conversationId) {
                 const progressClaim = progressClaimRegistry.create({ message: reportMessage, kind });
+                // The visible Agent already authored the narration. Once this
+                // pending result mounts its hidden MCP App, recover ownership
+                // from that iframe's exact parent ChatGPT page and complete the
+                // claim in the backend. This avoids depending on app callTool,
+                // which current Desktop builds may fail before request-level
+                // correlation exists, while preserving exact-page isolation.
+                void claimPendingProgressFromExactPage(progressClaim);
                 return {
                     content: [{
                         type: "text",

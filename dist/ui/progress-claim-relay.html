@@ -45,6 +45,12 @@
 
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+  const closeRelay = async () => {
+    try {
+      if (typeof window.openai?.requestClose === "function") await window.openai.requestClose();
+    } catch {}
+  };
+
   const dispatch = async (value) => {
     const claim = claimFrom(value);
     if (!claim?.claimId || dispatchStarted) return;
@@ -54,12 +60,20 @@
         if (typeof window.openai?.callTool !== "function") throw new Error("tool bridge unavailable");
         const result = await window.openai.callTool("devspace_progress_report", { claimId: claim.claimId });
         const structured = result?.structuredContent ?? result?.structured_content ?? result;
-        if (structured?.ok === true && structured?.claimed === true) return;
+        if (structured?.ok === true && structured?.claimed === true) {
+          await closeRelay();
+          return;
+        }
         throw new Error("progress claim was not completed");
       } catch {
         if (attempt < 2) await sleep(250 * (attempt + 1));
       }
     }
+    // One-shot hidden relays must not accumulate indefinitely when the host's
+    // app-initiated callTool path fails. The backend exact-page resolver has a
+    // bounded window to claim the iframe before it is retired.
+    await sleep(1200);
+    await closeRelay();
   };
 
   window.addEventListener("openai:set_globals", () => {

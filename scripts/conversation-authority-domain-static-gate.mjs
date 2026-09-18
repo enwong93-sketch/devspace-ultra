@@ -30,6 +30,9 @@ assert.match(server, /ProgressClaimCdpResolver/,
   "pending narration must recover exact page ownership from the mounted claim iframe when app callTool has no request correlation");
 assert.match(server, /resolveProgressClaimPage\?\.\(relayClaimId\)/);
 assert.match(server, /EXACT_PAGE_CLAIM_PROOF/);
+assert.match(server, /claimPendingProgressFromExactPage/,
+  "pending Agent narration must complete from exact iframe-parent authority even when app callTool fails");
+assert.match(server, /void claimPendingProgressFromExactPage\(progressClaim\)/);
 assert.match(server, /outputSchema:[\s\S]{0,1200}progressClaim:\s*z\.object\(/,
   "progress tool must declare the structured claim output so ChatGPT can hydrate the relay App");
 assert.match(server, /"devspace\/progressClaim":\s*progressClaim/,
@@ -67,6 +70,8 @@ assert.match(progressClaims, /durableConversationOwners:\s*0/);
 assert.match(progressRelay, /window\.openai\.callTool\("devspace_progress_report"/);
 assert.match(progressRelay, /window\.openai\?\.toolResponseMetadata/,
   "claim relay must accept result metadata when toolOutput is null");
+assert.match(progressRelay, /window\.openai\?\.requestClose/,
+  "failed one-shot relay iframes must retire instead of exhausting ChatGPT app render slots");
 assert.match(progressClaimCdp, /chooseAppContext/);
 assert.match(progressClaimCdp, /classic-exact-page-progress-claim-cdp-page-verified/);
 assert.match(progressClaimCdp, /parentId/);

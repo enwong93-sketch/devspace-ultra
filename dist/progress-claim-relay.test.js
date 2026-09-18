@@ -6,6 +6,8 @@ assert.match(html, /width:\s*1px/);
 assert.match(html, /height:\s*1px/);
 assert.match(html, /aria-hidden="true"/);
 assert.match(html, /window\.openai\.callTool\("devspace_progress_report"/);
+assert.match(html, /window\.openai\?\.requestClose/);
+assert.match(html, /await closeRelay\(\)/);
 assert.match(html, /window\.openai\?\.toolResponseMetadata/,
   "progress claim relay must consume tool-result metadata when toolOutput is unavailable");
 assert.match(html, /devspace\/progressClaim/,
