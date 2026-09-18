@@ -987,6 +987,31 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
         }
         return null;
     };
+    let progressClaimSweepRunning = false;
+    const sweepPendingProgressClaims = async () => {
+        if (progressClaimSweepRunning || typeof resolveProgressClaimPage !== "function") return;
+        progressClaimSweepRunning = true;
+        try {
+            for (const pending of progressClaimRegistry.pendingClaims({ limit: 8 })) {
+                const authority = await resolveProgressClaimPage(pending.claimId).catch(() => null);
+                if (!authority?.conversationId) continue;
+                await progressClaimRegistry.claim({
+                    claimId: pending.claimId,
+                    authority,
+                    complete: async ({ message: claimedMessage, kind: claimedKind, authority: claimedAuthority }) => await writeVerifiedProgress({
+                        message: claimedMessage,
+                        kind: claimedKind,
+                        resolved: claimedAuthority,
+                        dedupeKey: `progress-claim:${pending.claimId}`,
+                    }),
+                }).catch(() => null);
+            }
+        } finally {
+            progressClaimSweepRunning = false;
+        }
+    };
+    const progressClaimSweepTimer = setInterval(() => { void sweepPendingProgressClaims(); }, 1_000);
+    progressClaimSweepTimer.unref?.();
     const writeVerifiedProgress = async ({ message, kind, resolved, dedupeKey = null }) => {
         const conversationId = String(resolved?.conversationId || "").trim();
         if (!conversationId)

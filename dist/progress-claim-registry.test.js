@@ -13,6 +13,7 @@ const registry = new ProgressClaimRegistry({
 const claim = registry.create({ message: "Exact progress message", kind: "verification" });
 assert.equal(claim.state, "pending");
 assert.equal(registry.diagnostics().pending, 1);
+assert.equal(registry.pendingClaims()[0]?.claimId, claim.claimId);
 assert.equal(JSON.stringify(registry.diagnostics()).includes("Exact progress message"), false);
 
 const authorityA = {
@@ -38,6 +39,7 @@ const completed = await registry.claim({
 });
 assert.equal(completed.conversationId, "conversation-progress-a");
 assert.equal(writes, 1);
+assert.equal(registry.pendingClaims().some((item) => item.claimId === claim.claimId), false);
 
 const duplicate = await registry.claim({
   claimId: claim.claimId,

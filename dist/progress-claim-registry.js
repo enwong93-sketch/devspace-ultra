@@ -199,6 +199,16 @@ export class ProgressClaimRegistry {
     this.#enforceCap();
   }
 
+  pendingClaims({ limit = 8 } = {}) {
+    this.prune();
+    const capped = Math.max(1, Math.min(32, Number(limit) || 8));
+    return [...this.records.values()]
+      .filter((row) => row.state === "pending")
+      .sort((left, right) => Number(left.createdAtMs) - Number(right.createdAtMs))
+      .slice(0, capped)
+      .map((row) => publicClaim(row));
+  }
+
   diagnostics() {
     this.prune();
     const rows = [...this.records.values()];

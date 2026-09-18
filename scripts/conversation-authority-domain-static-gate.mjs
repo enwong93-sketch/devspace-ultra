@@ -33,6 +33,9 @@ assert.match(server, /EXACT_PAGE_CLAIM_PROOF/);
 assert.match(server, /claimPendingProgressFromExactPage/,
   "pending Agent narration must complete from exact iframe-parent authority even when app callTool fails");
 assert.match(server, /void claimPendingProgressFromExactPage\(progressClaim\)/);
+assert.match(server, /progressClaimRegistry\.pendingClaims\(\{ limit: 8 \}\)/,
+  "a bounded background sweep must keep resolving claims that mount after the initial tool handler has returned");
+assert.match(server, /setInterval\(\(\) => \{ void sweepPendingProgressClaims\(\); \}, 1_000\)/);
 assert.match(server, /outputSchema:[\s\S]{0,1200}progressClaim:\s*z\.object\(/,
   "progress tool must declare the structured claim output so ChatGPT can hydrate the relay App");
 assert.match(server, /"devspace\/progressClaim":\s*progressClaim/,
