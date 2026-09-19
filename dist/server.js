@@ -82,6 +82,7 @@ import { registerUnifiedRoutingTool } from "./unified-routing-tools.js";
 import { retiredToolCallResult } from "./retired-tool-compat.js";
 import { EXACT_CONVERSATION_REQUEST_PROOF, EXACT_PAGE_CLAIM_PROOF, isProjectableProgressMessage } from "./progress-ownership-proof.js";
 import { ProgressClaimRegistry } from "./progress-claim-registry.js";
+import { ProgressBootstrapAuthorityRegistry } from "./progress-bootstrap-authority.js";
 import { ConversationStartClaimRegistry } from "./conversation-start-claim-registry.js";
 import { ConversationStartClaimCdpResolver } from "./conversation-start-claim-cdp.js";
 import { InteractiveProgressEnforcementGate } from "./interactive-progress-enforcement.js";
@@ -747,7 +748,7 @@ function registerCodexProcessTools(server, config, workspaces, processSessions) 
         });
     });
 }
-function createMcpServer(config, workspaces, reviewCheckpoints, processSessions, localAgentProviders, incomingArtifactAdapters, chatSwarm, capabilityRuntime, blenderRuntimeManager, codexMcpBridge, conversationContinuity, contextGuardian, exactUsageAuthority, codexContextBridge, planRuntime, goalRuntime, goalHostBridge, hostOverlayProjection, computerUseOverlay, conversationAuthority, conversationAuthorityReady, goalRunProgress, requestConversationContext, progressClaimRegistry, conversationStartClaimRegistry, resolveProgressClaimPage, resolveStartClaimPage, interactiveProgressGate, conversationProgressLiveness = null) {
+function createMcpServer(config, workspaces, reviewCheckpoints, processSessions, localAgentProviders, incomingArtifactAdapters, chatSwarm, capabilityRuntime, blenderRuntimeManager, codexMcpBridge, conversationContinuity, contextGuardian, exactUsageAuthority, codexContextBridge, planRuntime, goalRuntime, goalHostBridge, hostOverlayProjection, computerUseOverlay, conversationAuthority, conversationAuthorityReady, goalRunProgress, requestConversationContext, progressClaimRegistry, progressBootstrapAuthority, conversationStartClaimRegistry, resolveProgressClaimPage, resolveStartClaimPage, interactiveProgressGate, conversationProgressLiveness = null) {
     const toolSurface = toolModeCapabilities(config.toolMode);
     const modelInstructions = serverInstructions(config);
     const modelInstructionsFingerprint = createHash("sha256").update(modelInstructions).digest("hex");
@@ -965,6 +966,13 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
     registerCodexContextBridgeTools(server, codexContextBridge);
     const resolveConversation = resolveCapabilityConversationAuthority;
     const resolveProgressConversation = resolveProgressConversationAuthority;
+    const resolveBootstrapConversation = async (_extra, toolName) => {
+        const requestContext = requestConversationContext?.current?.() || null;
+        return progressBootstrapAuthority?.consume?.({
+            sessionFingerprint: requestContext?.sessionFingerprint,
+            toolName,
+        }) || null;
+    };
     const claimPendingProgressFromExactPage = async (progressClaim) => {
         const claimId = String(progressClaim?.claimId || "").trim();
         if (!claimId || typeof resolveProgressClaimPage !== "function") return null;
@@ -978,11 +986,12 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
             return await progressClaimRegistry.claim({
                 claimId,
                 authority,
-                complete: async ({ message: claimedMessage, kind: claimedKind, authority: claimedAuthority }) => await writeVerifiedProgress({
+                complete: async ({ message: claimedMessage, kind: claimedKind, authority: claimedAuthority, requestBinding }) => await writeVerifiedProgress({
                     message: claimedMessage,
                     kind: claimedKind,
                     resolved: claimedAuthority,
                     dedupeKey: `progress-claim:${claimId}`,
+                    bootstrapSessionFingerprint: requestBinding?.sessionFingerprint || null,
                 }),
             }).catch(() => null);
         }
@@ -999,11 +1008,12 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
                 await progressClaimRegistry.claim({
                     claimId: pending.claimId,
                     authority,
-                    complete: async ({ message: claimedMessage, kind: claimedKind, authority: claimedAuthority }) => await writeVerifiedProgress({
+                    complete: async ({ message: claimedMessage, kind: claimedKind, authority: claimedAuthority, requestBinding }) => await writeVerifiedProgress({
                         message: claimedMessage,
                         kind: claimedKind,
                         resolved: claimedAuthority,
                         dedupeKey: `progress-claim:${pending.claimId}`,
+                        bootstrapSessionFingerprint: requestBinding?.sessionFingerprint || null,
                     }),
                 }).catch(() => null);
             }
@@ -1058,7 +1068,7 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
     };
     const conversationStartClaimSweepTimer = setInterval(() => { void sweepPendingConversationStartClaims(); }, 1_000);
     conversationStartClaimSweepTimer.unref?.();
-    const writeVerifiedProgress = async ({ message, kind, resolved, dedupeKey = null }) => {
+    const writeVerifiedProgress = async ({ message, kind, resolved, dedupeKey = null, bootstrapSessionFingerprint = null }) => {
         const conversationId = String(resolved?.conversationId || "").trim();
         if (!conversationId)
             throw new Error("ChatGPT Classic conversation identity is unavailable for this MCP request.");
@@ -1108,6 +1118,12 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
         interactiveProgressGate?.noteReport?.({
             conversationId,
             observedAtMs: Date.parse(snapshot?.updatedAt || "") || Date.now(),
+        });
+        progressBootstrapAuthority?.register?.({
+            sessionFingerprint: bootstrapSessionFingerprint,
+            conversationId,
+            runtimeKey: resolved.runtimeKey,
+            observedAt: resolved.observedAt || snapshot?.updatedAt || new Date().toISOString(),
         });
         return {
             conversationId,
@@ -1168,6 +1184,7 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
         try {
             const relayClaimId = String(claimId || "").trim();
             const reportMessage = String(message || "").trim();
+            const currentRequestContext = requestConversationContext?.current?.() || null;
             if (relayClaimId && reportMessage) {
                 throw new Error("Progress report accepts either an Agent message or one hidden relay claim, never both.");
             }
@@ -1179,11 +1196,12 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
                 const result = await progressClaimRegistry.claim({
                     claimId: relayClaimId,
                     authority: relayAuthority,
-                    complete: async ({ message: claimedMessage, kind: claimedKind, authority }) => await writeVerifiedProgress({
+                    complete: async ({ message: claimedMessage, kind: claimedKind, authority, requestBinding }) => await writeVerifiedProgress({
                         message: claimedMessage,
                         kind: claimedKind,
                         resolved: authority,
                         dedupeKey: `progress-claim:${relayClaimId}`,
+                        bootstrapSessionFingerprint: requestBinding?.sessionFingerprint || currentRequestContext?.sessionFingerprint || null,
                     }),
                 });
                 return {
@@ -1201,7 +1219,13 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
             }
             if (!reportMessage) throw new Error("Progress report message is required.");
             if (!resolved?.conversationId) {
-                const progressClaim = progressClaimRegistry.create({ message: reportMessage, kind });
+                const progressClaim = progressClaimRegistry.create({
+                    message: reportMessage,
+                    kind,
+                    requestBinding: {
+                        sessionFingerprint: currentRequestContext?.sessionFingerprint || null,
+                    },
+                });
                 // The visible Agent already authored the narration. Once this
                 // pending result mounts its hidden MCP App, recover ownership
                 // from that iframe's exact parent ChatGPT page and complete the
@@ -1228,7 +1252,12 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
                     },
                 };
             }
-            const result = await writeVerifiedProgress({ message: reportMessage, kind, resolved });
+            const result = await writeVerifiedProgress({
+                message: reportMessage,
+                kind,
+                resolved,
+                bootstrapSessionFingerprint: currentRequestContext?.sessionFingerprint || null,
+            });
             return {
                 content: [{ type: "text", text: `Progress narration updated for the current conversation: ${reportMessage}` }],
                 structuredContent: {
@@ -1249,6 +1278,7 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
     registerPlanTools(server, planRuntime, {
         resourceUri: PLAN_CARD_URI,
         resolveConversation,
+        resolveBootstrapConversation,
         startClaimRegistry: conversationStartClaimRegistry,
         claimRelayResourceUri: PROGRESS_CLAIM_RELAY_URI,
         resolveStartClaimPage,
@@ -1259,6 +1289,7 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
         hostBridge: goalHostBridge,
         onMount: ({ goal }) => hostOverlayProjection?.requestOwnerRebind?.({ goalId: goal?.id }),
         resolveConversation,
+        resolveBootstrapConversation,
         startClaimRegistry: conversationStartClaimRegistry,
         claimRelayResourceUri: PROGRESS_CLAIM_RELAY_URI,
         resolveStartClaimPage,
@@ -2258,6 +2289,7 @@ export function createServer(config = loadConfig(), options = {}) {
     const mcpCallCorrelator = new ClassicMcpCallCorrelator();
     const activeTurnRegistry = new ClassicActiveTurnRegistry();
     const progressClaimRegistry = new ProgressClaimRegistry();
+    const progressBootstrapAuthority = new ProgressBootstrapAuthorityRegistry();
     const conversationStartClaimRegistry = new ConversationStartClaimRegistry();
     const conversationStartClaimCdp = new ConversationStartClaimCdpResolver({ ports: classicCdpOptions.ports });
     const resolveProgressClaimPage = async (claimId) => conversationStartClaimCdp.find({ claimId, claimType: "progress" });
@@ -2865,7 +2897,7 @@ export function createServer(config = loadConfig(), options = {}) {
     const localAgentProviders = config.subagents
         ? getLocalAgentProviderAvailabilitySnapshot()
         : [];
-    const mcpServerTemplate = createMcpServer(config, workspaces, reviewCheckpoints, processSessions, localAgentProviders, incomingArtifactAdapters, chatSwarm, capabilityRuntime, blenderRuntimeManager, codexMcpBridge, conversationContinuity, contextGuardian, exactUsageAuthority, codexContextBridge, planRuntime, goalRuntime, goalHostBridge, hostOverlayProjection, computerUseOverlay, conversationAuthority, conversationAuthorityReady, goalRunProgress, requestConversationContext, progressClaimRegistry, conversationStartClaimRegistry, resolveProgressClaimPage, resolveStartClaimPage, interactiveProgressGate, conversationProgressLiveness);
+    const mcpServerTemplate = createMcpServer(config, workspaces, reviewCheckpoints, processSessions, localAgentProviders, incomingArtifactAdapters, chatSwarm, capabilityRuntime, blenderRuntimeManager, codexMcpBridge, conversationContinuity, contextGuardian, exactUsageAuthority, codexContextBridge, planRuntime, goalRuntime, goalHostBridge, hostOverlayProjection, computerUseOverlay, conversationAuthority, conversationAuthorityReady, goalRunProgress, requestConversationContext, progressClaimRegistry, progressBootstrapAuthority, conversationStartClaimRegistry, resolveProgressClaimPage, resolveStartClaimPage, interactiveProgressGate, conversationProgressLiveness);
     const mcpTemplateDiagnostics = mcpServerTemplateDiagnostics(mcpServerTemplate);
     logEvent(config.logging, "info", "mcp_server_template_ready", mcpTemplateDiagnostics);
     const createSessionMcpServer = () => createMcpSessionServerFromTemplate(mcpServerTemplate);
@@ -2962,7 +2994,7 @@ export function createServer(config = loadConfig(), options = {}) {
             contextMetadataAdapter,
             streamRecoveryAdapter,
             config,
-        }), conversationCorrelation: mcpRequestCorrelationDiagnostics.diagnostics(), conversationStartClaims: conversationStartClaimRegistry.diagnostics(), diagnosticGc });
+        }), conversationCorrelation: mcpRequestCorrelationDiagnostics.diagnostics(), progressBootstrap: progressBootstrapAuthority.diagnostics(), conversationStartClaims: conversationStartClaimRegistry.diagnostics(), diagnosticGc });
     });
     app.get("/__devspace/stream-recovery/status", (req, res) => {
         const remoteAddress = String(req.socket?.remoteAddress ?? "");

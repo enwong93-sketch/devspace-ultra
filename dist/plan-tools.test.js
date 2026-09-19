@@ -106,6 +106,9 @@ try {
       registerPlanTools(boundServer, boundRuntime, {
         resourceUri: "ui://devspace/plan-card.html",
         resolveConversation: async (extra) => extra?.conversationId ? extra : null,
+        resolveBootstrapConversation: async (extra, toolName) => extra?.bootstrap === true && toolName === "devspace_plan_start"
+          ? { conversationId: "conversation-tools-bootstrap", runtimeKey: "main-01", pageVerified: true }
+          : null,
         startClaimRegistry: startClaims,
         claimRelayResourceUri: "ui://devspace/progress-claim-relay.html",
         resolveStartClaimPage: async (claimId) => ({
@@ -142,6 +145,16 @@ try {
       assert.equal(claimedPlan.structuredContent.plan.conversationId, "conversation-tools-claimed");
       assert.equal(claimedPlan.structuredContent.plan.title, "Must not become global",
         "exact-page relay must execute the stored original Plan input, never its schema placeholders");
+
+      const bootstrappedPlan = await boundStart.handler({
+        title: "Cached schema Plan",
+        steps: [
+          { text: "Current", status: "in_progress" },
+          { text: "Next", status: "pending" },
+        ],
+      }, { bootstrap: true });
+      assert.equal(bootstrappedPlan.structuredContent.plan.conversationId, "conversation-tools-bootstrap",
+        "an already-open cached schema may start Plan only from the short-lived exact-progress bootstrap resolver");
 
       const startedA = await boundStart.handler({
         title: "Conversation A tool plan",

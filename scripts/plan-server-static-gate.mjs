@@ -18,7 +18,9 @@ assert.match(source, /conversationAuthority\.resolveFingerprint\(sessionFingerpr
 assert.doesNotMatch(source, /resolveVerifiedDirectSession|persistVerifiedDirectSessionIdentity|conversationAuthority\.waitForFingerprint/, "Plan tools must not revive durable or cross-request session ownership");
 assert.match(source, /const resolveConversation = resolveCapabilityConversationAuthority;/, "Plan tools must receive the capability/control authority, never the progress-only authority");
 assert.doesNotMatch(source, /const resolveConversation = resolveProgressConversationAuthority;/, "a progress-card identity must never own Plan execution state");
-assert.match(source, /registerPlanTools\(server, planRuntime, \{\s*resourceUri: PLAN_CARD_URI,\s*resolveConversation,\s*startClaimRegistry:\s*conversationStartClaimRegistry,\s*claimRelayResourceUri:\s*PROGRESS_CLAIM_RELAY_URI,\s*resolveStartClaimPage,?\s*\}\)/s, "Plan tools must receive native request authority plus exact-page start recovery so new Plans cannot become global unbound state");
+assert.match(source, /registerPlanTools\(server, planRuntime, \{\s*resourceUri: PLAN_CARD_URI,\s*resolveConversation,\s*resolveBootstrapConversation,\s*startClaimRegistry:\s*conversationStartClaimRegistry,\s*claimRelayResourceUri:\s*PROGRESS_CLAIM_RELAY_URI,\s*resolveStartClaimPage,?\s*\}\)/s, "Plan tools must receive native request authority plus short-lived exact-progress bootstrap and exact-page start recovery");
+assert.match(source, /new ProgressBootstrapAuthorityRegistry\(\)/,
+  "cached-schema Plan bootstrap must be derived from short-lived exact progress proof rather than durable session ownership");
 assert.match(source, /new ConversationStartClaimRegistry\(\)/,
   "Plan start recovery must use one bounded in-memory claim registry rather than a reusable session owner");
 assert.match(source, /new ConversationStartClaimCdpResolver\(\{\s*ports:\s*classicCdpOptions\.ports,?\s*\}\)/s,

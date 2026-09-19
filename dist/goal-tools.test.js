@@ -224,6 +224,9 @@ try {
         relayResourceUri: "ui://devspace/goal-continuation-relay.html",
         hostBridge,
         resolveConversation: async (extra) => extra?.conversationId ? extra : null,
+        resolveBootstrapConversation: async (extra, toolName) => extra?.bootstrap === true && toolName === "devspace_goal_start"
+          ? { conversationId: "conversation-tools-bootstrap", runtimeKey: "main-01", pageVerified: true }
+          : null,
         startClaimRegistry: startClaims,
         claimRelayResourceUri: "ui://devspace/progress-claim-relay.html",
         resolveStartClaimPage: async (claimId) => ({
@@ -258,6 +261,13 @@ try {
       assert.equal(claimedGoal.structuredContent.goal.conversationId, "conversation-tools-claimed");
       assert.equal(claimedGoal.structuredContent.goal.objective, "Must not become global",
         "exact-page relay must execute the stored original Goal input, never its schema placeholders");
+
+      const bootstrappedGoal = await boundStart.handler({
+        objective: "Cached schema Goal",
+        successCriteria: ["Use exact progress bootstrap"],
+      }, { bootstrap: true });
+      assert.equal(bootstrappedGoal.structuredContent.goal.conversationId, "conversation-tools-bootstrap",
+        "an already-open cached schema may start Goal only from the short-lived exact-progress bootstrap resolver");
 
       const startedBound = await boundStart.handler({
         objective: "Conversation A Goal",

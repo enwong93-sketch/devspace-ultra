@@ -88,6 +88,7 @@ function exactPageClaimMeta(resourceUri) {
 export function registerPlanTools(server, planRuntime, {
   resourceUri,
   resolveConversation,
+  resolveBootstrapConversation = null,
   startClaimRegistry = null,
   claimRelayResourceUri = null,
   resolveStartClaimPage = null,
@@ -166,7 +167,11 @@ export function registerPlanTools(server, planRuntime, {
           claimId: relayClaimId,
         });
       }
-      const conversationId = await resolveConversationId(extra);
+      let conversationId = await resolveConversationId(extra);
+      if (!conversationId && typeof resolveBootstrapConversation === "function") {
+        const bootstrap = await resolveBootstrapConversation(extra, "devspace_plan_start");
+        conversationId = String(bootstrap?.conversationId || "").trim() || null;
+      }
       if (typeof resolveConversation === "function" && !conversationId) {
         if (!startClaimRegistry || !claimRelayResourceUri) {
           throw new Error("ChatGPT Classic conversation identity is unresolved; refusing to create an unbound Plan.");

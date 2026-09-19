@@ -37,6 +37,11 @@ function publicClaim(record) {
   };
 }
 
+function cleanRequestBinding(value) {
+  const sessionFingerprint = cleanFingerprint(value?.sessionFingerprint);
+  return sessionFingerprint ? { sessionFingerprint } : null;
+}
+
 function verifiedAuthority(value, expectedClaimId = null) {
   const conversationId = cleanConversationId(value?.conversationId);
   const runtimeKey = cleanRuntimeKey(value?.runtimeKey);
@@ -103,7 +108,7 @@ export class ProgressClaimRegistry {
     this.rejected = 0;
   }
 
-  create({ message, kind = "progress" } = {}) {
+  create({ message, kind = "progress", requestBinding = null } = {}) {
     this.prune();
     const text = cleanText(message, 1_600);
     const normalizedKind = cleanText(kind, 80);
@@ -121,6 +126,7 @@ export class ProgressClaimRegistry {
       state: "pending",
       message: text,
       kind: normalizedKind,
+      requestBinding: cleanRequestBinding(requestBinding),
       owner: null,
       completionPromise: null,
       result: null,
@@ -162,6 +168,7 @@ export class ProgressClaimRegistry {
         message: record.message,
         kind: record.kind,
         authority: structuredClone(owner),
+        requestBinding: record.requestBinding ? structuredClone(record.requestBinding) : null,
       }))
       .then((result) => {
         const publicResult = {
@@ -177,6 +184,7 @@ export class ProgressClaimRegistry {
         record.completionPromise = null;
         // The message is no longer needed after the authoritative write.
         record.message = null;
+        record.requestBinding = null;
         this.completed += 1;
         return structuredClone(publicResult);
       })
@@ -224,6 +232,7 @@ export class ProgressClaimRegistry {
       maxClaims: this.maxClaims,
       rawMessagesExposed: false,
       durableConversationOwners: 0,
+      rawRequestBindingsExposed: false,
     };
   }
 
@@ -247,5 +256,6 @@ export const progressClaimRegistryInternals = {
   cleanRuntimeKey,
   cleanText,
   publicClaim,
+  cleanRequestBinding,
   verifiedAuthority,
 };

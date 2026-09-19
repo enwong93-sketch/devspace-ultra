@@ -154,6 +154,7 @@ export function registerGoalTools(server, goalRuntime, {
   hostBridge,
   onMount,
   resolveConversation,
+  resolveBootstrapConversation = null,
   startClaimRegistry = null,
   claimRelayResourceUri = null,
   resolveStartClaimPage = null,
@@ -246,7 +247,11 @@ export function registerGoalTools(server, goalRuntime, {
           claimId: relayClaimId,
         });
       }
-      const conversationId = await resolveConversationId(extra);
+      let conversationId = await resolveConversationId(extra);
+      if (!conversationId && typeof resolveBootstrapConversation === "function") {
+        const bootstrap = await resolveBootstrapConversation(extra, "devspace_goal_start");
+        conversationId = String(bootstrap?.conversationId || "").trim() || null;
+      }
       if (typeof resolveConversation === "function" && !conversationId) {
         if (!startClaimRegistry || !claimRelayResourceUri) {
           throw new Error("ChatGPT Classic conversation identity is unresolved; refusing to create an unbound Goal.");

@@ -39,7 +39,11 @@ assert.match(source, /const resolveConversation = resolveCapabilityConversationA
 assert.match(source, /const resolveProgressConversation = resolveProgressConversationAuthority;/, "progress narration must use only the progress authority resolver");
 assert.match(source, /const resolved = await resolveProgressConversation\(extra\);/, "devspace_progress_report must use the isolated progress resolver");
 assert.doesNotMatch(source, /const resolveConversation = resolveProgressConversationAuthority;/, "progress identity must never become the generic tool authority");
-assert.match(source, /registerGoalTools\(server, goalRuntime, \{\s*resourceUri: GOAL_DOCK_URI,\s*relayResourceUri: GOAL_RELAY_URI,\s*hostBridge: goalHostBridge,\s*onMount:\s*\(\{ goal \}\) => hostOverlayProjection\?\.requestOwnerRebind\?\.\(\{ goalId: goal\?\.id \}\),\s*resolveConversation,\s*startClaimRegistry:\s*conversationStartClaimRegistry,\s*claimRelayResourceUri:\s*PROGRESS_CLAIM_RELAY_URI,\s*resolveStartClaimPage,?\s*\}\)/s, "Goal tools must receive native request authority plus the exact-page one-time start recovery resolver");
+assert.match(source, /registerGoalTools\(server, goalRuntime, \{\s*resourceUri: GOAL_DOCK_URI,\s*relayResourceUri: GOAL_RELAY_URI,\s*hostBridge: goalHostBridge,\s*onMount:\s*\(\{ goal \}\) => hostOverlayProjection\?\.requestOwnerRebind\?\.\(\{ goalId: goal\?\.id \}\),\s*resolveConversation,\s*resolveBootstrapConversation,\s*startClaimRegistry:\s*conversationStartClaimRegistry,\s*claimRelayResourceUri:\s*PROGRESS_CLAIM_RELAY_URI,\s*resolveStartClaimPage,?\s*\}\)/s, "Goal tools must receive native request authority plus short-lived exact-progress bootstrap and exact-page one-time start recovery");
+assert.match(source, /new ProgressBootstrapAuthorityRegistry\(\)/,
+  "cached-schema Goal bootstrap must be derived from short-lived exact progress proof rather than durable session ownership");
+assert.match(source, /progressBootstrapAuthority\?\.consume\?\.\(\{[\s\S]{0,180}toolName/,
+  "Goal bootstrap must consume a tool-specific exact-progress lease");
 assert.match(source, /new ConversationStartClaimRegistry\(\)/,
   "Goal start recovery must use one bounded in-memory claim registry rather than a reusable session owner");
 assert.match(source, /new ConversationStartClaimCdpResolver\(\{\s*ports:\s*classicCdpOptions\.ports,?\s*\}\)/s,
