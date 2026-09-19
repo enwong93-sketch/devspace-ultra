@@ -24,7 +24,8 @@ assert.match(server, /registerAppTool\(server, "devspace_progress_report"[\s\S]*
 assert.match(server, /resourceUri:\s*PROGRESS_CLAIM_RELAY_URI/);
 assert.match(server, /resourceUri:\s*PROGRESS_CLAIM_RELAY_URI,[\s\S]{0,800}visibility:\s*\["model",\s*"app"\]/,
   "the progress relay must be callable by the exact page MCP App as well as the model");
-assert.match(server, /progressClaimRegistry\.create\(\{ message:\s*reportMessage, kind \}\)/);
+assert.match(server, /progressClaimRegistry\.create\(\{[\s\S]{0,260}message:\s*reportMessage,[\s\S]{0,180}kind,[\s\S]{0,260}requestBinding:[\s\S]{0,180}sessionFingerprint:\s*currentRequestContext\?\.sessionFingerprint/,
+  "pending progress must retain only the hashed request session needed for a short-lived cached-schema bootstrap lease");
 assert.match(server, /claimId:\s*z\.string\(\)\.min\(16\)\.max\(200\)\.optional\(\)/);
 assert.match(server, /progressClaimRegistry\.claim\(/);
 assert.match(server, /ConversationStartClaimCdpResolver/,
@@ -40,6 +41,12 @@ assert.match(server, /setInterval\(\(\) => \{ void sweepPendingProgressClaims\(\
 assert.match(server, /conversationStartClaimRegistry\.pendingClaims\(\{ limit: 8 \}\)/,
   "Goal\/Plan bootstrap claims must also be swept only from bounded exact-page pending state");
 assert.match(server, /setInterval\(\(\) => \{ void sweepPendingConversationStartClaims\(\); \}, 1_000\)/);
+assert.match(server, /new ProgressBootstrapAuthorityRegistry\(\)/,
+  "cached Goal\/Plan bootstrap must use a bounded short-lived in-memory registry");
+assert.match(server, /progressBootstrapAuthority\?\.register\?\.\(\{[\s\S]{0,300}sessionFingerprint:\s*bootstrapSessionFingerprint/,
+  "only a successfully persisted exact progress report may mint a cached-schema bootstrap lease");
+assert.match(server, /progressBootstrapAuthority\?\.consume\?\.\(\{[\s\S]{0,200}sessionFingerprint:\s*requestContext\?\.sessionFingerprint,[\s\S]{0,120}toolName/,
+  "Goal\/Plan bootstrap must consume the lease through the current request's hashed session only");
 assert.match(server, /outputSchema:[\s\S]{0,1200}progressClaim:\s*z\.object\(/,
   "progress tool must declare the structured claim output so ChatGPT can hydrate the relay App");
 assert.match(server, /"devspace\/progressClaim":\s*progressClaim/,
