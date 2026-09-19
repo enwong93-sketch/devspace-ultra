@@ -11,8 +11,9 @@ const liveness = await readFile(new URL("../dist/conversation-progress-liveness.
 const livenessCdp = await readFile(new URL("../dist/conversation-progress-liveness-cdp.js", import.meta.url), "utf8");
 const transportObserver = await readFile(new URL("../dist/classic-turn-transport-observer.js", import.meta.url), "utf8");
 const progressClaims = await readFile(new URL("../dist/progress-claim-registry.js", import.meta.url), "utf8");
+const startClaims = await readFile(new URL("../dist/conversation-start-claim-registry.js", import.meta.url), "utf8");
 const progressRelay = await readFile(new URL("../dist/ui/progress-claim-relay.html", import.meta.url), "utf8");
-const progressClaimCdp = await readFile(new URL("../dist/conversation-start-claim-cdp.js", import.meta.url), "utf8");
+const claimCdp = await readFile(new URL("../dist/conversation-start-claim-cdp.js", import.meta.url), "utf8");
 
 assert.match(server, /const resolveCapabilityConversationAuthority = async \(extra\) =>/);
 assert.match(server, /const resolveProgressConversationAuthority = async \(extra\) =>/);
@@ -26,7 +27,7 @@ assert.match(server, /resourceUri:\s*PROGRESS_CLAIM_RELAY_URI,[\s\S]{0,800}visib
 assert.match(server, /progressClaimRegistry\.create\(\{ message:\s*reportMessage, kind \}\)/);
 assert.match(server, /claimId:\s*z\.string\(\)\.min\(16\)\.max\(200\)\.optional\(\)/);
 assert.match(server, /progressClaimRegistry\.claim\(/);
-assert.match(server, /ProgressClaimCdpResolver/,
+assert.match(server, /ConversationStartClaimCdpResolver/,
   "pending narration must recover exact page ownership from the mounted claim iframe when app callTool has no request correlation");
 assert.match(server, /resolveProgressClaimPage\?\.\(relayClaimId\)/);
 assert.match(server, /EXACT_PAGE_CLAIM_PROOF/);
@@ -36,6 +37,9 @@ assert.match(server, /void claimPendingProgressFromExactPage\(progressClaim\)/);
 assert.match(server, /progressClaimRegistry\.pendingClaims\(\{ limit: 8 \}\)/,
   "a bounded background sweep must keep resolving claims that mount after the initial tool handler has returned");
 assert.match(server, /setInterval\(\(\) => \{ void sweepPendingProgressClaims\(\); \}, 1_000\)/);
+assert.match(server, /conversationStartClaimRegistry\.pendingClaims\(\{ limit: 8 \}\)/,
+  "Goal\/Plan bootstrap claims must also be swept only from bounded exact-page pending state");
+assert.match(server, /setInterval\(\(\) => \{ void sweepPendingConversationStartClaims\(\); \}, 1_000\)/);
 assert.match(server, /outputSchema:[\s\S]{0,1200}progressClaim:\s*z\.object\(/,
   "progress tool must declare the structured claim output so ChatGPT can hydrate the relay App");
 assert.match(server, /"devspace\/progressClaim":\s*progressClaim/,
@@ -70,14 +74,27 @@ assert.match(server, /ownershipProof,\s*ownershipSource:\s*resolved\.source/);
 assert.match(progressClaims, /exact page-verified conversation authority/);
 assert.match(progressClaims, /another conversation page/);
 assert.match(progressClaims, /durableConversationOwners:\s*0/);
-assert.match(progressRelay, /window\.openai\.callTool\("devspace_progress_report"/);
+assert.match(progressRelay, /toolName:\s*"devspace_progress_report"/);
+assert.match(progressRelay, /startClaim\.toolName === "devspace_goal_start"/);
+assert.match(progressRelay, /startClaim\.toolName === "devspace_plan_start"/);
+assert.match(progressRelay, /window\.openai\.callTool\(action\.toolName, action\.arguments\)/);
 assert.match(progressRelay, /window\.openai\?\.toolResponseMetadata/,
   "claim relay must accept result metadata when toolOutput is null");
 assert.match(progressRelay, /window\.openai\?\.requestClose/,
   "failed one-shot relay iframes must retire instead of exhausting ChatGPT app render slots");
-assert.match(progressClaimCdp, /chooseAppContext/);
-assert.match(progressClaimCdp, /classic-exact-page-progress-claim-cdp-page-verified/);
-assert.match(progressClaimCdp, /parentId/);
+assert.match(progressRelay, /devspace\/conversationStartClaim/);
+assert.match(startClaims, /devspace_goal_start/);
+assert.match(startClaims, /devspace_plan_start/);
+assert.match(startClaims, /exact page-verified conversation authority/);
+assert.match(startClaims, /rawInputsExposed:\s*false/);
+assert.match(claimCdp, /chooseAppContext/);
+assert.match(claimCdp, /classic-exact-page-progress-claim-cdp-page-verified/);
+assert.match(claimCdp, /classic-exact-page-start-claim-cdp-page-verified/);
+assert.match(claimCdp, /parentId/);
+assert.doesNotMatch(claimCdp, /Page\.navigate|Page\.reload|location\.href\s*=/,
+  "exact-page claim recovery must remain read-only and never navigate a Main");
+assert.match(server, /conversationStartClaimRelay/,
+  "Goal\/Plan relay retries must bypass the ordinary substantive-tool progress gate");
 assert.doesNotMatch(progressRelay, /sendFollowUpMessage|prompt-textarea|composer/);
 
 assert.doesNotMatch(server, /resolveVerifiedDirectSession\(|persistVerifiedDirectSessionIdentity|directRequestAuthorityRegistry/,

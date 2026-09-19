@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PlanRuntime } from "./plan-runtime.js";
 import { registerPlanTools } from "./plan-tools.js";
+import { ConversationStartClaimRegistry } from "./conversation-start-claim-registry.js";
 
 const root = await mkdtemp(join(tmpdir(), "devspace-plan-tools-"));
 
@@ -92,6 +93,10 @@ try {
       const boundRuntime = new PlanRuntime({ stateDir: boundRoot });
       await boundRuntime.ready;
       const boundRegistered = new Map();
+      let claimCounter = 0;
+      const startClaims = new ConversationStartClaimRegistry({
+        createId: () => `plan_claim_${String(++claimCounter).padStart(20, "0")}`,
+      });
       const boundServer = {
         registerTool(name, config, handler) {
           boundRegistered.set(name, { name, config, handler });
@@ -100,7 +105,17 @@ try {
       };
       registerPlanTools(boundServer, boundRuntime, {
         resourceUri: "ui://devspace/plan-card.html",
-        resolveConversation: async (extra) => extra?.conversationId ? { conversationId: extra.conversationId } : null,
+        resolveConversation: async (extra) => extra?.conversationId ? extra : null,
+        startClaimRegistry: startClaims,
+        claimRelayResourceUri: "ui://devspace/progress-claim-relay.html",
+        resolveStartClaimPage: async (claimId) => ({
+          conversationId: "conversation-tools-claimed",
+          runtimeKey: "main-03",
+          claimId,
+          source: "classic-exact-page-start-claim-cdp-page-verified",
+          observedAt: "2026-09-17T03:00:00.000Z",
+          pageVerified: true,
+        }),
       });
       const boundStart = boundRegistered.get("devspace_plan_start");
       const unresolved = await boundStart.handler({
@@ -110,8 +125,23 @@ try {
           { text: "Next", status: "pending" },
         ],
       }, {});
-      assert.equal(unresolved.isError, true);
-      assert.match(unresolved.content[0].text, /conversation identity is unresolved|unbound Plan/i);
+      assert.equal(unresolved.isError, undefined);
+      assert.equal(unresolved.structuredContent.pending, true);
+      assert.equal(unresolved.structuredContent.plan, undefined);
+      assert.equal(unresolved.structuredContent.conversationStartClaim.toolName, "devspace_plan_start");
+      const planClaimId = unresolved.structuredContent.conversationStartClaim.claimId;
+      const claimedPlan = await boundStart.handler({
+        title: "[exact-page-claim-relay]",
+        steps: [
+          { text: "[exact-page-claim-relay-current]", status: "in_progress" },
+          { text: "[exact-page-claim-relay-next]", status: "pending" },
+        ],
+        claimId: planClaimId,
+      }, {});
+      assert.equal(claimedPlan.structuredContent.claimed, true);
+      assert.equal(claimedPlan.structuredContent.plan.conversationId, "conversation-tools-claimed");
+      assert.equal(claimedPlan.structuredContent.plan.title, "Must not become global",
+        "exact-page relay must execute the stored original Plan input, never its schema placeholders");
 
       const startedA = await boundStart.handler({
         title: "Conversation A tool plan",
@@ -143,6 +173,7 @@ try {
     legacyInlineCardTools: 0,
     dataTools: 4,
     conversationBound: true,
+    exactPageStartClaim: true,
   }));
 } finally {
   await rm(root, { recursive: true, force: true });

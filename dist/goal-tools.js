@@ -78,6 +78,19 @@ const goalSchema = z.object({
   lastConsumedLeaseId: z.string().nullable(),
 });
 const goalOutputSchema = { goal: goalSchema };
+const conversationStartClaimSchema = z.object({
+  claimId: z.string(),
+  toolName: z.enum(["devspace_goal_start", "devspace_plan_start"]),
+  expiresAt: z.string(),
+  state: z.string(),
+});
+const goalStartOutputSchema = {
+  goal: goalSchema.optional(),
+  pending: z.boolean().optional(),
+  claimed: z.boolean().optional(),
+  claimId: z.string().optional(),
+  conversationStartClaim: conversationStartClaimSchema.optional(),
+};
 const continuationClaimSchema = z.object({
   goalId: z.string(),
   round: z.number().int().positive(),
@@ -126,11 +139,25 @@ function modelOnlyMeta() {
 function modelAndAppMeta() {
   return { ui: { visibility: ["model", "app"] } };
 }
+function exactPageClaimMeta(resourceUri) {
+  return resourceUri
+    ? { ui: { resourceUri, visibility: ["model", "app"] } }
+    : modelOnlyMeta();
+}
 function appOnlyMeta() {
   return { ui: { visibility: ["app"] } };
 }
 
-export function registerGoalTools(server, goalRuntime, { resourceUri, relayResourceUri, hostBridge, onMount, resolveConversation } = {}) {
+export function registerGoalTools(server, goalRuntime, {
+  resourceUri,
+  relayResourceUri,
+  hostBridge,
+  onMount,
+  resolveConversation,
+  startClaimRegistry = null,
+  claimRelayResourceUri = null,
+  resolveStartClaimPage = null,
+} = {}) {
   if (!resourceUri) throw new Error("registerGoalTools requires resourceUri.");
   if (!relayResourceUri) throw new Error("registerGoalTools requires relayResourceUri.");
 
@@ -153,13 +180,19 @@ export function registerGoalTools(server, goalRuntime, { resourceUri, relayResou
     return goal;
   };
 
-  const requireNewConversationId = async (extra) => {
-    const conversationId = await resolveConversationId(extra);
-    if (typeof resolveConversation === "function" && !conversationId) {
-      throw new Error("ChatGPT Classic conversation identity is unresolved; refusing to create an unbound Goal.");
-    }
-    return conversationId;
-  };
+  const pendingStartResult = (claim) => ({
+    content: [{
+      type: "text",
+      text: "Goal Mode start is awaiting exact page-local ownership confirmation. Retry devspace_goal_start once with the returned claimId and the same objective/successCriteria before substantive work.",
+    }],
+    structuredContent: {
+      pending: true,
+      conversationStartClaim: claim,
+    },
+    _meta: {
+      "devspace/conversationStartClaim": claim,
+    },
+  });
 
   registerAppTool(server, "devspace_goal_start", {
     title: "Start DevSpace Goal",
@@ -167,13 +200,63 @@ export function registerGoalTools(server, goalRuntime, { resourceUri, relayResou
     inputSchema: {
       objective: z.string().min(1).max(4_000),
       successCriteria: z.array(z.string().min(1).max(1_000)).min(1).max(12),
+      claimId: z.string().min(16).max(200).optional()
+        .describe("Reserved for exact-page ownership recovery after this tool returns a pending conversationStartClaim."),
     },
-    outputSchema: goalOutputSchema,
+    outputSchema: goalStartOutputSchema,
     annotations: MUTATING,
-    _meta: modelOnlyMeta(),
-  }, async ({ objective, successCriteria }, extra) => {
+    _meta: exactPageClaimMeta(claimRelayResourceUri),
+  }, async ({ objective, successCriteria, claimId }, extra) => {
     try {
-      const conversationId = await requireNewConversationId(extra);
+      const relayClaimId = String(claimId || "").trim();
+      if (relayClaimId) {
+        if (!startClaimRegistry) throw new Error("Goal exact-page start recovery is unavailable.");
+        const existing = startClaimRegistry.inspect({
+          claimId: relayClaimId,
+          toolName: "devspace_goal_start",
+        });
+        if (!existing) throw new Error("Goal start claim is unavailable or expired.");
+        if (existing.completed && existing.result?.goal) {
+          return {
+            ...textResult(existing.result.goal, `Started Goal ${existing.result.goal.id} at round ${existing.result.goal.round}.`, {
+              claimed: true,
+              claimId: relayClaimId,
+            }),
+          };
+        }
+        let resolved = await resolveConversation(extra);
+        if (!resolved?.conversationId && typeof resolveStartClaimPage === "function") {
+          resolved = await resolveStartClaimPage(relayClaimId);
+        }
+        if (!resolved?.conversationId) return pendingStartResult(existing);
+        const claimed = await startClaimRegistry.claim({
+          claimId: relayClaimId,
+          toolName: "devspace_goal_start",
+          authority: resolved,
+          complete: async ({ input, authority }) => ({
+            goal: await goalRuntime.start({
+              objective: input.objective,
+              successCriteria: input.successCriteria,
+              conversationId: authority.conversationId,
+            }),
+          }),
+        });
+        return textResult(claimed.goal, `Started Goal ${claimed.goal.id} at round ${claimed.goal.round}.`, {
+          claimed: true,
+          claimId: relayClaimId,
+        });
+      }
+      const conversationId = await resolveConversationId(extra);
+      if (typeof resolveConversation === "function" && !conversationId) {
+        if (!startClaimRegistry || !claimRelayResourceUri) {
+          throw new Error("ChatGPT Classic conversation identity is unresolved; refusing to create an unbound Goal.");
+        }
+        const claim = startClaimRegistry.create({
+          toolName: "devspace_goal_start",
+          input: { objective, successCriteria },
+        });
+        return pendingStartResult(claim);
+      }
       const goal = await goalRuntime.start({ objective, successCriteria, conversationId });
       return textResult(goal, `Started Goal ${goal.id} at round ${goal.round}.`);
     } catch (error) {

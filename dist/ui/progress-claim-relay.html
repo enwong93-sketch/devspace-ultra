@@ -24,7 +24,7 @@
 (() => {
   let dispatchStarted = false;
 
-  const claimFrom = (value) => {
+  const progressClaimFrom = (value) => {
     if (!value || typeof value !== "object") return null;
     return value?.structuredContent?.progressClaim ??
       value?.structured_content?.progressClaim ??
@@ -33,6 +33,53 @@
       value?._meta?.["devspace/progressClaim"] ??
       value?.progressClaim ??
       null;
+  };
+
+  const conversationStartClaimFrom = (value) => {
+    if (!value || typeof value !== "object") return null;
+    return value?.structuredContent?.conversationStartClaim ??
+      value?.structured_content?.conversationStartClaim ??
+      value?.toolResult?.structuredContent?.conversationStartClaim ??
+      value?.["devspace/conversationStartClaim"] ??
+      value?._meta?.["devspace/conversationStartClaim"] ??
+      value?.conversationStartClaim ??
+      null;
+  };
+
+  const relayActionFrom = (value) => {
+    const progressClaim = progressClaimFrom(value);
+    if (progressClaim?.claimId) {
+      return {
+        toolName: "devspace_progress_report",
+        arguments: { claimId: progressClaim.claimId },
+      };
+    }
+    const startClaim = conversationStartClaimFrom(value);
+    if (!startClaim?.claimId) return null;
+    if (startClaim.toolName === "devspace_goal_start") {
+      return {
+        toolName: startClaim.toolName,
+        arguments: {
+          claimId: startClaim.claimId,
+          objective: "[exact-page-claim-relay]",
+          successCriteria: ["[exact-page-claim-relay]"],
+        },
+      };
+    }
+    if (startClaim.toolName === "devspace_plan_start") {
+      return {
+        toolName: startClaim.toolName,
+        arguments: {
+          claimId: startClaim.claimId,
+          title: "[exact-page-claim-relay]",
+          steps: [
+            { text: "[exact-page-claim-relay-current]", status: "in_progress" },
+            { text: "[exact-page-claim-relay-next]", status: "pending" },
+          ],
+        },
+      };
+    }
+    return null;
   };
 
   const dispatchGlobals = () => {
@@ -52,19 +99,26 @@
   };
 
   const dispatch = async (value) => {
-    const claim = claimFrom(value);
-    if (!claim?.claimId || dispatchStarted) return;
+    const action = relayActionFrom(value);
+    if (!action || dispatchStarted) return;
     dispatchStarted = true;
     for (let attempt = 0; attempt < 3; attempt += 1) {
       try {
         if (typeof window.openai?.callTool !== "function") throw new Error("tool bridge unavailable");
-        const result = await window.openai.callTool("devspace_progress_report", { claimId: claim.claimId });
+        const result = await window.openai.callTool(action.toolName, action.arguments);
         const structured = result?.structuredContent ?? result?.structured_content ?? result;
-        if (structured?.ok === true && structured?.claimed === true) {
+        if (action.toolName === "devspace_progress_report") {
+          if (structured?.ok === true && structured?.claimed === true) {
+            await closeRelay();
+            return;
+          }
+          throw new Error("progress claim was not completed");
+        }
+        if (structured?.claimed === true && (structured?.goal || structured?.plan)) {
           await closeRelay();
           return;
         }
-        throw new Error("progress claim was not completed");
+        throw new Error("conversation start claim was not completed");
       } catch {
         if (attempt < 2) await sleep(250 * (attempt + 1));
       }

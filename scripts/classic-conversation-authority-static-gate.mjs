@@ -48,8 +48,14 @@ assert.match(server, /requestConversationContext\.run\(/,
   "verified authority must remain request-scoped through AsyncLocalStorage");
 assert.match(server, /EXACT_CONVERSATION_REQUEST_PROOF/,
   "progress writes must carry a verifiable exact-conversation ownership proof");
-assert.match(server, /resolved\?\.pageVerified !== true \|\| !resolved\?\.runtimeKey \|\| !resolved\?\.callFingerprint/,
-  "progress narration must fail closed without exact page and invocation evidence");
+assert.match(server, /EXACT_PAGE_CLAIM_PROOF/,
+  "the v0.5.8 compatibility relay must preserve a distinct exact-page claim proof instead of weakening direct request authority");
+assert.match(server, /const exactRequest = Boolean\([\s\S]{0,320}resolved\?\.callFingerprint[\s\S]{0,220}endsWith\("-page-verified"\)/,
+  "ordinary progress narration must still require exact page plus canonical invocation evidence");
+assert.match(server, /const exactPageClaim = Boolean\([\s\S]{0,320}resolved\?\.claimId[\s\S]{0,220}classic-exact-page-progress-claim-cdp-page-verified/,
+  "only the one-time hidden iframe-parent claim may bypass a missing call fingerprint");
+assert.match(server, /if \(!exactRequest && !exactPageClaim\)/,
+  "progress narration must fail closed unless one of the two exact authority proofs is present");
 
 assert.doesNotMatch(server, /ClassicDirectRequestAuthorityRegistry/,
   "the retired cross-request trace authority cache must not remain in production source");

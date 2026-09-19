@@ -82,7 +82,8 @@ import { registerUnifiedRoutingTool } from "./unified-routing-tools.js";
 import { retiredToolCallResult } from "./retired-tool-compat.js";
 import { EXACT_CONVERSATION_REQUEST_PROOF, EXACT_PAGE_CLAIM_PROOF, isProjectableProgressMessage } from "./progress-ownership-proof.js";
 import { ProgressClaimRegistry } from "./progress-claim-registry.js";
-import { ProgressClaimCdpResolver } from "./conversation-start-claim-cdp.js";
+import { ConversationStartClaimRegistry } from "./conversation-start-claim-registry.js";
+import { ConversationStartClaimCdpResolver } from "./conversation-start-claim-cdp.js";
 import { InteractiveProgressEnforcementGate } from "./interactive-progress-enforcement.js";
 // ChatGPT/OpenAI MCP clients may reconnect without sending DELETE. Core session
 // lifetime is therefore tied to the actual standalone SSE connection: when that
@@ -746,7 +747,7 @@ function registerCodexProcessTools(server, config, workspaces, processSessions) 
         });
     });
 }
-function createMcpServer(config, workspaces, reviewCheckpoints, processSessions, localAgentProviders, incomingArtifactAdapters, chatSwarm, capabilityRuntime, blenderRuntimeManager, codexMcpBridge, conversationContinuity, contextGuardian, exactUsageAuthority, codexContextBridge, planRuntime, goalRuntime, goalHostBridge, hostOverlayProjection, computerUseOverlay, conversationAuthority, conversationAuthorityReady, goalRunProgress, requestConversationContext, progressClaimRegistry, resolveProgressClaimPage, interactiveProgressGate, conversationProgressLiveness = null) {
+function createMcpServer(config, workspaces, reviewCheckpoints, processSessions, localAgentProviders, incomingArtifactAdapters, chatSwarm, capabilityRuntime, blenderRuntimeManager, codexMcpBridge, conversationContinuity, contextGuardian, exactUsageAuthority, codexContextBridge, planRuntime, goalRuntime, goalHostBridge, hostOverlayProjection, computerUseOverlay, conversationAuthority, conversationAuthorityReady, goalRunProgress, requestConversationContext, progressClaimRegistry, conversationStartClaimRegistry, resolveProgressClaimPage, resolveStartClaimPage, interactiveProgressGate, conversationProgressLiveness = null) {
     const toolSurface = toolModeCapabilities(config.toolMode);
     const modelInstructions = serverInstructions(config);
     const modelInstructionsFingerprint = createHash("sha256").update(modelInstructions).digest("hex");
@@ -1012,6 +1013,51 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
     };
     const progressClaimSweepTimer = setInterval(() => { void sweepPendingProgressClaims(); }, 1_000);
     progressClaimSweepTimer.unref?.();
+    let conversationStartClaimSweepRunning = false;
+    const completeConversationStartClaim = async (pending, authority) => {
+        if (!pending?.claimId || !pending?.toolName || !authority?.conversationId) return null;
+        return await conversationStartClaimRegistry.claim({
+            claimId: pending.claimId,
+            toolName: pending.toolName,
+            authority,
+            complete: async ({ input, authority: claimedAuthority, toolName }) => {
+                if (toolName === "devspace_goal_start") {
+                    return {
+                        goal: await goalRuntime.start({
+                            objective: input.objective,
+                            successCriteria: input.successCriteria,
+                            conversationId: claimedAuthority.conversationId,
+                        }),
+                    };
+                }
+                if (toolName === "devspace_plan_start") {
+                    return {
+                        plan: await planRuntime.start({
+                            title: input.title,
+                            steps: input.steps,
+                            conversationId: claimedAuthority.conversationId,
+                        }),
+                    };
+                }
+                throw new Error(`Unsupported conversation start claim tool ${toolName}.`);
+            },
+        });
+    };
+    const sweepPendingConversationStartClaims = async () => {
+        if (conversationStartClaimSweepRunning || typeof resolveStartClaimPage !== "function") return;
+        conversationStartClaimSweepRunning = true;
+        try {
+            for (const pending of conversationStartClaimRegistry.pendingClaims({ limit: 8 })) {
+                const authority = await resolveStartClaimPage(pending.claimId).catch(() => null);
+                if (!authority?.conversationId) continue;
+                await completeConversationStartClaim(pending, authority).catch(() => null);
+            }
+        } finally {
+            conversationStartClaimSweepRunning = false;
+        }
+    };
+    const conversationStartClaimSweepTimer = setInterval(() => { void sweepPendingConversationStartClaims(); }, 1_000);
+    conversationStartClaimSweepTimer.unref?.();
     const writeVerifiedProgress = async ({ message, kind, resolved, dedupeKey = null }) => {
         const conversationId = String(resolved?.conversationId || "").trim();
         if (!conversationId)
@@ -1203,6 +1249,9 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
     registerPlanTools(server, planRuntime, {
         resourceUri: PLAN_CARD_URI,
         resolveConversation,
+        startClaimRegistry: conversationStartClaimRegistry,
+        claimRelayResourceUri: PROGRESS_CLAIM_RELAY_URI,
+        resolveStartClaimPage,
     });
     registerGoalTools(server, goalRuntime, {
         resourceUri: GOAL_DOCK_URI,
@@ -1210,6 +1259,9 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
         hostBridge: goalHostBridge,
         onMount: ({ goal }) => hostOverlayProjection?.requestOwnerRebind?.({ goalId: goal?.id }),
         resolveConversation,
+        startClaimRegistry: conversationStartClaimRegistry,
+        claimRelayResourceUri: PROGRESS_CLAIM_RELAY_URI,
+        resolveStartClaimPage,
     });
     registerAppTool(server, "open_workspace", {
         title: "Open workspace",
@@ -2206,8 +2258,10 @@ export function createServer(config = loadConfig(), options = {}) {
     const mcpCallCorrelator = new ClassicMcpCallCorrelator();
     const activeTurnRegistry = new ClassicActiveTurnRegistry();
     const progressClaimRegistry = new ProgressClaimRegistry();
-    const progressClaimCdp = new ProgressClaimCdpResolver({ ports: classicCdpOptions.ports });
-    const resolveProgressClaimPage = async (claimId) => progressClaimCdp.find({ claimId });
+    const conversationStartClaimRegistry = new ConversationStartClaimRegistry();
+    const conversationStartClaimCdp = new ConversationStartClaimCdpResolver({ ports: classicCdpOptions.ports });
+    const resolveProgressClaimPage = async (claimId) => conversationStartClaimCdp.find({ claimId, claimType: "progress" });
+    const resolveStartClaimPage = async (claimId) => conversationStartClaimCdp.find({ claimId, claimType: "conversation-start" });
     const mcpRequestCorrelationDiagnostics = new McpRequestCorrelationDiagnostics();
     const requestConversationContext = new McpConversationRequestContext();
     let conversationProgressLiveness = null;
@@ -2811,7 +2865,7 @@ export function createServer(config = loadConfig(), options = {}) {
     const localAgentProviders = config.subagents
         ? getLocalAgentProviderAvailabilitySnapshot()
         : [];
-    const mcpServerTemplate = createMcpServer(config, workspaces, reviewCheckpoints, processSessions, localAgentProviders, incomingArtifactAdapters, chatSwarm, capabilityRuntime, blenderRuntimeManager, codexMcpBridge, conversationContinuity, contextGuardian, exactUsageAuthority, codexContextBridge, planRuntime, goalRuntime, goalHostBridge, hostOverlayProjection, computerUseOverlay, conversationAuthority, conversationAuthorityReady, goalRunProgress, requestConversationContext, progressClaimRegistry, resolveProgressClaimPage, interactiveProgressGate, conversationProgressLiveness);
+    const mcpServerTemplate = createMcpServer(config, workspaces, reviewCheckpoints, processSessions, localAgentProviders, incomingArtifactAdapters, chatSwarm, capabilityRuntime, blenderRuntimeManager, codexMcpBridge, conversationContinuity, contextGuardian, exactUsageAuthority, codexContextBridge, planRuntime, goalRuntime, goalHostBridge, hostOverlayProjection, computerUseOverlay, conversationAuthority, conversationAuthorityReady, goalRunProgress, requestConversationContext, progressClaimRegistry, conversationStartClaimRegistry, resolveProgressClaimPage, resolveStartClaimPage, interactiveProgressGate, conversationProgressLiveness);
     const mcpTemplateDiagnostics = mcpServerTemplateDiagnostics(mcpServerTemplate);
     logEvent(config.logging, "info", "mcp_server_template_ready", mcpTemplateDiagnostics);
     const createSessionMcpServer = () => createMcpSessionServerFromTemplate(mcpServerTemplate);
@@ -2908,7 +2962,7 @@ export function createServer(config = loadConfig(), options = {}) {
             contextMetadataAdapter,
             streamRecoveryAdapter,
             config,
-        }), conversationCorrelation: mcpRequestCorrelationDiagnostics.diagnostics(), diagnosticGc });
+        }), conversationCorrelation: mcpRequestCorrelationDiagnostics.diagnostics(), conversationStartClaims: conversationStartClaimRegistry.diagnostics(), diagnosticGc });
     });
     app.get("/__devspace/stream-recovery/status", (req, res) => {
         const remoteAddress = String(req.socket?.remoteAddress ?? "");
@@ -3301,6 +3355,11 @@ export function createServer(config = loadConfig(), options = {}) {
             const requestedToolName = mcpMethod === "tools/call"
                 ? String(req?.body?.params?.name || "").trim()
                 : "";
+            const conversationStartClaimRelay = Boolean(
+                ["devspace_goal_start", "devspace_plan_start"].includes(requestedToolName)
+                && typeof req?.body?.params?.arguments?.claimId === "string"
+                && String(req.body.params.arguments.claimId).trim().length >= 16
+            );
             const retiredToolResult = retiredToolCallResult(requestedToolName);
             if (retiredToolResult) {
                 res.status(200).json({
@@ -3327,7 +3386,7 @@ export function createServer(config = loadConfig(), options = {}) {
                     runtimeKey: null,
                 }))
                 : null;
-            if (mcpMethod === "tools/call" && requestedToolName) {
+            if (mcpMethod === "tools/call" && requestedToolName && !conversationStartClaimRelay) {
                 const gateAuthority = requestConversation?.capabilityAuthority
                     || requestConversation?.progressAuthority
                     || (requestConversation?.conversationId ? requestConversation : null);

@@ -39,7 +39,17 @@ assert.match(source, /const resolveConversation = resolveCapabilityConversationA
 assert.match(source, /const resolveProgressConversation = resolveProgressConversationAuthority;/, "progress narration must use only the progress authority resolver");
 assert.match(source, /const resolved = await resolveProgressConversation\(extra\);/, "devspace_progress_report must use the isolated progress resolver");
 assert.doesNotMatch(source, /const resolveConversation = resolveProgressConversationAuthority;/, "progress identity must never become the generic tool authority");
-assert.match(source, /registerGoalTools\(server, goalRuntime, \{\s*resourceUri: GOAL_DOCK_URI,\s*relayResourceUri: GOAL_RELAY_URI,\s*hostBridge: goalHostBridge,\s*onMount:\s*\(\{ goal \}\) => hostOverlayProjection\?\.requestOwnerRebind\?\.\(\{ goalId: goal\?\.id \}\),\s*resolveConversation,?\s*\}\)/s, "Goal tools must receive the native conversation resolver while explicit mount remains read-only for Goal state");
+assert.match(source, /registerGoalTools\(server, goalRuntime, \{\s*resourceUri: GOAL_DOCK_URI,\s*relayResourceUri: GOAL_RELAY_URI,\s*hostBridge: goalHostBridge,\s*onMount:\s*\(\{ goal \}\) => hostOverlayProjection\?\.requestOwnerRebind\?\.\(\{ goalId: goal\?\.id \}\),\s*resolveConversation,\s*startClaimRegistry:\s*conversationStartClaimRegistry,\s*claimRelayResourceUri:\s*PROGRESS_CLAIM_RELAY_URI,\s*resolveStartClaimPage,?\s*\}\)/s, "Goal tools must receive native request authority plus the exact-page one-time start recovery resolver");
+assert.match(source, /new ConversationStartClaimRegistry\(\)/,
+  "Goal start recovery must use one bounded in-memory claim registry rather than a reusable session owner");
+assert.match(source, /new ConversationStartClaimCdpResolver\(\{\s*ports:\s*classicCdpOptions\.ports,?\s*\}\)/s,
+  "Goal start recovery must prove the hidden claim iframe under the bounded Classic Main port set");
+assert.match(source, /const resolveStartClaimPage = async \(claimId\) => conversationStartClaimCdp\.find\(\{ claimId, claimType: "conversation-start" \}\)/,
+  "Goal start recovery must resolve a one-time claim to its exact parent ChatGPT page");
+assert.match(source, /conversationStartClaimRelay/,
+  "exact-page relay retries must not be counted as a second substantive user work tool");
+assert.match(source, /registerGoalTools\(server, goalRuntime,[\s\S]{0,800}resolveStartClaimPage/,
+  "Goal tools must receive the exact-page CDP claim resolver");
 assert.match(source, /createMcpServer\([^)]*goalRuntime[^)]*goalHostBridge[^)]*hostOverlayProjection[^)]*conversationAuthority[^)]*conversationAuthorityReady/s);
 assert.match(source, /await goalRuntime\.close\(\)/);
 
