@@ -69,6 +69,40 @@ pending handover is not success and is not permission to kill active work.
 
 ## Remaining product-level work
 
+### Latest deployed checkpoint (supersedes earlier pending-deployment notes)
+
+- Deployed code: `6dfd5683699efad6f83bdc7d17aff8d31924c3a9`, following
+  `616c4cb5c56cbdaea43c99209a28ebe8357cbab4`; package remains 0.5.8.
+- Final code audit: `81286203-bd16-4655-85a7-52cc1271b03a`, exit 0,
+  162 named gates, completed 2026-09-20T09:15:46.087Z. It includes the new
+  bootstrap and real HTTP lifecycle tests through the full suite.
+- Quiet handover `7d8802a1-60b5-4d16-8f7c-9f77f892848c` completed at
+  09:16:54.937Z. Active Core is 36960, slot b; Gateway stayed running.
+  Schema unchanged, no fresh initialize required, no rollback. Two sessions
+  replayed and ONE did not replay. Its cause/impact is not yet established;
+  never summarize this handover as zero dropped sessions.
+- Normal progress marker `POST-HANDOVER` persisted at 09:17:49.553Z and was
+  confirmed in actual visible text in both exact matching Main displays.
+  `cardAcceptancePassed=true`, not merely `mounted=true`.
+- Current persistent Goal: `goal_9ddde493694349b9`, exact conversation
+  `6aacf595-b3d0-83ee-a31f-043786b41e85`, created via ordinary MCP start
+  at 09:18:14.555Z. Keep it active pending further end-to-end verification.
+- Current round Plan: `plan_54f8742f1566f14b`, same conversation, created
+  09:19:56.507Z. One earlier expired-preflight start was pending; a readback
+  established there was no active Plan before the successful retry. Do not
+  reuse this Plan after it becomes completed.
+- Read-only Blender inventory still reports three online runtimes:
+  production 9879/PID17000, bust QA 9880/PID19444, unseen-body 9881/PID33232.
+  The old offline registry records were not started, stopped or deleted.
+- Auto Compact remains OFF; Goal Recovery, progress/liveness, Context
+  Guardian, Host Overlay, Stream Recovery, plugins, skills and artifacts
+  remain enabled. Nothing was published or pushed.
+
+Remaining: actual next-round Goal continuation and isolated Rescue behavior;
+native request-correlation still reports zero; characterize the one unreplayed
+session and intermittent upstream Connection failed/TimeoutError. Do not
+disable safeguards or reintroduce session-only authority to make these pass.
+
 ### Confirmed display root cause, 2026-09-20T09:11Z
 
 An additional orphan process PID 32416 ran the exact relative command
