@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { execFile, spawn } from "node:child_process";
 import { mkdir, rm, writeFile } from "node:fs/promises";
+import {openSync, closeSync} from 'node:fs';
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
@@ -110,9 +111,15 @@ await writeFile(scriptPath, `${script}\r\n`, { encoding: "utf8", mode: 0o600 });
 
 // Keep the existing Windows Job alive; do not stop/unregister the production
 // task or create another task-owned Job around its long-lived applications.
-const helper = spawn('powershell.exe', ['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',scriptPath], {
-  detached:true, windowsHide:true, stdio:'ignore',
-});
+const helperStdoutPath=join(logDir,'stable-gateway-whole-restart-helper.out.log');
+const helperStderrPath=join(logDir,'stable-gateway-whole-restart-helper.err.log');
+const out=openSync(helperStdoutPath,'a');const err=openSync(helperStderrPath,'a');
+let helper;
+try {
+  helper = spawn('powershell.exe', ['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',scriptPath], {
+    detached:true, windowsHide:true, stdio:['ignore',out,err],
+  });
+} finally {closeSync(out);closeSync(err);}
 helper.unref();
 
 console.log(JSON.stringify({
@@ -126,6 +133,8 @@ console.log(JSON.stringify({
   helperTaskName,
   helperPid: helper.pid,
   jobPreserved: true,
+  helperStdoutPath,
+  helperStderrPath,
   delaySeconds,
   resultPath,
   scriptPath,

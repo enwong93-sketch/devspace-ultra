@@ -87,7 +87,7 @@ export function buildRestartPowerShell({
   const pidList = allPids.join(",");
   return [
     "$ErrorActionPreference='Stop'",
-    `[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false)`,
+    `try { [Console]::OutputEncoding=[Text.UTF8Encoding]::new($false) } catch {}`,
     `$taskName=${psQuote(taskName)}`,
     `$resultPath=${psQuote(resultPath)}`,
     `$gatewayPort=${Number(gatewayPort)}`,
