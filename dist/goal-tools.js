@@ -1,5 +1,6 @@
 import { registerAppTool } from "@modelcontextprotocol/ext-apps/server";
 import * as z from "zod/v4";
+import { goalAcknowledgementView } from './goal-result-view.js';
 
 const READ_ONLY = {
   readOnlyHint: true,
@@ -115,10 +116,12 @@ const continuationOutputSchema = {
   hostDispatch: hostDispatchSchema.optional(),
 };
 
-function textResult(goal, text, extra = {}) {
+function textResult(goal, text, extra = {}, { fullHistory = false } = {}) {
+  const view = fullHistory ? { goal, omittedDuplicateReports: 0 } : goalAcknowledgementView(goal);
   return {
-    content: [{ type: "text", text }],
-    structuredContent: { goal, ...extra },
+    content: [{ type: "text", text: view.omittedDuplicateReports
+      ? text + ' The duplicate latest report is included once as lastRoundReport; recentReports here excludes that duplicate. devspace_goal_status returns the full authoritative history.' : text }],
+    structuredContent: { goal: view.goal, ...extra },
   };
 }
 
@@ -279,7 +282,7 @@ export function registerGoalTools(server, goalRuntime, {
   }, async ({ goalId }, extra) => {
     try {
       const goal = await bindOrVerifyActiveGoal(goalId, extra);
-      return textResult(goal, `Goal ${goal.id} is ${goal.status}, round ${goal.round}, ${goal.roundState}.`);
+      return textResult(goal, `Goal ${goal.id} is ${goal.status}, round ${goal.round}, ${goal.roundState}.`, {}, { fullHistory: true });
     } catch (error) {
       return errorResult(error);
     }
@@ -490,7 +493,7 @@ export function registerGoalTools(server, goalRuntime, {
       if (typeof onMount === "function") {
         try { await onMount({ goal }); } catch {}
       }
-      return textResult(goal, `Mounted Goal ${goal.id} at round ${goal.round}, revision ${goal.revision}.`);
+      return textResult(goal, `Mounted Goal ${goal.id} at round ${goal.round}, revision ${goal.revision}.`, {}, { fullHistory: true });
     } catch (error) {
       return errorResult(error);
     }

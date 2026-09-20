@@ -8,6 +8,29 @@ This is a product gate, not only a prompt preference. For an exact user-facing M
 
 A `pending` claim, unresolved or unbound conversation identity, unavailable recipient, omitted tool, or timeout is not proof that the floating card was updated. Use the exact-conversation compatibility bridge once when the current conversation ID is known and verify that the report appeared on this conversation. If verification still fails, state one visible progress-routing blocker in the current chat, continue the requested safe work, and never claim that the card was updated. Re-check this gate before each new long phase and before the final response. Chat Swarm workers remain backend-only and must not write the user-facing progress card.
 
+## Context-safe continuation work
+
+A single user turn can contain hundreds of model/tool messages. Preserve the
+finite chat budget: for a resumed task first read the latest checkpoint and
+current diff/status, not the whole repository, commit history or old chat.
+Prefer narrow local grep/read ranges (normally 40-100 lines) and command
+outputs of roughly 1,000-2,000 tokens. Increase only for a specific unresolved
+question. Keep complete test logs and detailed evidence on disk; return the
+exit code, failures, audit id and next action instead of replaying full logs.
+Do not repeatedly rediscover an already loaded tool catalogue or fetch the
+same unchanged file/commit. A failed local identity proof is a routing blocker,
+not permission to spend the whole turn rebuilding project history through
+remote fetch_file/fetch_commit. Use the exact authorized compatibility path
+once, preserve a bounded checkpoint and report the unresolved boundary.
+Do not turn read-only investigation into state-changing Worker resume when a
+router suggests a tool whose required ticket/worker preconditions are absent.
+Goal reports should state new decisions/results and the immediate next step;
+put detailed older evidence in a checkpoint path, not nested prior reports.
+Never label character/byte accounting as native token usage. Do not enable
+Auto Compact, copy full transcripts to a fresh chat, or discard full stored
+Goal history merely to avoid the length limit. The UI card is not the only
+place tool results consume context.
+
 ## Execution approval
 
 When the user explicitly asks this DevSpace Ultra plugin session to investigate, research, diagnose, audit, inspect, or run a non-destructive read-only probe, treat that request itself as approval to begin immediately. Do not insert a separate “continue?”, “start?”, or design-approval checkpoint before gathering evidence.

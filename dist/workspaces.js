@@ -256,6 +256,11 @@ const SKIPPED_CONTEXT_DIRS = new Set([
     ".next",
     ".turbo",
     ".cache",
+    // Generated local fixtures can contain whole plugin/repository clones.
+    // Do not advertise those as instructions for the parent project. Opening
+    // that directory explicitly still loads its own root instructions.
+    ".local",
+    ".tmp",
 ]);
 export function formatAgentsPath(path, workspaceRoot) {
     if (!workspaceRoot)

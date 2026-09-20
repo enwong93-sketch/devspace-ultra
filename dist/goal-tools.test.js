@@ -4,6 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { GoalRuntime } from "./goal-runtime.js";
 import { registerGoalTools } from "./goal-tools.js";
+import './goal-result-view.test.js';
+import './context-payload-audit.test.js';
+import './workspace-discovery-view.test.js';
+import './workspace-discovery-scan.test.js';
 import { ConversationStartClaimRegistry } from "./conversation-start-claim-registry.js";
 
 const root = await mkdtemp(join(tmpdir(), "devspace-goal-tools-"));
@@ -167,7 +171,13 @@ try {
   assert.equal(resumedResult.structuredContent.goal.status, "active");
 
   const mountResult = await mount.handler({ goalId: goal1.id });
-  assert.deepEqual(mountResult.structuredContent.goal, resumedResult.structuredContent.goal);
+  assert.deepEqual(mountResult.structuredContent.goal, await runtime.status(goal1.id),
+    'read-only mount must return the full authoritative history, not the acknowledgement projection');
+  assert.deepEqual(mountResult.structuredContent.goal.lastRoundReport, resumedResult.structuredContent.goal.lastRoundReport);
+  assert.deepEqual(mountResult.structuredContent.goal.continuation, resumedResult.structuredContent.goal.continuation);
+  assert.deepEqual(mountResult.structuredContent.goal.successCriteria, resumedResult.structuredContent.goal.successCriteria);
+  assert.equal(resumedResult.structuredContent.goal.recentReports.some(r => JSON.stringify(r) === JSON.stringify(resumedResult.structuredContent.goal.lastRoundReport)), false,
+    'mutation acknowledgements must not repeat the latest report twice');
   assert.deepEqual(mountOwnerRebinds, [{ goalId: goal1.id, revision: resumedResult.structuredContent.goal.revision }], "explicit Goal mount must arm exact-owner Host Overlay recovery without changing Goal state");
 
   const completionGoalResult = await start.handler({

@@ -86,6 +86,7 @@ import { retiredToolCallResult } from "./retired-tool-compat.js";
 import { EXACT_CONVERSATION_REQUEST_PROOF, EXACT_PAGE_CLAIM_PROOF, isProjectableProgressMessage } from "./progress-ownership-proof.js";
 import { OpenaiConversationBindings, openaiConversationIdentity, OPENAI_CONVERSATION_PAGE_SOURCE, inspectExactConversationPage, localBindingAuthorized } from './openai-conversation-binding.js';
 import { ProgressClaimRegistry } from "./progress-claim-registry.js";
+import { workspaceDiscoveryView } from './workspace-discovery-view.js';
 import { ProgressBootstrapAuthorityRegistry } from "./progress-bootstrap-authority.js";
 import { ConversationStartClaimRegistry } from "./conversation-start-claim-registry.js";
 import { ConversationStartClaimCdpResolver } from "./conversation-start-claim-cdp.js";
@@ -1430,6 +1431,8 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
         const availableAgentsFileOutputs = availableAgentsFiles.map((file) => ({
             path: formatAgentsPath(file.path, workspace.root),
         }));
+        const discovery = workspaceDiscoveryView({ availableAgentsFiles: availableAgentsFileOutputs,
+            skills: visibleSkills, agents: visibleAgents, skillDiagnostics: workspace.skillDiagnostics });
         const instruction = config.skillsEnabled
             ? "Use this workspaceId in all subsequent tool calls for this project. Do not call open_workspace again for this same folder unless this workspaceId stops working, the user asks to reopen, or you switch to a different folder/worktree. Follow loaded agentsFiles instructions. Before working under a path listed in availableAgentsFiles, read that instruction file. When a task matches an available skill in skills, read its path before proceeding."
             : "Use this workspaceId in all subsequent tool calls for this project. Do not call open_workspace again for this same folder unless this workspaceId stops working, the user asks to reopen, or you switch to a different folder/worktree. Follow loaded agentsFiles instructions. Before working under a path listed in availableAgentsFiles, read that instruction file.";
@@ -1444,10 +1447,10 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
                         ? `Loaded project instructions: ${loadedAgentsFiles.map((file) => file.path).join(", ")}`
                         : undefined,
                     availableAgentsFileOutputs.length > 0
-                        ? `Available nested instructions: ${availableAgentsFileOutputs.map((file) => file.path).join(", ")}`
+                        ? `Available nested instruction count: ${availableAgentsFileOutputs.length}; see bounded structured preview.`
                         : undefined,
                     visibleSkills.length > 0
-                        ? `Available skills: ${visibleSkills.map((skill) => skill.name).join(", ")}`
+                        ? `Available skill count: ${visibleSkills.length}; route by task rather than loading the catalogue.`
                         : undefined,
                     visibleAgentProviders.some((provider) => provider.available)
                         ? `Available subagent providers: ${visibleAgentProviders.filter((provider) => provider.available).map((provider) => provider.name).join(", ")}`
@@ -1456,9 +1459,9 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
                         ? `Unavailable subagent providers: ${visibleAgentProviders.filter((provider) => !provider.available).map(formatUnavailableAgentProvider).join(", ")}`
                         : undefined,
                     visibleAgents.length > 0
-                        ? `Available subagent profiles: ${visibleAgents.map(formatVisibleAgent).join(", ")}`
+                        ? `Available subagent profile count: ${visibleAgents.length}; see structured preview.`
                         : undefined,
-                    instruction,
+                    instruction + discovery.notice,
                 ].filter(Boolean).join("\n"),
             },
         ];
@@ -1495,12 +1498,12 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
                 sourceRoot: workspace.sourceRoot,
                 worktree: workspace.worktree,
                 agentsFiles: loadedAgentsFiles,
-                availableAgentsFiles: availableAgentsFileOutputs,
-                skills: visibleSkills,
+                availableAgentsFiles: discovery.availableAgentsFiles,
+                skills: discovery.skills,
                 agentProviders: visibleAgentProviders,
-                agents: visibleAgents,
-                skillDiagnostics: workspace.skillDiagnostics,
-                instruction,
+                agents: discovery.agents,
+                skillDiagnostics: discovery.skillDiagnostics,
+                instruction: instruction + discovery.notice,
             },
         };
     });
