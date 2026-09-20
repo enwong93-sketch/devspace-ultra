@@ -30,6 +30,7 @@ function runtimeLabelForPort(port) {
 function conversationIdFromPageUrl(url) {
   try {
     const parsed = new URL(String(url || ""));
+    if (parsed.protocol !== 'https:' || parsed.hostname !== 'chatgpt.com') return null;
     return parsed.pathname.match(/\/c\/([^/?#]+)/)?.[1] || null;
   } catch {
     return null;
@@ -69,6 +70,8 @@ export async function waitForVisibleReportBoundary({
         last?.chatMode === true &&
         last?.generating === false &&
         nativeComplete &&
+        last?.latestMessageRole === 'assistant' &&
+        last?.safetyCheckVisible !== true && last?.deliveryTimeoutVisible !== true &&
         typeof last?.latestAssistantText === "string" &&
         last.latestAssistantText.trim().length > 0
       );
@@ -278,6 +281,10 @@ export async function inspectVisibleReportCommit(candidate, options = {}) {
         });
         const messageNodes = [...document.querySelectorAll('[data-message-author-role]')];
         const latestMessageNode = messageNodes.at(-1) || null;
+        const latestUserNode = [...messageNodes].reverse().find((node) => node.getAttribute('data-message-author-role') === 'user') || null;
+        const userNodes = messageNodes.filter(node => node.getAttribute('data-message-author-role') === 'user');
+        const beforeLatestUser = messageNodes.slice(0, messageNodes.indexOf(latestUserNode));
+        const assistantBeforeLatestUser = [...beforeLatestUser].reverse().find(node => node.getAttribute('data-message-author-role') === 'assistant') || null;
         const assistantNodes = messageNodes.filter((el) => el.getAttribute('data-message-author-role') === 'assistant');
         const assistants = assistantNodes
           .map((el) => (el.innerText || '').trim())
@@ -311,7 +318,7 @@ export async function inspectVisibleReportCommit(candidate, options = {}) {
         routeLifecycle.hydratedSinceMs = routeHydrated ? (routeLifecycle.hydratedSinceMs || lifecycleNow) : null;
         routeLifecycle.lastSeenAtMs = lifecycleNow;
         let streamStatus = null;
-        if (conversationId) {
+        if (conversationId && ${options.skipNativeStatus !== true}) {
           try {
             const response = await fetch('/backend-api/conversation/' + conversationId + '/stream_status', {
               credentials: 'include',
@@ -333,6 +340,10 @@ export async function inspectVisibleReportCommit(candidate, options = {}) {
           latestAssistantText,
           latestMessageRole: latestMessageNode?.getAttribute('data-message-author-role') || null,
           latestMessageId: latestMessageNode?.getAttribute('data-message-id') || null,
+          latestUserMessageId: latestUserNode?.getAttribute('data-message-id') || null,
+          latestUserText: String(latestUserNode?.innerText || '').trim(),
+          previousUserMessageId: userNodes.at(-2)?.getAttribute('data-message-id') || null,
+          assistantBeforeLatestUserMessageId: assistantBeforeLatestUser?.getAttribute('data-message-id') || null,
           latestAssistantMessageId: latestAssistantNode?.getAttribute('data-message-id') || null,
           assistantCount: assistants.length,
           visibleMessageCount,
@@ -472,6 +483,24 @@ export async function probeClassicConversationPagePort(port, conversationId, opt
       relayOnly: false,
       directPage: true,
     }));
+}
+
+// Inspect only the already-bound exact Goal conversation. Duplicate displays
+// are returned for consensus, never treated as different task owners.
+export async function inspectGoalContinuationPages(goal, { ports = defaultMainDebugPorts(), skipNativeStatus = false, runtimeKey = null } = {}) {
+  if (runtimeKey) {
+    if (!/^main-(0[1-9]|[12][0-9]|3[0-2])$/.test(runtimeKey)) return [];
+    const number=Number(runtimeKey.slice(-2)); const port=number===1?9721:9730+number;
+    ports=ports.filter(value=>value===port);
+  }
+  const groups = await Promise.all(ports.map(port => probeClassicConversationPagePort(port, goal.conversationId).catch(() => [])));
+  const candidates = groups.flat();
+  if (!candidates.length || candidates.length > 4) return [];
+  const snapshots = await Promise.all(candidates.map(async candidate => {
+    const page = await inspectVisibleReportCommit(candidate, { timeoutMs: 3000, skipNativeStatus });
+    return { ...page, candidate, runtimeKey: candidate.runtimePort===9721?'main-01':`main-${String(candidate.runtimePort-9730).padStart(2,'0')}` };
+  }));
+  return snapshots;
 }
 
 async function findRawHostObject(client, contextId) {

@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { readComposerDraft } from './classic-composer-draft.js';
 
 export const INTERRUPTED_TURN_RESCUE_TEXT = "- 繼續";
 
@@ -43,14 +44,16 @@ function localMinute(value = Date.now()) {
 
 function conversationIdFromUrl(url) {
   try {
-    return new URL(String(url || "")).pathname.match(/\/c\/([^/?#]+)/)?.[1] || null;
+    const parsed = new URL(String(url || ''));
+    if (parsed.protocol !== 'https:' || parsed.hostname !== 'chatgpt.com') return null;
+    return parsed.pathname.match(/\/c\/([^/?#]+)/)?.[1] || null;
   } catch {
     return null;
   }
 }
 
 async function targetsForPort(port) {
-  const response = await fetch(`http://127.0.0.1:${port}/json/list`, { cache: "no-store" });
+  const response = await fetch(`http://127.0.0.1:${port}/json/list`, { cache: "no-store", signal: AbortSignal.timeout(1500) });
   if (!response.ok) throw new Error(`CDP target list ${port} returned HTTP ${response.status}.`);
   return await response.json();
 }
@@ -401,6 +404,16 @@ export class ConversationProgressLivenessCdpAdapter {
     });
   }
 
+  async sendGoalContinuation({ conversationId, target, sourceUserId, assistantMessageId } = {}) {
+    if (!sourceUserId || !assistantMessageId) return { ok: false, definiteFailure: true, dispatchCommitted: false, state: 'goal-boundary-required' };
+    const resolved = await this.#resolveExactTarget(conversationId, target);
+    if (!resolved.ok) return { ...resolved, definiteFailure: true, dispatchCommitted: false };
+    return this.#sendConversationMessage({ resolved, text: INTERRUPTED_TURN_RESCUE_TEXT,
+      expectedPrefix: INTERRUPTED_TURN_RESCUE_TEXT, purpose: 'goal-continuation', attempt: 1,
+      allowNormalCompletion: true, requireInterruptionEvidence: false,
+      goalBoundary: { sourceUserId, assistantMessageId } });
+  }
+
   async #sendConversationMessage({
     resolved,
     text,
@@ -409,16 +422,20 @@ export class ConversationProgressLivenessCdpAdapter {
     attempt,
     allowNormalCompletion = false,
     requireInterruptionEvidence = true,
+    goalBoundary = null,
   }) {
     const page = await this.connect(resolved.target);
     const marker = markerFor(resolved.conversationId, `${purpose}:${attempt}`);
+    let submissionAttempted = false;
     try {
       const preflight = await page.evaluate(`(() => {
         const expected = ${JSON.stringify(resolved.conversationId)};
         const expectedText = ${JSON.stringify(text)};
         const allowNormalCompletion = ${allowNormalCompletion === true};
         const requireInterruptionEvidence = ${requireInterruptionEvidence !== false};
+        const goalBoundary = ${JSON.stringify(goalBoundary)};
         const actual = location.pathname.match(/\\/c\\/([^/?#]+)/)?.[1] || null;
+        const draftText = ${readComposerDraft.toString()};
         const visible = (element) => {
           if (!(element instanceof HTMLElement)) return false;
           const rect = element.getBoundingClientRect();
@@ -436,7 +453,12 @@ export class ConversationProgressLivenessCdpAdapter {
         const latestMessageText = String(latestMessage?.innerText || latestMessage?.textContent || '').trim();
         const latestUser = [...messageNodes].reverse().find((node) => node.getAttribute('data-message-author-role') === 'user') || null;
         const latestUserText = String(latestUser?.innerText || latestUser?.textContent || '').trim();
-        if (latestUserText === expectedText) {
+        if (goalBoundary && (latestUser?.getAttribute('data-message-id') !== goalBoundary.sourceUserId
+          || latestMessageRole !== 'assistant'
+          || latestMessage?.getAttribute('data-message-id') !== goalBoundary.assistantMessageId)) {
+          return { ok:false, state:'goal-source-turn-changed' };
+        }
+        if (!goalBoundary && latestUserText === expectedText) {
           return { ok:true, state:'already-visible', alreadyVisible:true };
         }
         const latestTurnContainer = latestMessage?.closest('article') || latestMessage;
@@ -458,10 +480,15 @@ export class ConversationProgressLivenessCdpAdapter {
         const editors = [...document.querySelectorAll('#prompt-textarea,textarea,div.ProseMirror[contenteditable="true"],[data-lexical-editor="true"][contenteditable="true"],[contenteditable="true"][role="textbox"]')].filter(visible);
         const editor = editors.find((node) => node.closest('form')) || editors.at(-1);
         if (!editor) return { ok:false, state:'composer-missing' };
-        const existing = String(editor instanceof HTMLTextAreaElement ? editor.value : editor.innerText || editor.textContent || '').replace(/\\u2060/g, '').trim();
-        if (existing) return { ok:false, state:'composer-not-empty' };
+        const existing = draftText(editor);
+        if (existing !== '') return { ok:false, state:'composer-not-empty' };
         editor.setAttribute('data-devspace-liveness-send', ${JSON.stringify(marker)});
         editor.focus();
+        if (!(editor instanceof HTMLTextAreaElement)) {
+          const selection = getSelection(); const range = document.createRange();
+          range.selectNodeContents(editor); range.collapse(false);
+          selection.removeAllRanges(); selection.addRange(range);
+        }
         return { ok:true };
       })()`);
       const committedResult = (extra = {}) => ({
@@ -488,8 +515,21 @@ export class ConversationProgressLivenessCdpAdapter {
       }
       await page.call("Input.insertText", { text });
       await this.sleep(350);
+      submissionAttempted = true; // a lost CDP acknowledgement may follow a successful click
       const submitted = await page.evaluate(`(() => {
         const marker = ${JSON.stringify(marker)};
+        const expectedConversation = ${JSON.stringify(resolved.conversationId)};
+        const expectedText = ${JSON.stringify(text)};
+        const draftText = ${readComposerDraft.toString()};
+        const goalBoundary = ${JSON.stringify(goalBoundary)};
+        if (location.pathname.match(/\\/c\\/([^/?#]+)/)?.[1] !== expectedConversation) return {ok:false,state:'route-changed-before-send'};
+        if (document.querySelector('button[data-testid="stop-button"]')) return {ok:false,state:'turn-started-before-send'};
+        if (goalBoundary) {
+          const nodes = [...document.querySelectorAll('[data-message-author-role]')];
+          const user = [...nodes].reverse().find(n => n.getAttribute('data-message-author-role') === 'user');
+          const last = nodes.at(-1);
+          if (user?.getAttribute('data-message-id') !== goalBoundary.sourceUserId || last?.getAttribute('data-message-id') !== goalBoundary.assistantMessageId) return {ok:false,state:'goal-source-turn-changed'};
+        }
         const visible = (element) => {
           if (!(element instanceof HTMLElement)) return false;
           const rect = element.getBoundingClientRect();
@@ -498,8 +538,8 @@ export class ConversationProgressLivenessCdpAdapter {
         };
         const editor = document.querySelector('[data-devspace-liveness-send="' + marker + '"]');
         if (!editor) return { ok:false, state:'composer-lost' };
-        const inserted = String(editor instanceof HTMLTextAreaElement ? editor.value : editor.innerText || editor.textContent || '').trim();
-        if (!inserted) return { ok:false, state:'text-not-inserted' };
+        const inserted = draftText(editor);
+        if (inserted !== expectedText) return { ok:false, state:'composer-text-changed' };
         const buttons = [...document.querySelectorAll('button')].filter(visible);
         const send = buttons.find((button) => button.matches('[data-testid="send-button"]'))
           || buttons.find((button) => /send|傳送|发送|送出/i.test(String(button.getAttribute('aria-label') || button.title || '')));
@@ -520,12 +560,14 @@ export class ConversationProgressLivenessCdpAdapter {
             const expected = ${JSON.stringify(resolved.conversationId)};
             const expectedPrefix = ${JSON.stringify(expectedPrefix)};
             const expectedText = ${JSON.stringify(text)};
+            const strictGoalBoundary = ${Boolean(goalBoundary)};
             const actual = location.pathname.match(/\\/c\\/([^/?#]+)/)?.[1] || null;
             if (actual !== expected) return { ok:false, state:'route-changed-after-send' };
             const users = [...document.querySelectorAll('[data-message-author-role="user"]')];
             const latest = String(users.at(-1)?.innerText || users.at(-1)?.textContent || '').trim();
+            const normalized = latest.replace(/^DevSpace Local Gateway\\s*/, '').trim();
             return {
-              ok: latest === expectedText || latest.startsWith(expectedPrefix),
+              ok: normalized === expectedText || (!strictGoalBoundary && normalized.startsWith(expectedPrefix)),
               state: latest ? 'visible' : 'missing',
             };
           })()`);
@@ -556,6 +598,11 @@ export class ConversationProgressLivenessCdpAdapter {
             purpose,
             attempt,
           };
+    } catch (error) {
+      return { ok: false, state: 'transport-acknowledgement-uncertain',
+        error: error instanceof Error ? error.message : String(error),
+        dispatchCommitted: submissionAttempted, definiteFailure: !submissionAttempted,
+        visibilityVerified: false };
     } finally {
       page.close();
     }

@@ -321,9 +321,14 @@ export function registerGoalTools(server, goalRuntime, {
     try {
       await bindOrVerifyActiveGoal(goalId, extra);
       const goal = await goalRuntime.turnReport({ goalId, summary, meaningfulProgress, blockerFingerprint });
+      const reportAuthority = goal.status === 'active' && typeof resolveBootstrapConversation === 'function'
+        ? await resolveBootstrapConversation(extra, 'devspace_goal_turn_report').catch(() => null) : null;
+      const armed = goal.status === 'active' && hostBridge?.continuationSupervisor
+        ? await hostBridge.continuationSupervisor.arm(goal, { reportAuthority }).catch(() => ({ armed: false, reason: 'source-boundary-capture-failed' }))
+        : null;
       return textResult(
         goal,
-        `Goal round ${goal.round} report recorded. Now give the user the complete visible report for this round as your final response. Do not call any more tools in this turn.`,
+        `Goal round ${goal.round} report recorded. Now give the user the complete visible report for this round as your final response. Do not call any more tools in this turn.${armed ? (armed.armed ? ' The backend will dispatch one minimal continuation only after this exact user turn has a new completed final report; on the next turn inspect Goal status and continue its already-working round.' : ` Automatic continuation is not armed: ${armed.reason || armed.state}.`) : ''}`,
       );
     } catch (error) {
       return errorResult(error);
@@ -384,6 +389,9 @@ export function registerGoalTools(server, goalRuntime, {
     try {
       await bindOrVerifyActiveGoal(goalId, extra);
       const goal = await goalRuntime.control({ goalId, action });
+      if (action === 'resume' && hostBridge?.continuationSupervisor) {
+        await hostBridge.continuationSupervisor.arm(goal, { resume: true });
+      }
       return textResult(goal, `Goal ${goal.id} is now ${goal.status}.`);
     } catch (error) {
       return errorResult(error);
@@ -405,6 +413,14 @@ export function registerGoalTools(server, goalRuntime, {
     try {
       await bindOrVerifyActiveGoal(goalId, extra);
       if (action === "dispatch") {
+        if (hostBridge?.continuationSupervisor) {
+          const status = await hostBridge.continuationSupervisor.requestDispatch(goalId);
+          const goal = await goalRuntime.status(goalId);
+          return textResult(goal, `Goal continuation backend state: ${status.state}.`, {
+            acknowledged: status.dispatched,
+            hostDispatch: { ok: true, transport: 'backend-exact-page-continuation' },
+          });
+        }
         if (!hostBridge || typeof hostBridge.dispatch !== "function") {
           throw new Error("ChatGPT Classic Goal host bridge is unavailable.");
         }

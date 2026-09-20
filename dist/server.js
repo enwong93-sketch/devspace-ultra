@@ -48,6 +48,8 @@ import { registerPlanTools } from "./plan-tools.js";
 import { GoalRuntime } from "./goal-runtime.js";
 import { registerGoalTools } from "./goal-tools.js";
 import { ClassicGoalHostBridge } from "./goal-host-bridge.js";
+import { inspectGoalContinuationPages } from "./goal-host-bridge.js";
+import { GoalContinuationSupervisor } from './goal-continuation-supervisor.js';
 import { ClassicGoalRoundCompletionGuard } from "./goal-round-completion-guard.js";
 import { ClassicPrimaryDebugGuard } from "./primary-debug-guard.js";
 import { ClassicStreamRecoveryGuard } from "./classic-stream-recovery-guard.js";
@@ -2236,6 +2238,25 @@ export function createServer(config = loadConfig(), options = {}) {
             : () => primaryDebugGuard.pollOnce(),
         sendRecovery: sendExactGoalRecovery,
     });
+    const goalContinuationSupervisor = new GoalContinuationSupervisor({
+        goalRuntime,
+        statePath: join(config.stateDir, 'goal-continuation-driver.json'),
+        enabled: !config.passiveCore,
+        inspect: (goal, options = {}) => inspectGoalContinuationPages(goal, { ...classicCdpOptions, skipNativeStatus: options.sourceOnly === true, runtimeKey: options.runtimeKey || null }),
+        dispatch: ({ goal, page, sourceUserId, assistantMessageId }) => {
+            const candidate = page.candidate;
+            const runtimeKey = runtimeKeyForPort(candidate.runtimePort);
+            return progressLivenessAdapter.sendGoalContinuation({
+                conversationId: goal.conversationId, sourceUserId, assistantMessageId,
+                target: { exact: true, conversationId: goal.conversationId, runtimeKey, port: candidate.runtimePort,
+                    target: { runtimeKey, port: candidate.runtimePort, targetId: candidate.pageTargetId,
+                        url: candidate.pageUrl, webSocketDebuggerUrl: candidate.pageWebSocketDebuggerUrl } },
+            });
+        },
+    });
+    // Shared by report, UI dispatch and shutdown; never one driver per MCP session.
+    goalHostBridge.continuationSupervisor = goalContinuationSupervisor;
+    goalContinuationSupervisor.start();
     const goalRoundCompletionGuard = new ClassicGoalRoundCompletionGuard({
         goalRuntime,
         inspect: async (goal) => {
@@ -3015,7 +3036,7 @@ export function createServer(config = loadConfig(), options = {}) {
             contextMetadataAdapter,
             streamRecoveryAdapter,
             config,
-        }), conversationCorrelation: mcpRequestCorrelationDiagnostics.diagnostics(), progressBootstrap: progressBootstrapAuthority.diagnostics(), conversationStartClaims: conversationStartClaimRegistry.diagnostics(), progressProjection: progressNarrationOverlay.status(), diagnosticGc });
+        }), conversationCorrelation: mcpRequestCorrelationDiagnostics.diagnostics(), progressBootstrap: progressBootstrapAuthority.diagnostics(), conversationStartClaims: conversationStartClaimRegistry.diagnostics(), progressProjection: progressNarrationOverlay.status(), goalContinuation: goalContinuationSupervisor.status(), diagnosticGc });
     });
     app.get("/__devspace/stream-recovery/status", (req, res) => {
         const remoteAddress = String(req.socket?.remoteAddress ?? "");
@@ -3573,6 +3594,7 @@ export function createServer(config = loadConfig(), options = {}) {
         localAgentProviders,
         close: () => {
             closePromise ??= (async () => {
+                await goalContinuationSupervisor.close();
                 mcpServerTemplate.__devspaceStopClaimSweeps?.();
                 const results = await transports.closeAll();
                 logSessionCloseResults("server_shutdown", results);

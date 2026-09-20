@@ -152,7 +152,6 @@ export class ProgressClaimRegistry {
     if (typeof complete !== "function") throw new Error("Progress claim completion callback is required.");
     if (record.owner && (
       record.owner.conversationId !== owner.conversationId
-      || record.owner.runtimeKey !== owner.runtimeKey
     )) {
       this.rejected += 1;
       throw new Error("Progress claim is already owned by another conversation page.");

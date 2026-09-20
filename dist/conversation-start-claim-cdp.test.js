@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import './claim-display-regression.test.js';
 import {
   ConversationStartClaimCdpResolver,
   conversationStartClaimCdpInternals,

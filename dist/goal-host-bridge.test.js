@@ -15,7 +15,7 @@ assert.equal(typeof moduleUnderTest?.probeClassicConversationPagePort, "function
 {
   const snapshots = [
     { chatMode: true, generating: true, streamStatus: "IN_PROGRESS", latestAssistantText: "" },
-    { chatMode: true, generating: false, streamStatus: "COMPLETE", latestAssistantText: "MAIN1-GOAL-R2 — visible summary" },
+    { chatMode: true, generating: false, streamStatus: "COMPLETE", latestMessageRole: "assistant", latestAssistantText: "MAIN1-GOAL-R2 — visible summary" },
   ];
   let index = 0;
   let now = Date.parse("2026-09-05T01:00:00.000Z");
@@ -39,7 +39,7 @@ assert.equal(typeof moduleUnderTest?.probeClassicConversationPagePort, "function
   const boundary = await moduleUnderTest.waitForVisibleReportBoundary({
     inspect: async () => {
       inspections += 1;
-      return { chatMode: true, generating: false, streamStatus: "COMPLETE", latestAssistantText: "current-looking summary" };
+      return { chatMode: true, generating: false, streamStatus: "COMPLETE", latestMessageRole: "assistant", latestAssistantText: "current-looking summary" };
     },
     reportedAt: "2026-09-05T01:00:00.000Z",
     minimumReportSettleMs: 400,
@@ -107,6 +107,16 @@ assert.equal(typeof moduleUnderTest?.probeClassicConversationPagePort, "function
 }
 
 const ports = moduleUnderTest.defaultMainDebugPorts();
+{
+  let now = 1000;
+  const boundary = await moduleUnderTest.waitForVisibleReportBoundary({
+    inspect: async () => ({chatMode:true, generating:false, streamStatus:'COMPLETE',
+      latestMessageRole:'user', latestAssistantText:'An answer to the PREVIOUS user request'}),
+    reportedAt:new Date(0).toISOString(), timeoutMs:10, pollMs:1,
+    now:() => now, sleep:async () => { now += 2; },
+  });
+  assert.equal(boundary.ok, false, 'an old assistant answer cannot complete a newer user turn');
+}
 assert.equal(ports[0], 9721);
 assert.equal(ports[1], 9732);
 assert.equal(ports.at(-1), 9762);
@@ -187,6 +197,7 @@ const defaultBoundaryBridge = new moduleUnderTest.ClassicGoalHostBridge({
       generating: false,
       streamStatus: "COMPLETE",
       latestAssistantText: "ROUND DEFAULT — visible report committed",
+      latestMessageRole: "assistant",
       conversationId: "conversation_default",
     };
   },

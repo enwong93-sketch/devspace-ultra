@@ -1,4 +1,4 @@
-const ALLOWED_START_TOOLS = new Set(["devspace_goal_start", "devspace_plan_start"]);
+const ALLOWED_START_TOOLS = new Set(["devspace_goal_start", "devspace_plan_start", "devspace_goal_turn_report"]);
 const DEFAULT_TTL_MS = 45_000;
 const DEFAULT_MAX_SESSIONS = 128;
 

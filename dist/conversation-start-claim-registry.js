@@ -152,7 +152,6 @@ export class ConversationStartClaimRegistry {
     if (typeof complete !== "function") throw new Error("Conversation start claim completion callback is required.");
     if (record.owner && (
       record.owner.conversationId !== owner.conversationId
-      || record.owner.runtimeKey !== owner.runtimeKey
     )) {
       this.rejected += 1;
       throw new Error("Conversation start claim is already owned by another conversation page.");

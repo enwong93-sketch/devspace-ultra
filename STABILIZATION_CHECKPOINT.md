@@ -1,5 +1,73 @@
 # DevSpace Ultra v0.5.8 stabilization — 2026-09-20
 
+## Round 2: Goal continuation closure (latest work)
+
+The user asked to finish stabilization, explicitly prioritizing Goal Mode.
+The real Goal was still round 1 / reported / continuation pending more than
+three hours after its final response. It was manually redeemed into round 2
+at 12:51:30Z; that manual redemption is NOT automatic-continuation evidence.
+
+Confirmed defects and narrow fixes:
+
+- Normal Goal continuation previously depended entirely on the hidden relay
+  App calling an app-only tool. Missing/hung Apps left it pending forever.
+  A singleton, passive-aware backend supervisor now captures the report's
+  source user message, waits for a NEW visible final with native completion,
+  obtains an exclusive runtime lease, journals before sending one minimal
+  `- 繼續`, verifies it on-page, then redeems the next working round. Existing
+  app dispatch delegates to the same owner rather than creating another send.
+- The old visible-report gate accepted the previous assistant text while the
+  newest message was a user request. It now requires an assistant final.
+- A single conversation shown in two windows is not two conversation owners.
+  Exact opaque claims now collapse identical conversation ownership while
+  checking EVERY batch, exact https://chatgpt.com host and refreshed parent
+  routes. Different conversation IDs still fail closed.
+- The two current displays have different visible user boundaries: Main-01
+  is stale, Main-02 owns the current request. A recently revalidated opaque
+  progress receipt plus the current request trace may therefore locate the
+  report's actual page. Without that proof, conflicting displays remain
+  unarmed; the driver never picks a conversation merely by activity/runtime.
+- The canary composer retained an app mention pill. Previously this looked
+  like user draft text and blocked sending. A DOM-copy text extractor ignores
+  ONLY recognized plugin mention pills, keeps genuine text/attachments
+  protected, preserves the actual mention, and places inserted text at the
+  editor end. The final click rechecks route, source turn and exact inserted
+  text. A lost click acknowledgement is never labeled safe-to-retry.
+- An uncertain send is durably quarantined across restart and can only be
+  reconciled from the exact source-user -> final-assistant -> next-control-user
+  message sequence, without sending again. Pause/stop/new human input wins.
+
+Real isolated acceptance:
+
+- Used only the pre-existing Main-06 canary
+  `6aacc828-96f0-83e8-b368-a550e2c8ae27`, after verifying idle CANARY_READY and
+  no user draft. No production Goal store, other Main, Blender, setting or
+  navigation was changed by the harness.
+- `scripts/goal-continuation-canary.mjs --execute` passed at 13:13:42.212Z,
+  with exactly one visible control send and the isolated Goal at round 2 /
+  working. Result is in the system Temp folder
+  `devspace-goal-continuation-canary-xagu0k/result.json`.
+- Subsequently the canary produced an actual new assistant final
+  `2fa0149c-acb4-48b3-a728-162d7397abfd`. Its existing production Rescue
+  record was completed/armed=false at 13:16:17Z. The canary did not modify
+  global settings; it reported Auto Compact correctly still disabled.
+- This proves the real composer/send/resume path and normal-completion
+  disarm. The own-production Goal report -> automatic next assistant turn
+  must still be checked AFTER the upcoming controlled deployment/final.
+
+New modules: `goal-continuation-supervisor.js`, `classic-composer-draft.js`.
+New tests cover source final gating, stale/multiple displays, pause races,
+restart, lost acknowledgements, single-send transport, draft protection and
+actual report/app production wiring; they are included in verify:goal.
+Preliminary full audit `ebd79d43-73f1-443a-be77-992071248272` passed 162 named
+gates. Later refinements require a final committed-revision audit.
+
+Historical one-session replay failure has no surviving reason in the bounded
+logs inspected. Existing replay/lazy-resurrection/no-5xx-replay tests pass.
+Do not invent its cause or restart Gateway just to add diagnostic fields.
+The temporary Gateway-only diagnostics experiment was reverted; no such
+Gateway change is part of this Core-only deployment.
+
 ## Non-negotiable operating state
 
 Keep package version 0.5.8. Auto Compact remains off. Do not disable Goal,

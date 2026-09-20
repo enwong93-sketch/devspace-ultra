@@ -50,7 +50,11 @@ function cleanClaimId(value) {
 }
 
 function conversationIdFromUrl(url) {
-  try { return new URL(String(url || "")).pathname.match(/\/c\/([^/?#]+)/)?.[1] || null; }
+  try {
+    const parsed = new URL(String(url || ''));
+    if (parsed.protocol !== 'https:' || parsed.hostname !== 'chatgpt.com') return null;
+    return parsed.pathname.match(/\/c\/([^/?#]+)/)?.[1] || null;
+  }
   catch { return null; }
 }
 
@@ -167,20 +171,24 @@ export class ConversationStartClaimCdpResolver {
     if (!expected) return null;
     const normalizedType = claimType === "progress" ? "progress" : "conversation-start";
     const owners = new Map();
+    const displays = new Map();
     let inspected = 0;
-
-    for (const port of this.ports) {
-      const targets = await this.listTargets(port).catch(() => []);
+    // Probe offline loopback ports concurrently, not 32 sequential deadlines.
+    // No ownership is cached between requests.
+    const inventories = await Promise.all(this.ports.map(async (port) => ({
+      port, targets: await this.listTargets(port).catch(() => []),
+    })));
+    for (const { port, targets } of inventories) {
       if (!Array.isArray(targets) || !targets.length) continue;
       const pages = new Map(
         targets
-          .filter((target) => target?.type === "page" && /chatgpt\.com/i.test(String(target?.url || "")))
+          .filter((target) => target?.type === "page" && conversationIdFromUrl(target?.url))
           .map((target) => [String(target.id || ""), target]),
       );
       if (!pages.size) continue;
       const iframes = targets
-        .filter((target) => target?.type === "iframe" && pages.has(String(target?.parentId || "")) && target?.webSocketDebuggerUrl)
-        .slice(0, this.maxIframes);
+        .filter((target) => target?.type === "iframe" && pages.has(String(target?.parentId || "")) && target?.webSocketDebuggerUrl);
+      if (iframes.length > this.maxIframes) return null; // incomplete ambiguity scan
 
       for (let index = 0; index < iframes.length; index += this.batchSize) {
         const batch = iframes.slice(index, index + this.batchSize);
@@ -195,15 +203,21 @@ export class ConversationStartClaimCdpResolver {
           const conversationId = conversationIdFromUrl(page?.url);
           const runtimeKey = runtimeKeyForPort(port);
           if (!conversationId || !runtimeKey) continue;
-          owners.set(`${runtimeKey}:${conversationId}`, { runtimeKey, conversationId });
+          if (!owners.has(conversationId)) owners.set(conversationId, { runtimeKey, conversationId });
+          displays.set(`${port}:${page.id}`, { port, pageId: page.id, conversationId });
         }
         if (owners.size > 1) return null;
-        if (owners.size === 1) break;
+        // Do not stop at the first match: a later batch may prove a conflict.
       }
     }
 
     if (owners.size !== 1) return null;
     const owner = [...owners.values()][0];
+    for (const display of displays.values()) {
+      const current = await this.listTargets(display.port).catch(() => []);
+      const page = current.find((target) => target?.type === 'page' && target.id === display.pageId);
+      if (conversationIdFromUrl(page?.url) !== owner.conversationId) return null;
+    }
     return {
       ...owner,
       claimId: expected,
@@ -213,6 +227,7 @@ export class ConversationStartClaimCdpResolver {
       pageVerified: true,
       observedAt: new Date(Number(this.now())).toISOString(),
       inspectedIframes: inspected,
+      matchingDisplays: displays.size,
     };
   }
 }
