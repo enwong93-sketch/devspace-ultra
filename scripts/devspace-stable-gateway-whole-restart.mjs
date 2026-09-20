@@ -72,10 +72,20 @@ const owned = validateDevspaceListeners({
 });
 const gateway = owned.find((entry) => entry.role === "gateway") ?? null;
 const corePids = owned.filter((entry) => entry.role === "core").map((entry) => entry.pid);
-const jobProbe = await execFileAsync('python', [join(packageRoot,'scripts','devspace-runtime-safety-probe.py'),
-  ...owned.map(entry=>String(entry.pid))], {windowsHide:true,maxBuffer:1024*1024});
-const jobSafety = JSON.parse(jobProbe.stdout).currentJob;
-if (!jobSafety?.queryOk || !jobSafety?.limitsQueryOk || jobSafety.killOnJobClose !== false) {
+const jobProbe = await new Promise((resolveProbe, rejectProbe) => {
+  // Match the actual detached helper's Job. execFile creates a short-lived
+  // child Job and therefore measures the wrong containment boundary.
+  const probe = spawn('python', [join(packageRoot,'scripts','devspace-runtime-safety-probe.py'),
+    ...owned.map(entry=>String(entry.pid))], {detached:true,windowsHide:true,stdio:['ignore','pipe','pipe']});
+  let stdout='';
+  probe.stdout.on('data',data=>{stdout+=data.toString('utf8');});
+  probe.stderr.resume();
+  probe.once('error',rejectProbe);
+  probe.once('close',code=>code===0?resolveProbe(stdout):rejectProbe(new Error('Windows Job probe failed.')));
+});
+const jobSafety = JSON.parse(jobProbe).currentJob;
+if (!jobSafety?.queryOk || !jobSafety?.limitsQueryOk || jobSafety.killOnJobClose !== false
+  || !owned.every(entry=>jobSafety.requestedPidsInCurrentJob?.includes(entry.pid))) {
   throw new Error('Cannot prove shared Windows Job survives launcher exit; no process was stopped.');
 }
 
