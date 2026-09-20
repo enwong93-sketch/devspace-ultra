@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import './progress-claim-lifetime.test.js';
 import { readFile } from "node:fs/promises";
 
 const html = await readFile(new URL("./ui/progress-claim-relay.html", import.meta.url), "utf8");

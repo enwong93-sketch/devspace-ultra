@@ -56,6 +56,13 @@ Real isolated acceptance:
   must still be checked AFTER the upcoming controlled deployment/final.
 
 New modules: `goal-continuation-supervisor.js`, `classic-composer-draft.js`.
+The progress relay had an additional lifetime mismatch: it closed on success
+or only 1.2s after failed host calls, even though backend scans could take
+longer and the next Goal/Plan tool must revalidate the same receipt. It now
+retains the invisible receipt only until its declared two-minute expiry, with
+cleanup scheduled independently of a hung host call. Two executable HTML/VM
+regressions failed before the fix and pass after it. No message is authored
+by that cleanup timer and no unrelated iframe is closed.
 New tests cover source final gating, stale/multiple displays, pause races,
 restart, lost acknowledgements, single-send transport, draft protection and
 actual report/app production wiring; they are included in verify:goal.
