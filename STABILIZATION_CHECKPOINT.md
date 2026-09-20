@@ -25,6 +25,18 @@ Main/Blender processes are never in its targeted PID list. A zero-listener
 cold start remains supported. All changes require a final audit before that
 single controlled Gateway/Core replacement.
 
+The final process safety probe found the existing Job contains Gateway,
+Core and all three Blender PIDs, with limitFlags=0 (no kill-on-job-close).
+Therefore the original Stop-ScheduledTask method MUST NOT be used. The
+canonical replacement helper now leaves the Job and task untouched, waits
+for quiet, rechecks creation identities, stops ONLY the exact Gateway/Core
+PIDs and starts the unchanged canonical launcher directly. Its helper is a
+detached process in the surviving Job, not another Task Scheduler kill scope.
+It refuses replacement unless the Job-limit probe succeeds and confirms
+kill-on-job-close is false. The generated PowerShell is syntax-checked by the
+real PowerShell parser in regression tests. No production change has been
+performed by these probes or tests.
+
 The user asked to finish stabilization, explicitly prioritizing Goal Mode.
 The real Goal was still round 1 / reported / continuation pending more than
 three hours after its final response. It was manually redeemed into round 2

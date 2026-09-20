@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import {execFileSync} from 'node:child_process';
 import {
   buildRestartPowerShell,
   parseNetstatListeners,
@@ -74,15 +75,16 @@ const script = buildRestartPowerShell({
   helperTaskName: "DevSpace-Stable-Gateway-Restart-test",
   delaySeconds: 5,
 });
-assert.match(script, /Stop-ScheduledTask/);
+assert.doesNotMatch(script, /Stop-ScheduledTask|Stop-Job|TerminateJobObject/,
+  'replacing Gateway must never kill a shared Windows Job containing Blender');
 assert.match(script, /Stop-Process -Id \$pidValue -Force/);
 assert.match(script, /Start-ScheduledTask/);
 assert.match(script, /__devspace\/gateway\/healthz/);
 assert.match(script, /while \(-not \$ok\)/, "restart health verification must wait for actual readiness rather than a wall-clock deadline");
 assert.doesNotMatch(script.slice(script.indexOf('  Start-ScheduledTask')), /quietDeadline|health-timeout/,
   "startup has no overall deadline; the bounded quiet check may only abort BEFORE stopping any work");
-assert.ok(script.indexOf('$quietSamples -lt 3') < script.indexOf('  Stop-ScheduledTask'));
-assert.ok(script.indexOf('Process identity changed; restart cancelled.') < script.indexOf('  Stop-ScheduledTask'));
+assert.ok(script.indexOf('$quietSamples -lt 3') < script.indexOf(' Stop-Process'));
+assert.ok(script.indexOf('Process identity changed; restart cancelled.') < script.indexOf(' Stop-Process'));
 assert.match(script, /admission\.activeRequests -eq 0/);
 assert.match(script, /activity\.running -eq 0/);
 assert.match(script, /\$oldPids=@\(100,200\)/);
@@ -98,6 +100,15 @@ const coldStartScript = buildRestartPowerShell({
 });
 assert.match(coldStartScript, /\$oldPids=@\(\)/, "zero-listener recovery must be a supported cold-start path");
 assert.match(coldStartScript, /\$hasGateway=\$false/);
+const preserveJobScript=buildRestartPowerShell({taskName:'x',gatewayPort:7678,gatewayPid:100,corePids:[200],resultPath:'x',
+  nodePath:'C:\\Node\\node.exe',launcherPath:'C:\\DevSpace\\scripts\\devspace-fixed-backend.mjs',configDir:'C:\\State'});
+assert.match(preserveJobScript,/Start-Process -FilePath \$nodePath/);
+assert.doesNotMatch(preserveJobScript,/Stop-ScheduledTask|Start-ScheduledTask|Unregister-ScheduledTask/);
+if (process.platform === 'win32') {
+  const encoded=Buffer.from(preserveJobScript,'utf8').toString('base64');
+  const check=`$t=$null;$e=$null;[System.Management.Automation.Language.Parser]::ParseInput([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encoded}')),[ref]$t,[ref]$e)|Out-Null; if($e.Count){$e|ForEach-Object{$_.Message};exit 1}`;
+  execFileSync('powershell.exe',['-NoProfile','-NonInteractive','-Command',check],{windowsHide:true});
+}
 
 {
   const rows = await queryListenerProcesses([100, 200], {

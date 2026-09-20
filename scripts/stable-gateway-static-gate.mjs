@@ -63,7 +63,8 @@ assert.match(gatewayRuntime, /updateAuthorization\(/, "Gateway registry must rot
 assert.match(gatewayRuntime, /markEventStreamOpen[\s\S]*markEventStreamClosed[\s\S]*entry\.coreId = "unmapped"[\s\S]*entry\.backendSessionId = "unmapped"/, "Gateway SSE disconnects must invalidate only the Core mapping while retaining the public conversation descriptor for lazy resurrection");
 assert.doesNotMatch(gatewayRuntime, /#removeDisconnectedIfIdle|this\.sessions\.delete\(entry\.publicSessionId\)/, "A normal ChatGPT SSE reconnect boundary must never revoke the public MCP session descriptor");
 assert.doesNotMatch(gatewayRuntime, /MAX_RETAINED|MAX_REPLAY|idleRetention|timeoutPromise|setTimeout/, "Gateway public-session continuity must not impose artificial retention caps or wall-clock termination");
-assert.match(gatewayProxy, /registry\.updateAuthorization\(publicSessionId, currentAuthorization\)/, "every authenticated session request must refresh the replay/schema-probe credential before later handover");
+assert.match(gatewayProxy, /res\.statusCode >= 200 && res\.statusCode < 300\) \{\s*registry\.updateAuthorization\(responsePublicSessionId, requestAuthorization\)/,
+  "only a Core-accepted request may refresh replay credentials; rejected App tokens must not poison later handover");
 assert.match(gatewayProxy, /droppedPublicSessionIds[\s\S]*registry\.invalidateMapping\?\.\(session\.publicSessionId\)/, "one stale replay mapping must be isolated without deleting the lightweight public session descriptor");
 assert.match(gatewayProxy, /resurrectionLocks[\s\S]*resurrectSession[\s\S]*registry\.commitMappings/, "Gateway must lazily resurrect an unmapped public MCP session exactly once while preserving public identity");
 assert.match(gatewayProxy, /upstreamRes\.statusCode === 404[\s\S]*resurrectSession/, "only an exact downstream unknown-session response may trigger transparent lazy resurrection");

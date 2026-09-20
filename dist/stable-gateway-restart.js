@@ -79,6 +79,9 @@ export function buildRestartPowerShell({
   helperTaskName = null,
   delaySeconds = 5,
   expectedProcesses = [],
+  nodePath = null,
+  launcherPath = null,
+  configDir = null,
 }) {
   const allPids = [...new Set([gatewayPid, ...corePids].map(Number).filter((value) => Number.isInteger(value) && value > 0))];
   const pidList = allPids.join(",");
@@ -112,20 +115,28 @@ export function buildRestartPowerShell({
     "    if (-not $current -or $current.CreationDate.ToUniversalTime().ToString('o') -ne $identity.createdAt) { throw 'Process identity changed; restart cancelled.' }",
     "  }",
     "  $quietVerified=$true",
-    "  Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue",
+    // Never terminate the Task Scheduler Job: detached Blender processes can
+    // still belong to it. Only the preflighted Gateway/Core PIDs are retired.
     "  foreach ($pidValue in $oldPids) { Stop-Process -Id $pidValue -Force -ErrorAction SilentlyContinue }",
     "  Start-Sleep -Seconds 2",
-    "  Start-ScheduledTask -TaskName $taskName",
+    ...(nodePath && launcherPath && configDir ? [
+      `  $nodePath=${psQuote(nodePath)}`,
+      `  $launcherPath=${psQuote(launcherPath)}`,
+      `  $configDir=${psQuote(configDir)}`,
+      `  $launcherArgs='"'+$launcherPath+'" --foreground --config-dir "'+$configDir+'"'`,
+      "  $replacement=Start-Process -FilePath $nodePath -ArgumentList $launcherArgs -WindowStyle Hidden -PassThru",
+    ] : ["  Start-ScheduledTask -TaskName $taskName"]),
     "  while (-not $ok) {",
     "    Start-Sleep -Milliseconds 500",
     "    try {",
     "      $response=Invoke-RestMethod -Uri ('http://127.0.0.1:'+$gatewayPort+'/__devspace/gateway/healthz')",
     "      if ($response.ok -eq $true) { $core=Invoke-RestMethod -TimeoutSec 3 -Uri ('http://127.0.0.1:'+$gatewayPort+'/__devspace/memory/status'); if ($core.pid -gt 0) { $ok=$true; $state='ready'; break } }",
     "    } catch {}",
+    "    if ($replacement -and $replacement.HasExited -and $replacement.ExitCode -ne 0) { throw 'Canonical replacement launcher exited before readiness.' }",
     "    $task=Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue",
     "    $taskInfo=Get-ScheduledTaskInfo -TaskName $taskName -ErrorAction SilentlyContinue",
     "    $listener=Get-NetTCPConnection -State Listen -LocalPort $gatewayPort -ErrorAction SilentlyContinue | Select-Object -First 1",
-    "    if (-not $listener -and $task -and $task.State -ne 'Running' -and $taskInfo -and $taskInfo.LastTaskResult -notin @(0,267009)) {",
+    "    if (-not $replacement -and -not $listener -and $task -and $task.State -ne 'Running' -and $taskInfo -and $taskInfo.LastTaskResult -notin @(0,267009)) {",
     "      throw ('Stable Gateway task exited before readiness (LastTaskResult='+$taskInfo.LastTaskResult+').')",
     "    }",
     "  }",

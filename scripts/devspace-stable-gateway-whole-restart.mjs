@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -72,6 +72,12 @@ const owned = validateDevspaceListeners({
 });
 const gateway = owned.find((entry) => entry.role === "gateway") ?? null;
 const corePids = owned.filter((entry) => entry.role === "core").map((entry) => entry.pid);
+const jobProbe = await execFileAsync('python', [join(packageRoot,'scripts','devspace-runtime-safety-probe.py'),
+  ...owned.map(entry=>String(entry.pid))], {windowsHide:true,maxBuffer:1024*1024});
+const jobSafety = JSON.parse(jobProbe.stdout).currentJob;
+if (!jobSafety?.queryOk || !jobSafety?.limitsQueryOk || jobSafety.killOnJobClose !== false) {
+  throw new Error('Cannot prove shared Windows Job survives launcher exit; no process was stopped.');
+}
 
 const helperTaskName = `${taskName}-Restart-${Date.now().toString(36)}`.slice(0, 220);
 const script = buildRestartPowerShell({
@@ -80,8 +86,10 @@ const script = buildRestartPowerShell({
   gatewayPid: gateway?.pid ?? null,
   corePids,
   resultPath,
-  helperTaskName,
   delaySeconds,
+  nodePath: process.execPath,
+  launcherPath: join(packageRoot, 'scripts', 'devspace-fixed-backend.mjs'),
+  configDir,
   expectedProcesses: owned.map(entry => {
     const process=listenerProcesses.find(row=>row.processId===entry.pid);
     if (!process?.createdAt) throw new Error('Process creation identity is unavailable; refusing whole restart.');
@@ -90,24 +98,12 @@ const script = buildRestartPowerShell({
 });
 await writeFile(scriptPath, `${script}\r\n`, { encoding: "utf8", mode: 0o600 });
 
-const helperCommand = [
-  "$ErrorActionPreference='Stop'",
-  `$helperTaskName=${psQuote(helperTaskName)}`,
-  `$scriptPath=${psQuote(scriptPath)}`,
-  "$execute=Join-Path $PSHOME 'powershell.exe'",
-  `$arguments='-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "'+$scriptPath+'"'`,
-  "$action=New-ScheduledTaskAction -Execute $execute -Argument $arguments",
-  "$trigger=New-ScheduledTaskTrigger -Once -At ((Get-Date).AddHours(1))",
-  "$settings=New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero)",
-  "$principal=New-ScheduledTaskPrincipal -UserId ([Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel Limited",
-  "$definition=New-ScheduledTask -Action $action -Trigger $trigger -Settings $settings -Principal $principal",
-  "Register-ScheduledTask -TaskName $helperTaskName -InputObject $definition -Force | Out-Null",
-  "Start-ScheduledTask -TaskName $helperTaskName",
-].join("; ");
-await execFileAsync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", helperCommand], {
-  windowsHide: true,
-  maxBuffer: 2 * 1024 * 1024,
+// Keep the existing Windows Job alive; do not stop/unregister the production
+// task or create another task-owned Job around its long-lived applications.
+const helper = spawn('powershell.exe', ['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',scriptPath], {
+  detached:true, windowsHide:true, stdio:'ignore',
 });
+helper.unref();
 
 console.log(JSON.stringify({
   ok: true,
@@ -118,6 +114,8 @@ console.log(JSON.stringify({
   oldGatewayPid: gateway?.pid ?? null,
   oldCorePids: corePids,
   helperTaskName,
+  helperPid: helper.pid,
+  jobPreserved: true,
   delaySeconds,
   resultPath,
   scriptPath,
