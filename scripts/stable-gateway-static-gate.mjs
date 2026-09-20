@@ -73,6 +73,12 @@ assert.doesNotMatch(gatewayProxy, /setTimeout|setTimeout\(|requestTimeoutMs|Core
 assert.doesNotMatch(gatewayController, /drainTimeoutMs|requestTimeoutMs|waitForDrain\([^)]*\d|waitForOpen\([^)]*timeout/, "Core recovery and handover must wait for real request completion rather than a deadline");
 assert.doesNotMatch(coreSlot, /Core readiness timed out|SIGKILL|max-old-space-size|max-semi-space-size/, "Core lifecycle must not cap heap, kill a slow startup, or force-kill long shutdown work");
 assert.match(gatewayController, /droppedSessions/, "Core recovery and handover results must surface partial replay drops without marking a healthy replacement Core fatal");
+assert.match(gatewayController, /deferredSessions/,
+  "recoverable replay failures must be reported separately from schema-incompatible session removal");
+assert.match(gatewayController, /replayFailureReasons/,
+  "handover evidence must expose only bounded sanitized replay reason counts");
+assert.match(gatewayProxy, /MCP session deferred for lazy recovery/,
+  "non-schema replay failures must preserve the public descriptor for next-request resurrection");
 assert.doesNotMatch(gatewayRuntime, /writeFile|persist.*authorization|authorization.*JSON\.stringify/i, "rotated replay credentials must remain memory-only");
 assert.doesNotMatch(stableGateway, /console\.log\([^\n]*(controlToken|authorization|bearer)/i, "Gateway must never log control/replay credentials");
 

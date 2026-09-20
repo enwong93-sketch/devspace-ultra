@@ -355,7 +355,7 @@ async function testSuccessfulHandover() {
   }
 }
 
-async function testReplayFailureDropsStaleSessionButKeepsHealthyCoreB() {
+async function testReplayFailureDefersSessionButKeepsHealthyCoreB() {
   const h = await createHarness({ failActiveB: true });
   try {
     const publicSessionId = await initializeSession(h);
@@ -365,7 +365,9 @@ async function testReplayFailureDropsStaleSessionButKeepsHealthyCoreB() {
     assert.equal(result.rollback, false);
     assert.equal(result.activeSlot, "b");
     assert.equal(result.replayedSessions, 0);
-    assert.equal(result.droppedSessions, 1);
+    assert.equal(result.droppedSessions, 0);
+    assert.equal(result.deferredSessions, 1);
+    assert.deepEqual(result.replayFailureReasons, { "initialize-failed": 1 });
     assert.equal(h.activeBStarted(), true);
     assert.equal(h.stops.includes("core-b"), false, "stale session replay must not cause a healthy Core B rollback");
 
@@ -433,6 +435,8 @@ async function testExplicitSchemaChangeDropsOldSessionsAndPromotesValidatedCore(
     assert.equal(result.replayedSessions, 0);
     assert.equal(result.droppedSessions, 1,
       "initialized sessions carrying the old model surface must be removed instead of replayed across a schema change");
+    assert.equal(result.deferredSessions, 0);
+    assert.deepEqual(result.replayFailureReasons, { "schema-stale": 1 });
     assert.deepEqual(h.candidateProbes, [
       { expectedSchemaFingerprint: "a".repeat(64), allowSchemaChange: true },
       { expectedSchemaFingerprint: "b".repeat(64), allowSchemaChange: false },
@@ -492,7 +496,7 @@ async function testSchemaChangeReplacementMismatchRollsBackOldSurface() {
 await testLongLivedEventStreamDoesNotBlockHandoverDrain();
 await testEventStreamWithoutAcceptHeaderDoesNotBlockHandoverDrain();
 await testSuccessfulHandover();
-await testReplayFailureDropsStaleSessionButKeepsHealthyCoreB();
+await testReplayFailureDefersSessionButKeepsHealthyCoreB();
 await testCandidateFailureNeverStopsA();
 await testSchemaChangeRequiresExplicitAuthorization();
 await testExplicitSchemaChangeDropsOldSessionsAndPromotesValidatedCore();

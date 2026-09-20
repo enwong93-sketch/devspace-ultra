@@ -84,6 +84,16 @@ class StaleSessionSchemaError extends Error {
   }
 }
 
+function replayFailureCode(error) {
+  if (error?.code === "MCP_SCHEMA_STALE") return "schema-stale";
+  const message = String(error instanceof Error ? error.message : error || "");
+  if (message === "initialize-replay-failed") return "initialize-failed";
+  if (message === "initialized-notification-replay-failed") return "initialized-notification-failed";
+  const schemaProbe = message.match(/Core tools\/list schema probe failed with HTTP (\d{3})\./);
+  if (schemaProbe) return `schema-probe-http-${schemaProbe[1]}`;
+  return "transport-or-core-failure";
+}
+
 function isInitialize(body) {
   return body?.method === "initialize";
 }
@@ -219,6 +229,8 @@ export function createStableGatewayProxy({
     const nextCore = requireCore(coreInput);
     const mappings = [];
     const droppedPublicSessionIds = [];
+    const deferredPublicSessionIds = [];
+    const failureReasonCounts = {};
     for (const session of registry.entriesForReplay()) {
       try {
         const initialized = await requestCoreJson(nextCore, session.initializeBody, {
@@ -254,19 +266,30 @@ export function createStableGatewayProxy({
           backendSessionId,
         });
       } catch (error) {
-        if (error?.code === "MCP_SCHEMA_STALE") registry.remove?.(session.publicSessionId);
-        else registry.invalidateMapping?.(session.publicSessionId);
-        droppedPublicSessionIds.push(session.publicSessionId);
+        const reason = replayFailureCode(error);
+        failureReasonCounts[reason] = Number(failureReasonCounts[reason] || 0) + 1;
+        const terminal = error?.code === "MCP_SCHEMA_STALE";
+        if (terminal) {
+          registry.remove?.(session.publicSessionId);
+          droppedPublicSessionIds.push(session.publicSessionId);
+        } else {
+          // A failed replay is not session loss. Preserve the public descriptor
+          // and recover lazily on the next real request, which brings a current
+          // Authorization header. This avoids replaying stale bearer material
+          // and reports availability truthfully to operators.
+          registry.invalidateMapping?.(session.publicSessionId);
+          deferredPublicSessionIds.push(session.publicSessionId);
+        }
         try {
           activityJournal?.noteSystem?.({
-            title: "Stale MCP session dropped",
-            detail: `${nextCore.id}: ${error instanceof Error ? error.message : "session replay failed"}`,
-            state: "failed",
+            title: terminal ? "Incompatible MCP session removed" : "MCP session deferred for lazy recovery",
+            detail: `${nextCore.id}: ${reason}`,
+            state: terminal ? "failed" : "completed",
           });
         } catch {}
       }
     }
-    return { mappings, droppedPublicSessionIds };
+    return { mappings, droppedPublicSessionIds, deferredPublicSessionIds, failureReasonCounts };
   };
 
   const resurrectSession = async (publicSessionId, authorization) => {
@@ -332,6 +355,8 @@ export function createStableGatewayProxy({
         activeCore: { ...currentCore },
         replayedSessions: replayed.mappings.length,
         droppedSessions: replayed.droppedPublicSessionIds.length,
+        deferredSessions: replayed.deferredPublicSessionIds.length,
+        replayFailureReasons: replayed.failureReasonCounts,
       };
     } finally {
       registry.abortBarrier();

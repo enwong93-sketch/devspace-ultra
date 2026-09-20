@@ -263,7 +263,10 @@ async function runStaleReplayIsolationGate() {
     assert.equal(handover.status, 200);
     assert.equal(handover.json?.ok, true);
     assert.equal(handover.json?.activeSlot, "b");
-    assert.equal(handover.json?.droppedSessions, 1);
+    assert.equal(handover.json?.droppedSessions, 0,
+      "a recoverable replay failure must not be labelled as permanent session loss");
+    assert.equal(handover.json?.deferredSessions, 1);
+    assert.deepEqual(handover.json?.replayFailureReasons, { "initialize-failed": 1 });
 
     const resurrected = await requestJson(harness.baseUrl, "/mcp", {
       body: { jsonrpc: "2.0", id: 3, method: "tools/list", params: {} },

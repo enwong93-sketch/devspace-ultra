@@ -84,7 +84,7 @@ try {
       headers: { 'content-type': 'application/json', 'x-devspace-gateway-control': control.controlToken }, body: JSON.stringify({ allowSchemaChange: false }) });
     const result = await response.json();
     state.handover = Object.fromEntries(['ok', 'state', 'activeSlot', 'activePid', 'candidateStage', 'schemaChanged',
-      'requiresFreshInitialize', 'replayedSessions', 'droppedSessions', 'rollback', 'durationMs']
+      'requiresFreshInitialize', 'replayedSessions', 'deferredSessions', 'droppedSessions', 'replayFailureReasons', 'rollback', 'durationMs']
       .filter(key => result[key] !== undefined).map(key => [key, result[key]]));
     if (!response.ok || !result.ok) throw new Error('protected-handover-failed');
     const after = await client.listTools();
