@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import { cleanOpenaiIdentity } from './openai-conversation-binding.js';
 
 function cleanFingerprint(value) {
   const text = String(value ?? "").trim().toLowerCase();
@@ -30,12 +31,14 @@ export class McpConversationRequestContext {
     sessionFingerprint = null,
     mcpSessionId = null,
     traceCorrelationFingerprints = [],
+    openaiIdentity = null,
   } = {}, operation) {
     if (typeof operation !== "function") throw new Error("operation is required.");
     const selectedCapabilityAuthority = capabilityAuthority || authority;
     const capabilityConversationId = cleanConversation(selectedCapabilityAuthority?.conversationId);
     const progressConversationId = cleanConversation(progressAuthority?.conversationId);
     const context = {
+      openaiIdentity: cleanOpenaiIdentity(openaiIdentity),
       authority: capabilityConversationId
         ? {
             ...selectedCapabilityAuthority,
@@ -75,6 +78,7 @@ export class McpConversationRequestContext {
     const value = this.storage.getStore();
     if (!value) return null;
     return {
+      ...(value.openaiIdentity ? { openaiIdentity: { ...value.openaiIdentity } } : {}),
       authority: value.authority ? structuredClone(value.authority) : null,
       capabilityAuthority: value.capabilityAuthority ? structuredClone(value.capabilityAuthority) : null,
       progressAuthority: value.progressAuthority ? structuredClone(value.progressAuthority) : null,

@@ -52,7 +52,7 @@ export class GoalContinuationSupervisor {
     if (Array.isArray(rows) && options.runtimeKey) rows = rows.filter(p => p.runtimeKey === options.runtimeKey);
     if (!Array.isArray(rows) || !rows.length || rows.length > 4) return null;
     if (rows.some(p => p?.conversationId !== goal.conversationId || !p.latestUserMessageId || p.chatMode !== true)) return null;
-    if (new Set(rows.map(p => p.latestUserMessageId)).size !== 1) return null;
+    if (!options.allowDivergent && new Set(rows.map(p => p.latestUserMessageId)).size !== 1) return null;
     return rows;
   }
   async arm(goal, { resume = false, reportAuthority = null } = {}) {
@@ -70,7 +70,7 @@ export class GoalContinuationSupervisor {
       && reportAuthority?.conversationId === goal.conversationId
       && /^main-(0[1-9]|[12][0-9]|3[0-2])$/.test(reportAuthority?.runtimeKey || '')
       ? reportAuthority.runtimeKey : null;
-    const pages = await this.pages(goal, { sourceOnly: true, runtimeKey: sourceRuntimeKey });
+    const pages = await this.pages(goal, { sourceOnly: true, runtimeKey: sourceRuntimeKey, allowDivergent: true });
     if (!pages) return { armed: false, reason: 'source-page-unresolved' };
     const current = await this.goalRuntime.status(goal.id);
     if (!pending(current) || current.continuation.continuationId !== id || this.closed) return { armed: false, reason: 'goal-changed' };
@@ -80,11 +80,25 @@ export class GoalContinuationSupervisor {
       }
       if (this.records.size >= this.maxRecords) return { armed: false, reason: 'journal-capacity-protected' };
     }
+    const causalDisplayProof = !sourceRuntimeKey && new Set(pages.map(p=>p.latestUserMessageId)).size > 1;
+    if (causalDisplayProof) {
+      const awaiting = pages.filter(p => p.generating === true || p.latestMessageRole === 'user');
+      // A later final is not causal proof if two different unfinished branches
+      // were already present when the report arrived. Do not race the first
+      // branch to finish; require an exact request receipt to disambiguate it.
+      if (new Set(awaiting.map(p => p.latestUserMessageId)).size !== 1) {
+        return { armed: false, reason: 'ambiguous-unfinished-source-turns' };
+      }
+    }
     const row = {
       goalId: goal.id, continuationId: id, conversationId: goal.conversationId, round: goal.round,
       reportedAt: goal.lastRoundReport.reportedAt, sourceUserId: pages[0].latestUserMessageId,
       sourceRuntimeKey,
-      baseline: resume ? [] : pages.map(p => ({ id: p.latestAssistantMessageId || null, hash: digest(p.latestAssistantText) })),
+      causalDisplayProof,
+      sourceCandidates: causalDisplayProof ? pages.map(p=>({pageTargetId:p.pageTargetId,
+        userId:p.latestUserMessageId,assistantId:p.latestAssistantMessageId,hash:digest(p.latestAssistantText),
+        awaitingAssistant:p.generating===true||p.latestMessageRole==='user'})) : null,
+      baseline: resume && !causalDisplayProof ? [] : pages.map(p => ({ id: p.latestAssistantMessageId || null, hash: digest(p.latestAssistantText) })),
       state: 'waiting', reason: 'awaiting-visible-final', attempts: 0, createdAt: this.now(),
     };
     this.records.set(id, row); await this.save();
@@ -117,6 +131,26 @@ export class GoalContinuationSupervisor {
       && new Set(pages.map(p => `${p.latestAssistantMessageId}:${digest(p.latestAssistantText)}`)).size === 1
       && !row.baseline.some(b => b.id === pages[0].latestAssistantMessageId && b.hash === digest(pages[0].latestAssistantText));
   }
+  async finalCandidates(goal,row) {
+    if (!row.causalDisplayProof) return {pages:await this.pages(goal,{runtimeKey:row.sourceRuntimeKey})};
+    const all=await this.pages(goal,{allowDivergent:true});
+    if(!all)return {pages:null};
+    const knownUsers=new Set(row.sourceCandidates.map(p=>p.userId));
+    // Synchronizing a stale display to an already-captured user is harmless;
+    // an actually NEW user in any display cancels this report's continuation.
+    if(all.some(p=>!knownUsers.has(p.latestUserMessageId)))return {pages:null,newUser:true};
+    const changed=all.filter(p=>{
+      const before=row.sourceCandidates.find(b=>b.pageTargetId===p.pageTargetId);
+      return before?.awaitingAssistant===true && p.latestUserMessageId===before.userId && finalPage(p)
+        && (p.latestAssistantMessageId!==before.assistantId || digest(p.latestAssistantText)!==before.hash);
+    });
+    const outcomes=new Set(changed.map(p=>`${p.latestUserMessageId}:${p.latestAssistantMessageId}:${digest(p.latestAssistantText)}`));
+    if(outcomes.size!==1)return {pages:null};
+    // The causal proof is a new final AFTER this exact report's captured
+    // boundary, not a guess based on which Runtime happens to look active.
+    row.sourceUserId=changed[0].latestUserMessageId;
+    return {pages:changed};
+  }
   async reconcile(row) {
     const goal = await this.goalRuntime.status(row.goalId);
     if (goal.status !== 'active' || this.closed) return;
@@ -140,7 +174,9 @@ export class GoalContinuationSupervisor {
     if (!pending(goal) || goal.continuation.continuationId !== row.continuationId || goal.round !== row.round) {
       row.state = 'superseded'; row.reason = 'goal-stopped-paused-or-consumed'; await this.save(); return;
     }
-    let pages = await this.pages(goal, { runtimeKey: row.sourceRuntimeKey });
+    let selected = await this.finalCandidates(goal,row);
+    if(selected.newUser){row.state='cancelled';row.reason='new-user-turn-takes-precedence';await this.save();return;}
+    let pages = selected.pages;
     if (!pages) { row.reason = 'exact-page-unavailable'; return; }
     if (pages.some(p => p.latestUserMessageId !== row.sourceUserId)) {
       row.state = 'cancelled'; row.reason = 'new-user-turn-takes-precedence'; await this.save(); return;
@@ -152,7 +188,8 @@ export class GoalContinuationSupervisor {
     // Exclusive GoalRuntime lease also arbitrates the legacy app dispatch path.
     const claimed = await this.goalRuntime.continuation({ goalId: row.goalId, action: 'claim' });
     const leaseId = claimed.claim.leaseId;
-    pages = await this.pages(goal, { runtimeKey: row.sourceRuntimeKey });
+    selected = await this.finalCandidates(goal,row);
+    pages = selected.pages;
     const current = await this.goalRuntime.status(row.goalId);
     if (this.closed || current.status !== 'active' || current.continuation?.leaseId !== leaseId || !this.matchesFinal(row, pages)) {
       await this.goalRuntime.continuation({ goalId: row.goalId, action: 'release', leaseId }).catch(() => {});
@@ -160,6 +197,7 @@ export class GoalContinuationSupervisor {
     }
     row.state = 'dispatching'; row.attempts += 1; row.leaseId = leaseId; row.sentAt = this.now();
     row.finalAssistantId = pages[0].latestAssistantMessageId;
+    if(row.causalDisplayProof)row.sourceRuntimeKey=pages[0].runtimeKey||null;
     await this.save(); // durable before any possible transport side effect
     const authorized = await this.goalRuntime.status(row.goalId);
     if (this.closed || authorized.status !== 'active' || authorized.roundState !== 'reported'

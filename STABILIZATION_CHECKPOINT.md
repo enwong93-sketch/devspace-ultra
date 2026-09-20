@@ -2,6 +2,52 @@
 
 ## Round 2: Goal continuation closure (latest work)
 
+### Latest resumed work — 2026-09-20 16:04Z onward
+
+The deployed Gateway/Core are now 38708/16796, not the older PIDs below.
+The Goal is still round 2 / working. No current-turn Plan was created: its
+pending claim expired. Do not treat that pending result as a Plan ID.
+
+During inspection, invoking the old whole-restart script with `--status`
+unexpectedly scheduled a replacement because it ignored unsupported flags.
+The newly spawned worker 9288 was cancelled while its saved phase was still
+`waiting-for-quiet`; original Gateway 38708 and Core 16796 were both alive
+and were NOT stopped. The saved waiting record is therefore stale, not an
+active replacement. The CLI now parses every argument BEFORE any side effect:
+status reads only, no args show help, unknown/conflicting flags reject, and
+actual replacement requires --execute. `verify:stable-gateway:whole-restart`
+now means --preflight-only; `restart:stable-gateway` is the explicit execute
+command. An actual child-process test verifies --status leaves its sentinel
+record's bytes/mtime and directory unchanged.
+
+The current Pro/background turn publishes an async placeholder (tool author
+`a8km123`) to the main conversation, but its internal MCP receipts do not
+appear in the page's mounted Apps or native conversation snapshot during the
+turn. This was observed in both read-only iframe and bounded native probes.
+Do not keep waiting for a receipt that the host has not published.
+
+Official OpenAI Plugins reference identifies `_meta["openai/session"]` as
+an anonymized CONVERSATION id, not reusable `mcp-session-id`. New code keeps
+these distinct. It keys the authenticated provider id with OAuth client,
+resource, subject and organization; no legacy session maps are imported.
+Initial binding requires a real exact-page receipt or a direct-loopback
+owner-authorized bootstrap using the ORIGINAL pending claim. The bootstrap
+does not accept raw provider identity or replacement prose from callers.
+Subsequent requests recheck the live exact page. Conflicts quarantine instead
+of overwriting; raw metadata and credentials are not stored. This permits
+Pro to keep its own context without weakening transport/session isolation.
+Reference: https://developers.openai.com/plugins/reference
+
+The pending causal-display Goal patch was also hardened: two distinct
+unfinished user branches at report time cannot race for continuation. Without
+an exact receipt, only one captured unfinished source plus a genuinely new
+native-complete final may authorize the single send; new human input cancels.
+
+Preliminary combined full audit e1b89950-dcd2-4eb8-ad0f-f70e91d5bd64 passed
+162 named gates. A final committed revision audit and Core-only handover are
+still needed. The current Pro card uses the exact compatibility bridge until
+the new provider binding is loaded and verified with ordinary progress calls.
+
 ### Deployment preflight uncovered a Gateway authorization defect
 
 Core-only handover `185a9b6b-63d0-4e2a-9639-5cb35b9e0cb7` failed safely at

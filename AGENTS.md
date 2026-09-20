@@ -30,6 +30,27 @@ For every qualifying interactive Main task, this is an execution requirement rat
 
 ## Capability routing contract
 
+### Provider conversation identity is not a transport session
+
+OpenAI's official Plugins reference defines `_meta["openai/session"]` as an
+anonymized conversation ID. Treat it separately from reusable `mcp-session-id`
+and browser-session aliases. The `openai-conversation-binding` module accepts
+it only after OAuth/resource validation, keys it with the authenticated client,
+subject and organization, and requires an initial exact-page receipt or an
+explicit owner-authorized local bootstrap. Reuse still verifies the exact live
+conversation page; conflicts fail closed. Do not import legacy session maps.
+
+For a Pro/background turn whose original pending progress receipt is not
+rendered, the working Agent may use the existing local bridge once with
+`bind-progress --runtime-key <verified-main> --expected-conversation-id <current-id> --claim-id <original-pending-claim>`.
+This is an explicit operator pairing, not a native receipt claim: it needs the
+local owner credential, validates the actual page, and uses only the message
+and provider identity retained from the original authenticated request. It
+never accepts a caller-supplied provider key or replacement message. Confirm
+actual card text afterwards. Other chats cannot inherit this provider key.
+
+Reference: https://developers.openai.com/plugins/reference
+
 Routing is a Local Gateway product layer, not an informal prompt convention. Use `devspace_route` once at the start or resumption of a non-trivial task before generic implementation work. It is the single harness across direct tools, Agent Skills, capability plugins, MCP servers/tools, workflows, and application runtimes. After `open_workspace`, pass its `workspaceId` to `devspace_route` whenever project-local, user, or trusted plugin Agent Skills may apply. Follow every returned `routeChain` entry and its exact `nextAction`; discovery, catalog listing, or reading a Skill is never completion by itself. Use `capability_route` or `tool_search` only when `devspace_route` explicitly delegates to those compatibility sub-routers or when the user specifically requests a lower-level catalog search.
 
 ### Codex native browser gate

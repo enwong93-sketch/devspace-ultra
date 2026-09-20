@@ -122,13 +122,75 @@ test('a current request receipt disambiguates a stale second display without cho
   const d=new GoalContinuationSupervisor(config);
   h.setPages([{...h.page(),runtimeKey:'main-01',latestUserMessageId:'stale-user'},
     {...h.page(),runtimeKey:'main-02',pageTargetId:'page-b'}]);
-  assert.equal((await d.arm(h.reported)).armed,false);
-  assert.equal((await d.arm(h.reported,{reportAuthority:{pageVerified:false,runtimeKey:'main-02'}})).armed,false);
   const armed=await d.arm(h.reported,{reportAuthority:{pageVerified:true,
     source:'exact-progress-bootstrap-lease-page-verified',conversationId:h.reported.conversationId,runtimeKey:'main-02'}});
   assert.equal(armed.armed,true);
   h.final(); await d.pollOnce();h.advanceTime(100);await d.pollOnce();
   assert.equal(h.sends(),1);await d.close();
+});
+
+async function causalHarness(t,{bothAwaiting=false}={}) {
+  const h=await harness(t);await h.driver.close();
+  let views=[{...h.page(),runtimeKey:'main-01',latestUserMessageId:'stale-user',
+    generating:bothAwaiting,latestMessageRole:bothAwaiting?'user':'assistant'},
+    {...h.page(),runtimeKey:'main-02',pageTargetId:'page-b'}];
+  h.setPages(views);
+  const driver=new GoalContinuationSupervisor({...h.config,statePath:join(h.root,'causal-driver.json')});
+  t.after(()=>driver.close());
+  const armed=await driver.arm(h.reported);
+  assert.equal(armed.armed,true);
+  const set=(next)=>{views=next;h.setPages(views);};
+  const finish=(page,id='assistant-current')=>({...page,generating:false,latestMessageRole:'assistant',
+    latestAssistantMessageId:id,latestAssistantText:'A genuinely new final after the report'});
+  return {...h,driver,views:()=>views,set,finish,
+    tick:async()=>{h.advanceTime(100);return driver.pollOnce();}};
+}
+
+test('without an App receipt, divergent displays wait for one causal new final, never mere activity',async t=>{
+  const h=await causalHarness(t);
+  await h.tick();await h.tick();assert.equal(h.sends(),0);
+  h.set([h.views()[0],h.finish(h.views()[1])]);
+  await h.tick();await h.tick();assert.equal(h.sends(),1);
+  assert.equal((await h.runtime.status(h.g.id)).round,2);
+});
+
+test('a previously completed stale display changing its old text is not a current final',async t=>{
+  const h=await causalHarness(t);
+  h.set([h.finish(h.views()[0],'old-final-rehydrated'),h.views()[1]]);
+  await h.tick();await h.tick();assert.equal(h.sends(),0);
+});
+
+test('two unfinished branches cannot race to become the report owner',async t=>{
+  const h=await harness(t); await h.driver.close();
+  h.setPages([{...h.page(),runtimeKey:'main-01',latestUserMessageId:'other-unfinished-user'},
+    {...h.page(),runtimeKey:'main-02',pageTargetId:'page-b'}]);
+  const driver=new GoalContinuationSupervisor({...h.config,statePath:join(h.root,'ambiguous-driver.json')});
+  t.after(()=>driver.close());
+  const result=await driver.arm(h.reported);
+  assert.equal(result.armed,false);
+  assert.equal(result.reason,'ambiguous-unfinished-source-turns');
+  await driver.pollOnce(); assert.equal(h.sends(),0);
+});
+
+test('new human input in either display cancels a waiting causal continuation',async t=>{
+  const h=await causalHarness(t);
+  h.set([{...h.views()[0],latestUserMessageId:'brand-new-human-turn'},h.finish(h.views()[1])]);
+  await h.tick();assert.equal(h.sends(),0);
+  assert.equal(h.driver.status().records[0].state,'cancelled');
+});
+
+test('stale display syncing to an already captured user does not masquerade as new input',async t=>{
+  const h=await causalHarness(t);
+  h.set([{...h.views()[0],latestUserMessageId:'user-a'},h.finish(h.views()[1])]);
+  await h.tick();await h.tick();assert.equal(h.sends(),1);
+});
+
+test('a restart preserves causal baselines and still sends at most once',async t=>{
+  const h=await causalHarness(t);await h.driver.close();
+  h.set([h.views()[0],h.finish(h.views()[1])]);
+  const restarted=new GoalContinuationSupervisor({...h.config,statePath:join(h.root,'causal-driver.json')});
+  await restarted.pollOnce();h.advanceTime(100);await restarted.pollOnce();await restarted.pollOnce();
+  await restarted.close();assert.equal(h.sends(),1);
 });
 
 test('journal dispatching at restart is quarantined rather than replayed', async t => {

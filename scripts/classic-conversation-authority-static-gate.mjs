@@ -54,8 +54,12 @@ assert.match(server, /const exactRequest = Boolean\([\s\S]{0,320}resolved\?\.cal
   "ordinary progress narration must still require exact page plus canonical invocation evidence");
 assert.match(server, /const exactPageClaim = Boolean\([\s\S]{0,320}resolved\?\.claimId[\s\S]{0,220}classic-exact-page-progress-claim-cdp-page-verified/,
   "only the one-time hidden iframe-parent claim may bypass a missing call fingerprint");
-assert.match(server, /if \(!exactRequest && !exactPageClaim\)/,
-  "progress narration must fail closed unless one of the two exact authority proofs is present");
+assert.match(server, /if \(!exactRequest && !exactPageClaim && !providerBound\)/,
+  'progress must require a native request proof, exact receipt, or authenticated provider-conversation binding with current page verification');
+assert.match(server, /const providerIdentity = openaiConversationIdentity\(\{ auth: req\.auth, meta: req\.body\?\.params\?\._meta, headers: req\.headers \}\)/,
+  'provider identity must come from the OAuth-accepted host metadata, never tool arguments or MCP transport session id');
+assert.match(server, /await openaiBindings\.resolve\(providerIdentity\)/,
+  'documented anonymous conversation bindings must revalidate their current exact page per request');
 
 assert.doesNotMatch(server, /ClassicDirectRequestAuthorityRegistry/,
   "the retired cross-request trace authority cache must not remain in production source");

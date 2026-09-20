@@ -83,7 +83,8 @@ import { registerJsReplCompatibilityTool } from "./js-repl-compat.js";
 import { registerToolchainTools } from "./toolchain-tools.js";
 import { registerUnifiedRoutingTool } from "./unified-routing-tools.js";
 import { retiredToolCallResult } from "./retired-tool-compat.js";
-import { EXACT_CONVERSATION_REQUEST_PROOF, EXACT_PAGE_CLAIM_PROOF, isProjectableProgressMessage } from "./progress-ownership-proof.js";
+import { EXACT_CONVERSATION_REQUEST_PROOF, EXACT_PAGE_CLAIM_PROOF, PROVIDER_CONVERSATION_PROOF, isProjectableProgressMessage } from "./progress-ownership-proof.js";
+import { OpenaiConversationBindings, openaiConversationIdentity, OPENAI_CONVERSATION_PAGE_SOURCE, inspectExactConversationPage, localBindingAuthorized } from './openai-conversation-binding.js';
 import { ProgressClaimRegistry } from "./progress-claim-registry.js";
 import { ProgressBootstrapAuthorityRegistry } from "./progress-bootstrap-authority.js";
 import { ConversationStartClaimRegistry } from "./conversation-start-claim-registry.js";
@@ -751,7 +752,7 @@ function registerCodexProcessTools(server, config, workspaces, processSessions) 
         });
     });
 }
-function createMcpServer(config, workspaces, reviewCheckpoints, processSessions, localAgentProviders, incomingArtifactAdapters, chatSwarm, capabilityRuntime, blenderRuntimeManager, codexMcpBridge, conversationContinuity, contextGuardian, exactUsageAuthority, codexContextBridge, planRuntime, goalRuntime, goalHostBridge, hostOverlayProjection, computerUseOverlay, conversationAuthority, conversationAuthorityReady, goalRunProgress, requestConversationContext, progressClaimRegistry, progressBootstrapAuthority, conversationStartClaimRegistry, resolveProgressClaimPage, resolveStartClaimPage, interactiveProgressGate, conversationProgressLiveness = null) {
+function createMcpServer(config, workspaces, reviewCheckpoints, processSessions, localAgentProviders, incomingArtifactAdapters, chatSwarm, capabilityRuntime, blenderRuntimeManager, codexMcpBridge, conversationContinuity, contextGuardian, exactUsageAuthority, codexContextBridge, planRuntime, goalRuntime, goalHostBridge, hostOverlayProjection, computerUseOverlay, conversationAuthority, conversationAuthorityReady, goalRunProgress, requestConversationContext, progressClaimRegistry, progressBootstrapAuthority, conversationStartClaimRegistry, resolveProgressClaimPage, resolveStartClaimPage, interactiveProgressGate, conversationProgressLiveness = null, openaiBindings = null) {
     const toolSurface = toolModeCapabilities(config.toolMode);
     const modelInstructions = serverInstructions(config);
     const modelInstructionsFingerprint = createHash("sha256").update(modelInstructions).digest("hex");
@@ -1000,6 +1001,7 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
                     dedupeKey: `progress-claim:${claimId}`,
                     bootstrapSessionFingerprint: requestBinding?.sessionFingerprint || null,
                     bootstrapTraceFingerprints: requestBinding?.traceCorrelationFingerprints || [],
+                    providerIdentity: requestBinding?.openaiIdentity || null,
                 }),
             }).catch(() => null);
         }
@@ -1024,6 +1026,7 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
                         dedupeKey: `progress-claim:${pending.claimId}`,
                         bootstrapSessionFingerprint: requestBinding?.sessionFingerprint || null,
                         bootstrapTraceFingerprints: requestBinding?.traceCorrelationFingerprints || [],
+                        providerIdentity: requestBinding?.openaiIdentity || null,
                     }),
                 }).catch(() => null);
             }
@@ -1084,7 +1087,7 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
         clearInterval(progressClaimSweepTimer);
         clearInterval(conversationStartClaimSweepTimer);
     };
-    const writeVerifiedProgress = async ({ message, kind, resolved, dedupeKey = null, bootstrapSessionFingerprint = null, bootstrapTraceFingerprints = [] }) => {
+    const writeVerifiedProgress = async ({ message, kind, resolved, dedupeKey = null, bootstrapSessionFingerprint = null, bootstrapTraceFingerprints = [], providerIdentity = null }) => {
         const conversationId = String(resolved?.conversationId || "").trim();
         if (!conversationId)
             throw new Error("ChatGPT Classic conversation identity is unavailable for this MCP request.");
@@ -1100,10 +1103,12 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
             && resolved?.callFingerprint
             && String(resolved?.source || "").endsWith("-page-verified")
         );
-        if (!exactRequest && !exactPageClaim) {
+        const providerBound = resolved?.pageVerified === true && resolved?.source === OPENAI_CONVERSATION_PAGE_SOURCE
+            && /^[a-f0-9]{64}$/.test(resolved?.providerConversationKey || '');
+        if (!exactRequest && !exactPageClaim && !providerBound) {
             throw new Error("Progress narration requires an exact page-verified tool invocation for the current conversation.");
         }
-        const ownershipProof = exactPageClaim ? EXACT_PAGE_CLAIM_PROOF : EXACT_CONVERSATION_REQUEST_PROOF;
+        const ownershipProof = providerBound ? PROVIDER_CONVERSATION_PROOF : exactPageClaim ? EXACT_PAGE_CLAIM_PROOF : EXACT_CONVERSATION_REQUEST_PROOF;
         const gatewayPort = Number(config.stableGatewayPort ?? config.edgeBackendPort ?? 7678);
         if (!Number.isInteger(gatewayPort) || gatewayPort < 1024 || gatewayPort > 65535)
             throw new Error("Stable Gateway progress endpoint port is invalid.");
@@ -1127,6 +1132,7 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
         const snapshot = await response.json().catch(() => null);
         if (!response.ok)
             throw new Error(`Progress narration endpoint returned HTTP ${response.status}${snapshot?.error ? ` (${snapshot.error})` : ""}.`);
+        if (providerIdentity && exactPageClaim) await openaiBindings?.bind(providerIdentity, resolved);
         await conversationProgressLiveness?.noteReport?.({
             conversationId,
             observedAtMs: Date.parse(snapshot?.updatedAt || "") || Date.now(),
@@ -1153,6 +1159,25 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
                 : null,
             updatedAt: snapshot?.updatedAt ?? null,
         };
+    };
+    // Private owner-authenticated operator bridge for a first Pro/background
+    // turn whose receipt cannot mount. It binds ONLY the identity retained
+    // from that original authenticated pending call, never a supplied key.
+    server.__devspaceBindPendingProgress = async ({ claimId, runtimeKey, expectedConversationId }) => {
+        const identity = progressClaimRegistry.requestIdentity(claimId);
+        if (!identity) throw new Error('Pending authenticated progress claim unavailable or expired.');
+        const page = await inspectExactConversationPage(runtimeKey, expectedConversationId);
+        if (!page) throw new Error('Operator bootstrap exact page is unavailable or ambiguous.');
+        if (progressClaimRegistry.requestIdentity(claimId)?.key !== identity.key) throw new Error('Claim expired during operator verification.');
+        const bound = await openaiBindings.bind(identity, page, { operator: true });
+        if (!bound) throw new Error('Provider binding conflicted or failed validation.');
+        const resolved = await openaiBindings.resolve(identity);
+        if (!resolved) throw new Error('Bound page disappeared before claim completion.');
+        // Use the original Agent-authored pending message; no operator prose or
+        // untrusted body is substituted into another conversation's card.
+        return progressClaimRegistry.claim({ claimId, authority: { ...resolved, claimId },
+            complete: ({ message, kind }) => writeVerifiedProgress({ message, kind, resolved,
+                dedupeKey: `progress-claim:${claimId}` }) });
     };
     registerAppTool(server, "devspace_progress_report", {
         title: "Report Conversation Progress",
@@ -1210,6 +1235,10 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
             }
             const resolved = await resolveProgressConversation(extra);
             if (relayClaimId) {
+                if (resolved?.source === OPENAI_CONVERSATION_PAGE_SOURCE
+                    && progressClaimRegistry.requestIdentity(relayClaimId)?.key !== resolved.providerConversationKey) {
+                    throw new Error('A provider-bound request cannot redeem another conversation identity claim.');
+                }
                 const relayAuthority = resolved?.conversationId
                     ? resolved
                     : await resolveProgressClaimPage?.(relayClaimId);
@@ -1223,6 +1252,7 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
                         dedupeKey: `progress-claim:${relayClaimId}`,
                         bootstrapSessionFingerprint: requestBinding?.sessionFingerprint || currentRequestContext?.sessionFingerprint || null,
                         bootstrapTraceFingerprints: requestBinding?.traceCorrelationFingerprints || currentRequestContext?.traceCorrelationFingerprints || [],
+                        providerIdentity: requestBinding?.openaiIdentity || null,
                     }),
                 });
                 return {
@@ -1246,6 +1276,7 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
                     requestBinding: {
                         sessionFingerprint: currentRequestContext?.sessionFingerprint || null,
                         traceCorrelationFingerprints: currentRequestContext?.traceCorrelationFingerprints || [],
+                        openaiIdentity: currentRequestContext?.openaiIdentity || null,
                     },
                 });
                 // The visible Agent already authored the narration. Once this
@@ -1280,6 +1311,7 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
                 resolved,
                 bootstrapSessionFingerprint: currentRequestContext?.sessionFingerprint || null,
                 bootstrapTraceFingerprints: currentRequestContext?.traceCorrelationFingerprints || [],
+                providerIdentity: currentRequestContext?.openaiIdentity || null,
             });
             return {
                 content: [{ type: "text", text: `Progress narration updated for the current conversation: ${reportMessage}` }],
@@ -2331,6 +2363,7 @@ export function createServer(config = loadConfig(), options = {}) {
     const mcpCallCorrelator = new ClassicMcpCallCorrelator();
     const activeTurnRegistry = new ClassicActiveTurnRegistry();
     const progressClaimRegistry = new ProgressClaimRegistry();
+    const openaiBindings = new OpenaiConversationBindings({ statePath: join(config.stateDir, 'openai-conversation-bindings-v1.json') });
     const progressBootstrapAuthority = new ProgressBootstrapAuthorityRegistry();
     const conversationStartClaimRegistry = new ConversationStartClaimRegistry();
     const conversationStartClaimCdp = new ConversationStartClaimCdpResolver({ ports: classicCdpOptions.ports });
@@ -2939,7 +2972,7 @@ export function createServer(config = loadConfig(), options = {}) {
     const localAgentProviders = config.subagents
         ? getLocalAgentProviderAvailabilitySnapshot()
         : [];
-    const mcpServerTemplate = createMcpServer(config, workspaces, reviewCheckpoints, processSessions, localAgentProviders, incomingArtifactAdapters, chatSwarm, capabilityRuntime, blenderRuntimeManager, codexMcpBridge, conversationContinuity, contextGuardian, exactUsageAuthority, codexContextBridge, planRuntime, goalRuntime, goalHostBridge, hostOverlayProjection, computerUseOverlay, conversationAuthority, conversationAuthorityReady, goalRunProgress, requestConversationContext, progressClaimRegistry, progressBootstrapAuthority, conversationStartClaimRegistry, resolveProgressClaimPage, resolveStartClaimPage, interactiveProgressGate, conversationProgressLiveness);
+    const mcpServerTemplate = createMcpServer(config, workspaces, reviewCheckpoints, processSessions, localAgentProviders, incomingArtifactAdapters, chatSwarm, capabilityRuntime, blenderRuntimeManager, codexMcpBridge, conversationContinuity, contextGuardian, exactUsageAuthority, codexContextBridge, planRuntime, goalRuntime, goalHostBridge, hostOverlayProjection, computerUseOverlay, conversationAuthority, conversationAuthorityReady, goalRunProgress, requestConversationContext, progressClaimRegistry, progressBootstrapAuthority, conversationStartClaimRegistry, resolveProgressClaimPage, resolveStartClaimPage, interactiveProgressGate, conversationProgressLiveness, openaiBindings);
     const mcpTemplateDiagnostics = mcpServerTemplateDiagnostics(mcpServerTemplate);
     logEvent(config.logging, "info", "mcp_server_template_ready", mcpTemplateDiagnostics);
     const createSessionMcpServer = () => createMcpSessionServerFromTemplate(mcpServerTemplate);
@@ -3037,6 +3070,17 @@ export function createServer(config = loadConfig(), options = {}) {
             streamRecoveryAdapter,
             config,
         }), conversationCorrelation: mcpRequestCorrelationDiagnostics.diagnostics(), progressBootstrap: progressBootstrapAuthority.diagnostics(), conversationStartClaims: conversationStartClaimRegistry.diagnostics(), progressProjection: progressNarrationOverlay.status(), goalContinuation: goalContinuationSupervisor.status(), diagnosticGc });
+    });
+    app.post('/__devspace/conversation/bind-progress-claim', express.json({ limit: '4kb' }), async (req, res) => {
+        if (config.passiveCore || !localBindingAuthorized(req, config.oauth.ownerToken) || req.headers['x-forwarded-for']) {
+            res.status(403).json({ ok: false, error: 'Owner-authorized direct-loopback bootstrap required.' }); return;
+        }
+        try {
+            const input = req.body || {};
+            if (Object.keys(input).some(key => !['claimId', 'runtimeKey', 'expectedConversationId'].includes(key))) throw new Error('Unexpected binding field.');
+            const result = await mcpServerTemplate.__devspaceBindPendingProgress(input);
+            res.json({ ok: true, bound: true, conversationId: result.conversationId, claimed: true });
+        } catch (error) { res.status(409).json({ ok: false, error: error.message }); }
     });
     app.get("/__devspace/stream-recovery/status", (req, res) => {
         const remoteAddress = String(req.socket?.remoteAddress ?? "");
@@ -3453,7 +3497,12 @@ export function createServer(config = loadConfig(), options = {}) {
                         turnTraceFingerprint: turnTraceFingerprintFromClassicRequest({ headers: req?.headers || {} }),
                         observedAt: new Date().toISOString(),
                     });
-                    return await resolveAndBindMcpConversation(req);
+                    const providerIdentity = openaiConversationIdentity({ auth: req.auth, meta: req.body?.params?._meta, headers: req.headers });
+                    const providerAuthority = await openaiBindings.resolve(providerIdentity);
+                    if (providerAuthority) return { conversationId: providerAuthority.conversationId,
+                        capabilityAuthority: providerAuthority, progressAuthority: providerAuthority,
+                        sessionFingerprint: coreClientSessionFingerprint(req), openaiIdentity: providerIdentity };
+                    return { ...await resolveAndBindMcpConversation(req), openaiIdentity: providerIdentity };
                 })().catch(() => ({
                     conversationId: null,
                     sessionFingerprint: coreClientSessionFingerprint(req),
@@ -3507,6 +3556,7 @@ export function createServer(config = loadConfig(), options = {}) {
                 }
             }
             const handled = requestConversationContext.run({
+                openaiIdentity: requestConversation?.openaiIdentity || null,
                 capabilityAuthority: requestConversation?.capabilityAuthority
                     || (requestConversation?.conversationId ? requestConversation : null),
                 progressAuthority: requestConversation?.progressAuthority || null,
@@ -3619,6 +3669,7 @@ export function createServer(config = loadConfig(), options = {}) {
                 await primaryDebugGuard?.close?.();
                 await blenderRuntimeManager.close();
                 await capabilityRuntime.close();
+                await openaiBindings.queue.catch(() => {});
                 await codexMcpBridge.close();
                 codexContextBridge?.close();
                 oauthProvider.close();

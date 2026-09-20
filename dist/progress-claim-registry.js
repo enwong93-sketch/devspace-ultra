@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { cleanOpenaiIdentity, OPENAI_CONVERSATION_PAGE_SOURCE } from './openai-conversation-binding.js';
 
 const DEFAULT_TTL_MS = 2 * 60_000;
 const DEFAULT_MAX_CLAIMS = 128;
@@ -41,7 +42,8 @@ function cleanRequestBinding(value) {
   const sessionFingerprint = cleanFingerprint(value?.sessionFingerprint);
   const traceCorrelationFingerprints = [...new Set((Array.isArray(value?.traceCorrelationFingerprints)
     ? value.traceCorrelationFingerprints : []).slice(0, 8).map(cleanFingerprint).filter(Boolean))];
-  return sessionFingerprint ? { sessionFingerprint, traceCorrelationFingerprints } : null;
+  return sessionFingerprint || cleanOpenaiIdentity(value?.openaiIdentity) ? { sessionFingerprint, traceCorrelationFingerprints,
+    ...(cleanOpenaiIdentity(value?.openaiIdentity) ? { openaiIdentity: cleanOpenaiIdentity(value.openaiIdentity) } : {}) } : null;
 }
 
 function verifiedAuthority(value, expectedClaimId = null) {
@@ -55,7 +57,7 @@ function verifiedAuthority(value, expectedClaimId = null) {
   if (
     conversationId
     && runtimeKey
-    && source === "classic-exact-page-progress-claim-cdp-page-verified"
+    && ["classic-exact-page-progress-claim-cdp-page-verified", OPENAI_CONVERSATION_PAGE_SOURCE].includes(source)
     && observedAt
     && value?.pageVerified === true
     && expectedClaimId
@@ -216,6 +218,12 @@ export class ProgressClaimRegistry {
       .sort((left, right) => Number(left.createdAtMs) - Number(right.createdAtMs))
       .slice(0, capped)
       .map((row) => publicClaim(row));
+  }
+
+  requestIdentity(claimId) {
+    this.prune();
+    const record = this.records.get(claimId);
+    return record?.state === 'pending' ? cleanOpenaiIdentity(record.requestBinding?.openaiIdentity) : null;
   }
 
   diagnostics() {

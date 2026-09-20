@@ -1,12 +1,13 @@
 #!/usr/bin/env node
 import { execFile, spawn } from "node:child_process";
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, rm, writeFile, readFile } from "node:fs/promises";
 import {openSync, closeSync} from 'node:fs';
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { loadDevspaceFiles } from "../dist/user-config.js";
+import { parseGatewayRestartArguments } from '../dist/gateway-restart-cli.js';
 import {
   buildRestartPowerShell,
   parseNetstatListeners,
@@ -17,18 +18,26 @@ import {
 const execFileAsync = promisify(execFile);
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
-function argument(name, fallback = "") {
-  const index = process.argv.indexOf(`--${name}`);
-  return index >= 0 && index + 1 < process.argv.length ? String(process.argv[index + 1]) : fallback;
-}
-
 function psQuote(value) {
   return `'${String(value).replaceAll("'", "''")}'`;
 }
 
-const configDir = resolve(argument("config-dir", join(homedir(), ".devspace-tailscale-bootstrap")));
-const taskName = argument("task-name", "DevSpace-Stable-Gateway").trim();
-const delaySeconds = Math.max(0, Number(argument("delay-seconds", "6")) || 0);
+const cli = parseGatewayRestartArguments(process.argv.slice(2));
+const configDir = resolve(cli.configDir || join(homedir(), '.devspace-tailscale-bootstrap'));
+if (cli.mode === 'help') {
+  console.log('Usage: devspace-stable-gateway-whole-restart.mjs --status | --preflight-only | --execute [--config-dir PATH] [--delay-seconds 0..300]');
+  process.exit(0);
+}
+if (cli.mode === 'status') {
+  const path = join(configDir, 'logs', 'stable-gateway-whole-restart-result.json');
+  let record = null;
+  try { record = JSON.parse((await readFile(path, 'utf8')).replace(/^\uFEFF/, '')); }
+  catch (error) { if (error.code !== 'ENOENT') throw error; }
+  console.log(JSON.stringify({ ok: true, readOnly: true, state: record?.state || 'missing', record, statusPath: path, secretValuesLogged: false }));
+  process.exit(0);
+}
+const taskName = cli.taskName;
+const delaySeconds = cli.delaySeconds;
 if (!taskName) throw new Error("Scheduled Task name is required.");
 
 const files = loadDevspaceFiles({ ...process.env, DEVSPACE_CONFIG_DIR: configDir });
@@ -120,7 +129,7 @@ await writeFile(planPath,JSON.stringify({version:1,packageRoot,configDir,gateway
 let helper;
 try {
   helper = spawn(process.execPath, [join(packageRoot,'scripts','devspace-gateway-replace-worker.mjs'),planPath,
-    ...(process.argv.includes('--preflight-only')?['--preflight-only']:[])], {
+    ...(cli.mode === 'preflight-only'?['--preflight-only']:[])], {
     detached:true, windowsHide:true, stdio:['ignore',out,err],
   });
 } finally {closeSync(out);closeSync(err);}
