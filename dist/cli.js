@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import * as prompts from "@clack/prompts";
-import { getShellConfig } from "@earendil-works/pi-coding-agent";
+import { getShellConfig } from "@devspace/pi-coding-agent";
 import { satisfies } from "semver";
 import { loadConfig } from "./config.js";
 import { classifyEdgeConfig, deployCloudflareWorker, deployCloudflareWorkerVpc, ensureCloudflareTunnel, ensureVpcService, installFixedEdgeStartup, planDisableEdgeConfig, planFixedEdgeCandidateConfig, planFixedEdgeConfig, probeFixedEdge, resolveWranglerAuthEnv, startCloudflareTunnelDetached } from "./edge-cloudflare.js";

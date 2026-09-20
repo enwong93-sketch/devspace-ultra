@@ -1,4 +1,4 @@
-import { createBashTool, createEditTool, createFindTool, createGrepTool, createLsTool, createReadTool, createWriteTool, } from "@earendil-works/pi-coding-agent";
+import { createBashTool, createEditTool, createFindTool, createGrepTool, createLsTool, createReadTool, createWriteTool, } from "@devspace/pi-coding-agent";
 import { resolveAllowedPath } from "./roots.js";
 function toMcpContent(result) {
     return result.content.map((content) => {
