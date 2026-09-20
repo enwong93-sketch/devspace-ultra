@@ -1242,7 +1242,7 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
             const resolved = await resolveProgressConversation(extra);
             if (relayClaimId) {
                 if (resolved?.source === OPENAI_CONVERSATION_PAGE_SOURCE
-                    && progressClaimRegistry.requestIdentity(relayClaimId)?.key !== resolved.providerConversationKey) {
+                    && progressClaimRegistry.claimIdentity(relayClaimId)?.key !== resolved.providerConversationKey) {
                     throw new Error('A provider-bound request cannot redeem another conversation identity claim.');
                 }
                 const relayAuthority = resolved?.conversationId

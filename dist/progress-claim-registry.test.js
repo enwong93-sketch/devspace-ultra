@@ -13,7 +13,7 @@ const registry = new ProgressClaimRegistry({
 const claim = registry.create({
   message: "Exact progress message",
   kind: "verification",
-  requestBinding: { sessionFingerprint: "c".repeat(64) },
+  requestBinding: { sessionFingerprint: "c".repeat(64), openaiIdentity: { version: 1, key: 'e'.repeat(64) }, callFingerprint: 'f'.repeat(64) },
 });
 assert.equal(claim.state, "pending");
 assert.equal(registry.diagnostics().pending, 1);
@@ -43,6 +43,9 @@ const completed = await registry.claim({
   },
 });
 assert.equal(completed.conversationId, "conversation-progress-a");
+assert.equal(registry.claimIdentity(claim.claimId).key, 'e'.repeat(64), 'duplicate receipt retries retain only the immutable hashed owner');
+assert.equal(registry.requestIdentity(claim.claimId), null, 'completed claims cannot be paired again');
+assert.equal(registry.requestFingerprint(claim.claimId), null);
 assert.equal(writes, 1);
 assert.equal(registry.pendingClaims().some((item) => item.claimId === claim.claimId), false);
 

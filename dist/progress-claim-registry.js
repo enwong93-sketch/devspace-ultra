@@ -132,6 +132,7 @@ export class ProgressClaimRegistry {
       message: text,
       kind: normalizedKind,
       requestBinding: cleanRequestBinding(requestBinding),
+      providerIdentity: cleanOpenaiIdentity(requestBinding?.openaiIdentity),
       owner: null,
       completionPromise: null,
       result: null,
@@ -230,6 +231,10 @@ export class ProgressClaimRegistry {
     this.prune();
     const record = this.records.get(claimId);
     return record?.state === 'pending' ? cleanFingerprint(record.requestBinding?.callFingerprint) : null;
+  }
+  claimIdentity(claimId) {
+    this.prune();
+    return cleanOpenaiIdentity(this.records.get(claimId)?.providerIdentity);
   }
 
   diagnostics() {
