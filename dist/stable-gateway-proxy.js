@@ -415,10 +415,8 @@ export function createStableGatewayProxy({
         sendGatewayError(res, 404, "Unknown public MCP session");
         return;
       }
-      if (currentAuthorization && currentAuthorization !== mapping.authorization) {
-        registry.updateAuthorization(publicSessionId, currentAuthorization);
-        mapping.authorization = currentAuthorization;
-      }
+      // Retain only credentials that Core actually accepted. A rejected
+      // app-initiated request must not poison future handover/schema probes.
       if (replayableMcpStream) {
         publicEventStreamOpened = registry.markEventStreamOpen?.(publicSessionId) === true;
       }
@@ -493,6 +491,9 @@ export function createStableGatewayProxy({
 
       const pipeFinalResponse = (upstreamRes, responsePublicSessionId) => {
         res.statusCode = upstreamRes.statusCode ?? 502;
+        if (responsePublicSessionId && requestAuthorization && res.statusCode >= 200 && res.statusCode < 300) {
+          registry.updateAuthorization(responsePublicSessionId, requestAuthorization);
+        }
         setResponseHeaders(res, upstreamRes.headers, responsePublicSessionId);
         const captureToolList = Boolean(publicSessionId && parsedBody?.method === "tools/list");
         const schemaChunks = [];

@@ -82,6 +82,11 @@ const script = buildRestartPowerShell({
   resultPath,
   helperTaskName,
   delaySeconds,
+  expectedProcesses: owned.map(entry => {
+    const process=listenerProcesses.find(row=>row.processId===entry.pid);
+    if (!process?.createdAt) throw new Error('Process creation identity is unavailable; refusing whole restart.');
+    return {processId:entry.pid,createdAt:process.createdAt};
+  }),
 });
 await writeFile(scriptPath, `${script}\r\n`, { encoding: "utf8", mode: 0o600 });
 

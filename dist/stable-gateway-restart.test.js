@@ -79,7 +79,12 @@ assert.match(script, /Stop-Process -Id \$pidValue -Force/);
 assert.match(script, /Start-ScheduledTask/);
 assert.match(script, /__devspace\/gateway\/healthz/);
 assert.match(script, /while \(-not \$ok\)/, "restart health verification must wait for actual readiness rather than a wall-clock deadline");
-assert.doesNotMatch(script, /deadline|health-timeout|TimeoutSec/, "restart must not fail or kill work merely because startup is slow");
+assert.doesNotMatch(script.slice(script.indexOf('  Start-ScheduledTask')), /quietDeadline|health-timeout/,
+  "startup has no overall deadline; the bounded quiet check may only abort BEFORE stopping any work");
+assert.ok(script.indexOf('$quietSamples -lt 3') < script.indexOf('  Stop-ScheduledTask'));
+assert.ok(script.indexOf('Process identity changed; restart cancelled.') < script.indexOf('  Stop-ScheduledTask'));
+assert.match(script, /admission\.activeRequests -eq 0/);
+assert.match(script, /activity\.running -eq 0/);
 assert.match(script, /\$oldPids=@\(100,200\)/);
 assert.match(script, /secretValuesLogged=\$false/);
 assert.match(script, /Unregister-ScheduledTask -TaskName \$helperTaskName/);
@@ -92,6 +97,7 @@ const coldStartScript = buildRestartPowerShell({
   resultPath: "x",
 });
 assert.match(coldStartScript, /\$oldPids=@\(\)/, "zero-listener recovery must be a supported cold-start path");
+assert.match(coldStartScript, /\$hasGateway=\$false/);
 
 {
   const rows = await queryListenerProcesses([100, 200], {

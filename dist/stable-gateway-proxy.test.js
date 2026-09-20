@@ -77,7 +77,7 @@ function postJson(baseUrl, body, headers = {}, { onData } = {}) {
   });
 }
 
-async function createFakeCore(id, { failInitializeAt, unknownSessionOnce = false, genericFailureStatus = null, tools = FAKE_TOOLS } = {}) {
+async function createFakeCore(id, { failInitializeAt, unknownSessionOnce = false, genericFailureStatus = null, tools = FAKE_TOOLS, rejectedAuthorization = null } = {}) {
   const observed = [];
   const state = {
     streamEnded: false,
@@ -99,6 +99,9 @@ async function createFakeCore(id, { failInitializeAt, unknownSessionOnce = false
       clientSessionFingerprint: req.headers["x-devspace-client-session-fingerprint"],
     });
 
+    if (rejectedAuthorization && req.headers.authorization === rejectedAuthorization) {
+      res.statusCode=401;res.setHeader('content-type','application/json');res.end(JSON.stringify({error:'unauthorized'}));return;
+    }
     if (req.method === "GET" && req.url === "/mcp") {
       state.sseActive = true;
       res.statusCode = 200;
@@ -485,6 +488,27 @@ async function testStreamingResponseIsNotBuffered() {
   }
 }
 
+async function testRejectedAuthorizationCannotPoisonReplay() {
+  const bad='Bearer rejected-test-token';
+  const core=await createFakeCore('auth-core',{rejectedAuthorization:bad});
+  const registry=new StableGatewaySessionRegistry();
+  const gateway=createStableGatewayProxy({activeCore:{id:core.id,baseUrl:core.baseUrl},publicBaseUrl:'https://devspace-gateway.example.test',registry});
+  const server=createServer(gateway.handler);const base=await listen(server);
+  try {
+    const initialized=await postJson(base,{jsonrpc:'2.0',id:1,method:'initialize',params:{}},{authorization:'Bearer valid-test-token'});
+    const id=initialized.headers['mcp-session-id'];
+    const rejected=await postJson(base,{jsonrpc:'2.0',id:2,method:'tools/list',params:{}},{authorization:bad,'mcp-session-id':id});
+    assert.equal(rejected.status,401);
+    assert.equal(registry.lookup(id).authorization,'Bearer valid-test-token','a rejected App request must not replace the last Core-accepted replay credential');
+    const rotated=await postJson(base,{jsonrpc:'2.0',id:3,method:'tools/list',params:{}},{authorization:'Bearer rotated-valid-token','mcp-session-id':id});
+    assert.equal(rotated.status,200);
+    assert.equal(registry.lookup(id).authorization,'Bearer rotated-valid-token');
+    const replay=await gateway.replaySessionsToCore({id:core.id,baseUrl:core.baseUrl});
+    assert.equal(replay.droppedPublicSessionIds.length,0);
+  } finally {await close(server);await close(core.server);}
+}
+
+await testRejectedAuthorizationCannotPoisonReplay();
 await testInitializeAndStablePublicSession();
 await testGatewayForwardsOnlyDerivedClientSessionFingerprint();
 await testSessionBoundRequestTranslation();

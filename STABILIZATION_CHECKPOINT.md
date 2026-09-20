@@ -2,6 +2,29 @@
 
 ## Round 2: Goal continuation closure (latest work)
 
+### Deployment preflight uncovered a Gateway authorization defect
+
+Core-only handover `185a9b6b-63d0-4e2a-9639-5cb35b9e0cb7` failed safely at
+13:35:26Z: all three retained authorizations were rejected by schema probes,
+while ordinary MCP tools still worked. No replacement Core was promoted.
+Inspection found that the Gateway updated retained session authorization
+BEFORE Core accepted the incoming request. An actual HTTP regression with a
+401-rejected fake token reproduced replacement of the previously valid token.
+The proxy now updates replay authorization only after Core returns 2xx.
+The same test verifies a valid token refresh is retained and replay succeeds.
+This is a demonstrated defect; the identities of historical failing callers
+or the earlier one-session replay error have not been guessed.
+
+This fix requires loading the Gateway, not merely a Core handover. The
+canonical whole-restart helper was strengthened to wait for three quiet
+observations (no active requests or activities), recheck exact process
+creation identities immediately before stopping, and verify Core readiness
+as well as Gateway readiness afterwards. A bounded PRE-stop quiet timeout
+cancels without touching work; startup itself still has no kill deadline.
+Main/Blender processes are never in its targeted PID list. A zero-listener
+cold start remains supported. All changes require a final audit before that
+single controlled Gateway/Core replacement.
+
 The user asked to finish stabilization, explicitly prioritizing Goal Mode.
 The real Goal was still round 1 / reported / continuation pending more than
 three hours after its final response. It was manually redeemed into round 2
