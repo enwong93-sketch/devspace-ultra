@@ -43,6 +43,7 @@ function cleanRequestBinding(value) {
   const traceCorrelationFingerprints = [...new Set((Array.isArray(value?.traceCorrelationFingerprints)
     ? value.traceCorrelationFingerprints : []).slice(0, 8).map(cleanFingerprint).filter(Boolean))];
   return sessionFingerprint || cleanOpenaiIdentity(value?.openaiIdentity) ? { sessionFingerprint, traceCorrelationFingerprints,
+    callFingerprint: cleanFingerprint(value?.callFingerprint),
     ...(cleanOpenaiIdentity(value?.openaiIdentity) ? { openaiIdentity: cleanOpenaiIdentity(value.openaiIdentity) } : {}) } : null;
 }
 
@@ -224,6 +225,11 @@ export class ProgressClaimRegistry {
     this.prune();
     const record = this.records.get(claimId);
     return record?.state === 'pending' ? cleanOpenaiIdentity(record.requestBinding?.openaiIdentity) : null;
+  }
+  requestFingerprint(claimId) {
+    this.prune();
+    const record = this.records.get(claimId);
+    return record?.state === 'pending' ? cleanFingerprint(record.requestBinding?.callFingerprint) : null;
   }
 
   diagnostics() {

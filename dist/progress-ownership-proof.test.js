@@ -7,7 +7,6 @@ import {
   isProjectableProgressMessage,
   normalizeProgressOwnershipProof,
 } from "./progress-ownership-proof.js";
-import { PROVIDER_CONVERSATION_PROOF } from './progress-ownership-proof.js';
 import './openai-conversation-binding.test.js';
 
 const direct = {
@@ -57,7 +56,8 @@ const claim = {
   ownershipObservedAt: "2026-09-13T04:02:00.000Z",
   ownershipRuntimeKey: "main-04",
 };
-const providerProof = { ...claim, ownershipProof: PROVIDER_CONVERSATION_PROOF, ownershipSource: 'openai-conversation-binding-page-verified' };
+const providerProof = { ...claim, ownershipProof: EXACT_CONVERSATION_REQUEST_PROOF,
+  ownershipCallFingerprint: 'd'.repeat(64), ownershipSource: 'openai-conversation-binding-page-verified' };
 assert.equal(isProjectableProgressMessage(providerProof), true);
 assert.equal(isProjectableProgressMessage({ ...providerProof, ownershipSource: 'legacy-session-owner' }), false);
 assert.equal(hasVerifiedProgressOwnership(claim), true);

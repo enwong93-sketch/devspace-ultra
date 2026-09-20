@@ -32,6 +32,7 @@ export class McpConversationRequestContext {
     mcpSessionId = null,
     traceCorrelationFingerprints = [],
     openaiIdentity = null,
+    callFingerprint = null,
   } = {}, operation) {
     if (typeof operation !== "function") throw new Error("operation is required.");
     const selectedCapabilityAuthority = capabilityAuthority || authority;
@@ -39,6 +40,7 @@ export class McpConversationRequestContext {
     const progressConversationId = cleanConversation(progressAuthority?.conversationId);
     const context = {
       openaiIdentity: cleanOpenaiIdentity(openaiIdentity),
+      callFingerprint: cleanFingerprint(callFingerprint),
       authority: capabilityConversationId
         ? {
             ...selectedCapabilityAuthority,
@@ -79,6 +81,7 @@ export class McpConversationRequestContext {
     if (!value) return null;
     return {
       ...(value.openaiIdentity ? { openaiIdentity: { ...value.openaiIdentity } } : {}),
+      ...(value.callFingerprint ? { callFingerprint: value.callFingerprint } : {}),
       authority: value.authority ? structuredClone(value.authority) : null,
       capabilityAuthority: value.capabilityAuthority ? structuredClone(value.capabilityAuthority) : null,
       progressAuthority: value.progressAuthority ? structuredClone(value.progressAuthority) : null,

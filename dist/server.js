@@ -83,7 +83,7 @@ import { registerJsReplCompatibilityTool } from "./js-repl-compat.js";
 import { registerToolchainTools } from "./toolchain-tools.js";
 import { registerUnifiedRoutingTool } from "./unified-routing-tools.js";
 import { retiredToolCallResult } from "./retired-tool-compat.js";
-import { EXACT_CONVERSATION_REQUEST_PROOF, EXACT_PAGE_CLAIM_PROOF, PROVIDER_CONVERSATION_PROOF, isProjectableProgressMessage } from "./progress-ownership-proof.js";
+import { EXACT_CONVERSATION_REQUEST_PROOF, EXACT_PAGE_CLAIM_PROOF, isProjectableProgressMessage } from "./progress-ownership-proof.js";
 import { OpenaiConversationBindings, openaiConversationIdentity, OPENAI_CONVERSATION_PAGE_SOURCE, inspectExactConversationPage, localBindingAuthorized } from './openai-conversation-binding.js';
 import { ProgressClaimRegistry } from "./progress-claim-registry.js";
 import { ProgressBootstrapAuthorityRegistry } from "./progress-bootstrap-authority.js";
@@ -1104,11 +1104,15 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
             && String(resolved?.source || "").endsWith("-page-verified")
         );
         const providerBound = resolved?.pageVerified === true && resolved?.source === OPENAI_CONVERSATION_PAGE_SOURCE
-            && /^[a-f0-9]{64}$/.test(resolved?.providerConversationKey || '');
+            && /^[a-f0-9]{64}$/.test(resolved?.providerConversationKey || '')
+            && /^[a-f0-9]{64}$/.test(resolved?.callFingerprint || '');
         if (!exactRequest && !exactPageClaim && !providerBound) {
             throw new Error("Progress narration requires an exact page-verified tool invocation for the current conversation.");
         }
-        const ownershipProof = providerBound ? PROVIDER_CONVERSATION_PROOF : exactPageClaim ? EXACT_PAGE_CLAIM_PROOF : EXACT_CONVERSATION_REQUEST_PROOF;
+        // Keep the proven v0.5.8 Gateway wire format. The actual authenticated
+        // request fingerprint plus explicit provider provenance is retained;
+        // no fake native tool invocation and no Gateway schema change.
+        const ownershipProof = exactPageClaim ? EXACT_PAGE_CLAIM_PROOF : EXACT_CONVERSATION_REQUEST_PROOF;
         const gatewayPort = Number(config.stableGatewayPort ?? config.edgeBackendPort ?? 7678);
         if (!Number.isInteger(gatewayPort) || gatewayPort < 1024 || gatewayPort > 65535)
             throw new Error("Stable Gateway progress endpoint port is invalid.");
@@ -1165,7 +1169,8 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
     // from that original authenticated pending call, never a supplied key.
     server.__devspaceBindPendingProgress = async ({ claimId, runtimeKey, expectedConversationId }) => {
         const identity = progressClaimRegistry.requestIdentity(claimId);
-        if (!identity) throw new Error('Pending authenticated progress claim unavailable or expired.');
+        const originalFingerprint = progressClaimRegistry.requestFingerprint(claimId);
+        if (!identity || !originalFingerprint) throw new Error('Pending authenticated progress claim unavailable or expired.');
         const page = await inspectExactConversationPage(runtimeKey, expectedConversationId);
         if (!page) throw new Error('Operator bootstrap exact page is unavailable or ambiguous.');
         if (progressClaimRegistry.requestIdentity(claimId)?.key !== identity.key) throw new Error('Claim expired during operator verification.');
@@ -1173,6 +1178,7 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
         if (!bound) throw new Error('Provider binding conflicted or failed validation.');
         const resolved = await openaiBindings.resolve(identity);
         if (!resolved) throw new Error('Bound page disappeared before claim completion.');
+        resolved.callFingerprint = originalFingerprint;
         // Use the original Agent-authored pending message; no operator prose or
         // untrusted body is substituted into another conversation's card.
         return progressClaimRegistry.claim({ claimId, authority: { ...resolved, claimId },
@@ -1277,6 +1283,7 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
                         sessionFingerprint: currentRequestContext?.sessionFingerprint || null,
                         traceCorrelationFingerprints: currentRequestContext?.traceCorrelationFingerprints || [],
                         openaiIdentity: currentRequestContext?.openaiIdentity || null,
+                        callFingerprint: currentRequestContext?.callFingerprint || null,
                     },
                 });
                 // The visible Agent already authored the narration. Once this
@@ -3499,6 +3506,7 @@ export function createServer(config = loadConfig(), options = {}) {
                     });
                     const providerIdentity = openaiConversationIdentity({ auth: req.auth, meta: req.body?.params?._meta, headers: req.headers });
                     const providerAuthority = await openaiBindings.resolve(providerIdentity);
+                    if (providerAuthority) providerAuthority.callFingerprint = fingerprintMcpToolCall('tools/call', req.body.params);
                     if (providerAuthority) return { conversationId: providerAuthority.conversationId,
                         capabilityAuthority: providerAuthority, progressAuthority: providerAuthority,
                         sessionFingerprint: coreClientSessionFingerprint(req), openaiIdentity: providerIdentity };
@@ -3557,6 +3565,7 @@ export function createServer(config = loadConfig(), options = {}) {
             }
             const handled = requestConversationContext.run({
                 openaiIdentity: requestConversation?.openaiIdentity || null,
+                callFingerprint: fingerprintMcpToolCall('tools/call', req.body?.params || {}),
                 capabilityAuthority: requestConversation?.capabilityAuthority
                     || (requestConversation?.conversationId ? requestConversation : null),
                 progressAuthority: requestConversation?.progressAuthority || null,
