@@ -29,6 +29,7 @@ export class McpConversationRequestContext {
     progressAuthorityPromise = null,
     sessionFingerprint = null,
     mcpSessionId = null,
+    traceCorrelationFingerprints = [],
   } = {}, operation) {
     if (typeof operation !== "function") throw new Error("operation is required.");
     const selectedCapabilityAuthority = capabilityAuthority || authority;
@@ -58,6 +59,8 @@ export class McpConversationRequestContext {
         : null,
       sessionFingerprint: cleanFingerprint(sessionFingerprint) || cleanFingerprint(selectedCapabilityAuthority?.sessionFingerprint) || cleanFingerprint(progressAuthority?.sessionFingerprint),
       mcpSessionId: cleanConversation(mcpSessionId),
+      traceCorrelationFingerprints: [...new Set((Array.isArray(traceCorrelationFingerprints)
+        ? traceCorrelationFingerprints : []).slice(0, 8).map(cleanFingerprint).filter(Boolean))],
       authorityPromise: authorityPromise && typeof authorityPromise.then === "function"
         ? Promise.resolve(authorityPromise)
         : null,
@@ -77,6 +80,8 @@ export class McpConversationRequestContext {
       progressAuthority: value.progressAuthority ? structuredClone(value.progressAuthority) : null,
       sessionFingerprint: value.sessionFingerprint,
       mcpSessionId: value.mcpSessionId,
+      ...(value.traceCorrelationFingerprints.length
+        ? { traceCorrelationFingerprints: [...value.traceCorrelationFingerprints] } : {}),
       ...(value.authorityPromise ? { authorityPromise: value.authorityPromise } : {}),
       ...(value.progressAuthorityPromise ? { progressAuthorityPromise: value.progressAuthorityPromise } : {}),
     };

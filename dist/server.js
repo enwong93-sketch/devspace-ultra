@@ -971,6 +971,8 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
         return progressBootstrapAuthority?.consume?.({
             sessionFingerprint: requestContext?.sessionFingerprint,
             toolName,
+            traceCorrelationFingerprints: requestContext?.traceCorrelationFingerprints,
+            verifyPage: resolveProgressClaimPage,
         }) || null;
     };
     const claimPendingProgressFromExactPage = async (progressClaim) => {
@@ -992,6 +994,7 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
                     resolved: claimedAuthority,
                     dedupeKey: `progress-claim:${claimId}`,
                     bootstrapSessionFingerprint: requestBinding?.sessionFingerprint || null,
+                    bootstrapTraceFingerprints: requestBinding?.traceCorrelationFingerprints || [],
                 }),
             }).catch(() => null);
         }
@@ -1014,6 +1017,7 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
                         resolved: claimedAuthority,
                         dedupeKey: `progress-claim:${pending.claimId}`,
                         bootstrapSessionFingerprint: requestBinding?.sessionFingerprint || null,
+                        bootstrapTraceFingerprints: requestBinding?.traceCorrelationFingerprints || [],
                     }),
                 }).catch(() => null);
             }
@@ -1068,7 +1072,7 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
     };
     const conversationStartClaimSweepTimer = setInterval(() => { void sweepPendingConversationStartClaims(); }, 1_000);
     conversationStartClaimSweepTimer.unref?.();
-    const writeVerifiedProgress = async ({ message, kind, resolved, dedupeKey = null, bootstrapSessionFingerprint = null }) => {
+    const writeVerifiedProgress = async ({ message, kind, resolved, dedupeKey = null, bootstrapSessionFingerprint = null, bootstrapTraceFingerprints = [] }) => {
         const conversationId = String(resolved?.conversationId || "").trim();
         if (!conversationId)
             throw new Error("ChatGPT Classic conversation identity is unavailable for this MCP request.");
@@ -1121,6 +1125,10 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
         });
         progressBootstrapAuthority?.register?.({
             sessionFingerprint: bootstrapSessionFingerprint,
+            traceCorrelationFingerprints: bootstrapTraceFingerprints,
+            claimId: resolved.claimId,
+            pageVerified: resolved.pageVerified,
+            source: resolved.source,
             conversationId,
             runtimeKey: resolved.runtimeKey,
             observedAt: resolved.observedAt || snapshot?.updatedAt || new Date().toISOString(),
@@ -1202,6 +1210,7 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
                         resolved: authority,
                         dedupeKey: `progress-claim:${relayClaimId}`,
                         bootstrapSessionFingerprint: requestBinding?.sessionFingerprint || currentRequestContext?.sessionFingerprint || null,
+                        bootstrapTraceFingerprints: requestBinding?.traceCorrelationFingerprints || currentRequestContext?.traceCorrelationFingerprints || [],
                     }),
                 });
                 return {
@@ -1224,6 +1233,7 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
                     kind,
                     requestBinding: {
                         sessionFingerprint: currentRequestContext?.sessionFingerprint || null,
+                        traceCorrelationFingerprints: currentRequestContext?.traceCorrelationFingerprints || [],
                     },
                 });
                 // The visible Agent already authored the narration. Once this
@@ -1257,6 +1267,7 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
                 kind,
                 resolved,
                 bootstrapSessionFingerprint: currentRequestContext?.sessionFingerprint || null,
+                bootstrapTraceFingerprints: currentRequestContext?.traceCorrelationFingerprints || [],
             });
             return {
                 content: [{ type: "text", text: `Progress narration updated for the current conversation: ${reportMessage}` }],
@@ -2994,7 +3005,7 @@ export function createServer(config = loadConfig(), options = {}) {
             contextMetadataAdapter,
             streamRecoveryAdapter,
             config,
-        }), conversationCorrelation: mcpRequestCorrelationDiagnostics.diagnostics(), progressBootstrap: progressBootstrapAuthority.diagnostics(), conversationStartClaims: conversationStartClaimRegistry.diagnostics(), diagnosticGc });
+        }), conversationCorrelation: mcpRequestCorrelationDiagnostics.diagnostics(), progressBootstrap: progressBootstrapAuthority.diagnostics(), conversationStartClaims: conversationStartClaimRegistry.diagnostics(), progressProjection: progressNarrationOverlay.status(), diagnosticGc });
     });
     app.get("/__devspace/stream-recovery/status", (req, res) => {
         const remoteAddress = String(req.socket?.remoteAddress ?? "");
@@ -3473,6 +3484,7 @@ export function createServer(config = loadConfig(), options = {}) {
                 sessionFingerprint: requestConversation?.sessionFingerprint
                     || coreClientSessionFingerprint(req),
                 mcpSessionId: sessionId || trackedSessionId || null,
+                traceCorrelationFingerprints: requestTraceCorrelationFingerprints(req?.headers || {}),
             }, () => transport.handleRequest(req, res, req.body));
             if (mcpEventStreamRequest && trackedSessionId) {
                 transports.markEventStreamOpen(trackedSessionId);

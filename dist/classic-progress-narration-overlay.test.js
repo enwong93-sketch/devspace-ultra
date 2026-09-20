@@ -8,7 +8,7 @@ import {
   conversationProgressNarrationMap,
   inspectProgressNarrationExpression,
 } from "./classic-progress-narration-overlay.js";
-import { EXACT_CONVERSATION_REQUEST_PROOF } from "./progress-ownership-proof.js";
+import { EXACT_CONVERSATION_REQUEST_PROOF, EXACT_PAGE_BRIDGE_PROOF, EXACT_PAGE_CLAIM_PROOF } from "./progress-ownership-proof.js";
 
 const now = Date.parse("2026-09-08T02:30:00.000Z");
 const ownership = (runtimeKey, fingerprint) => ({
@@ -117,6 +117,16 @@ assert.deepEqual(
 );
 
 const script = buildProgressNarrationScript(map);
+{
+  const shared = { source: 'agent-progress-tool', conversationId: 'conversation-normal-claim', ownershipRuntimeKey: 'main-02', ownershipObservedAt: new Date(now).toISOString() };
+  const recovered = conversationProgressNarrationMap({ humanProgress: { messages: [
+    { ...shared, text: 'Old compatibility bridge report', at: new Date(now - 1000).toISOString(), ownershipProof: EXACT_PAGE_BRIDGE_PROOF, ownershipSource: 'devspace-conversation-bridge' },
+    { ...shared, text: 'Fresh normal claim report', at: new Date(now).toISOString(), ownershipProof: EXACT_PAGE_CLAIM_PROOF, ownershipSource: 'classic-exact-page-progress-claim-cdp-page-verified' },
+  ] } });
+  assert.equal(recovered[shared.conversationId].messages.at(-1).text, 'Fresh normal claim report',
+    'the projector must not accept a bridge report while silently discarding newer exact-page claim reports');
+  assert.match(buildProgressNarrationScript(recovered), /Fresh normal claim report/);
+}
 assert.match(script, /DevSpace 進度旁白/);
 assert.match(script, /aria-live','polite'/);
 assert.match(script, /const UI_VERSION = "7"/);

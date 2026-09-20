@@ -39,7 +39,9 @@ function publicClaim(record) {
 
 function cleanRequestBinding(value) {
   const sessionFingerprint = cleanFingerprint(value?.sessionFingerprint);
-  return sessionFingerprint ? { sessionFingerprint } : null;
+  const traceCorrelationFingerprints = [...new Set((Array.isArray(value?.traceCorrelationFingerprints)
+    ? value.traceCorrelationFingerprints : []).slice(0, 8).map(cleanFingerprint).filter(Boolean))];
+  return sessionFingerprint ? { sessionFingerprint, traceCorrelationFingerprints } : null;
 }
 
 function verifiedAuthority(value, expectedClaimId = null) {

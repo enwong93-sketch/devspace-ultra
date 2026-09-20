@@ -27,6 +27,11 @@ function cleanObservedAt(value) {
   return Number.isFinite(parsed) ? new Date(parsed).toISOString() : null;
 }
 
+function cleanTraceFingerprints(value) {
+  return [...new Set((Array.isArray(value) ? value : []).slice(0, 8)
+    .map(cleanFingerprint).filter(Boolean))];
+}
+
 /**
  * Short-lived one-turn bootstrap authority derived only from a successful
  * exact-page progress narration proof. This exists solely so already-open
@@ -54,26 +59,41 @@ export class ProgressBootstrapAuthorityRegistry {
     this.expired = 0;
   }
 
-  register({ sessionFingerprint, conversationId, runtimeKey, observedAt } = {}) {
+  register({ sessionFingerprint, conversationId, runtimeKey, observedAt,
+    traceCorrelationFingerprints, claimId, source, pageVerified } = {}) {
     this.prune();
     const session = cleanFingerprint(sessionFingerprint);
     const conversation = cleanConversationId(conversationId);
     const runtime = cleanRuntimeKey(runtimeKey);
-    const observed = cleanObservedAt(observedAt) || new Date(Number(this.now())).toISOString();
-    if (!session || !conversation || !runtime) return null;
+    const observed = cleanObservedAt(observedAt);
+    const traces = cleanTraceFingerprints(traceCorrelationFingerprints);
+    const claim = cleanText(claimId, 200);
+    if (!session || !conversation || !runtime || !observed || !traces.length
+      || !claim || !/^[A-Za-z0-9_-]{16,200}$/.test(claim)
+      || pageVerified !== true
+      || source !== 'classic-exact-page-progress-claim-cdp-page-verified') return null;
 
     const nowMs = Number(this.now());
-    const ownerKey = `${runtime}:${conversation}`;
+    const observedMs = Date.parse(observed);
+    if (observedMs > nowMs + 1_000 || nowMs - observedMs >= this.ttlMs) return null;
+    const ownerKey = conversation;
     const existing = this.sessions.get(session);
     let owners = new Map();
     if (existing && Number(existing.expiresAtMs) > nowMs) {
       owners = new Map(existing.owners);
     }
     const previous = owners.get(ownerKey);
+    if (previous?.claimId === claim) {
+      // A duplicate relay acknowledgement must not replenish consumed grants.
+      return { ok: true, ambiguous: owners.size > 1, ownerCount: owners.size,
+        expiresAt: new Date(existing.expiresAtMs).toISOString() };
+    }
     owners.set(ownerKey, {
       conversationId: conversation,
       runtimeKey: runtime,
       observedAt: observed,
+      claimId: claim,
+      traceCorrelationFingerprints: traces,
       usedTools: new Set(),
       ...(previous?.firstObservedAt ? { firstObservedAt: previous.firstObservedAt } : { firstObservedAt: observed }),
     });
@@ -82,7 +102,7 @@ export class ProgressBootstrapAuthorityRegistry {
       owners,
       createdAtMs: existing?.createdAtMs ?? nowMs,
       updatedAtMs: nowMs,
-      expiresAtMs: nowMs + this.ttlMs,
+      expiresAtMs: observedMs + this.ttlMs,
     };
     this.sessions.set(session, record);
     this.registered += 1;
@@ -95,11 +115,13 @@ export class ProgressBootstrapAuthorityRegistry {
     };
   }
 
-  consume({ sessionFingerprint, toolName } = {}) {
+  async consume({ sessionFingerprint, toolName, traceCorrelationFingerprints, verifyPage } = {}) {
     this.prune();
     const session = cleanFingerprint(sessionFingerprint);
     const tool = cleanText(toolName, 220);
-    if (!session || !ALLOWED_START_TOOLS.has(tool)) return null;
+    const traces = cleanTraceFingerprints(traceCorrelationFingerprints);
+    if (!session || !ALLOWED_START_TOOLS.has(tool) || !traces.length
+      || typeof verifyPage !== 'function') return null;
     const record = this.sessions.get(session);
     if (!record) return null;
     if (record.owners.size !== 1) {
@@ -108,14 +130,25 @@ export class ProgressBootstrapAuthorityRegistry {
     }
     const owner = [...record.owners.values()][0];
     if (owner.usedTools.has(tool)) return null;
+    if (!traces.some((trace) => owner.traceCorrelationFingerprints.includes(trace))) return null;
+    // Session affinity is never authority. Re-read the exact opaque claim from
+    // its current parent page, then commit once after all asynchronous checks.
+    let live;
+    try { live = await verifyPage(owner.claimId); } catch { return null; }
+    this.prune();
+    if (this.sessions.get(session) !== record || record.owners.size !== 1
+      || record.owners.get(owner.conversationId) !== owner || owner.usedTools.has(tool)
+      || live?.pageVerified !== true || live?.claimId !== owner.claimId
+      || live?.source !== 'classic-exact-page-progress-claim-cdp-page-verified'
+      || live?.conversationId !== owner.conversationId || !cleanRuntimeKey(live?.runtimeKey)) return null;
     owner.usedTools.add(tool);
     this.consumed += 1;
     return {
       conversationId: owner.conversationId,
-      runtimeKey: owner.runtimeKey,
+      runtimeKey: live.runtimeKey,
       sessionFingerprint: session,
       source: "exact-progress-bootstrap-lease-page-verified",
-      observedAt: owner.observedAt,
+      observedAt: live.observedAt,
       pageVerified: true,
       bootstrapLease: true,
     };
@@ -148,6 +181,8 @@ export class ProgressBootstrapAuthorityRegistry {
       maxSessions: this.maxSessions,
       rawSessionPersisted: false,
       durableConversationOwners: 0,
+      exactRequestTraceRequired: true,
+      currentClaimPageRevalidated: true,
     };
   }
 
@@ -168,6 +203,7 @@ export const progressBootstrapAuthorityInternals = {
   cleanConversationId,
   cleanFingerprint,
   cleanObservedAt,
+  cleanTraceFingerprints,
   cleanRuntimeKey,
   cleanText,
 };

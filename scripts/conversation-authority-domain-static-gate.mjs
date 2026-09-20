@@ -20,6 +20,10 @@ assert.match(server, /const resolveProgressConversationAuthority = async \(extra
 assert.match(server, /const resolveConversationAuthority = resolveCapabilityConversationAuthority;/);
 assert.match(server, /const resolveConversation = resolveCapabilityConversationAuthority;/);
 assert.match(server, /const resolveProgressConversation = resolveProgressConversationAuthority;/);
+assert.match(server, /progressBootstrapAuthority\?\.consume\?\.\(\{[\s\S]{0,400}traceCorrelationFingerprints:[\s\S]{0,180}verifyPage:\s*resolveProgressClaimPage/,
+  'cached Goal/Plan bootstrap requires the current request trace and live exact claim page, never session affinity alone');
+assert.match(server, /traceCorrelationFingerprints:\s*requestTraceCorrelationFingerprints\(req\?\.headers \|\| \{\}\)/,
+  'the bootstrap trace must originate in this authenticated HTTP request rather than caller tool arguments');
 assert.match(server, /registerAppTool\(server, "devspace_progress_report"[\s\S]*const resolved = await resolveProgressConversation\(extra\);/);
 assert.match(server, /resourceUri:\s*PROGRESS_CLAIM_RELAY_URI/);
 assert.match(server, /resourceUri:\s*PROGRESS_CLAIM_RELAY_URI,[\s\S]{0,800}visibility:\s*\["model",\s*"app"\]/,
