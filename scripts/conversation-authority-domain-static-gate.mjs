@@ -41,10 +41,14 @@ assert.match(server, /claimPendingProgressFromExactPage/,
 assert.match(server, /void claimPendingProgressFromExactPage\(progressClaim\)/);
 assert.match(server, /progressClaimRegistry\.pendingClaims\(\{ limit: 8 \}\)/,
   "a bounded background sweep must keep resolving claims that mount after the initial tool handler has returned");
-assert.match(server, /setInterval\(\(\) => \{ void sweepPendingProgressClaims\(\); \}, 1_000\)/);
+assert.match(server, /config\.passiveCore \? null : setInterval\(\(\) => \{ void sweepPendingProgressClaims\(\)\.catch/,
+  'passive candidates must not run progress claim sweeps');
 assert.match(server, /conversationStartClaimRegistry\.pendingClaims\(\{ limit: 8 \}\)/,
   "Goal\/Plan bootstrap claims must also be swept only from bounded exact-page pending state");
-assert.match(server, /setInterval\(\(\) => \{ void sweepPendingConversationStartClaims\(\); \}, 1_000\)/);
+assert.match(server, /config\.passiveCore \? null : setInterval\(\(\) => \{ void sweepPendingConversationStartClaims\(\)\.catch/,
+  'passive candidates must not mutate Goal/Plan through claim sweeps');
+assert.match(server, /mcpServerTemplate\.__devspaceStopClaimSweeps\?\.\(\)/,
+  'runtime shutdown must stop claim timers before releasing transports and Goal/Plan stores');
 assert.match(server, /new ProgressBootstrapAuthorityRegistry\(\)/,
   "cached Goal\/Plan bootstrap must use a bounded short-lived in-memory registry");
 assert.match(server, /progressBootstrapAuthority\?\.register\?\.\(\{[\s\S]{0,300}sessionFingerprint:\s*bootstrapSessionFingerprint/,

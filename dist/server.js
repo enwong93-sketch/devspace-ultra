@@ -31,6 +31,7 @@ import { BlenderRuntimeManager } from "./blender-runtime-manager.js";
 import { ProcessSessionManager } from "./process-sessions.js";
 import { createReviewCheckpointManager } from "./review-checkpoints.js";
 import { shutdownHttpServer } from "./server-shutdown.js";
+import { attachHttpRuntimeLifecycle } from "./http-runtime-lifecycle.js";
 import { formatPathForPrompt } from "./skills.js";
 import { createWorkspaceStore } from "./workspace-store.js";
 import { formatAgentsPath, WorkspaceRegistry } from "./workspaces.js";
@@ -975,15 +976,17 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
             verifyPage: resolveProgressClaimPage,
         }) || null;
     };
+    let claimSweepsClosed = config.passiveCore === true;
     const claimPendingProgressFromExactPage = async (progressClaim) => {
         const claimId = String(progressClaim?.claimId || "").trim();
-        if (!claimId || typeof resolveProgressClaimPage !== "function") return null;
+        if (claimSweepsClosed || !claimId || typeof resolveProgressClaimPage !== "function") return null;
         for (const delayMs of [120, 250, 500, 900, 1500]) {
             await new Promise((resolve) => {
                 const timer = setTimeout(resolve, delayMs);
                 timer.unref?.();
             });
             const authority = await resolveProgressClaimPage(claimId).catch(() => null);
+            if (claimSweepsClosed) return null;
             if (!authority?.conversationId) continue;
             return await progressClaimRegistry.claim({
                 claimId,
@@ -1002,11 +1005,12 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
     };
     let progressClaimSweepRunning = false;
     const sweepPendingProgressClaims = async () => {
-        if (progressClaimSweepRunning || typeof resolveProgressClaimPage !== "function") return;
+        if (claimSweepsClosed || progressClaimSweepRunning || typeof resolveProgressClaimPage !== "function") return;
         progressClaimSweepRunning = true;
         try {
             for (const pending of progressClaimRegistry.pendingClaims({ limit: 8 })) {
                 const authority = await resolveProgressClaimPage(pending.claimId).catch(() => null);
+                if (claimSweepsClosed) return;
                 if (!authority?.conversationId) continue;
                 await progressClaimRegistry.claim({
                     claimId: pending.claimId,
@@ -1025,8 +1029,8 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
             progressClaimSweepRunning = false;
         }
     };
-    const progressClaimSweepTimer = setInterval(() => { void sweepPendingProgressClaims(); }, 1_000);
-    progressClaimSweepTimer.unref?.();
+    const progressClaimSweepTimer = config.passiveCore ? null : setInterval(() => { void sweepPendingProgressClaims().catch(() => {}); }, 1_000);
+    progressClaimSweepTimer?.unref?.();
     let conversationStartClaimSweepRunning = false;
     const completeConversationStartClaim = async (pending, authority) => {
         if (!pending?.claimId || !pending?.toolName || !authority?.conversationId) return null;
@@ -1058,11 +1062,12 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
         });
     };
     const sweepPendingConversationStartClaims = async () => {
-        if (conversationStartClaimSweepRunning || typeof resolveStartClaimPage !== "function") return;
+        if (claimSweepsClosed || conversationStartClaimSweepRunning || typeof resolveStartClaimPage !== "function") return;
         conversationStartClaimSweepRunning = true;
         try {
             for (const pending of conversationStartClaimRegistry.pendingClaims({ limit: 8 })) {
                 const authority = await resolveStartClaimPage(pending.claimId).catch(() => null);
+                if (claimSweepsClosed) return;
                 if (!authority?.conversationId) continue;
                 await completeConversationStartClaim(pending, authority).catch(() => null);
             }
@@ -1070,8 +1075,13 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
             conversationStartClaimSweepRunning = false;
         }
     };
-    const conversationStartClaimSweepTimer = setInterval(() => { void sweepPendingConversationStartClaims(); }, 1_000);
-    conversationStartClaimSweepTimer.unref?.();
+    const conversationStartClaimSweepTimer = config.passiveCore ? null : setInterval(() => { void sweepPendingConversationStartClaims().catch(() => {}); }, 1_000);
+    conversationStartClaimSweepTimer?.unref?.();
+    server.__devspaceStopClaimSweeps = () => {
+        claimSweepsClosed = true;
+        clearInterval(progressClaimSweepTimer);
+        clearInterval(conversationStartClaimSweepTimer);
+    };
     const writeVerifiedProgress = async ({ message, kind, resolved, dedupeKey = null, bootstrapSessionFingerprint = null, bootstrapTraceFingerprints = [] }) => {
         const conversationId = String(resolved?.conversationId || "").trim();
         if (!conversationId)
@@ -3563,6 +3573,7 @@ export function createServer(config = loadConfig(), options = {}) {
         localAgentProviders,
         close: () => {
             closePromise ??= (async () => {
+                mcpServerTemplate.__devspaceStopClaimSweeps?.();
                 const results = await transports.closeAll();
                 logSessionCloseResults("server_shutdown", results);
                 processSessions.shutdown();
@@ -3622,6 +3633,10 @@ if (await isMainModule()) {
             console.log(`subagent providers: ${formatLocalAgentProviderAvailabilitySummary(localAgentProviders)}`);
         }
     });
+    attachHttpRuntimeLifecycle(httpServer, close, { onError: (error) => {
+        console.error('devspace HTTP lifecycle failed', error?.code || error?.name || 'Error');
+        process.exitCode = 1;
+    } });
     let shuttingDown = false;
     const shutdown = async () => {
         if (shuttingDown)

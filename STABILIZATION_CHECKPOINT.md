@@ -69,6 +69,35 @@ pending handover is not success and is not permission to kill active work.
 
 ## Remaining product-level work
 
+### Confirmed display root cause, 2026-09-20T09:11Z
+
+An additional orphan process PID 32416 ran the exact relative command
+`node dist/cli.js serve` with cwd equal to this DevSpace installation.
+It had no listening socket, no living parent, no child process, and 22 active
+CDP connections to Main pages. A process search restricted to absolute
+`devspace` command-line paths or listening port 7676 missed it. Its old
+projector continuously held the priority-100 lease and accepted bridge
+reports but not newer claim proofs.
+
+After rechecking its creation time, cwd, exact command, parent, children,
+listeners and exclusion from the live Gateway's active Core PID, only that
+orphan was terminated. Official Core 43592 and Gateway 40548 stayed running;
+no Main or Blender was stopped. A normal `devspace_progress_report` then
+persisted at 09:11:40.288Z and rendered the `ORPHAN-CLEARED` marker in BOTH
+matching displays. Their producer changed from `c9061953-...` to
+`60882623-...`. This is real UI evidence of the orphan projector conflict,
+not just a unit-test inference. It does not prove the upstream MCP transport
+outage had the same cause.
+
+Prevention patch: bind each CLI/server HTTP listener's close/error to its
+own idempotent runtime cleanup; stop claim sweeps before store/transport
+shutdown; suppress those sweeps entirely in passive candidate Cores.
+No sweep may write after shutdown while an asynchronous page check finishes.
+
+Revision 616c4cb audit `06033506-b4dd-4b25-bd69-8f7f948b261a` completed with
+exit 0 and 162 named gates. The subsequent lifecycle patch needs its own
+final audit and controlled production handover.
+
 Verify normal narration through the actual visible card after controlled
 deployment. Verify Goal/Plan exact start and continuation in the current chat,
 then independent Rescue timing and cancellation in an isolated canary. The
