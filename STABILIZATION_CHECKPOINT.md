@@ -37,6 +37,16 @@ kill-on-job-close is false. The generated PowerShell is syntax-checked by the
 real PowerShell parser in regression tests. No production change has been
 performed by these probes or tests.
 
+The detached PowerShell helper exited without a result before touching either
+service, so the executable replacement path now uses the same persistent
+Node-worker pattern as the existing Core reload. It atomically records every
+phase, waits for quiet, revalidates creation identities and the surviving Job,
+terminates only the two exact service PIDs, then starts the existing canonical
+launcher. A real non-destructive `--preflight-only` run completed successfully
+at 2026-09-20T14:03:58.793Z. No scheduled task or Job is stopped. The generated
+PowerShell remains an inspected compatibility artifact, not the executed
+replacement path. Repeated calls must inspect the saved phase first.
+
 The user asked to finish stabilization, explicitly prioritizing Goal Mode.
 The real Goal was still round 1 / reported / continuation pending more than
 three hours after its final response. It was manually redeemed into round 2

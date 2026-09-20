@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import {execFileSync} from 'node:child_process';
+import {readFileSync} from 'node:fs';
 import {
   buildRestartPowerShell,
   parseNetstatListeners,
@@ -123,6 +124,16 @@ if (process.platform === 'win32') {
   assert.equal(rows[0].processId, 100);
   assert.equal(Object.hasOwn(rows[0], "parentProcessId"), false, "fixture confirms parser preserves only fields returned by PowerShell");
 }
+
+const worker=readFileSync(new URL('../scripts/devspace-gateway-replace-worker.mjs',import.meta.url),'utf8');
+assert.doesNotMatch(worker,/Stop-ScheduledTask|TerminateJobObject|taskkill|Stop-Job/);
+assert.match(worker,/actual\.createdAt!==p\.createdAt/);
+assert.match(worker,/job\.killOnJobClose!==false/);
+assert.ok(worker.indexOf("if(!quiet(await snapshot()))") < worker.indexOf('process.kill(p.pid)'));
+assert.match(worker,/await save\('replacing-exact-processes'/);
+assert.match(worker,/if\(process\.argv\.includes\('--preflight-only'\)\)/);
+assert.match(worker,/devspace-fixed-backend\.mjs/);
+assert.match(worker,/detached:true/);
 
 console.log(JSON.stringify({
   ok: true,

@@ -114,9 +114,13 @@ await writeFile(scriptPath, `${script}\r\n`, { encoding: "utf8", mode: 0o600 });
 const helperStdoutPath=join(logDir,'stable-gateway-whole-restart-helper.out.log');
 const helperStderrPath=join(logDir,'stable-gateway-whole-restart-helper.err.log');
 const out=openSync(helperStdoutPath,'a');const err=openSync(helperStderrPath,'a');
+const planPath=join(logDir,'stable-gateway-replacement-plan.json');
+await writeFile(planPath,JSON.stringify({version:1,packageRoot,configDir,gatewayPort,delaySeconds,
+  identities:owned.map(entry=>({pid:entry.pid,role:entry.role,createdAt:listenerProcesses.find(p=>p.processId===entry.pid).createdAt}))}),{encoding:'utf8',mode:0o600});
 let helper;
 try {
-  helper = spawn('powershell.exe', ['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',scriptPath], {
+  helper = spawn(process.execPath, [join(packageRoot,'scripts','devspace-gateway-replace-worker.mjs'),planPath,
+    ...(process.argv.includes('--preflight-only')?['--preflight-only']:[])], {
     detached:true, windowsHide:true, stdio:['ignore',out,err],
   });
 } finally {closeSync(out);closeSync(err);}
