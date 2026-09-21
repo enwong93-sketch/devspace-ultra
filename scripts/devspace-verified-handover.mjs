@@ -17,24 +17,32 @@ import { assessVerifiedHandoverReadiness } from '../dist/verified-handover-polic
 import { readGatewayControlFile } from './devspace-stable-gateway.mjs';
 
 const [mode, idArg] = process.argv.slice(2);
-if (process.argv.length > (['--worker', '--status'].includes(mode) ? 4 : 3)) throw new Error('Unexpected handover arguments');
-if (!['--execute', '--preflight-only', '--worker', '--status'].includes(mode)) {
-  console.log('Usage: devspace-verified-handover.mjs --execute | --preflight-only | --status <id>');
+if (process.argv.length > (['--worker', '--status', '--execute-semantic-schema'].includes(mode) ? 4 : 3)) throw new Error('Unexpected handover arguments');
+if (!['--execute', '--execute-semantic-schema', '--preflight-only', '--worker', '--status'].includes(mode)) {
+  console.log('Usage: devspace-verified-handover.mjs --execute | --execute-semantic-schema <expected-fingerprint> | --preflight-only | --status <id>');
   process.exit(mode ? 2 : 0);
 }
 if ((mode === '--worker' || mode === '--status') && !/^[a-f0-9-]{36}$/.test(idArg || '')) throw new Error('Valid operation id required');
-const id = idArg || randomUUID();
+if (mode === '--execute-semantic-schema' && !/^[a-f0-9]{64}$/i.test(idArg || '')) throw new Error('Expected candidate schema fingerprint is required.');
+const id = ['--worker', '--status'].includes(mode) ? idArg : randomUUID();
 const directory = join(tmpdir(), 'devspace-verified-handovers');
 const path = join(directory, id + '.json');
 if (mode === '--status') { console.log(await readFile(path, 'utf8')); process.exit(0); }
 await mkdir(directory, { recursive: true });
-if (mode === '--execute') {
-  await atomicWriteJson(path, { id, phase: 'scheduled', rawCredentialsStored: false });
+if (mode === '--execute' || mode === '--execute-semantic-schema') {
+  await atomicWriteJson(path, { id, phase: 'scheduled', rawCredentialsStored: false,
+    requestedMode: mode === '--execute-semantic-schema' ? 'semantic-schema' : 'compatible',
+    ...(mode === '--execute-semantic-schema' ? { expectedCandidateFingerprint: idArg.toLowerCase() } : {}) });
   const child = spawn(process.execPath, [fileURLToPath(import.meta.url), '--worker', id], { detached: true, windowsHide: true, stdio: 'ignore' });
   child.unref(); console.log(JSON.stringify({ id, phase: 'scheduled', helperPid: child.pid, statusPath: path })); process.exit(0);
 }
 
-const state = { id, phase: 'authenticating-temporary-verifier', startedAt: new Date().toISOString(), rawCredentialsStored: false };
+const requested = mode === '--worker' ? JSON.parse(await readFile(path, 'utf8')) : { requestedMode: 'preflight' };
+const allowSchemaChange = requested.requestedMode === 'semantic-schema';
+const expectedCandidateFingerprint = allowSchemaChange ? String(requested.expectedCandidateFingerprint || '').toLowerCase() : null;
+if (allowSchemaChange && !/^[a-f0-9]{64}$/.test(expectedCandidateFingerprint)) throw new Error('Scheduled schema fingerprint is invalid.');
+const state = { id, phase: 'authenticating-temporary-verifier', startedAt: new Date().toISOString(), rawCredentialsStored: false,
+  requestedMode: requested.requestedMode, ...(expectedCandidateFingerprint ? { expectedCandidateFingerprint } : {}) };
 const save = async phase => { state.phase = phase; state.observedAt = new Date().toISOString(); await atomicWriteJson(path, state); };
 const safeFailureDetail = value => String(value ?? '')
   .replace(/\bBearer\s+\S+/gi, 'Bearer [REDACTED]')
@@ -97,7 +105,7 @@ try {
     await save(readiness.mode === 'pre-quiet' ? 'pre-quiet-verified' : 'controller-drain-ready');
     await save('handing-over');
     const response = await fetch(base + '/__devspace/gateway/handover', { method: 'POST', signal: AbortSignal.timeout(900000),
-      headers: { 'content-type': 'application/json', 'x-devspace-gateway-control': control.controlToken }, body: JSON.stringify({ allowSchemaChange: false }) });
+      headers: { 'content-type': 'application/json', 'x-devspace-gateway-control': control.controlToken }, body: JSON.stringify({ allowSchemaChange }) });
     const result = await response.json();
     state.handoverHttpStatus = response.status;
     state.handover = Object.fromEntries(['ok', 'state', 'activeSlot', 'activePid', 'candidateStage', 'schemaChanged',
@@ -105,10 +113,26 @@ try {
       .filter(key => result[key] !== undefined).map(key => [key, result[key]]));
     if (result?.error) state.handover.error = safeFailureDetail(result.error);
     if (!response.ok || !result.ok) throw new Error('protected-handover-failed');
-    const after = await client.listTools();
-    state.sessionPreserved = transport.sessionId === originalSessionId;
-    state.catalogPreserved = after.tools.length === before.tools.length;
-    if (!state.sessionPreserved || !state.catalogPreserved) throw new Error('live-verifier-continuity-failed');
+    if (allowSchemaChange) {
+      if (result.schemaChanged !== true || result.requiresFreshInitialize !== true
+        || String(result.schemaFingerprint || '').toLowerCase() !== expectedCandidateFingerprint) {
+        throw new Error('semantic-schema-migration-result-mismatch');
+      }
+      try { await client.close(); } catch {}
+      client = new Client({ name: 'devspace-maintenance-verifier-fresh', version: '0.5.8' }, { capabilities: {} });
+      transport = new StreamableHTTPClientTransport(new URL(base + '/mcp'), { requestInit: { headers: { authorization: 'Bearer ' + tokens.access_token } } });
+      await client.connect(transport);
+      const after = await client.listTools();
+      state.sessionPreserved = false;
+      state.freshSessionInitialized = Boolean(transport.sessionId);
+      state.catalogPreserved = after.tools.length === before.tools.length;
+      if (!state.freshSessionInitialized || !state.catalogPreserved) throw new Error('live-verifier-fresh-initialize-failed');
+    } else {
+      const after = await client.listTools();
+      state.sessionPreserved = transport.sessionId === originalSessionId;
+      state.catalogPreserved = after.tools.length === before.tools.length;
+      if (!state.sessionPreserved || !state.catalogPreserved) throw new Error('live-verifier-continuity-failed');
+    }
   }
   state.ok = true;
   await save(mode === '--preflight-only' ? 'preflight-verified' : 'handover-verified');
