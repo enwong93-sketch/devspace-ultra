@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { ClassicCdpClient } from '../dist/classic-cdp-client.js';
 import { ConversationProgressLivenessCdpAdapter, INTERRUPTED_TURN_RESCUE_TEXT } from '../dist/conversation-progress-liveness-cdp.js';
 import { ConversationProgressLivenessSupervisor } from '../dist/conversation-progress-liveness.js';
+import { analyzeRescueSequence } from '../dist/rescue-canary-sequence.js';
 
 const conversationId = String(process.argv[2] || '').trim();
 if (!/^[A-Za-z0-9_-]{8,200}$/.test(conversationId)) throw new Error('Explicit Main-06 conversation id is required.');
@@ -45,12 +46,51 @@ const evaluate = async expression => {
   if (result?.exceptionDetails) throw new Error('Main-06 page evaluation failed.');
   return result?.result?.value;
 };
-const countRescueMessages = () => evaluate(`(() => {
-  const expected=${JSON.stringify(INTERRUPTED_TURN_RESCUE_TEXT)};
-  const rows=[...document.querySelectorAll('[data-message-author-role="user"]')]
-    .map(node=>String(node.innerText||node.textContent||'').replace(/^DevSpace Local Gateway\\s*/, '').trim());
-  return { count:rows.filter(text=>text===expected).length, latest:rows.at(-1)||null };
-})()`);
+// ChatGPT virtualizes old DOM turns, so a whole-page visible-node count can
+// remain unchanged even after a new Rescue turn is committed. Verify the
+// causal current-branch sequence from the native conversation payload instead:
+// exact source user id -> exactly one NEW `- 繼續` user id -> assistant.
+// Return metadata/booleans only; never return transcript content or tokens.
+async function inspectNativeRescueSequence(conversationId, sourceUserMessageId, expectedText, analyze) {
+  if (location.pathname.match(/\/c\/([^/?#]+)/)?.[1] !== conversationId) {
+    return { ok:false, state:'route-changed' };
+  }
+  const session = await fetch('/api/auth/session', { credentials:'include', cache:'no-store', signal:AbortSignal.timeout(4000) }).then(r=>r.json());
+  const access = session?.accessToken || session?.access_token;
+  const response = await fetch('/backend-api/conversation/' + encodeURIComponent(conversationId), {
+    credentials:'include', cache:'no-store', signal:AbortSignal.timeout(8000),
+    headers: access ? { authorization:'Bearer ' + access } : undefined,
+  });
+  if (!response.ok) return { ok:false, state:'conversation-fetch-' + response.status };
+  const payload = await response.json();
+  const branch = [];
+  const seen = new Set();
+  let nodeId = payload.current_node;
+  while (nodeId && payload.mapping?.[nodeId] && !seen.has(nodeId)) {
+    seen.add(nodeId);
+    const node = payload.mapping[nodeId];
+    if (node.message) branch.push(node.message);
+    nodeId = node.parent;
+  }
+  branch.reverse();
+  return { ...analyze(branch, sourceUserMessageId, expectedText),
+    currentNode:payload.current_node || null };
+}
+const rescueSequenceAfterSource = sourceUserMessageId => evaluate(
+  `(${inspectNativeRescueSequence.toString()})(${JSON.stringify(conversationId)}, ${JSON.stringify(sourceUserMessageId)}, ${JSON.stringify(INTERRUPTED_TURN_RESCUE_TEXT)}, (${analyzeRescueSequence.toString()}))`,
+);
+
+const waitForRescueSequence = async (sourceUserMessageId, { requireAssistant = false, attempts = 30 } = {}) => {
+  let result = null;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    result = await rescueSequenceAfterSource(sourceUserMessageId);
+    const oneRescue = result?.ok === true && result.rescueUserIds?.length === 1;
+    if (oneRescue && (!requireAssistant || result.assistantAfterRescueId)) return result;
+    if (result?.rescueUserIds?.length > 1) return result;
+    await new Promise(resolve => setTimeout(resolve, 250));
+  }
+  return result;
+};
 try {
   await client.open();
   await client.call('Runtime.enable');
@@ -58,7 +98,12 @@ try {
   if (!baseline?.exact || baseline.runtimeKey !== runtimeKey || baseline.generating || !baseline.normalCompletion || !baseline.composerEmpty) {
     throw new Error(`Main-06 is not an idle completed canary page (${baseline?.state || 'unsafe-state'}).`);
   }
-  const before = await countRescueMessages();
+  const sourceUserMessageId = baseline.latestUserMessageId;
+  if (!sourceUserMessageId) throw new Error('Main-06 baseline has no exact source user message id.');
+  const before = await rescueSequenceAfterSource(sourceUserMessageId);
+  if (!before?.ok || before.rescueUserIds.length !== 0) {
+    throw new Error(`Main-06 baseline already has a post-source Rescue sequence: ${JSON.stringify(before)}`);
+  }
   const injected = await evaluate(`(() => {
     const expected=${JSON.stringify(conversationId)};
     if(location.pathname.match(/\\/c\\/([^/?#]+)/)?.[1]!==expected) return {ok:false,state:'route-changed'};
@@ -103,14 +148,17 @@ try {
   }
   await evaluate(`document.getElementById(${JSON.stringify(markerId)})?.remove(); true`);
   markerInjected = false;
-  const after = await countRescueMessages();
-  if (after.count !== before.count + 1 || after.latest !== INTERRUPTED_TURN_RESCUE_TEXT) {
-    throw new Error(`Visible Rescue message count mismatch (${before.count} -> ${after.count}); ${JSON.stringify({ record, dispatchDiagnostics, baselineLatestUserMessageId: baseline.latestUserMessageId })}`);
+  const after = await waitForRescueSequence(sourceUserMessageId);
+  if (!after?.ok || after.rescueUserIds.length !== 1) {
+    throw new Error(`Exact Rescue branch sequence mismatch: ${JSON.stringify({ before, after, record, dispatchDiagnostics, baselineLatestUserMessageId: baseline.latestUserMessageId })}`);
   }
   now += 60_000;
   await supervisor.tick();
-  const afterExtraTick = await countRescueMessages();
-  if (afterExtraTick.count !== after.count) throw new Error('Rescue was sent more than once for one interruption episode.');
+  const afterExtraTick = await rescueSequenceAfterSource(sourceUserMessageId);
+  if (!afterExtraTick?.ok || afterExtraTick.rescueUserIds.length !== 1
+    || afterExtraTick.latestRescueUserId !== after.latestRescueUserId) {
+    throw new Error(`Rescue was sent more than once for one interruption episode: ${JSON.stringify(afterExtraTick)}`);
+  }
   let settled = null;
   for (let attempt = 0; attempt < 60; attempt += 1) {
     await new Promise(resolve => setTimeout(resolve, 1000));
@@ -119,7 +167,10 @@ try {
   }
   console.log(JSON.stringify({ ok: true, gate: 'rescue-main06-live-canary', conversationId, runtimeKey,
     localizedThinkingFailureDetected: true, twentyMinuteBoundarySimulated: true, doubleConfirmation: true,
-    oneShotDispatch: true, beforeRescueMessages: before.count, afterRescueMessages: after.count,
+    oneShotDispatch: true, sourceUserMessageId,
+    rescueUserMessageId: after.latestRescueUserId,
+    assistantAfterRescueId: after.assistantAfterRescueId || settled?.latestAssistantMessageId || null,
+    nativeBranchSequenceVerified: true,
     finalTurnState: record.turnState, assistantSettled: settled?.normalCompletion === true,
     exactConversationOnly: true, pageNavigation: false, otherMainMutations: 0 }, null, 2));
 } finally {
