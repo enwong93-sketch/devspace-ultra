@@ -273,7 +273,8 @@ export class ConversationProgressLivenessSupervisor {
       && event?.canceled === true
       && record.generationResetPending === true;
     const transportOnlyFinish = kind === "finished" && event?.transportOnly === true;
-    if (!generatedResetCancellation && !transportOnlyFinish) record.lastActivityAt = at;
+    const transportOnlyObservation = transportOnlyFinish || ["metadata", "resumed"].includes(kind);
+    if (!generatedResetCancellation && !transportOnlyObservation) record.lastActivityAt = at;
     record.updatedAt = new Date(this.now()).toISOString();
 
     if (kind === "started") {
@@ -296,6 +297,12 @@ export class ConversationProgressLivenessSupervisor {
       record.duplicatePageObserved = false;
       record.uiCleanupPending = true;
       record.lastDispatchState = "conversation-turn-started";
+    } else if (kind === "resumed") {
+      // A stream reconnect is neither new user intent nor useful Agent work.
+      // Preserve the existing episode and silence anchors exactly as-is.
+      record.lastDispatchState = record.armed
+        ? "conversation-turn-stream-resumed-nonterminal"
+        : "idle-stream-resume-observed";
     } else if (kind === "finished" && event?.transportOnly === true) {
       // Network.loadingFinished closes only the browser HTTP transport. A
       // ChatGPT tool-using assistant turn can continue for many more MCP calls
@@ -474,7 +481,7 @@ export class ConversationProgressLivenessSupervisor {
           : page?.state || "conversation-page-not-open";
         continue;
       }
-      record.duplicatePageObserved = false;
+      record.duplicatePageObserved = page.duplicatePageObserved === true;
 
       if (page.normalCompletion === true) {
         this.#disarm(record, "completed", now, "normal-completion-observed-on-page");

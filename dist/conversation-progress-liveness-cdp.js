@@ -2,6 +2,11 @@ import { createHash } from "node:crypto";
 import { readComposerDraft } from './classic-composer-draft.js';
 
 export const INTERRUPTED_TURN_RESCUE_TEXT = "- 繼續";
+const TURN_ERROR_PATTERN_SOURCE = "something went wrong|error generating|network error|thinking failed|thought failed|發生錯誤|出現問題|網絡錯誤|思考失敗|思考失败|再試一次";
+
+export function isClassicTurnErrorText(value) {
+  return new RegExp(TURN_ERROR_PATTERN_SOURCE, "i").test(String(value || ""));
+}
 
 function cleanConversationId(value) {
   const text = String(value ?? "").trim();
@@ -139,18 +144,32 @@ function exactConversationExpression(conversationId) {
       ? String(editor instanceof HTMLTextAreaElement ? editor.value : editor.innerText || editor.textContent || '').replace(/\\u2060/g, '').trim()
       : null;
     const messageNodes = [...document.querySelectorAll('[data-message-author-role]')].filter(visible);
-    const latestMessage = messageNodes.at(-1) || null;
+    const turnSections = [...document.querySelectorAll('section[data-testid^="conversation-turn-"]')].filter(visible);
+    // Failed assistant turns often contain no data-message-author-role node at
+    // all. The last visible turn section is therefore the authoritative UI
+    // boundary; fall back to the latest role-bearing message only for older UI.
+    const latestTurnContainer = turnSections.at(-1)
+      || messageNodes.at(-1)?.closest('article')
+      || messageNodes.at(-1)
+      || null;
+    const latestTurnMessages = latestTurnContainer
+      ? [...latestTurnContainer.querySelectorAll('[data-message-author-role]')].filter(visible)
+      : [];
+    const latestMessage = latestTurnMessages.at(-1) || messageNodes.at(-1) || null;
     const latestMessageRole = latestMessage?.getAttribute('data-message-author-role') || null;
     const latestMessageText = String(latestMessage?.innerText || latestMessage?.textContent || '').trim();
-    const latestTurnContainer = latestMessage?.closest('article') || latestMessage;
+    // Current ChatGPT failure UI (for example the Cantonese Thinking-failed
+    // button) is a role-less sibling inside the turn SECTION. Scope to only
+    // that last turn rather than scanning older errors elsewhere on the page.
     const errorNodes = latestTurnContainer
-      ? [...latestTurnContainer.querySelectorAll('[role="alert"],[data-testid*="error" i],[data-testid*="retry" i]')].filter(visible)
+      ? [...latestTurnContainer.querySelectorAll('button,[role="alert"],[data-testid*="error" i],[data-testid*="retry" i]')].filter(visible)
       : [];
-    const hasTurnError = errorNodes.some((node) => /something went wrong|error generating|network error|發生錯誤|出現問題|網絡錯誤|再試一次/i.test(String(node.innerText || node.textContent || '')))
+    const turnErrorPattern = new RegExp(${JSON.stringify(TURN_ERROR_PATTERN_SOURCE)}, 'i');
+    const hasTurnError = errorNodes.some((node) => turnErrorPattern.test(String(node.innerText || node.textContent || '')))
       || buttons.some((button) => (
         /retry|try again|重試|再試/i.test(String(button.getAttribute('aria-label') || button.title || button.textContent || ''))
         && latestTurnContainer
-        && (button.closest('article') || button.parentElement)?.contains(latestTurnContainer)
+        && latestTurnContainer.contains(button)
       ));
     const root = document.getElementById('devspace-progress-narration-root');
     return {
@@ -205,13 +224,47 @@ export class ConversationProgressLivenessCdpAdapter {
         // One offline Runtime cannot invalidate a conversation found elsewhere.
       }
     }
-    if (matches.length !== 1) {
+    if (matches.length > 1) {
+      // The same exact conversation may be open in more than one Classic
+      // window. Runtime is only a locator, so resolve the duplicate safely
+      // when exactly one copy proves it is the active/interrupted turn and all
+      // other copies can be inspected as inactive. Two active/unknown copies
+      // remain ambiguous and fail closed.
+      const inspected = [];
+      for (const match of matches) {
+        try { inspected.push(await this.#inspectMatch(match, id)); } catch {}
+      }
+      const active = inspected.filter((page) => page?.exact
+        && page?.hydrated
+        && page?.composerFound
+        && page?.composerEmpty
+        && (page?.generating === true || page?.hasTurnError === true || page?.incompleteUserTurn === true));
+      if (inspected.length === matches.length && active.length === 1) {
+        return {
+          ...active[0],
+          duplicatePageObserved: true,
+          duplicateMatchCount: matches.length,
+          duplicateResolvedByUniqueActivePage: true,
+        };
+      }
       return {
         exact: false,
-        ambiguous: matches.length > 1,
-        state: matches.length > 1 ? "duplicate-conversation-pages" : "conversation-page-not-open",
+        ambiguous: true,
+        state: inspected.length !== matches.length
+          ? "duplicate-conversation-page-inspection-incomplete"
+          : "duplicate-conversation-pages",
         conversationId: id,
         matchCount: matches.length,
+        activeMatchCount: active.length,
+      };
+    }
+    if (matches.length === 0) {
+      return {
+        exact: false,
+        ambiguous: false,
+        state: "conversation-page-not-open",
+        conversationId: id,
+        matchCount: 0,
       };
     }
     return await this.#inspectMatch(matches[0], id);
@@ -448,7 +501,15 @@ export class ConversationProgressLivenessCdpAdapter {
           return { ok:false, state:'still-generating' };
         }
         const messageNodes = [...document.querySelectorAll('[data-message-author-role]')].filter(visible);
-        const latestMessage = messageNodes.at(-1) || null;
+        const turnSections = [...document.querySelectorAll('section[data-testid^="conversation-turn-"]')].filter(visible);
+        const latestTurnContainer = turnSections.at(-1)
+          || messageNodes.at(-1)?.closest('article')
+          || messageNodes.at(-1)
+          || null;
+        const latestTurnMessages = latestTurnContainer
+          ? [...latestTurnContainer.querySelectorAll('[data-message-author-role]')].filter(visible)
+          : [];
+        const latestMessage = latestTurnMessages.at(-1) || messageNodes.at(-1) || null;
         const latestMessageRole = latestMessage?.getAttribute('data-message-author-role') || null;
         const latestMessageText = String(latestMessage?.innerText || latestMessage?.textContent || '').trim();
         const latestUser = [...messageNodes].reverse().find((node) => node.getAttribute('data-message-author-role') === 'user') || null;
@@ -461,15 +522,15 @@ export class ConversationProgressLivenessCdpAdapter {
         if (!goalBoundary && latestUserText === expectedText) {
           return { ok:true, state:'already-visible', alreadyVisible:true };
         }
-        const latestTurnContainer = latestMessage?.closest('article') || latestMessage;
         const errorNodes = latestTurnContainer
-          ? [...latestTurnContainer.querySelectorAll('[role="alert"],[data-testid*="error" i],[data-testid*="retry" i]')].filter(visible)
+          ? [...latestTurnContainer.querySelectorAll('button,[role="alert"],[data-testid*="error" i],[data-testid*="retry" i]')].filter(visible)
           : [];
-        const hasTurnError = errorNodes.some((node) => /something went wrong|error generating|network error|發生錯誤|出現問題|網絡錯誤|再試一次/i.test(String(node.innerText || node.textContent || '')))
+        const turnErrorPattern = new RegExp(${JSON.stringify(TURN_ERROR_PATTERN_SOURCE)}, 'i');
+        const hasTurnError = errorNodes.some((node) => turnErrorPattern.test(String(node.innerText || node.textContent || '')))
           || buttons.some((button) => (
             /retry|try again|重試|再試/i.test(String(button.getAttribute('aria-label') || button.title || button.textContent || ''))
             && latestTurnContainer
-            && (button.closest('article') || button.parentElement)?.contains(latestTurnContainer)
+            && latestTurnContainer.contains(button)
           ));
         if (!allowNormalCompletion && latestMessageRole === 'assistant' && latestMessageText.length > 0 && !hasTurnError) {
           return { ok:false, state:'normal-completion-observed' };
@@ -692,4 +753,6 @@ export const _test = {
   markerFor,
   localMinute,
   conversationIdFromUrl,
+  exactConversationExpression,
+  TURN_ERROR_PATTERN_SOURCE,
 };

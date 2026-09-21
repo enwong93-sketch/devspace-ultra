@@ -907,7 +907,27 @@ await silentSupervisor.noteActivity({
   conversationId: "conversation-silent-main-01",
   observedAtMs: silentNow,
 });
-silentNow += 6 * 60_000;
+silentNow += 4 * 60_000;
+const main04BeforeResume = silentSupervisor.status().records.find((row) => row.conversationId === "conversation-silent-main-04");
+await silentSupervisor.noteTurn({
+  kind: "resumed",
+  conversationId: "conversation-silent-main-04",
+  runtimeKey: "main-04",
+  observedAtMs: silentNow,
+});
+await silentSupervisor.noteTurn({
+  kind: "metadata",
+  conversationId: "conversation-silent-main-04",
+  runtimeKey: "main-04",
+  observedAtMs: silentNow + 1_000,
+});
+const main04AfterResume = silentSupervisor.status().records.find((row) => row.conversationId === "conversation-silent-main-04");
+assert.equal(main04AfterResume.startedAt, main04BeforeResume.startedAt,
+  "stream resume must never create a new Rescue episode");
+assert.equal(main04AfterResume.lastActivityAt, main04BeforeResume.lastActivityAt,
+  "stream resume/metadata must not postpone the twenty-minute Rescue clock");
+assert.equal(main04AfterResume.episodeRevision, main04BeforeResume.episodeRevision);
+silentNow += 2 * 60_000;
 await silentSupervisor.tick();
 let silentMain01 = silentSupervisor.status().records.find((row) => row.conversationId === "conversation-silent-main-01");
 let silentMain04 = silentSupervisor.status().records.find((row) => row.conversationId === "conversation-silent-main-04");

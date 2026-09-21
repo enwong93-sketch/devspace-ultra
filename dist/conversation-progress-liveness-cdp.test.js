@@ -1,5 +1,21 @@
 import assert from "node:assert/strict";
-import { ConversationProgressLivenessCdpAdapter } from "./conversation-progress-liveness-cdp.js";
+import { ConversationProgressLivenessCdpAdapter, isClassicTurnErrorText, _test } from "./conversation-progress-liveness-cdp.js";
+
+assert.equal(isClassicTurnErrorText("思考失敗"), true);
+assert.equal(isClassicTurnErrorText("思考失败"), true);
+assert.equal(isClassicTurnErrorText("Thinking failed"), true);
+assert.equal(isClassicTurnErrorText("Thought failed"), true);
+assert.equal(isClassicTurnErrorText("正常完成"), false);
+const exactInspectionSource = _test.exactConversationExpression("conversation-error-scope");
+assert.match(exactInspectionSource, /section\[data-testid\^=\\?"conversation-turn-/,
+  "failure detection must inspect the latest ChatGPT turn section, not only the message article");
+assert.match(exactInspectionSource, /const latestTurnContainer = turnSections\.at\(-1\)/,
+  "a role-less failed assistant turn must remain visible as the last turn boundary");
+assert.match(exactInspectionSource, /latestTurnMessages\.at\(-1\) \|\| messageNodes\.at\(-1\)/,
+  "older role-bearing message metadata may be used only after selecting the current turn section");
+assert.match(exactInspectionSource, /querySelectorAll\('button,/,
+  "the unlabelled Thinking failed button must be included in scoped error candidates");
+assert.match(exactInspectionSource, /思考失敗/);
 
 const targets = new Map([
   [9721, [{
@@ -111,6 +127,50 @@ const incompleteRejected = await adapter.findUniqueActiveConversation({
 });
 assert.equal(incompleteRejected.exact, false);
 
+firstTarget.url = "https://chatgpt.com/c/conversation-duplicate";
+firstTarget.snapshot = {
+  ...firstTarget.snapshot,
+  conversationId: "conversation-duplicate",
+  url: firstTarget.url,
+  hydrated: true,
+  composerFound: true,
+  composerEmpty: true,
+  generating: true,
+  latestMessageRole: "user",
+  hasTurnError: true,
+  normalCompletion: false,
+  incompleteUserTurn: false,
+};
+secondTarget.url = "https://chatgpt.com/c/conversation-duplicate";
+secondTarget.snapshot = {
+  ...secondTarget.snapshot,
+  conversationId: "conversation-duplicate",
+  url: secondTarget.url,
+  hydrated: true,
+  composerFound: true,
+  composerEmpty: true,
+  generating: false,
+  latestMessageRole: "assistant",
+  hasTurnError: false,
+  normalCompletion: true,
+  incompleteUserTurn: false,
+};
+const uniqueActiveDuplicate = await adapter.find({ conversationId: "conversation-duplicate" });
+assert.equal(uniqueActiveDuplicate.exact, true);
+assert.equal(uniqueActiveDuplicate.runtimeKey, "main-01");
+assert.equal(uniqueActiveDuplicate.duplicatePageObserved, true);
+assert.equal(uniqueActiveDuplicate.duplicateResolvedByUniqueActivePage, true);
+assert.equal(uniqueActiveDuplicate.duplicateMatchCount, 2);
+
+secondTarget.snapshot.generating = true;
+secondTarget.snapshot.latestMessageRole = "user";
+secondTarget.snapshot.normalCompletion = false;
+const twoActiveDuplicates = await adapter.find({ conversationId: "conversation-duplicate" });
+assert.equal(twoActiveDuplicates.exact, false);
+assert.equal(twoActiveDuplicates.ambiguous, true);
+assert.equal(twoActiveDuplicates.state, "duplicate-conversation-pages");
+assert.equal(twoActiveDuplicates.activeMatchCount, 2);
+
 console.log(JSON.stringify({
   ok: true,
   gate: "conversation-progress-liveness-cdp",
@@ -119,4 +179,8 @@ console.log(JSON.stringify({
   progressCardOwnerRequired: true,
   runtimeLocatorOnly: true,
   incompleteUserTurnOptInOnly: true,
+  thinkingFailedLocalized: true,
+  latestTurnSectionScoped: true,
+  duplicateConversationUniqueActiveResolved: true,
+  multipleActiveDuplicatesFailClosed: true,
 }));

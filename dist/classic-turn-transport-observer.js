@@ -114,7 +114,10 @@ export class ClassicTurnTransportTracker {
     });
     this.#enforceCap();
     this.#emitActiveTurn({
-      kind: "started",
+      // /conversation/resume reconnects an existing response stream. Treating
+      // it as a fresh user turn would reset the exact-conversation Rescue clock
+      // on every reconnect and can postpone recovery forever.
+      kind: metadata.transportKind === "resume" ? "resumed" : "started",
       requestId,
       conversationId: metadata.conversationId,
       localFunctionNames: metadata.localFunctionNames || [],

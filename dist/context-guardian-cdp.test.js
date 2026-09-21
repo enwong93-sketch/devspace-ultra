@@ -31,6 +31,7 @@ import { fingerprintClassicSession } from "./classic-conversation-authority.js";
     }),
   });
   assert.equal(parsed.modelSlug, "gpt-5-6-thinking");
+  assert.equal(parsed.transportKind, "start");
   assert.equal(parsed.thinkingEffort, "max");
   assert.equal(parsed.conversationId, "conv-12345678");
   assert.equal(parsed.sessionFingerprint, fingerprintClassicSession("native-session-value"));
@@ -49,6 +50,7 @@ import { fingerprintClassicSession } from "./classic-conversation-authority.js";
     postData: JSON.stringify({ model: "gpt-test", conversation_id: "conv-resume-1234", messages: [] }),
   });
   assert.equal(parsedResume?.conversationId, "conv-resume-1234");
+  assert.equal(parsedResume?.transportKind, "resume");
   assert.equal(parseClassicTurnRequest({ url: "https://chatgpt.com/backend-api/other", method: "POST", postData: "{}" }), null);
 }
 

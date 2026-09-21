@@ -187,6 +187,9 @@ tracker.noteRequest({
     headers: {},
   },
 });
+const resumedStarted = activeTurns.findLast((item) => item.requestId === "resume-1");
+assert.equal(resumedStarted.kind, "resumed",
+  "a /conversation/resume transport must not impersonate a fresh user turn");
 assert.equal(tracker.noteResponse({
   requestId: "resume-1",
   response: { url: "https://chatgpt.com/backend-api/f/conversation/resume", status: 200 },

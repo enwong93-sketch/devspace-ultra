@@ -628,6 +628,8 @@ export async function rewriteHiddenRolloverPausedRequest(client, params, {
 
 export function parseClassicTurnRequest(request = {}) {
   if (String(request.method || "").toUpperCase() !== "POST" || !isTurnUrl(request.url)) return null;
+  let requestPath = null;
+  try { requestPath = new URL(String(request.url || "")).pathname; } catch {}
   let body;
   try { body = JSON.parse(String(request.postData || "{}")); } catch { return null; }
   const modelSlug = typeof body?.model === "string" ? body.model.trim() : "";
@@ -639,6 +641,7 @@ export function parseClassicTurnRequest(request = {}) {
       .slice(0, 256),
   )];
   return {
+    transportKind: requestPath === "/backend-api/f/conversation/resume" ? "resume" : "start",
     modelSlug,
     thinkingEffort: typeof body?.thinking_effort === "string"
       ? body.thinking_effort
