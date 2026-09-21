@@ -85,7 +85,7 @@ try {
   const preQuiet = Number(currentStatus?.admission?.activeRequests || 0) === 0
     && Number(currentStatus?.sessions?.totalNonStreamActiveRequests || 0) === 0;
   const quiet = preQuiet
-    ? await waitForStableGatewayQuiet({ statusProbe: gatewayStatus, pollMs: 250, consecutiveQuietSamples: 1 })
+    ? await waitForStableGatewayQuiet({ statusProbe: gatewayStatus, pollMs: 250, consecutiveQuietSamples: 2 })
     : { ok: false, state: "busy-controller-drain-required", quietSamples: 0 };
   const readiness = assessVerifiedHandoverReadiness({ quiet, status: currentStatus });
   const quietBoundary = {
