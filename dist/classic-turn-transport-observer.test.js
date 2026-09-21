@@ -102,7 +102,7 @@ tracker.noteRequest({
     postData: JSON.stringify({
       conversation_id: "conversation-a",
       model: "gpt-test",
-      messages: [],
+      messages: [{ id: "user-message-a-12345678", author: { role: "user" }, content: { parts: ["private body"] } }],
       local_function_names: ["blender_runtime", "blender_mcp", "blender_runtime"],
     }),
     headers: {
@@ -127,12 +127,14 @@ assert.equal(events[0].kind, "request");
 assert.equal(events[0].conversationId, "conversation-a");
 assert.equal(activeTurns[0].kind, "started");
 assert.equal(activeTurns[0].conversationId, "conversation-a");
+assert.equal(activeTurns[0].sourceUserMessageId, "user-message-a-12345678");
 assert.deepEqual(activeTurns[0].localFunctionNames, ["blender_runtime", "blender_mcp"]);
 assert.match(activeTurns[0].turnTraceFingerprint, /^[a-f0-9]{64}$/);
 assert.match(activeTurns[0].sessionFingerprint, /^[a-f0-9]{64}$/);
 assert.equal(activeTurns[0].sessionCorrelationFingerprints.length, 1);
 assert.equal(activeTurns[0].traceCorrelationFingerprints.length, 2);
 assert.equal(activeTurns[1].kind, "metadata");
+assert.equal(activeTurns[1].sourceUserMessageId, "user-message-a-12345678");
 assert.deepEqual(activeTurns[1].sessionCorrelationFingerprints, activeTurns[0].sessionCorrelationFingerprints);
 assert.deepEqual(activeTurns[1].traceCorrelationFingerprints, activeTurns[0].traceCorrelationFingerprints);
 assert.equal(JSON.stringify(activeTurns[0]).includes("turn-trace-secret-a"), false, "raw turn trace ids must never leave the parser");
@@ -183,7 +185,7 @@ tracker.noteRequest({
   request: {
     url: "https://chatgpt.com/backend-api/f/conversation/resume",
     method: "POST",
-    postData: JSON.stringify({ conversation_id: "conversation-resume", model: "gpt-test", messages: [] }),
+    postData: JSON.stringify({ conversation_id: "conversation-resume", model: "gpt-test", messages: [{ id: "resume-user-message-1234", author: { role: "user" }, content: { parts: ["continue"] } }] }),
     headers: {},
   },
 });
@@ -199,6 +201,8 @@ const resumedFinished = activeTurns.at(-1);
 assert.equal(resumedFinished.kind, "finished");
 assert.equal(resumedFinished.requestId, "resume-1");
 assert.equal(resumedFinished.conversationId, "conversation-resume");
+assert.equal(activeTurns.find((item) => item.requestId === "resume-1" && item.kind === "resumed")?.sourceUserMessageId, "resume-user-message-1234");
+assert.equal(resumedFinished.sourceUserMessageId, "resume-user-message-1234");
 const originalFinished = activeTurns.findLast((item) => item.requestId === "r1" && item.kind === "finished");
 assert.equal(originalFinished?.transportOnly, true);
 assert.deepEqual(originalFinished?.sessionCorrelationFingerprints, activeTurns[0].sessionCorrelationFingerprints);

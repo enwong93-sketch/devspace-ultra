@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { readComposerDraft } from './classic-composer-draft.js';
 
 export const INTERRUPTED_TURN_RESCUE_TEXT = "- 繼續";
-const TURN_ERROR_PATTERN_SOURCE = "something went wrong|error generating|network error|thinking failed|thought failed|發生錯誤|出現問題|網絡錯誤|思考失敗|思考失败|再試一次";
+const TURN_ERROR_PATTERN_SOURCE = "something went wrong|error generating|network error|thinking failed|thought failed|thinking interrupted|thought interrupted|發生錯誤|出現問題|網絡錯誤|思考失敗|思考失败|已中斷思考|已中断思考|再試一次";
 
 export function isClassicTurnErrorText(value) {
   return new RegExp(TURN_ERROR_PATTERN_SOURCE, "i").test(String(value || ""));
@@ -165,7 +165,11 @@ function exactConversationExpression(conversationId) {
       ? [...latestTurnContainer.querySelectorAll('button,[role="alert"],[data-testid*="error" i],[data-testid*="retry" i]')].filter(visible)
       : [];
     const turnErrorPattern = new RegExp(${JSON.stringify(TURN_ERROR_PATTERN_SOURCE)}, 'i');
-    const hasTurnError = errorNodes.some((node) => turnErrorPattern.test(String(node.innerText || node.textContent || '')))
+    const rolelessTurnError = latestTurnMessages.length === 0
+      && latestTurnContainer
+      && turnErrorPattern.test(String(latestTurnContainer.innerText || latestTurnContainer.textContent || ''));
+    const hasTurnError = rolelessTurnError
+      || errorNodes.some((node) => turnErrorPattern.test(String(node.innerText || node.textContent || '')))
       || buttons.some((button) => (
         /retry|try again|重試|再試/i.test(String(button.getAttribute('aria-label') || button.title || button.textContent || ''))
         && latestTurnContainer
@@ -526,7 +530,11 @@ export class ConversationProgressLivenessCdpAdapter {
           ? [...latestTurnContainer.querySelectorAll('button,[role="alert"],[data-testid*="error" i],[data-testid*="retry" i]')].filter(visible)
           : [];
         const turnErrorPattern = new RegExp(${JSON.stringify(TURN_ERROR_PATTERN_SOURCE)}, 'i');
-        const hasTurnError = errorNodes.some((node) => turnErrorPattern.test(String(node.innerText || node.textContent || '')))
+        const rolelessTurnError = latestTurnMessages.length === 0
+          && latestTurnContainer
+          && turnErrorPattern.test(String(latestTurnContainer.innerText || latestTurnContainer.textContent || ''));
+        const hasTurnError = rolelessTurnError
+          || errorNodes.some((node) => turnErrorPattern.test(String(node.innerText || node.textContent || '')))
           || buttons.some((button) => (
             /retry|try again|重試|再試/i.test(String(button.getAttribute('aria-label') || button.title || button.textContent || ''))
             && latestTurnContainer

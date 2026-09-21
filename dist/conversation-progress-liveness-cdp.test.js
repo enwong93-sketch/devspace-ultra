@@ -5,6 +5,9 @@ assert.equal(isClassicTurnErrorText("思考失敗"), true);
 assert.equal(isClassicTurnErrorText("思考失败"), true);
 assert.equal(isClassicTurnErrorText("Thinking failed"), true);
 assert.equal(isClassicTurnErrorText("Thought failed"), true);
+assert.equal(isClassicTurnErrorText("已中斷思考"), true);
+assert.equal(isClassicTurnErrorText("已中断思考"), true);
+assert.equal(isClassicTurnErrorText("Thinking interrupted"), true);
 assert.equal(isClassicTurnErrorText("正常完成"), false);
 const exactInspectionSource = _test.exactConversationExpression("conversation-error-scope");
 assert.match(exactInspectionSource, /section\[data-testid\^=\\?"conversation-turn-/,
@@ -16,6 +19,9 @@ assert.match(exactInspectionSource, /latestTurnMessages\.at\(-1\) \|\| messageNo
 assert.match(exactInspectionSource, /querySelectorAll\('button,/,
   "the unlabelled Thinking failed button must be included in scoped error candidates");
 assert.match(exactInspectionSource, /思考失敗/);
+assert.match(exactInspectionSource, /已中斷思考/);
+assert.match(exactInspectionSource, /latestTurnMessages\.length === 0/,
+  "a role-less terminal turn section must be checked even when no error button exists");
 
 const targets = new Map([
   [9721, [{

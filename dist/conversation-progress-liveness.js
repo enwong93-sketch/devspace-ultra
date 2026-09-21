@@ -23,6 +23,11 @@ function cleanConversationId(value) {
   return text && /^[A-Za-z0-9_-]{8,200}$/.test(text) ? text : null;
 }
 
+function cleanMessageId(value) {
+  const text = cleanText(value, 200);
+  return text && /^[A-Za-z0-9_-]{8,200}$/.test(text) ? text : null;
+}
+
 function finiteTime(value) {
   if (Number.isFinite(Number(value))) return Number(value);
   const parsed = Date.parse(String(value || ""));
@@ -113,6 +118,7 @@ function serializableRecord(record) {
     planId: record.planId || null,
     planRevision: Number(record.planRevision || 0),
     episodeRevision: Number(record.episodeRevision || 0),
+    sourceUserMessageId: cleanMessageId(record.sourceUserMessageId),
     armed: record.armed === true,
     turnState: cleanText(record.turnState, 80) || "idle",
     duplicatePageObserved: record.duplicatePageObserved === true,
@@ -199,6 +205,7 @@ export class ConversationProgressLivenessSupervisor {
       const record = this.#newRecord(conversationId);
       record.planId = cleanText(value?.planId, 200);
       record.planRevision = Number(value?.planRevision || 0);
+      record.sourceUserMessageId = cleanMessageId(value?.sourceUserMessageId);
       record.lastReportAt = value?.lastReportAt || null;
       record.lastContinueAt = value?.lastContinueAt || null;
       record.restartObservedAt = finiteTime(value?.restartObservedAt) ? value.restartObservedAt : null;
@@ -269,18 +276,30 @@ export class ConversationProgressLivenessSupervisor {
     const at = new Date(atMs).toISOString();
     const kind = String(event?.kind || "").toLowerCase();
     const record = this.#record(conversationId);
+    const sourceUserMessageId = cleanMessageId(event?.sourceUserMessageId);
+    const sameActiveUserTurn = kind === "started"
+      && sourceUserMessageId
+      && record.armed === true
+      && record.sourceUserMessageId === sourceUserMessageId
+      && ["running", "interrupted", "restart-interrupted", "completion-pending", "uncertain"].includes(record.turnState);
     const generatedResetCancellation = kind === "failed"
       && event?.canceled === true
       && record.generationResetPending === true;
     const transportOnlyFinish = kind === "finished" && event?.transportOnly === true;
-    const transportOnlyObservation = transportOnlyFinish || ["metadata", "resumed"].includes(kind);
+    const transportOnlyObservation = transportOnlyFinish || ["metadata", "resumed"].includes(kind) || sameActiveUserTurn;
     if (!generatedResetCancellation && !transportOnlyObservation) record.lastActivityAt = at;
     record.updatedAt = new Date(this.now()).toISOString();
 
-    if (kind === "started") {
+    if (sameActiveUserTurn) {
+      // ChatGPT can retry the same backend turn via /conversation instead of
+      // /conversation/resume. The stable source user-message id proves no new
+      // user intent, so the twenty-minute Rescue clock must not restart.
+      record.lastDispatchState = "same-user-turn-request-reobserved-nonterminal";
+    } else if (kind === "started") {
       record.armed = true;
       record.episodeRevision = Number(record.episodeRevision || 0) + 1;
       record.turnState = "running";
+      record.sourceUserMessageId = sourceUserMessageId;
       record.startedAt = at;
       record.interruptedAt = null;
       record.completedAt = null;
@@ -303,6 +322,7 @@ export class ConversationProgressLivenessSupervisor {
       record.lastDispatchState = record.armed
         ? "conversation-turn-stream-resumed-nonterminal"
         : "idle-stream-resume-observed";
+      if (!record.sourceUserMessageId && sourceUserMessageId) record.sourceUserMessageId = sourceUserMessageId;
     } else if (kind === "finished" && event?.transportOnly === true) {
       // Network.loadingFinished closes only the browser HTTP transport. A
       // ChatGPT tool-using assistant turn can continue for many more MCP calls
@@ -672,6 +692,7 @@ export class ConversationProgressLivenessSupervisor {
       planId: null,
       planRevision: 0,
       episodeRevision: 0,
+      sourceUserMessageId: null,
       armed: false,
       turnState: "idle",
       duplicatePageObserved: false,

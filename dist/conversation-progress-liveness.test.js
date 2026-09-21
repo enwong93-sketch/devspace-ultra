@@ -324,7 +324,7 @@ assert.equal(supervisor.status().stalledGeneratingSilenceRescue, true);
 assert.equal(supervisor.status().substantiveToolActivityResetsRescueClock, true);
 assert.equal(supervisor.status().maxContinueAttempts, 1);
 
-await supervisor.noteTurn({ kind: "started", conversationId: "conversation-running", runtimeKey: "main-01", observedAtMs: now });
+await supervisor.noteTurn({ kind: "started", conversationId: "conversation-running", runtimeKey: "main-01", sourceUserMessageId: "user-message-running", observedAtMs: now });
 await supervisor.noteTurn({ kind: "started", conversationId: "conversation-complete", runtimeKey: "main-02", observedAtMs: now });
 await supervisor.noteTurn({ kind: "finished", conversationId: "conversation-complete", runtimeKey: "main-02", observedAtMs: now + 1_000 });
 await supervisor.noteTurn({ kind: "started", conversationId: "conversation-finish-pending", runtimeKey: "main-02", observedAtMs: now });
@@ -359,11 +359,19 @@ await supervisor.noteTurn({
   canceled: true,
   observedAtMs: now + 3_000,
 });
+await supervisor.noteTurn({
+  kind: "started",
+  conversationId: "conversation-running",
+  runtimeKey: "main-01",
+  sourceUserMessageId: "user-message-running",
+  observedAtMs: now + 5 * 60_000,
+});
 
 let completeRecord = supervisor.status().records.find((row) => row.conversationId === "conversation-complete");
 let finishPendingRecord = supervisor.status().records.find((row) => row.conversationId === "conversation-finish-pending");
 let cancelledRecord = supervisor.status().records.find((row) => row.conversationId === "conversation-cancelled");
 const transportOnlyRecord = supervisor.status().records.find((row) => row.conversationId === "conversation-transport-only");
+const retriedSameTurnRecord = supervisor.status().records.find((row) => row.conversationId === "conversation-running");
 assert.equal(completeRecord.armed, false, "normal native completion must immediately disarm rescue");
 assert.equal(completeRecord.turnState, "completed");
 assert.equal(finishPendingRecord.armed, true,
@@ -377,6 +385,12 @@ assert.equal(transportOnlyRecord.interruptedAt, null,
 assert.equal(transportOnlyRecord.lastActivityAt, new Date(now).toISOString(),
   "transport-only completion must not advance the rescue clock beyond the native turn start");
 assert.equal(transportOnlyRecord.lastDispatchState, "conversation-turn-transport-finished-nonterminal");
+assert.equal(retriedSameTurnRecord.episodeRevision, 1,
+  "a backend retry of the same source user message must not create a new Rescue episode");
+assert.equal(retriedSameTurnRecord.startedAt, new Date(now).toISOString());
+assert.equal(retriedSameTurnRecord.lastActivityAt, new Date(now).toISOString(),
+  "same-user retries must not advance the twenty-minute silence anchor");
+assert.equal(retriedSameTurnRecord.lastDispatchState, "same-user-turn-request-reobserved-nonterminal");
 assert.equal(cancelledRecord.armed, false, "an explicit user cancellation must not be auto-rescued");
 assert.equal(cancelledRecord.turnState, "cancelled");
 assert.equal(settled.some((event) => event.conversationId === "conversation-complete" && event.turnState === "completed"), true);
