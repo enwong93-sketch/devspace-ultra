@@ -13,6 +13,7 @@ import { loadConfig } from '../dist/config.js';
 import { loadDevspaceFiles } from '../dist/user-config.js';
 import { atomicWriteJson } from '../dist/atomic-file.js';
 import { waitForStableGatewayQuiet } from '../dist/stable-gateway-quiet.js';
+import { assessVerifiedHandoverReadiness } from '../dist/verified-handover-policy.js';
 import { readGatewayControlFile } from './devspace-stable-gateway.mjs';
 
 const [mode, idArg] = process.argv.slice(2);
@@ -35,6 +36,11 @@ if (mode === '--execute') {
 
 const state = { id, phase: 'authenticating-temporary-verifier', startedAt: new Date().toISOString(), rawCredentialsStored: false };
 const save = async phase => { state.phase = phase; state.observedAt = new Date().toISOString(); await atomicWriteJson(path, state); };
+const safeFailureDetail = value => String(value ?? '')
+  .replace(/\bBearer\s+\S+/gi, 'Bearer [REDACTED]')
+  .replace(/([?&](?:token|key|secret|code)=)[^&\s]+/gi, '$1[REDACTED]')
+  .replace(/[\r\n]+/g, ' ')
+  .slice(0, 1200);
 await save(state.phase);
 const config = loadConfig();
 const files = loadDevspaceFiles();
@@ -73,19 +79,31 @@ try {
   state.toolCount = before.tools.length;
   await save('verification-anchor-ready');
   if (mode !== '--preflight-only') {
-    const quiet = await waitForStableGatewayQuiet({ signal: AbortSignal.timeout(180000), consecutiveQuietSamples: 3,
-      statusProbe: async () => {
-        const r = await fetch(base + '/__devspace/gateway/status', { headers: { 'x-devspace-gateway-control': control.controlToken }, signal: AbortSignal.timeout(4000) });
-        if (!r.ok) throw new Error('quiet-status-unavailable'); return r.json();
-      } });
-    if (!quiet.ok) throw new Error('quiet-boundary-not-reached');
+    const statusProbe = async () => {
+      const r = await fetch(base + '/__devspace/gateway/status', { headers: { 'x-devspace-gateway-control': control.controlToken }, signal: AbortSignal.timeout(4000) });
+      if (!r.ok) throw new Error('quiet-status-unavailable'); return r.json();
+    };
+    // A global pre-quiet window is useful but cannot be mandatory in a busy
+    // Multi-Main installation: continuous independent Agent work can starve it
+    // forever. After a short bounded attempt, the Gateway controller's own
+    // close-admission + drain barrier remains the authoritative safety gate.
+    const quiet = await waitForStableGatewayQuiet({ signal: AbortSignal.timeout(15000), consecutiveQuietSamples: 3, statusProbe });
+    const gatewayStatus = await statusProbe();
+    const readiness = assessVerifiedHandoverReadiness({ quiet, status: gatewayStatus });
+    state.quietBoundary = { state: quiet.state, quietSamples: quiet.quietSamples,
+      readinessMode: readiness.mode, admissionActive: readiness.admissionActive,
+      sessionNonStreamActive: readiness.sessionNonStreamActive, sessionCount: readiness.sessionCount };
+    if (!readiness.ok) { state.quietBoundary.reason = readiness.reason; throw new Error('quiet-boundary-unavailable'); }
+    await save(readiness.mode === 'pre-quiet' ? 'pre-quiet-verified' : 'controller-drain-ready');
     await save('handing-over');
-    const response = await fetch(base + '/__devspace/gateway/handover', { method: 'POST', signal: AbortSignal.timeout(120000),
+    const response = await fetch(base + '/__devspace/gateway/handover', { method: 'POST', signal: AbortSignal.timeout(900000),
       headers: { 'content-type': 'application/json', 'x-devspace-gateway-control': control.controlToken }, body: JSON.stringify({ allowSchemaChange: false }) });
     const result = await response.json();
+    state.handoverHttpStatus = response.status;
     state.handover = Object.fromEntries(['ok', 'state', 'activeSlot', 'activePid', 'candidateStage', 'schemaChanged',
       'requiresFreshInitialize', 'replayedSessions', 'deferredSessions', 'droppedSessions', 'replayFailureReasons', 'rollback', 'durationMs']
       .filter(key => result[key] !== undefined).map(key => [key, result[key]]));
+    if (result?.error) state.handover.error = safeFailureDetail(result.error);
     if (!response.ok || !result.ok) throw new Error('protected-handover-failed');
     const after = await client.listTools();
     state.sessionPreserved = transport.sessionId === originalSessionId;
