@@ -7,7 +7,7 @@ import {join,resolve,dirname} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {promisify} from 'node:util';
 import {atomicWriteJson} from '../dist/atomic-file.js';
-import {queryListenerProcesses} from '../dist/stable-gateway-restart.js';
+import {classifyGatewayReplacementBoundary,queryListenerProcesses} from '../dist/stable-gateway-restart.js';
 
 const run=promisify(execFile);
 const root=resolve(dirname(fileURLToPath(import.meta.url)),'..');
@@ -19,11 +19,11 @@ if (resolve(plan.packageRoot)!==root || resolve(dirname(planPath))!==resolve(pla
   || plan.identities.some(p=>!Number.isInteger(p.pid)||p.pid<1||!p.createdAt)) throw new Error('Invalid replacement identity plan');
 const resultPath=join(plan.configDir,'logs','stable-gateway-whole-restart-result.json');
 const status={ok:false,state:'worker-started',startedAt:new Date().toISOString(),
-  oldPids:plan.identities.map(p=>p.pid),gatewayPort:plan.gatewayPort,jobPreserved:true,quietVerified:false,secretValuesLogged:false};
+  oldPids:plan.identities.map(p=>p.pid),gatewayPort:plan.gatewayPort,replacementBreakaway:true,quietVerified:false,secretValuesLogged:false};
 const save=async(state,extra={})=>{Object.assign(status,extra,{state,updatedAt:new Date().toISOString()});await atomicWriteJson(resultPath,status);};
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 async function snapshot(){const r=await fetch(`http://127.0.0.1:${plan.gatewayPort}/__devspace/live/snapshot`,{signal:AbortSignal.timeout(3000)});if(!r.ok)throw new Error('Gateway snapshot unavailable');return r.json();}
-function quiet(s){return s.gateway?.admission?.closed===false && s.gateway.admission.activeRequests===0 && s.activity?.running===0;}
+function replacementBoundary(s){return classifyGatewayReplacementBoundary(s);}
 async function jobProbe(){
   const text=await new Promise((resolveProbe,rejectProbe)=>{
     const child=spawn('python',[join(root,'scripts','devspace-runtime-safety-probe.py'),...plan.identities.map(p=>String(p.pid))],{detached:true,windowsHide:true,stdio:['ignore','pipe','pipe']});
@@ -35,10 +35,12 @@ async function jobProbe(){
 try{
   await save('waiting-for-quiet');
   await sleep(Math.max(1000,Math.min(30000,Number(plan.delaySeconds||6)*1000)));
-  let consecutive=0;const deadline=Date.now()+120_000;
+  let consecutive=0;let boundaryMode=null;const deadline=Date.now()+120_000;
   while(consecutive<3){
     if(Date.now()>deadline)throw new Error('No quiet window; no process stopped');
-    consecutive=quiet(await snapshot())?consecutive+1:0;
+    const observedMode=replacementBoundary(await snapshot());
+    if(observedMode && observedMode===boundaryMode)consecutive+=1;
+    else {boundaryMode=observedMode;consecutive=observedMode?1:0;}
     await sleep(300);
   }
   const processes=await queryListenerProcesses(plan.identities.map(p=>p.pid));
@@ -47,30 +49,28 @@ try{
     if(!actual || actual.createdAt!==p.createdAt)throw new Error('Process identity changed; no process stopped');
   }
   const job=await jobProbe();
-  if(!job.queryOk || !job.limitsQueryOk || job.killOnJobClose!==false
-    || !plan.identities.every(p=>job.requestedPidsInCurrentJob.includes(p.pid)))throw new Error('Job safety cannot be confirmed; no process stopped');
-  if(!quiet(await snapshot()))throw new Error('Work resumed before replacement; no process stopped');
+  if(!job.queryOk || !job.limitsQueryOk
+    || (job.breakawayAllowed!==true && job.silentBreakaway!==true))throw new Error('Breakaway replacement safety cannot be confirmed; no process stopped');
+  if(replacementBoundary(await snapshot())!==boundaryMode)throw new Error('Work resumed before replacement; no process stopped');
   if(process.argv.includes('--preflight-only')){
-    await save('preflight-verified',{ok:true,quietVerified:true,completedAt:new Date().toISOString()});
+    await save('preflight-verified',{ok:true,quietVerified:true,boundaryMode,completedAt:new Date().toISOString()});
     process.exit(0);
   }
-  await save('replacing-exact-processes',{quietVerified:true});
+  await save('replacing-exact-processes',{quietVerified:true,boundaryMode});
   // Gateway first, so it cannot respawn the old Core while it is being retired.
   for(const p of [...plan.identities].sort((a,b)=>(a.role==='gateway'?-1:1)-(b.role==='gateway'?-1:1))){
     try{process.kill(p.pid);}catch(error){if(error.code!=='ESRCH')throw error;}
   }
   await sleep(500);
   await save('starting-canonical-launcher');
-  const launcher=spawn(process.execPath,[join(root,'scripts','devspace-fixed-backend.mjs'),'--foreground','--config-dir',plan.configDir],{
-    cwd:root,detached:true,windowsHide:true,stdio:'ignore',
+  const launched=await run('python',[join(root,'scripts','devspace-runtime-safety-probe.py'),'--launch-breakaway',
+    process.execPath,join(root,'scripts','devspace-fixed-backend.mjs'),'--foreground','--config-dir',plan.configDir],{
+    cwd:root,windowsHide:true,maxBuffer:1024*1024,
   });
-  launcher.unref();
-  let launchError=null;
-  launcher.once('error',error=>{launchError=error;});
-  launcher.once('exit',code=>{if(code!==0)launchError=new Error(`Launcher exited with ${code}`);});
+  const launcher=JSON.parse(String(launched.stdout||'{}'));
+  if(launcher.ok!==true || !Number.isInteger(launcher.pid))throw new Error('Breakaway launcher did not return a valid PID');
   await save('awaiting-core-ready',{launcherPid:launcher.pid});
   while(true){
-    if(launchError)throw launchError;
     await sleep(500);
     try{
       const s=await snapshot();

@@ -35,4 +35,35 @@ assert.equal(gate.snapshot().activeRequests, 1, "only the normal queued request 
 gate.leave();
 assert.deepEqual(gate.snapshot(), { closed: false, activeRequests: 0, queuedRequests: 0 });
 
-console.log(JSON.stringify({ ok: true, gate: "stable-gateway-admission" }));
+{
+  const cancelled = new StableGatewayAdmissionGate();
+  cancelled.closeAdmission();
+  const normalAbort = new AbortController();
+  const streamAbort = new AbortController();
+  const normal = cancelled.enter({ signal: normalAbort.signal });
+  const stream = cancelled.waitForOpen({ signal: streamAbort.signal });
+  await sleep(5);
+  assert.equal(cancelled.snapshot().queuedRequests, 2);
+  normalAbort.abort();
+  streamAbort.abort();
+  assert.equal(await normal, false);
+  assert.equal(await stream, false);
+  assert.deepEqual(cancelled.snapshot(), { closed: true, activeRequests: 0, queuedRequests: 0 },
+    "clients that disconnect behind a handover barrier must not leak admission waiters or active counts");
+}
+
+{
+  const preAborted = new StableGatewayAdmissionGate();
+  const controller = new AbortController();
+  controller.abort();
+  assert.equal(await preAborted.enter({ signal: controller.signal }), false);
+  assert.equal(preAborted.snapshot().activeRequests, 0,
+    "a request closed before the async enter continuation must never increment active admission accounting");
+}
+
+console.log(JSON.stringify({
+  ok: true,
+  gate: "stable-gateway-admission",
+  abortedWaitersReleased: true,
+  preAdmissionDisconnectDoesNotLeak: true,
+}));

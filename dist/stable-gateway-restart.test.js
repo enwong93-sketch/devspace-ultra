@@ -3,10 +3,36 @@ import {execFileSync} from 'node:child_process';
 import {readFileSync} from 'node:fs';
 import {
   buildRestartPowerShell,
+  classifyGatewayReplacementBoundary,
   parseNetstatListeners,
   queryListenerProcesses,
   validateDevspaceListeners,
 } from "./stable-gateway-restart.js";
+
+assert.equal(classifyGatewayReplacementBoundary({
+  gateway: {
+    handoverInProgress: false,
+    admission: { closed: false, activeRequests: 0 },
+    sessions: { totalActiveRequests: 0, totalNonStreamActiveRequests: 0 },
+  },
+  activity: { running: 0 },
+}), "quiet");
+assert.equal(classifyGatewayReplacementBoundary({
+  gateway: {
+    handoverInProgress: true,
+    admission: { closed: true, activeRequests: 3, queuedRequests: 236 },
+    sessions: { totalActiveRequests: 0, totalNonStreamActiveRequests: 0 },
+  },
+  activity: { running: 0 },
+}), "stuck-handover");
+assert.equal(classifyGatewayReplacementBoundary({
+  gateway: {
+    handoverInProgress: true,
+    admission: { closed: true, activeRequests: 3 },
+    sessions: { totalActiveRequests: 1, totalNonStreamActiveRequests: 1 },
+  },
+  activity: { running: 0 },
+}), null, "real MCP work must never be mistaken for leaked admission accounting");
 
 const listeners = parseNetstatListeners(`
   TCP    127.0.0.1:7678    0.0.0.0:0    LISTENING    100
@@ -128,12 +154,15 @@ if (process.platform === 'win32') {
 const worker=readFileSync(new URL('../scripts/devspace-gateway-replace-worker.mjs',import.meta.url),'utf8');
 assert.doesNotMatch(worker,/Stop-ScheduledTask|TerminateJobObject|taskkill|Stop-Job/);
 assert.match(worker,/actual\.createdAt!==p\.createdAt/);
-assert.match(worker,/job\.killOnJobClose!==false/);
+assert.match(worker,/job\.breakawayAllowed!==true/);
+assert.match(worker,/job\.silentBreakaway!==true/);
 assert.ok(worker.indexOf("if(!quiet(await snapshot()))") < worker.indexOf('process.kill(p.pid)'));
 assert.match(worker,/await save\('replacing-exact-processes'/);
 assert.match(worker,/if\(process\.argv\.includes\('--preflight-only'\)\)/);
 assert.match(worker,/devspace-fixed-backend\.mjs/);
-assert.match(worker,/detached:true/);
+assert.match(worker,/classifyGatewayReplacementBoundary/);
+assert.match(worker,/boundaryMode/);
+assert.match(worker,/--launch-breakaway/);
 
 console.log(JSON.stringify({
   ok: true,

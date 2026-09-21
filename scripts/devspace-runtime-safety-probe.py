@@ -2,9 +2,29 @@
 import ctypes
 import json
 import os
+import subprocess
 import sys
 from ctypes import wintypes
 import psutil
+
+if len(sys.argv) >= 3 and sys.argv[1] == "--launch-breakaway":
+    command = sys.argv[2:]
+    flags = (
+        subprocess.CREATE_BREAKAWAY_FROM_JOB
+        | subprocess.DETACHED_PROCESS
+        | subprocess.CREATE_NEW_PROCESS_GROUP
+        | subprocess.CREATE_NO_WINDOW
+    )
+    child = subprocess.Popen(
+        command,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        close_fds=True,
+        creationflags=flags,
+    )
+    print(json.dumps({"ok": True, "pid": child.pid, "breakaway": True}))
+    raise SystemExit(0)
 
 if os.name != "nt":
     raise SystemExit("Windows only")

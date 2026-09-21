@@ -18,6 +18,27 @@ export function parseNetstatListeners(text, ports) {
   return rows;
 }
 
+export function classifyGatewayReplacementBoundary(snapshot) {
+  const gateway = snapshot?.gateway;
+  const admission = gateway?.admission;
+  const sessions = gateway?.sessions;
+  const running = Number(snapshot?.activity?.running || 0);
+  if (!admission || !sessions || running !== 0) return null;
+  if (admission.closed === false && Number(admission.activeRequests || 0) === 0) {
+    return "quiet";
+  }
+  if (
+    gateway?.handoverInProgress === true
+    && admission.closed === true
+    && Number(admission.activeRequests || 0) > 0
+    && Number(sessions.totalActiveRequests || 0) === 0
+    && Number(sessions.totalNonStreamActiveRequests || 0) === 0
+  ) {
+    return "stuck-handover";
+  }
+  return null;
+}
+
 function normalizePath(value) {
   return String(value || "").replaceAll("/", "\\").toLowerCase();
 }

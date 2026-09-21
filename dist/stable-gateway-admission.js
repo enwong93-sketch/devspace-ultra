@@ -21,17 +21,32 @@ export class StableGatewayAdmissionGate {
     return true;
   }
 
-  async waitForOpen(_options = {}) {
-    if (!this.closed) return;
-    await new Promise((resolvePromise) => {
-      const waiter = { resolve: resolvePromise };
+  async waitForOpen({ signal } = {}) {
+    if (!this.closed) return signal?.aborted !== true;
+    if (signal?.aborted) return false;
+    return await new Promise((resolvePromise) => {
+      let settled = false;
+      let waiter;
+      const finish = (opened) => {
+        if (settled) return;
+        settled = true;
+        if (waiter) this.waiters.delete(waiter);
+        signal?.removeEventListener?.("abort", onAbort);
+        resolvePromise(opened);
+      };
+      const onAbort = () => finish(false);
+      waiter = { resolve: () => finish(true) };
       this.waiters.add(waiter);
+      signal?.addEventListener?.("abort", onAbort, { once: true });
+      if (!this.closed) finish(true);
     });
   }
 
   async enter(options = {}) {
-    await this.waitForOpen(options);
+    const opened = await this.waitForOpen(options);
+    if (!opened || options.signal?.aborted) return false;
     this.activeRequests += 1;
+    return true;
   }
 
   leave() {

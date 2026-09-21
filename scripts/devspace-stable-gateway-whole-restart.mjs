@@ -94,9 +94,9 @@ const jobProbe = await new Promise((resolveProbe, rejectProbe) => {
   probe.once('close',code=>code===0?resolveProbe(stdout):rejectProbe(new Error('Windows Job probe failed.')));
 });
 const jobSafety = JSON.parse(jobProbe).currentJob;
-if (!jobSafety?.queryOk || !jobSafety?.limitsQueryOk || jobSafety.killOnJobClose !== false
-  || !owned.every(entry=>jobSafety.requestedPidsInCurrentJob?.includes(entry.pid))) {
-  throw new Error('Cannot prove shared Windows Job survives launcher exit; no process was stopped.');
+if (!jobSafety?.queryOk || !jobSafety?.limitsQueryOk
+  || (jobSafety.breakawayAllowed !== true && jobSafety.silentBreakaway !== true)) {
+  throw new Error('Cannot prove a breakaway replacement survives helper exit; no process was stopped.');
 }
 
 const helperTaskName = `${taskName}-Restart-${Date.now().toString(36)}`.slice(0, 220);
@@ -145,7 +145,7 @@ console.log(JSON.stringify({
   oldCorePids: corePids,
   helperTaskName,
   helperPid: helper.pid,
-  jobPreserved: true,
+  replacementBreakaway: true,
   helperStdoutPath,
   helperStderrPath,
   delaySeconds,
