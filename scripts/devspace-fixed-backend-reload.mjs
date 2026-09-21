@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadDevspaceFiles } from "../dist/user-config.js";
 import { waitForStableGatewayQuiet } from "../dist/stable-gateway-quiet.js";
+import { assessVerifiedHandoverReadiness } from "../dist/verified-handover-policy.js";
 import { readGatewayControlFile } from "./devspace-stable-gateway.mjs";
 
 const isWorker = process.argv.includes("--worker");
@@ -80,18 +81,28 @@ try {
     if (!response.ok) throw new Error(`Stable Gateway status probe returned HTTP ${response.status}.`);
     return await response.json();
   };
-  const quiet = await waitForStableGatewayQuiet({
-    statusProbe: gatewayStatus,
-    pollMs: 250,
-    consecutiveQuietSamples: 2,
-  });
-  if (!quiet.ok) {
+  const currentStatus = await gatewayStatus();
+  const preQuiet = Number(currentStatus?.admission?.activeRequests || 0) === 0
+    && Number(currentStatus?.sessions?.totalNonStreamActiveRequests || 0) === 0;
+  const quiet = preQuiet
+    ? await waitForStableGatewayQuiet({ statusProbe: gatewayStatus, pollMs: 250, consecutiveQuietSamples: 1 })
+    : { ok: false, state: "busy-controller-drain-required", quietSamples: 0 };
+  const readiness = assessVerifiedHandoverReadiness({ quiet, status: currentStatus });
+  const quietBoundary = {
+    state: quiet.state,
+    quietSamples: quiet.quietSamples,
+    readinessMode: readiness.mode,
+    admissionActive: readiness.admissionActive,
+    sessionNonStreamActive: readiness.sessionNonStreamActive,
+    sessionCount: readiness.sessionCount,
+  };
+  if (!readiness.ok) {
     await writeLastResult(files.dir, {
       observedAt: new Date().toISOString(),
       handoverId,
-      state: quiet.state,
+      state: "quiet-boundary-unavailable",
       httpStatus: null,
-      result: quiet,
+      result: { ...quiet, readiness },
       secretValuesLogged: false,
     });
     process.exit(1);
@@ -110,6 +121,7 @@ try {
     handoverId,
     state: response.ok && result?.ok === true ? "completed" : "failed",
     allowSchemaChange,
+    quietBoundary,
     httpStatus: response.status,
     result,
     secretValuesLogged: false,
