@@ -22,6 +22,8 @@ assert.match(exactInspectionSource, /思考失敗/);
 assert.match(exactInspectionSource, /已中斷思考/);
 assert.match(exactInspectionSource, /latestTurnMessages\.length === 0/,
   "a role-less terminal turn section must be checked even when no error button exists");
+assert.match(exactInspectionSource, /latestUserMessageId/,
+  "the exact page snapshot must expose the source user message id for Rescue episode identity");
 
 const targets = new Map([
   [9721, [{
@@ -177,6 +179,63 @@ assert.equal(twoActiveDuplicates.ambiguous, true);
 assert.equal(twoActiveDuplicates.state, "duplicate-conversation-pages");
 assert.equal(twoActiveDuplicates.activeMatchCount, 2);
 
+const rescueTarget = {
+  id: "page-rescue-boundary",
+  type: "page",
+  url: "https://chatgpt.com/c/conversation-rescue-boundary",
+  webSocketDebuggerUrl: "ws://page-rescue-boundary",
+};
+const rescueEvaluations = [];
+const rescueCalls = [];
+let rescueEvaluateIndex = 0;
+const rescueAdapter = new ConversationProgressLivenessCdpAdapter({
+  runtimeKeys: ["main-01"],
+  listTargets: async () => [rescueTarget],
+  sleep: async () => {},
+  connect: async () => ({
+    evaluate: async (expression) => {
+      rescueEvaluations.push(expression);
+      rescueEvaluateIndex += 1;
+      if (rescueEvaluateIndex <= 2) return { ok: true };
+      return { ok: true, state: "visible" };
+    },
+    call: async (method, params) => { rescueCalls.push({ method, params }); return {}; },
+    close() {},
+  }),
+});
+const rescueResolvedTarget = {
+  exact: true,
+  conversationId: "conversation-rescue-boundary",
+  runtimeKey: "main-01",
+  port: 9721,
+  target: {
+    runtimeKey: "main-01",
+    port: 9721,
+    targetId: rescueTarget.id,
+    url: rescueTarget.url,
+    webSocketDebuggerUrl: rescueTarget.webSocketDebuggerUrl,
+  },
+};
+const rescueSend = await rescueAdapter.sendContinue({
+  conversationId: "conversation-rescue-boundary",
+  target: rescueResolvedTarget,
+  sourceUserMessageId: "source-user-message-1234",
+  attempt: 1,
+});
+assert.equal(rescueSend.ok, true);
+assert.equal(rescueSend.visibilityVerified, true);
+assert.equal(rescueCalls.length, 1);
+assert.equal(rescueCalls[0].method, "Input.insertText");
+assert.match(rescueEvaluations[0], /source-user-message-1234/);
+assert.match(rescueEvaluations[0], /previousUserId === rescueBoundary\.sourceUserMessageId/,
+  "text equality alone must not treat an older visible - 繼續 as this episode's Rescue");
+assert.match(rescueEvaluations.at(-1), /previousUser\?\.getAttribute\('data-message-id'\) === rescueBoundary\.sourceUserMessageId/,
+  "post-send visibility must prove the new Rescue user message follows the exact failed user turn");
+assert.deepEqual(await rescueAdapter.sendContinue({
+  conversationId: "conversation-rescue-boundary",
+  target: rescueResolvedTarget,
+}), { ok: false, definiteFailure: true, dispatchCommitted: false, state: "rescue-source-user-required" });
+
 console.log(JSON.stringify({
   ok: true,
   gate: "conversation-progress-liveness-cdp",
@@ -189,4 +248,6 @@ console.log(JSON.stringify({
   latestTurnSectionScoped: true,
   duplicateConversationUniqueActiveResolved: true,
   multipleActiveDuplicatesFailClosed: true,
+  rescueEpisodeBoundaryRequired: true,
+  oldContinueTextCannotSatisfyNewRescue: true,
 }));

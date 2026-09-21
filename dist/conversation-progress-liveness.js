@@ -502,6 +502,9 @@ export class ConversationProgressLivenessSupervisor {
         continue;
       }
       record.duplicatePageObserved = page.duplicatePageObserved === true;
+      if (!record.sourceUserMessageId) {
+        record.sourceUserMessageId = cleanMessageId(page.latestUserMessageId);
+      }
 
       if (page.normalCompletion === true) {
         this.#disarm(record, "completed", now, "normal-completion-observed-on-page");
@@ -611,6 +614,7 @@ export class ConversationProgressLivenessSupervisor {
         conversationId,
         target: page,
         attempt: 1,
+        sourceUserMessageId: record.sourceUserMessageId,
         silenceMs: rescueSilenceMs,
         rescueEvidence: record.rescueEvidence,
       }).catch((error) => ({ ok: false, state: error instanceof Error ? error.message : String(error) }));

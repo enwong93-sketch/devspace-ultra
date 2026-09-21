@@ -13,6 +13,11 @@ function cleanConversationId(value) {
   return text && /^[A-Za-z0-9_-]{8,200}$/.test(text) ? text : null;
 }
 
+function cleanMessageId(value) {
+  const text = String(value ?? "").trim();
+  return text && /^[A-Za-z0-9_-]{8,200}$/.test(text) ? text : null;
+}
+
 function cleanRuntimeKey(value) {
   const text = String(value ?? "").trim().toLowerCase();
   return /^main-\d{2}$/.test(text) ? text : null;
@@ -158,6 +163,9 @@ function exactConversationExpression(conversationId) {
     const latestMessage = latestTurnMessages.at(-1) || messageNodes.at(-1) || null;
     const latestMessageRole = latestMessage?.getAttribute('data-message-author-role') || null;
     const latestMessageText = String(latestMessage?.innerText || latestMessage?.textContent || '').trim();
+    const userMessages = messageNodes.filter((node) => node.getAttribute('data-message-author-role') === 'user');
+    const latestUserMessageId = userMessages.at(-1)?.getAttribute('data-message-id') || null;
+    const previousUserMessageId = userMessages.at(-2)?.getAttribute('data-message-id') || null;
     // Current ChatGPT failure UI (for example the Cantonese Thinking-failed
     // button) is a role-less sibling inside the turn SECTION. Scope to only
     // that last turn rather than scanning older errors elsewhere on the page.
@@ -183,6 +191,8 @@ function exactConversationExpression(conversationId) {
       generating,
       latestMessageRole,
       latestMessageTextLength: latestMessageText.length,
+      latestUserMessageId,
+      previousUserMessageId,
       hasTurnError,
       normalCompletion: !generating && latestMessageRole === 'assistant' && latestMessageText.length > 0 && !hasTurnError,
       incompleteUserTurn: !generating && latestMessageRole === 'user',
@@ -425,9 +435,11 @@ export class ConversationProgressLivenessCdpAdapter {
     }
   }
 
-  async sendContinue({ conversationId, target = null, attempt = 1 } = {}) {
+  async sendContinue({ conversationId, target = null, attempt = 1, sourceUserMessageId = null } = {}) {
     const resolved = await this.#resolveExactTarget(conversationId, target);
     if (!resolved.ok) return resolved;
+    const sourceId = cleanMessageId(sourceUserMessageId);
+    if (!sourceId) return { ok: false, definiteFailure: true, dispatchCommitted: false, state: 'rescue-source-user-required' };
     const text = INTERRUPTED_TURN_RESCUE_TEXT;
     return await this.#sendConversationMessage({
       resolved,
@@ -437,6 +449,7 @@ export class ConversationProgressLivenessCdpAdapter {
       attempt,
       allowNormalCompletion: false,
       requireInterruptionEvidence: true,
+      rescueBoundary: { sourceUserMessageId: sourceId },
     });
   }
 
@@ -480,6 +493,7 @@ export class ConversationProgressLivenessCdpAdapter {
     allowNormalCompletion = false,
     requireInterruptionEvidence = true,
     goalBoundary = null,
+    rescueBoundary = null,
   }) {
     const page = await this.connect(resolved.target);
     const marker = markerFor(resolved.conversationId, `${purpose}:${attempt}`);
@@ -491,6 +505,7 @@ export class ConversationProgressLivenessCdpAdapter {
         const allowNormalCompletion = ${allowNormalCompletion === true};
         const requireInterruptionEvidence = ${requireInterruptionEvidence !== false};
         const goalBoundary = ${JSON.stringify(goalBoundary)};
+        const rescueBoundary = ${JSON.stringify(rescueBoundary)};
         const actual = location.pathname.match(/\\/c\\/([^/?#]+)/)?.[1] || null;
         const draftText = ${readComposerDraft.toString()};
         const visible = (element) => {
@@ -518,12 +533,21 @@ export class ConversationProgressLivenessCdpAdapter {
         const latestMessageText = String(latestMessage?.innerText || latestMessage?.textContent || '').trim();
         const latestUser = [...messageNodes].reverse().find((node) => node.getAttribute('data-message-author-role') === 'user') || null;
         const latestUserText = String(latestUser?.innerText || latestUser?.textContent || '').trim();
+        const userMessages = messageNodes.filter((node) => node.getAttribute('data-message-author-role') === 'user');
+        const latestUserId = userMessages.at(-1)?.getAttribute('data-message-id') || null;
+        const previousUserId = userMessages.at(-2)?.getAttribute('data-message-id') || null;
         if (goalBoundary && (latestUser?.getAttribute('data-message-id') !== goalBoundary.sourceUserId
           || latestMessageRole !== 'assistant'
           || latestMessage?.getAttribute('data-message-id') !== goalBoundary.assistantMessageId)) {
           return { ok:false, state:'goal-source-turn-changed' };
         }
-        if (!goalBoundary && latestUserText === expectedText) {
+        if (rescueBoundary && latestUserId !== rescueBoundary.sourceUserMessageId) {
+          if (latestUserText === expectedText && previousUserId === rescueBoundary.sourceUserMessageId) {
+            return { ok:true, state:'already-visible', alreadyVisible:true };
+          }
+          return { ok:false, state:'rescue-source-turn-changed' };
+        }
+        if (!goalBoundary && !rescueBoundary && latestUserText === expectedText) {
           return { ok:true, state:'already-visible', alreadyVisible:true };
         }
         const errorNodes = latestTurnContainer
@@ -585,19 +609,40 @@ export class ConversationProgressLivenessCdpAdapter {
       await page.call("Input.insertText", { text });
       await this.sleep(350);
       submissionAttempted = true; // a lost CDP acknowledgement may follow a successful click
+      const cleanupUnsentDraft = async () => {
+        try {
+          return await page.evaluate(`(() => {
+            const marker = ${JSON.stringify(marker)};
+            const expectedText = ${JSON.stringify(text)};
+            const draftText = ${readComposerDraft.toString()};
+            const editor = document.querySelector('[data-devspace-liveness-send="' + marker + '"]');
+            if (!editor || draftText(editor) !== expectedText) return { cleaned:false, state:'ownership-lost' };
+            if (editor instanceof HTMLTextAreaElement) editor.value = '';
+            else editor.textContent = '';
+            editor.removeAttribute('data-devspace-liveness-send');
+            editor.dispatchEvent(new InputEvent('input', { bubbles:true, inputType:'deleteContentBackward', data:null }));
+            return { cleaned:draftText(editor) === '', state:'unsent-draft-cleaned' };
+          })()`);
+        } catch { return { cleaned:false, state:'cleanup-unavailable' }; }
+      };
       const submitted = await page.evaluate(`(() => {
         const marker = ${JSON.stringify(marker)};
         const expectedConversation = ${JSON.stringify(resolved.conversationId)};
         const expectedText = ${JSON.stringify(text)};
         const draftText = ${readComposerDraft.toString()};
         const goalBoundary = ${JSON.stringify(goalBoundary)};
+        const rescueBoundary = ${JSON.stringify(rescueBoundary)};
         if (location.pathname.match(/\\/c\\/([^/?#]+)/)?.[1] !== expectedConversation) return {ok:false,state:'route-changed-before-send'};
         if (document.querySelector('button[data-testid="stop-button"]')) return {ok:false,state:'turn-started-before-send'};
+        const nodes = [...document.querySelectorAll('[data-message-author-role]')];
         if (goalBoundary) {
-          const nodes = [...document.querySelectorAll('[data-message-author-role]')];
           const user = [...nodes].reverse().find(n => n.getAttribute('data-message-author-role') === 'user');
           const last = nodes.at(-1);
           if (user?.getAttribute('data-message-id') !== goalBoundary.sourceUserId || last?.getAttribute('data-message-id') !== goalBoundary.assistantMessageId) return {ok:false,state:'goal-source-turn-changed'};
+        }
+        if (rescueBoundary) {
+          const users = nodes.filter(n => n.getAttribute('data-message-author-role') === 'user');
+          if (users.at(-1)?.getAttribute('data-message-id') !== rescueBoundary.sourceUserMessageId) return {ok:false,state:'rescue-source-turn-changed'};
         }
         const visible = (element) => {
           if (!(element instanceof HTMLElement)) return false;
@@ -618,6 +663,8 @@ export class ConversationProgressLivenessCdpAdapter {
         return { ok:true };
       })()`);
       if (!submitted?.ok) {
+        const cleanup = await cleanupUnsentDraft();
+        if (cleanup?.cleaned === true) submissionAttempted = false;
         return { ...submitted, definiteFailure: true, dispatchCommitted: false };
       }
 
@@ -630,13 +677,20 @@ export class ConversationProgressLivenessCdpAdapter {
             const expectedPrefix = ${JSON.stringify(expectedPrefix)};
             const expectedText = ${JSON.stringify(text)};
             const strictGoalBoundary = ${Boolean(goalBoundary)};
+            const rescueBoundary = ${JSON.stringify(rescueBoundary)};
             const actual = location.pathname.match(/\\/c\\/([^/?#]+)/)?.[1] || null;
             if (actual !== expected) return { ok:false, state:'route-changed-after-send' };
             const users = [...document.querySelectorAll('[data-message-author-role="user"]')];
-            const latest = String(users.at(-1)?.innerText || users.at(-1)?.textContent || '').trim();
+            const latestUser = users.at(-1) || null;
+            const previousUser = users.at(-2) || null;
+            const latest = String(latestUser?.innerText || latestUser?.textContent || '').trim();
             const normalized = latest.replace(/^DevSpace Local Gateway\\s*/, '').trim();
+            const rescueSequence = !rescueBoundary || (
+              latestUser?.getAttribute('data-message-id') !== rescueBoundary.sourceUserMessageId
+              && previousUser?.getAttribute('data-message-id') === rescueBoundary.sourceUserMessageId
+            );
             return {
-              ok: normalized === expectedText || (!strictGoalBoundary && normalized.startsWith(expectedPrefix)),
+              ok: rescueSequence && (normalized === expectedText || (!strictGoalBoundary && !rescueBoundary && normalized.startsWith(expectedPrefix))),
               state: latest ? 'visible' : 'missing',
             };
           })()`);
@@ -668,6 +722,23 @@ export class ConversationProgressLivenessCdpAdapter {
             attempt,
           };
     } catch (error) {
+      if (submissionAttempted) {
+        try {
+          const cleanup = await page.evaluate(`(() => {
+            const marker = ${JSON.stringify(marker)};
+            const expectedText = ${JSON.stringify(text)};
+            const draftText = ${readComposerDraft.toString()};
+            const editor = document.querySelector('[data-devspace-liveness-send="' + marker + '"]');
+            if (!editor || draftText(editor) !== expectedText) return { cleaned:false };
+            if (editor instanceof HTMLTextAreaElement) editor.value = '';
+            else editor.textContent = '';
+            editor.removeAttribute('data-devspace-liveness-send');
+            editor.dispatchEvent(new InputEvent('input', { bubbles:true, inputType:'deleteContentBackward', data:null }));
+            return { cleaned:draftText(editor) === '' };
+          })()`);
+          if (cleanup?.cleaned === true) submissionAttempted = false;
+        } catch {}
+      }
       return { ok: false, state: 'transport-acknowledgement-uncertain',
         error: error instanceof Error ? error.message : String(error),
         dispatchCommitted: submissionAttempted, definiteFailure: !submissionAttempted,

@@ -21,7 +21,10 @@ await save(); console.log(JSON.stringify({resultPath,state:record.state}));
 let driver; let runtime;
 try {
   const pages = await inspectGoalContinuationPages({conversationId},{ports:[9736]});
-  if (pages.length!==1 || pages[0].generating || pages[0].latestAssistantText.trim()!=='CANARY_READY') throw new Error('Canary is not the expected idle baseline; refusing to continue other work');
+  if (pages.length!==1 || pages[0].generating || pages[0].latestMessageRole!=='assistant' || !pages[0].latestAssistantText.trim()) throw new Error('Canary is not one exact idle assistant-completed page; refusing to continue other work');
+  record.baselineAssistantMessageId=pages[0].latestAssistantMessageId;
+  record.baselineAssistantTextSha256=(await import('node:crypto')).createHash('sha256').update(pages[0].latestAssistantText).digest('hex');
+  await save();
   const c = new ClassicCdpClient(pages[0].candidate.pageWebSocketDebuggerUrl,{callTimeoutMs:3000});
   await c.open();
   let draft;
@@ -61,7 +64,7 @@ try {
   for(let i=0;i<3;i++) await driver.pollOnce();
   if(record.sends!==1) throw new Error('Duplicate send');
   const after=await inspectGoalContinuationPages({conversationId},{ports:[9736]});
-  record.tests=['real-exact-page-composer','existing-app-mention-preserved','one-visible-control-turn','Goal-round-2-working','no-second-send'];
+  record.tests=['real-exact-page-composer','arbitrary-idle-assistant-baseline','existing-app-mention-preserved','one-visible-control-turn','Goal-round-2-working','no-second-send'];
   record.sourceUserChanged=after[0]?.latestUserMessageId!==pages[0].latestUserMessageId;
   record.round=actual.round; record.roundState=actual.roundState;
   record.state='passed';
