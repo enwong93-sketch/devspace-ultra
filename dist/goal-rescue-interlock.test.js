@@ -99,35 +99,44 @@ test('each hidden Goal continuation creates a fresh Rescue episode even with the
   assert.equal(rescued.continueAttempts, 1);
   const firstEpisode = rescued.episodeRevision;
 
-  h.advance(1_000);
-  await h.note({ kind: 'goal-continuation-started', goalContinuationId: 'continuation_interlock_round_2' });
-  const round2 = h.record();
-  assert.equal(round2.armed, true);
-  assert.equal(round2.turnState, 'running');
-  assert.equal(round2.continueAttempts, 0);
-  assert.equal(round2.lastGoalContinuationId, 'continuation_interlock_round_2');
-  assert.equal(round2.episodeRevision, firstEpisode + 1);
-  const round2StartedAt = round2.startedAt;
-  const round2ActivityAt = round2.lastActivityAt;
+  let previousEpisode = firstEpisode;
+  const ENDURANCE_ROUNDS = 24;
+  for (let round = 2; round <= ENDURANCE_ROUNDS; round += 1) {
+    if (round % 6 === 0) {
+      const restarted = await h.restart();
+      assert.equal(restarted.armed, false,
+        'a rescued terminal episode stays disarmed after Core restart');
+      assert.equal(restarted.turnState, 'startup-disarmed');
+      assert.equal(restarted.episodeRevision, previousEpisode,
+        'restart preserves the prior episode identity without rearming it');
+    }
+    h.advance(1_000);
+    const continuationId = `continuation_interlock_round_${round}`;
+    await h.note({ kind: 'goal-continuation-started', goalContinuationId: continuationId });
+    const current = h.record();
+    assert.equal(current.armed, true);
+    assert.equal(current.turnState, 'running');
+    assert.equal(current.continueAttempts, 0);
+    assert.equal(current.lastGoalContinuationId, continuationId);
+    assert.equal(current.episodeRevision, previousEpisode + 1,
+      `round ${round} must create one fresh Rescue episode`);
+    previousEpisode = current.episodeRevision;
+    const startedAt = current.startedAt;
+    const activityAt = current.lastActivityAt;
 
-  h.advance(10 * MINUTE);
-  await h.note({ kind: 'goal-continuation-started', goalContinuationId: 'continuation_interlock_round_2' });
-  const duplicate = h.record();
-  assert.equal(duplicate.episodeRevision, round2.episodeRevision);
-  assert.equal(duplicate.startedAt, round2StartedAt);
-  assert.equal(duplicate.lastActivityAt, round2ActivityAt);
-  assert.equal(duplicate.lastDispatchState, 'duplicate-hidden-goal-continuation-observed');
+    h.advance(10 * MINUTE);
+    await h.note({ kind: 'goal-continuation-started', goalContinuationId: continuationId });
+    const duplicate = h.record();
+    assert.equal(duplicate.episodeRevision, previousEpisode);
+    assert.equal(duplicate.startedAt, startedAt);
+    assert.equal(duplicate.lastActivityAt, activityAt);
+    assert.equal(duplicate.lastDispatchState, 'duplicate-hidden-goal-continuation-observed');
 
-  await h.rescueEpisode();
-  assert.equal(h.sends(), 2, 'a later hidden Goal round receives its own one-shot Rescue');
-
-  await h.restart();
-  h.advance(1_000);
-  await h.note({ kind: 'goal-continuation-started', goalContinuationId: 'continuation_interlock_round_3' });
-  assert.equal(h.record().continueAttempts, 0);
-  assert.equal(h.record().lastGoalContinuationId, 'continuation_interlock_round_3');
-  await h.rescueEpisode();
-  assert.equal(h.sends(), 3, 'the interlock survives Core restart without globally exhausting Rescue');
+    await h.rescueEpisode();
+    assert.equal(h.sends(), round,
+      `round ${round} receives one Rescue without exhausting or duplicating later rounds`);
+  }
+  assert.equal(h.sends(), ENDURANCE_ROUNDS);
 });
 
 test('invalid Goal continuation notifications cannot rearm Rescue', async t => {

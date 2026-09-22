@@ -212,6 +212,11 @@ export class ConversationProgressLivenessSupervisor {
       record.lastContinueAt = value?.lastContinueAt || null;
       record.restartObservedAt = finiteTime(value?.restartObservedAt) ? value.restartObservedAt : null;
       record.generationResetAt = finiteTime(value?.generationResetAt) ? value.generationResetAt : null;
+      // Keep the episode identity monotonic across Core restarts even when the
+      // persisted episode is terminal/rescued and must remain disarmed. Only
+      // preserving the counter is safe; eligibility, attempts and timing are
+      // still rebuilt below from the stricter restorable-state checks.
+      record.episodeRevision = Math.max(0, Number(value?.episodeRevision || 0));
       const persistedTurnState = cleanText(value?.turnState, 80);
       const startedAtMs = finiteTime(value?.startedAt) || 0;
       const interruptedAtMs = finiteTime(value?.interruptedAt) || 0;
@@ -227,7 +232,7 @@ export class ConversationProgressLivenessSupervisor {
       if (restorable) {
         const restartObservedAt = new Date(startupNow).toISOString();
         const alreadyInterrupted = persistedTurnState === "interrupted";
-        record.episodeRevision = Math.max(1, Number(value?.episodeRevision || 1));
+        record.episodeRevision = Math.max(1, record.episodeRevision || 1);
         record.armed = true;
         // A replacement Core cannot continue an in-flight MCP/tool request
         // owned by its predecessor. Preserve the episode but make the restart
