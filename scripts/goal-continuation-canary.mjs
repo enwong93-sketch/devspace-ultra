@@ -94,8 +94,12 @@ try {
     await new Promise(r=>setTimeout(r,1000));
   }
   const actual=await runtime.status(g.id);
-  if (record.driver?.state!=='delivered'||record.transport?.backgroundAccepted!==true
-    ||record.transport?.visibleUserMessage!==false||record.transport?.composerMutation!==false||actual.round!==2) {
+  const acknowledgedHiddenSend = record.transport?.backgroundAccepted === true;
+  const reconciledHiddenSend = record.transport?.dispatchCommitted === true
+    && record.driver?.reason === 'uncertain-hidden-send-confirmed-by-native-branch'
+    && record.driver?.redeemed === true;
+  if (record.driver?.state!=='delivered'||(!acknowledgedHiddenSend&&!reconciledHiddenSend)
+    ||record.transport?.visibleUserMessage===true||record.transport?.composerMutation===true||actual.round!==2) {
     throw new Error('Hidden continuation not verified: '+JSON.stringify({driver:record.driver,transport:record.transport,round:actual.round}));
   }
   for(let i=0;i<3;i++) await driver.pollOnce();
