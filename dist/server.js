@@ -3111,7 +3111,22 @@ export function createServer(config = loadConfig(), options = {}) {
             contextMetadataAdapter,
             streamRecoveryAdapter,
             config,
-        }), conversationCorrelation: mcpRequestCorrelationDiagnostics.diagnostics(), progressBootstrap: progressBootstrapAuthority.diagnostics(), conversationStartClaims: conversationStartClaimRegistry.diagnostics(), progressProjection: progressNarrationOverlay.status(), goalContinuation: goalContinuationSupervisor.status(), diagnosticGc });
+        }), conversationCorrelation: mcpRequestCorrelationDiagnostics.diagnostics(), progressBootstrap: progressBootstrapAuthority.diagnostics(), conversationStartClaims: conversationStartClaimRegistry.diagnostics(), progressProjection: progressNarrationOverlay.status(),
+            goalContinuation: goalContinuationSupervisor.status(),
+            goalRoundRecovery: goalRoundCompletionGuard.status(),
+            statePersistence: {
+                goal: {
+                    lastError: goalRuntime.lastPersistError || null,
+                    failureCount: Number(goalRuntime.persistFailureCount || 0),
+                    recoveryCount: Number(goalRuntime.persistRecoveryCount || 0),
+                },
+                plan: {
+                    lastError: planRuntime.lastPersistError || null,
+                    failureCount: Number(planRuntime.persistFailureCount || 0),
+                    recoveryCount: Number(planRuntime.persistRecoveryCount || 0),
+                },
+            },
+            diagnosticGc });
     });
     app.post('/__devspace/conversation/bind-progress-claim', express.json({ limit: '4kb' }), async (req, res) => {
         if (config.passiveCore || !localBindingAuthorized(req, config.oauth.ownerToken) || req.headers['x-forwarded-for']) {
