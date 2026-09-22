@@ -466,11 +466,29 @@ export class ConversationProgressLivenessSupervisor {
     return serializableRecord(record);
   }
 
-  async noteActivity({ conversationId, observedAtMs } = {}) {
+  async noteActivity({ conversationId, observedAtMs, sourceUserMessageId } = {}) {
     const id = cleanConversationId(conversationId);
     if (!id) return null;
     const record = this.#record(id);
     if (!record.armed) return serializableRecord(record);
+    const source = cleanMessageId(sourceUserMessageId);
+    if (!source) {
+      record.lastDispatchState = "substantive-tool-activity-without-current-source-ignored";
+      record.updatedAt = new Date(this.now()).toISOString();
+      await this.#persist();
+      return serializableRecord(record);
+    }
+    if (record.sourceUserMessageId && record.sourceUserMessageId !== source) {
+      // A reusable MCP/session identity can outlive the browser turn that
+      // created it. Never let work from another or older turn postpone this
+      // conversation's Rescue. The caller must re-read the exact live page and
+      // pass its current source user-message id for every accepted activity.
+      record.lastDispatchState = "substantive-tool-activity-source-mismatch-ignored";
+      record.updatedAt = new Date(this.now()).toISOString();
+      await this.#persist();
+      return serializableRecord(record);
+    }
+    if (!record.sourceUserMessageId) record.sourceUserMessageId = source;
     const atMs = finiteTime(observedAtMs) || this.now();
     const existingMs = finiteTime(record.lastActivityAt) || 0;
     if (atMs >= existingMs) record.lastActivityAt = new Date(atMs).toISOString();

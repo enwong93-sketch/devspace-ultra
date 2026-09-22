@@ -849,11 +849,13 @@ const silentPages = new Map([
   ["conversation-silent-main-01", {
     runtimeKey: "main-01", port: 9721, hydrated: true, generating: true,
     composerEmpty: true, latestMessageRole: "user", hasTurnError: false,
+    latestUserMessageId: "source-silent-main-01",
     normalCompletion: false, incompleteUserTurn: false,
   }],
   ["conversation-silent-main-04", {
     runtimeKey: "main-04", port: 9734, hydrated: true, generating: true,
     composerEmpty: true, latestMessageRole: "user", hasTurnError: false,
+    latestUserMessageId: "source-silent-main-04",
     normalCompletion: false, incompleteUserTurn: false,
   }],
 ]);
@@ -913,12 +915,25 @@ for (const [conversationId, page] of silentPages) {
     kind: "started",
     conversationId,
     runtimeKey: page.runtimeKey,
+    sourceUserMessageId: page.latestUserMessageId,
     observedAtMs: silentNow,
   });
 }
-silentNow += 15 * 60_000;
+silentNow += 14 * 60_000;
+const beforeWrongActivity = silentSupervisor.status().records.find((row) => row.conversationId === "conversation-silent-main-01");
 await silentSupervisor.noteActivity({
   conversationId: "conversation-silent-main-01",
+  sourceUserMessageId: "source-from-another-or-older-turn",
+  observedAtMs: silentNow,
+});
+const afterWrongActivity = silentSupervisor.status().records.find((row) => row.conversationId === "conversation-silent-main-01");
+assert.equal(afterWrongActivity.lastActivityAt, beforeWrongActivity.lastActivityAt,
+  "stale or cross-turn tool activity must not postpone Rescue");
+assert.equal(afterWrongActivity.lastDispatchState, "substantive-tool-activity-source-mismatch-ignored");
+silentNow += 60_000;
+await silentSupervisor.noteActivity({
+  conversationId: "conversation-silent-main-01",
+  sourceUserMessageId: "source-silent-main-01",
   observedAtMs: silentNow,
 });
 silentNow += 4 * 60_000;

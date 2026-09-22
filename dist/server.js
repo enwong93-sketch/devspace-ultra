@@ -3653,10 +3653,31 @@ export function createServer(config = loadConfig(), options = {}) {
                         return;
                     }
                     if (progressGate?.activityAccepted === true) {
-                        await conversationProgressLiveness?.noteActivity?.({
+                        // Session/provider authority may survive the browser
+                        // turn that originally established it. Before tool
+                        // activity postpones interrupted-turn Rescue, re-read
+                        // the globally exact page and bind the activity to the
+                        // same current source user message. Visible failure,
+                        // idle/completed pages, duplicate pages and stale
+                        // session mappings must never refresh the Rescue clock.
+                        const activityPage = await progressLivenessAdapter.find({
                             conversationId: gateConversationId,
-                            observedAtMs: Date.now(),
                         }).catch(() => null);
+                        if (
+                            activityPage?.exact === true
+                            && activityPage?.ambiguous !== true
+                            && activityPage.conversationId === gateConversationId
+                            && activityPage.runtimeKey === gateRuntimeKey
+                            && activityPage.generating === true
+                            && activityPage.hasTurnError !== true
+                            && activityPage.latestUserMessageId
+                        ) {
+                            await conversationProgressLiveness?.noteActivity?.({
+                                conversationId: gateConversationId,
+                                sourceUserMessageId: activityPage.latestUserMessageId,
+                                observedAtMs: Date.now(),
+                            }).catch(() => null);
+                        }
                     }
                 }
             }
