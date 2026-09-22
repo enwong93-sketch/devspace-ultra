@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { decideGoalProgressNarration, goalRoundReportNarration } from "../dist/goal-progress-narrator.js";
+import { conversationProgressNarrationMap } from "../dist/classic-progress-narration-overlay.js";
 
 const [
   server,
@@ -84,11 +86,88 @@ assert.match(authority, /domFallbackUsed:\s*false/);
 assert.match(narrator, /goalRoundReportNarration/);
 assert.match(narrator, /lastRoundReport/);
 assert.match(narrator, /goal-round-report/);
-assert.match(narrator, /round-report-heading/);
-assert.match(narrator, /round-report-status/);
-assert.match(overlay, /const goalScoped/);
-assert.match(overlay, /item\.goalId === context\.goalId/);
-assert.match(overlay, /item\.round >= minimumRound && item\.round <= context\.round/);
+// Round reports preserve the working Agent's words rather than relying on
+// retired generated heading/status rows. Exercise the behavior directly.
+const authoredParts = [
+  "The isolated compression contract passed.",
+  "Next verify only this conversation's continuation.",
+];
+const narrationGoal = {
+  id: "static-canary-goal",
+  conversationId: "static-canary-source",
+  round: 2,
+  lastRoundReport: {
+    round: 2,
+    reportedAt: "2026-09-21T00:00:00.000Z",
+    summary: authoredParts.join("\n\n"),
+  },
+};
+const narrationRows = goalRoundReportNarration(narrationGoal);
+assert.deepEqual(narrationRows.map(({ text, conversationId, goalId, round, kind, source }) => ({
+  text, conversationId, goalId, round, kind, source,
+})), authoredParts.map((text) => ({
+  text,
+  conversationId: narrationGoal.conversationId,
+  goalId: narrationGoal.id,
+  round: 2,
+  kind: "agent-round-report",
+  source: "goal-round-report",
+})), "Round narration must preserve Agent text and exact Goal/conversation scope.");
+assert.ok(narrationRows.every((row) => typeof row.dedupeKey === "string" && row.dedupeKey.length > 0));
+assert.equal(new Set(narrationRows.map((row) => row.dedupeKey)).size, narrationRows.length);
+assert.deepEqual(goalRoundReportNarration({ ...narrationGoal, conversationId: null }), []);
+assert.deepEqual(goalRoundReportNarration({ ...narrationGoal, lastRoundReport: null }), []);
+assert.deepEqual(goalRoundReportNarration({
+  ...narrationGoal,
+  lastRoundReport: { ...narrationGoal.lastRoundReport, summary: "" },
+}), []);
+assert.equal(decideGoalProgressNarration(), null, "Telemetry must not generate narration.");
+
+// Narration is durable conversation history, not a current-Goal/round window.
+// Verify exact-conversation isolation and the real bounded output behavior.
+const earlierReport = {
+  text: "An earlier accepted result in the same conversation.",
+  conversationId: narrationGoal.conversationId,
+  goalId: "static-earlier-goal",
+  round: 1,
+  kind: "agent-round-report",
+  source: "goal-round-report",
+  at: "2026-09-01T00:00:00.000Z",
+  dedupeKey: "static-earlier-report",
+};
+const foreignReport = {
+  ...earlierReport,
+  text: "A different conversation's report.",
+  conversationId: "static-foreign-conversation",
+  dedupeKey: "static-foreign-report",
+};
+const unverifiedReport = {
+  ...earlierReport,
+  text: "Unverified direct progress must never be projected.",
+  source: "agent-progress-tool",
+  dedupeKey: "static-unverified-report",
+};
+const fixtureMessages = [
+  earlierReport,
+  ...narrationRows.map((row) => ({ ...row, at: narrationGoal.lastRoundReport.reportedAt })),
+  foreignReport,
+  unverifiedReport,
+];
+const projectionArgs = {
+  humanProgress: { messages: fixtureMessages },
+  nowMs: Date.parse("2026-09-21T01:00:00.000Z"),
+};
+const projected = conversationProgressNarrationMap(projectionArgs);
+assert.deepEqual(projected[narrationGoal.conversationId].messages.map((row) => row.text), [
+  earlierReport.text, ...authoredParts,
+]);
+assert.deepEqual(projected[foreignReport.conversationId].messages.map((row) => row.text), [foreignReport.text]);
+assert.deepEqual(conversationProgressNarrationMap({
+  humanProgress: { messages: [unverifiedReport] },
+}), {}, "Unverified direct progress must fail closed.");
+assert.deepEqual(conversationProgressNarrationMap({
+  ...projectionArgs, maxMessages: 1,
+})[narrationGoal.conversationId].messages.map((row) => row.text), [authoredParts.at(-1)]);
 assert.match(overlay, /devspace-progress-scroll/);
 
 const parsedManifest = JSON.parse(manifest);
@@ -112,6 +191,12 @@ console.log(JSON.stringify({
   verifiedAuthorityMigration: true,
   exactUsageFailsClosed: true,
   roundReportsEnterNarrationHistory: true,
+  agentAuthoredRoundReportsPreserved: true,
+  narrationScopeVerified: true,
+  automaticNarrationRejected: true,
+  durableConversationHistoryPreserved: true,
+  unverifiedNarrationRejected: true,
+  narrationOutputBoundVerified: true,
   builtInCapability: true,
   pageReloads: 0,
   syntheticUserMessages: 0,
