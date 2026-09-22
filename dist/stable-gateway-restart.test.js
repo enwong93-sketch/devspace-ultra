@@ -4,6 +4,7 @@ import {readFileSync} from 'node:fs';
 import {
   buildRestartPowerShell,
   classifyGatewayReplacementBoundary,
+  classifyGatewayRestartTopology,
   parseNetstatListeners,
   queryListenerProcesses,
   validateDevspaceListeners,
@@ -33,6 +34,11 @@ assert.equal(classifyGatewayReplacementBoundary({
   },
   activity: { running: 0 },
 }), null, "real MCP work must never be mistaken for leaked admission accounting");
+assert.equal(classifyGatewayRestartTopology([]), "cold-start");
+assert.equal(classifyGatewayRestartTopology([{ role: "gateway", pid: 1 }]), "replacement");
+assert.equal(classifyGatewayRestartTopology([{ role: "gateway", pid: 1 }, { role: "core", pid: 2 }]), "replacement");
+assert.equal(classifyGatewayRestartTopology([{ role: "core", pid: 2 }]), "orphan-core");
+assert.equal(classifyGatewayRestartTopology([{ role: "gateway" }, { role: "gateway" }]), "invalid");
 
 const listeners = parseNetstatListeners(`
   TCP    127.0.0.1:7678    0.0.0.0:0    LISTENING    100
@@ -152,6 +158,13 @@ if (process.platform === 'win32') {
 }
 
 const worker=readFileSync(new URL('../scripts/devspace-gateway-replace-worker.mjs',import.meta.url),'utf8');
+const wholeRestart=readFileSync(new URL('../scripts/devspace-stable-gateway-whole-restart.mjs',import.meta.url),'utf8');
+assert.ok(wholeRestart.indexOf('topology === "cold-start"') < wholeRestart.indexOf('const jobProbe'),
+  "zero-listener cold start must bypass breakaway proof because no process is stopped");
+assert.match(wholeRestart, /Start-ScheduledTask -TaskName/);
+assert.match(wholeRestart, /cold-start-ready/);
+assert.match(wholeRestart, /currentCores\.length === 1/);
+assert.match(wholeRestart, /currentCores\[0\]\.pid === Number\(memoryBody\.pid\)/);
 assert.doesNotMatch(worker,/Stop-ScheduledTask|TerminateJobObject|taskkill|Stop-Job/);
 assert.match(worker,/actual\.createdAt!==p\.createdAt/);
 assert.match(worker,/job\.breakawayAllowed!==true/);

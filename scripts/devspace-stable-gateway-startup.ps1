@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("install", "status", "remove", "start", "restart")]
+    [ValidateSet("install", "status", "remove", "start", "restart", "repair")]
     [string]$Action = "status",
     [string]$ConfigDir = "$env:USERPROFILE\.devspace",
     [ValidateRange(0,30)]
@@ -25,6 +25,40 @@ function Invoke-GatewayHelper {
 
 function Get-GatewayTask {
     return Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+}
+
+function New-GatewayTaskAction {
+    $taskArgs = '"{0}" --foreground --config-dir "{1}"' -f $helper, $configPath
+    return New-ScheduledTaskAction -Execute $node -Argument $taskArgs -WorkingDirectory $packageRoot
+}
+
+function New-GatewayTaskTriggers {
+    $logon = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
+    $watchdog = New-ScheduledTaskTrigger `
+        -Once `
+        -At ((Get-Date).AddMinutes(1)) `
+        -RepetitionInterval (New-TimeSpan -Minutes 1) `
+        -RepetitionDuration (New-TimeSpan -Days 3650)
+    return @($logon, $watchdog)
+}
+
+function New-GatewayTaskSettings {
+    return New-ScheduledTaskSettingsSet `
+        -ExecutionTimeLimit (New-TimeSpan -Seconds 0) `
+        -RestartCount 999 `
+        -RestartInterval (New-TimeSpan -Minutes 1) `
+        -MultipleInstances IgnoreNew `
+        -Priority 4 `
+        -StartWhenAvailable `
+        -AllowStartIfOnBatteries `
+        -DontStopIfGoingOnBatteries
+}
+
+function New-GatewayTaskPrincipal {
+    return New-ScheduledTaskPrincipal `
+        -UserId ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name) `
+        -LogonType Interactive `
+        -RunLevel Limited
 }
 
 function Get-DedicatedListenerProcess {
@@ -82,24 +116,14 @@ switch ($Action) {
             Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
         }
 
-        $taskArgs = '"{0}" --foreground --config-dir "{1}"' -f $helper, $configPath
-        $taskAction = New-ScheduledTaskAction -Execute $node -Argument $taskArgs -WorkingDirectory $packageRoot
-        $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
-        $settings = New-ScheduledTaskSettingsSet `
-            -ExecutionTimeLimit (New-TimeSpan -Seconds 0) `
-            -RestartCount 3 `
-            -RestartInterval (New-TimeSpan -Minutes 1) `
-            -StartWhenAvailable `
-            -AllowStartIfOnBatteries `
-            -DontStopIfGoingOnBatteries
-        $principal = New-ScheduledTaskPrincipal `
-            -UserId ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name) `
-            -LogonType Interactive `
-            -RunLevel Limited
+        $taskAction = New-GatewayTaskAction
+        $triggers = New-GatewayTaskTriggers
+        $settings = New-GatewayTaskSettings
+        $principal = New-GatewayTaskPrincipal
         Register-ScheduledTask `
             -TaskName $taskName `
             -Action $taskAction `
-            -Trigger $trigger `
+            -Trigger $triggers `
             -Settings $settings `
             -Principal $principal | Out-Null
         Start-ScheduledTask -TaskName $taskName
@@ -164,6 +188,31 @@ switch ($Action) {
             TaskState = if ($taskAfter) { $taskAfter.State.ToString() } else { $null }
             ConfigDir = $configPath
             Gateway = $gateway
+            SecretValuesLogged = $false
+        } | ConvertTo-Json -Depth 8 -Compress
+    }
+    "repair" {
+        $task = Get-GatewayTask
+        if (-not $task) { throw "Scheduled Task $taskName is not installed." }
+        $wasRunning = $task.State -eq "Running"
+        Set-ScheduledTask `
+            -TaskName $taskName `
+            -Action (New-GatewayTaskAction) `
+            -Trigger (New-GatewayTaskTriggers) `
+            -Settings (New-GatewayTaskSettings) `
+            -Principal (New-GatewayTaskPrincipal) | Out-Null
+        $after = Get-GatewayTask
+        [ordered]@{
+            Ok = $true
+            State = "repaired"
+            TaskName = $taskName
+            TaskState = if ($after) { $after.State.ToString() } else { $null }
+            RunningInstancePreserved = ($wasRunning -and $after -and $after.State -eq "Running")
+            RestartCount = 999
+            Priority = 4
+            MultipleInstances = "IgnoreNew"
+            WatchdogMinutes = 1
+            ConfigDir = $configPath
             SecretValuesLogged = $false
         } | ConvertTo-Json -Depth 8 -Compress
     }
