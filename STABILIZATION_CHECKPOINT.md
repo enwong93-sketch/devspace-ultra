@@ -1,5 +1,77 @@
 # DevSpace Ultra v0.5.8 stabilization — 2026-09-20
 
+## Round 3: complete control-plane loss and survivability — 2026-09-23
+
+### Incident evidence and recovery
+
+- Incident capture: `C:\Users\enwong\Desktop\devspace-recovery-20260923-053541`.
+  The captured process list contained no DevSpace fixed-backend launcher,
+  Stable Gateway or Core, and ports 7678/7688/7689 had no listener. This was a
+  complete backend-process loss, not merely a stale narration overlay.
+- No Windows Resource-Exhaustion Event 2004 or Node heap/OOM crash was found in
+  the captured hour. A group of WER LiveKernelEvent 141 records appeared around
+  05:21 HKT, consistent with a GPU/display timeout, but DevSpace's prior Core
+  log stopped around 04:22. CPU/GPU pressure remains a plausible environment
+  stressor, NOT a proven cause of the earlier DevSpace disappearance.
+- The old whole-restart executable failed before any mutation because it
+  required breakaway permission even when ZERO Gateway/Core listeners existed.
+  It correctly stopped no process, but consequently could not cold-start a
+  fully dead backend.
+- The canonical `DevSpace-Stable-Gateway` Scheduled Task restored production at
+  05:44 HKT. Verified state: Gateway 7678/PID 64248, sole Core 7688/PID 804,
+  Gateway active PID 804, fatal=false, admission open, active/queued requests
+  0/0, retired 7676/7677 absent. No Main or Blender was stopped; Blender PID
+  17000 remained alive.
+
+### Demonstrated product defects and fixes
+
+1. **Dead-backend cold start.** Commit `2f6fd95` classifies an empty listener
+   topology before the Windows Job breakaway probe. `--preflight-only` now
+   proves a zero-mutation cold start; `--execute` starts the canonical Scheduled
+   Task and requires Gateway health plus exactly one Core whose listener PID
+   matches `/__devspace/memory/status`. Orphan-Core and invalid topologies still
+   fail closed. An isolated alternate-port preflight returned
+   `cold-start-preflight-verified`, breakawayRequired=false, stoppedPids=0 and
+   created no listener.
+2. **Launcher supervision.** The foreground fixed-backend launcher now treats
+   any disappeared Gateway as failure even when the child reports exit code 0,
+   allowing Task Scheduler restart. A real competing healthy Gateway is the
+   only accepted zero-exit race. The exit listener is installed immediately so
+   a fast child failure cannot be missed.
+3. **CPU-saturation scheduling.** The Task and launcher/Core are Normal; the
+   small Gateway control plane is AboveNormal. High and Realtime are prohibited.
+   The running processes were changed in place without a restart: launcher
+   65716 BelowNormal->Normal, Gateway 64248 BelowNormal->AboveNormal, Core 804
+   BelowNormal->Normal.
+4. **Persistent restart policy.** The main Task now has restartCount=999,
+   interval=PT1M, MultipleInstances=IgnoreNew, Priority=4, no execution limit.
+   Commit `4b36a38` adds a separate one-minute watchdog Task instead of
+   repeatedly triggering the healthy long-running Task. The watchdog only
+   starts the main Task when health is down and it is not already running; it
+   never stops a running process tree. A real watchdog run returned 0 while
+   Gateway/Core PIDs remained unchanged and health stayed true.
+
+### Acceptance
+
+- Focused Stable Gateway, Goal, Rescue/liveness and Classic safety suites pass.
+- Clean-revision full audit `87365529-fc2e-45a4-b5b6-b736430ead78` on
+  `4b36a38e5b801b91d41f1f1e4cba892ff39ea1c5` passed 174 named gates, exit 0,
+  with an empty tracked diff.
+- The exact conversation progress marker was persisted and read from the real
+  floating card (`cardAcceptancePassed=true`); all five observed Main runtimes
+  were connected/synced, including Main-05 on its observed port 19735.
+- Production remains package 0.5.8 and Auto Compact remains OFF. Goal/Plan,
+  Rescue, Context Guardian, Host Overlay and Stream Recovery state was retained.
+
+### Boundary
+
+The live production backend was recovered manually through the canonical Task
+before this source fix. The new no-listener `--execute` branch was not tested by
+deliberately destroying production again; its isolated no-mutation preflight,
+the same canonical Task start path, exhaustive tests and the actual manual Task
+recovery are the current evidence. Do not state that CPU, OOM or LiveKernelEvent
+141 definitely caused the outage without a future process-exit/resource event.
+
 ## Round 3: long-run Goal/Rescue compatibility — 2026-09-22
 
 ### Deployed revision and exact acceptance
