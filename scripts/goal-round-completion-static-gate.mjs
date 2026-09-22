@@ -6,31 +6,35 @@ const runtime = await readFile(new URL("../dist/goal-runtime.js", import.meta.ur
 const bridge = await readFile(new URL("../dist/goal-host-bridge.js", import.meta.url), "utf8");
 const guard = await readFile(new URL("../dist/goal-round-completion-guard.js", import.meta.url), "utf8");
 
-assert.match(server, /ClassicGoalRoundCompletionGuard/);
-assert.match(server, /if\s*\(config\.goalRoundRecoveryEnabled\)[\s\S]*goalRoundCompletionGuard\.start\(\)/, "automatic same-round recovery must support an explicit operator hold");
+assert.match(server, /ClassicGoalRoundCompletionGuard/,
+  "legacy recovery state remains readable for existing persisted Goals");
+assert.doesNotMatch(server, /goalRoundCompletionGuard\.start\(/,
+  "production must never start the retired same-round Goal recovery dispatcher");
 assert.match(server, /goalRoundCompletionGuard\.close\(\)/);
 assert.match(server, /goalHostBridge\.inspectWorkingRound/);
 assert.match(server, /goalHostBridge\.dispatchRoundRecovery/);
-assert.match(server, /progressLivenessAdapter\.sendGoalRecovery/,
-  "Goal Recovery must reuse the exact page-composer transport proven by interrupted-turn rescue");
-assert.match(server, /sendRecovery:\s*sendExactGoalRecovery/);
+assert.doesNotMatch(server, /progressLivenessAdapter\.sendGoalRecovery|sendRecovery:\s*sendExactGoalRecovery/,
+  "Goal Recovery must never share interrupted-turn Rescue's visible page-composer transport");
 assert.match(runtime, /recoverableWorkingRounds/);
 assert.match(runtime, /claimRoundRecovery/);
 assert.match(runtime, /DEVSPACE_GOAL_ROUND_RECOVERY/);
 assert.match(runtime, /Do not call devspace_goal_round_begin/i);
 assert.match(runtime, /recovery-already-dispatched/,
-  "one successfully visible Goal recovery must close the current round recovery episode");
+  "legacy persisted recovery state remains parseable even though production dispatch is retired");
 assert.match(bridge, /inspectWorkingRound/);
 assert.match(bridge, /dispatchRoundRecovery/);
-assert.match(bridge, /findExactConversationPage/);
-assert.match(bridge, /classic-exact-page-composer/);
-assert.match(bridge, /foregroundActivation:\s*false/);
-assert.match(bridge, /pageNavigation:\s*false/);
+assert.match(bridge, /state:\s*"visible-goal-recovery-transport-retired"/);
+assert.match(bridge, /definiteFailure:\s*true/);
+assert.match(bridge, /dispatchCommitted:\s*false/);
+assert.match(bridge, /backgroundAccepted:\s*false/);
+assert.match(bridge, /visibleUserMessage:\s*false/);
+assert.match(bridge, /composerMutation:\s*false/);
 const recoveryStart = bridge.indexOf("async dispatchRoundRecovery");
 const recoveryEnd = bridge.indexOf("setBeforeRawDispatch", recoveryStart);
 const recoveryBody = bridge.slice(recoveryStart, recoveryEnd);
-assert.doesNotMatch(recoveryBody, /beforeDispatch|sendRaw|findConversationRelay|findMatchingCandidate/,
-  "Goal Recovery must not run Primary repair, app-relay discovery, or raw host follow-up RPC");
+assert.match(recoveryBody, /visible-goal-recovery-transport-retired/);
+assert.doesNotMatch(recoveryBody, /beforeDispatch|sendRecovery|sendGoalRecovery|findExactConversationPage|findExactConversationRelay|this\.sendRaw\(|Input\.insertText|prompt-textarea|send-button/,
+  "retired Goal Recovery must fail before page discovery, host RPC, Primary repair, or composer access");
 assert.doesNotMatch(recoveryBody, /Page\.navigate|Page\.reload|bringToFront|activate|showWindow/i,
   "Goal Recovery must not navigate, foreground, or pop another conversation window");
 assert.match(guard, /streamStatus/);
@@ -53,15 +57,13 @@ assert.match(server, /onTurnTransportEvent/);
 console.log(JSON.stringify({
   ok: true,
   gate: "goal-round-completion-static",
-  sameRoundRecovery: true,
-  noUserPromptRequired: true,
+  sameRoundRecovery: false,
+  visibleSameRoundRecoveryRetired: true,
+  interruptedWorkingRoundUsesOrdinaryRescue: true,
   chatModeOnly: true,
-  nativeCompleteOrTransportFailureRequired: true,
-  staleGuiGeneratingRequiresCurrentTurnProof: true,
-  transientAttemptBurstCanRecover: true,
+  legacyStateReadable: true,
   guiAloneNeverAuthoritative: true,
-  exactPageComposerTransport: true,
-  oneVisibleRecoveryPerRound: true,
-  foregroundActivation: false,
-  pageNavigation: false,
+  hiddenHostRecoveryTransport: false,
+  visibleComposerTransport: false,
+  hostRpcDispatch: false,
 }));

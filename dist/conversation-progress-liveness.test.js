@@ -1118,7 +1118,6 @@ const exactRecoveryTarget = {
 };
 const recoveryEvaluations = [];
 const recoveryCalls = [];
-let recoveryEvaluationIndex = 0;
 const exactPageRecoveryAdapter = new ConversationProgressLivenessCdpAdapter({
   runtimeKeys: ["main-03"],
   listTargets: async () => [exactRecoveryTarget],
@@ -1126,10 +1125,7 @@ const exactPageRecoveryAdapter = new ConversationProgressLivenessCdpAdapter({
   connect: async () => ({
     evaluate: async (expression) => {
       recoveryEvaluations.push(expression);
-      recoveryEvaluationIndex += 1;
-      if (recoveryEvaluationIndex === 1) return { ok: true };
-      if (recoveryEvaluationIndex === 2) return { ok: true };
-      return { ok: true, state: "visible" };
+      return { ok: true };
     },
     call: async (method, params) => {
       recoveryCalls.push({ method, params });
@@ -1156,103 +1152,40 @@ const goalRecoverySend = await exactPageRecoveryAdapter.sendGoalRecovery({
   prompt: "[DEVSPACE_GOAL_ROUND_RECOVERY]\nContinue the same verified Goal round.",
   attempt: 1,
 });
-assert.equal(goalRecoverySend.ok, true);
-assert.equal(goalRecoverySend.purpose, "goal-round-recovery");
-assert.equal(goalRecoverySend.dispatchCommitted, true);
-assert.equal(goalRecoverySend.visibilityVerified, true);
-assert.equal(goalRecoverySend.foregroundActivation, false);
-assert.equal(goalRecoverySend.pageNavigation, false);
-assert.equal(recoveryCalls.length, 1);
-assert.equal(recoveryCalls[0].method, "Input.insertText");
-assert.match(recoveryEvaluations[0], /const allowNormalCompletion = true;/,
-  "Goal Recovery must allow the completed assistant message that proves the prior round ended");
-assert.match(recoveryEvaluations[0], /const requireInterruptionEvidence = false;/,
-  "the Goal guard, not generic rescue DOM heuristics, owns recovery eligibility");
+assert.deepEqual(goalRecoverySend, {
+  ok: false,
+  definiteFailure: true,
+  dispatchCommitted: false,
+  visibilityVerified: false,
+  state: "visible-goal-recovery-transport-retired",
+});
+assert.equal(recoveryCalls.length, 0,
+  "Goal Recovery must never type control text into the user's composer");
+assert.equal(recoveryEvaluations.length, 0,
+  "the retired visible Goal transport must not even inspect or mutate the exact page");
 const invalidGoalRecovery = await exactPageRecoveryAdapter.sendGoalRecovery({
   conversationId: "conversation-goal-recovery",
   prompt: "untrusted arbitrary follow-up",
 });
-assert.deepEqual(invalidGoalRecovery, { ok: false, state: "invalid-goal-recovery-prompt" });
-
-let alreadyVisibleCalls = 0;
-const alreadyVisibleRecoveryAdapter = new ConversationProgressLivenessCdpAdapter({
-  runtimeKeys: ["main-03"],
-  listTargets: async () => [exactRecoveryTarget],
-  sleep: async () => {},
-  connect: async () => ({
-    evaluate: async () => ({ ok: true, state: "already-visible", alreadyVisible: true }),
-    call: async () => { alreadyVisibleCalls += 1; return {}; },
-    close() {},
-  }),
-});
-const alreadyVisibleRecovery = await alreadyVisibleRecoveryAdapter.sendGoalRecovery({
+assert.deepEqual(invalidGoalRecovery, goalRecoverySend,
+  "legacy callers fail closed regardless of prompt content; no visible Goal recovery transport remains");
+const retiredGoalContinuation = await exactPageRecoveryAdapter.sendGoalContinuation({
   conversationId: "conversation-goal-recovery",
-  target: {
-    exact: true,
-    conversationId: "conversation-goal-recovery",
-    runtimeKey: "main-03",
-    port: 9733,
-    target: {
-      runtimeKey: "main-03",
-      port: 9733,
-      targetId: exactRecoveryTarget.id,
-      url: exactRecoveryTarget.url,
-      webSocketDebuggerUrl: exactRecoveryTarget.webSocketDebuggerUrl,
-    },
-  },
-  prompt: "[DEVSPACE_GOAL_ROUND_RECOVERY]\nContinue the same verified Goal round.",
-  attempt: 1,
+  target: { exact: true },
+  sourceUserId: "source-user",
+  assistantMessageId: "assistant-final",
 });
-assert.equal(alreadyVisibleRecovery.ok, true);
-assert.equal(alreadyVisibleRecovery.alreadyVisible, true);
-assert.equal(alreadyVisibleRecovery.dispatchCommitted, true);
-assert.equal(alreadyVisibleCalls, 0, "an already visible exact recovery turn must not be submitted twice");
-
-let uncertainEvaluationIndex = 0;
-const uncertainRecoveryAdapter = new ConversationProgressLivenessCdpAdapter({
-  runtimeKeys: ["main-03"],
-  listTargets: async () => [exactRecoveryTarget],
-  sleep: async () => {},
-  connect: async () => ({
-    evaluate: async () => {
-      uncertainEvaluationIndex += 1;
-      if (uncertainEvaluationIndex <= 2) return { ok: true };
-      return { ok: false, state: "missing" };
-    },
-    call: async () => ({}),
-    close() {},
-  }),
+assert.deepEqual(retiredGoalContinuation, {
+  ok: false,
+  definiteFailure: true,
+  dispatchCommitted: false,
+  visibilityVerified: false,
+  state: "visible-goal-continuation-transport-retired",
 });
-const uncertainRecovery = await uncertainRecoveryAdapter.sendGoalRecovery({
-  conversationId: "conversation-goal-recovery",
-  target: {
-    exact: true,
-    conversationId: "conversation-goal-recovery",
-    runtimeKey: "main-03",
-    port: 9733,
-    target: {
-      runtimeKey: "main-03",
-      port: 9733,
-      targetId: exactRecoveryTarget.id,
-      url: exactRecoveryTarget.url,
-      webSocketDebuggerUrl: exactRecoveryTarget.webSocketDebuggerUrl,
-    },
-  },
-  prompt: "[DEVSPACE_GOAL_ROUND_RECOVERY]\nContinue one uncertain submission.",
-  attempt: 2,
-});
-assert.equal(uncertainRecovery.ok, false);
-assert.equal(uncertainRecovery.dispatchCommitted, true);
-assert.equal(uncertainRecovery.visibilityVerified, false);
-assert.equal(uncertainRecovery.definiteFailure, false);
-assert.equal(uncertainEvaluationIndex, 22,
-  "visibility verification must be bounded after one committed click");
 
 await supervisor.close();
 await runtime03Adapter.close();
 await exactPageRecoveryAdapter.close();
-await alreadyVisibleRecoveryAdapter.close();
-await uncertainRecoveryAdapter.close();
 await rm(dir, { recursive: true, force: true });
 
 console.log(JSON.stringify({
@@ -1270,7 +1203,8 @@ console.log(JSON.stringify({
   stalledGeneratingSilenceRescue: true,
   substantiveToolActivityResetsRescueClock: true,
   completionRevokesActiveTurnAuthority: true,
-  exactPageGoalRecovery: true,
+  exactPageGoalRecovery: false,
+  visibleGoalRecoveryTransportRetired: true,
   goalRecoveryForegroundActivation: false,
   goalRecoveryPageNavigation: false,
   transportFinishRequiresPageCompletion: true,

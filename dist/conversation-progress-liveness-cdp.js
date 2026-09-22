@@ -454,34 +454,30 @@ export class ConversationProgressLivenessCdpAdapter {
   }
 
   async sendGoalRecovery({ conversationId, target = null, prompt, attempt = 1 } = {}) {
-    const text = String(prompt || "").trim();
-    if (!text.startsWith("[DEVSPACE_GOAL_ROUND_RECOVERY]")) {
-      return { ok: false, state: "invalid-goal-recovery-prompt" };
-    }
-    const resolved = await this.#resolveExactTarget(conversationId, target);
-    if (!resolved.ok) return resolved;
-    return await this.#sendConversationMessage({
-      resolved,
-      text,
-      expectedPrefix: "[DEVSPACE_GOAL_ROUND_RECOVERY]",
-      purpose: "goal-round-recovery",
-      attempt,
-      // The Goal guard independently proves that a working round terminated
-      // without devspace_goal_turn_report. A visible assistant message is
-      // therefore expected and must not block the exact recovery turn.
-      allowNormalCompletion: true,
-      requireInterruptionEvidence: false,
-    });
+    void conversationId; void target; void prompt; void attempt;
+    // Goal continuation and same-round Goal recovery are host-owned hidden
+    // assistant continuations. They must never type policy/control text into
+    // the user's composer or create a visible synthetic user message. Keep a
+    // hard fail-closed compatibility method so a stale caller cannot silently
+    // revive the retired page-composer transport.
+    return {
+      ok: false,
+      definiteFailure: true,
+      dispatchCommitted: false,
+      visibilityVerified: false,
+      state: "visible-goal-recovery-transport-retired",
+    };
   }
 
   async sendGoalContinuation({ conversationId, target, sourceUserId, assistantMessageId } = {}) {
-    if (!sourceUserId || !assistantMessageId) return { ok: false, definiteFailure: true, dispatchCommitted: false, state: 'goal-boundary-required' };
-    const resolved = await this.#resolveExactTarget(conversationId, target);
-    if (!resolved.ok) return { ...resolved, definiteFailure: true, dispatchCommitted: false };
-    return this.#sendConversationMessage({ resolved, text: INTERRUPTED_TURN_RESCUE_TEXT,
-      expectedPrefix: INTERRUPTED_TURN_RESCUE_TEXT, purpose: 'goal-continuation', attempt: 1,
-      allowNormalCompletion: true, requireInterruptionEvidence: false,
-      goalBoundary: { sourceUserId, assistantMessageId } });
+    void conversationId; void target; void sourceUserId; void assistantMessageId;
+    return {
+      ok: false,
+      definiteFailure: true,
+      dispatchCommitted: false,
+      visibilityVerified: false,
+      state: "visible-goal-continuation-transport-retired",
+    };
   }
 
   async #sendConversationMessage({

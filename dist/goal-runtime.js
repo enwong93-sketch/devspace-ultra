@@ -75,9 +75,9 @@ function buildRoundRecoveryPrompt(goal, recoveryId) {
   return [
     "[DEVSPACE_GOAL_ROUND_RECOVERY]",
     `Resume DevSpace Goal ${goal.id} in the same working round ${goal.round}.`,
-    "The previous assistant turn ended before devspace_goal_turn_report. DevSpace inserted this recovery turn into the exact same conversation page; it is not new user intent and not a new Goal round.",
+    "The previous assistant turn ended before devspace_goal_turn_report. DevSpace resumed this exact conversation through a backend-owned hidden host continuation; no user message or composer draft was created. This is not new user intent and not a new Goal round.",
     "Do not call devspace_goal_round_begin. Read the current Goal and Plan state, continue meaningful unfinished work for this same round, verify progress, then call devspace_goal_turn_report as the final tool call before one complete visible final report.",
-    "Do not stop after merely acknowledging this recovery prompt. Do not send another recovery/follow-up turn. Preserve the full original Goal objective and success criteria.",
+    "Do not stop after merely acknowledging this hidden recovery instruction. Do not send another recovery/follow-up turn. Preserve the full original Goal objective and success criteria.",
     `Recovery id: ${recoveryId}`,
   ].join("\n");
 }

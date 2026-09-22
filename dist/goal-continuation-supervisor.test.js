@@ -9,6 +9,7 @@ import { GoalContinuationSupervisor } from './goal-continuation-supervisor.js';
 async function harness(t, options = {}) {
   const root = await mkdtemp(join(tmpdir(), 'devspace-goal-driver-test-'));
   let now = Date.now(); let sends = 0;
+  const sentPayloads = [];
   let pages = [{ conversationId: 'conversation-canary', latestUserMessageId: 'user-a',
     latestMessageRole: 'user', latestAssistantMessageId: 'assistant-old', latestAssistantText: 'old answer',
     chatMode: true, generating: true, streamStatus: 'COMPLETE', pageTargetId: 'page-a' }];
@@ -16,11 +17,21 @@ async function harness(t, options = {}) {
   const g = await runtime.start({ conversationId: 'conversation-canary', objective: 'Test automatic Goal continuation', successCriteria: ['Deliver once only'] });
   const reported = await runtime.turnReport({ goalId: g.id, summary: 'test checkpoint', meaningfulProgress: true });
   const config = { goalRuntime: runtime, statePath: join(root, 'driver.json'), now: () => now, settleMs: 10,
-    inspect: async () => structuredClone(pages), dispatch: async payload => { sends++; return options.send ? options.send(payload) : { ok: true, dispatchCommitted: true, visibilityVerified: true }; }, ...options };
+    inspect: async () => structuredClone(pages), dispatch: async payload => {
+      sends++; sentPayloads.push(structuredClone(payload));
+      return options.send ? options.send(payload) : {
+        ok: true,
+        dispatchCommitted: true,
+        backgroundAccepted: true,
+        visibilityVerified: false,
+        visibleUserMessage: false,
+        composerMutation: false,
+      };
+    }, ...options };
   const driver = new GoalContinuationSupervisor(config);
   await driver.arm(reported);
   t.after(async () => { await driver.close(); await runtime.close(); await rm(root, {recursive:true,force:true}); });
-  return { root, driver, runtime, g, reported, config, sends: () => sends,
+  return { root, driver, runtime, g, reported, config, sends: () => sends, sentPayloads,
     setPages: v => { pages = v; }, page: () => pages[0],
     final: () => { pages = pages.map(p => ({...p,generating:false,latestMessageRole:'assistant',latestAssistantMessageId:'assistant-new',latestAssistantText:'New final report'})); },
     tick: async () => { now += 100; return driver.pollOnce(); }, advanceTime: n => { now += n; } };
@@ -32,6 +43,12 @@ test('report alone never sends; final boundary delivers once and redeems next ro
   h.final(); await h.tick(); assert.equal(h.sends(),0);
   await Promise.all([h.tick(),h.tick()]);
   assert.equal(h.sends(),1);
+  assert.match(h.sentPayloads[0].prompt, /^\[DEVSPACE_GOAL_CONTINUATION\]/);
+  assert.equal(h.sentPayloads[0].continuationId, h.reported.continuation.continuationId);
+  assert.equal(typeof h.sentPayloads[0].leaseId, 'string');
+  assert.equal(h.sentPayloads[0].round, 1);
+  assert.equal(h.sentPayloads[0].reportedAt, h.reported.lastRoundReport.reportedAt);
+  assert.equal(h.driver.status().records[0].reason, 'one-hidden-continuation');
   const goal = await h.runtime.status(h.g.id);
   assert.equal(goal.round,2); assert.equal(goal.roundState,'working');
   await h.tick(); assert.equal(h.sends(),1);
@@ -76,9 +93,51 @@ test('a definite unsent failure may retry after bounded backoff', async t => {
   h.advanceTime(5100); await h.tick(); assert.equal(h.sends(),2);
 });
 
-test('lost acknowledgement recovers by exact source-final-next-user sequence, never resending', async t => {
+test('hidden acknowledgement loss reconciles from the native branch without a user message or resend', async t => {
+  const h=await harness(t,{send:()=>({ok:false,dispatchCommitted:true,definiteFailure:false,state:'ack-lost'})});
+  h.final(); await h.tick(); await h.tick(); assert.equal(h.sends(),1);
+  assert.equal(h.driver.status().records[0].state,'uncertain');
+  h.setPages([{...h.page(),nativeContinuation:{
+    resolved:true,
+    sourceUserFound:true,
+    baselineAssistantFound:true,
+    latestUserMessageId:'user-a',
+    latestAssistantMessageId:'assistant-hidden',
+    newUserAfterBaselineMessageId:null,
+    newUserAfterBaselineIndex:-1,
+    newAssistantAfterBaselineMessageId:'assistant-hidden',
+    newAssistantAfterBaselineIndex:0,
+  }}]);
+  await h.tick();
+  assert.equal(h.sends(),1);
+  assert.equal((await h.runtime.status(h.g.id)).round,2);
+  assert.equal(h.driver.status().records[0].state,'delivered');
+  assert.equal(h.driver.status().records[0].redeemed,true);
+  assert.equal(h.driver.status().records[0].reason,'uncertain-hidden-send-confirmed-by-native-branch');
+});
+
+test('a new user before hidden assistant confirmation cancels uncertain delivery', async t => {
+  const h=await harness(t,{send:()=>({ok:false,dispatchCommitted:true,definiteFailure:false,state:'ack-lost'})});
+  h.final(); await h.tick(); await h.tick(); assert.equal(h.sends(),1);
+  h.setPages([{...h.page(),nativeContinuation:{
+    resolved:true,
+    sourceUserFound:true,
+    baselineAssistantFound:true,
+    latestUserMessageId:'user-new',
+    newUserAfterBaselineMessageId:'user-new',
+    newUserAfterBaselineIndex:0,
+    newAssistantAfterBaselineMessageId:'assistant-too-late',
+    newAssistantAfterBaselineIndex:1,
+  }}]);
+  await h.tick();
+  assert.equal(h.driver.status().records[0].state,'cancelled');
+  assert.equal(h.sends(),1);
+});
+
+test('legacy visible acknowledgement loss recovers by exact source-final-next-user sequence, never resending', async t => {
   const h=await harness(t,{send:()=>({ok:false,dispatchCommitted:true,definiteFailure:false})});
   h.final(); await h.tick(); await h.tick(); assert.equal(h.sends(),1);
+  h.driver.records.get(h.reported.continuation.continuationId).deliveryMode = null;
   h.setPages([{...h.page(),latestUserMessageId:'user-next',previousUserMessageId:'WRONG-user',
     assistantBeforeLatestUserMessageId:'assistant-new',latestUserText:'- 繼續',generating:true,latestMessageRole:'user'}]);
   await h.tick(); assert.equal(h.driver.status().records[0].state,'uncertain');

@@ -10,9 +10,13 @@ assert.match(source, /const GOAL_DOCK_URI = "ui:\/\/devspace\/goal-dock\.html";/
 assert.match(source, /const GOAL_RELAY_URI = "ui:\/\/devspace\/goal-continuation-relay\.html";/);
 assert.match(source, /new GoalRuntime\(\{\s*stateDir: config\.stateDir,?\s*\}\)/s);
 assert.match(source, /const\s+classicCdpOptions\s*=\s*Array\.isArray\(config\.classicMainDebugPorts\)[\s\S]{0,180}ports:\s*config\.classicMainDebugPorts/, "Goal Host Bridge must share the configured bounded Classic port set");
-assert.match(source, /new ClassicGoalHostBridge\(\{\s*\.\.\.classicCdpOptions,\s*beforeDispatch:\s*config\.passiveCore\s*\|\|\s*!primaryDebugGuard\s*\?\s*undefined\s*:\s*\(\) => primaryDebugGuard\.pollOnce\(\),\s*sendRecovery:\s*sendExactGoalRecovery,?\s*\}\)/s);
-assert.match(source, /const sendExactGoalRecovery = async \([\s\S]*progressLivenessAdapter\.sendGoalRecovery\(\{/,
-  "Goal Recovery must use the exact current conversation page-composer sender");
+assert.match(source, /new ClassicGoalHostBridge\(\{\s*\.\.\.classicCdpOptions,\s*beforeDispatch:\s*config\.passiveCore\s*\|\|\s*!primaryDebugGuard\s*\?\s*undefined\s*:\s*\(\) => primaryDebugGuard\.pollOnce\(\),?\s*\}\)/s);
+assert.doesNotMatch(source, /sendExactGoalRecovery|progressLivenessAdapter\.sendGoalRecovery|progressLivenessAdapter\.sendGoalContinuation/,
+  "Goal continuation and same-round recovery must never be wired to the visible composer transport");
+assert.match(source, /dispatch:\s*\(\{ goal, page,[\s\S]{0,500}return goalHostBridge\.dispatch\(\{/,
+  "the Goal continuation supervisor must dispatch through the hidden host bridge");
+assert.match(source, /expectedPageTargetId:\s*candidate\.pageTargetId/,
+  "hidden continuation must remain bound to the exact page proven at the visible-final boundary");
 assert.match(source, /registerAppResource\(server, "DevSpace Goal Dock", GOAL_DOCK_URI,/);
 assert.match(source, /new URL\("\.\/ui\/goal-dock\.html", import\.meta\.url\)/);
 assert.match(source, /registerAppResource\(server, "DevSpace Goal Continuation Relay", GOAL_RELAY_URI,/);

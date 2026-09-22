@@ -15,14 +15,16 @@ assert.match(config, /DEVSPACE_CLASSIC_HOST_OVERLAY/);
 assert.match(config, /classicHostOverlayEnabled/);
 assert.match(config, /DEVSPACE_PASSIVE_CORE/);
 assert.match(config, /passiveCore/);
-assert.match(config, /DEVSPACE_GOAL_ROUND_RECOVERY/);
 assert.match(config, /goalRoundRecoveryEnabled/);
+assert.match(config, /goalRoundRecoveryEnabled:\s*false/,
+  "legacy config/env values must never revive visible same-round Goal Recovery");
 assert.match(server, /if\s*\(config\.classicStreamRecoveryEnabled\)/);
 assert.match(server, /if\s*\(config\.contextGuardianEnabled \|\| config\.classicHostOverlayEnabled\)/);
 assert.match(server, /if\s*\(config\.contextGuardianEnabled && config\.autoCompactEnabled\)/);
 assert.match(server, /if\s*\(config\.classicHostOverlayEnabled\)/);
 assert.match(server, /if\s*\(!config\.passiveCore\)[\s\S]*primaryDebugGuard\.start/, "passive Core must not start Primary Debug Guard");
-assert.match(server, /if\s*\(!config\.passiveCore\)[\s\S]*if\s*\(config\.goalRoundRecoveryEnabled\)[\s\S]*goalRoundCompletionGuard\.start/, "passive Core or an explicit Goal recovery hold must not start Goal Round Completion Guard");
+assert.doesNotMatch(server, /goalRoundCompletionGuard\.start\(/,
+  "production must never start the retired visible same-round Goal recovery dispatcher");
 assert.match(server, /if\s*\(!config\.contextGuardianEnabled \|\| !config\.autoCompactEnabled\)\s*return\s*\{\s*handled:\s*false/);
 assert.match(server, /streamRecoveryAdapter\.start/);
 assert.match(server, /streamRecoveryGuard\.start/);

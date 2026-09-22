@@ -50,6 +50,7 @@ export class GoalContinuationSupervisor {
   async pages(goal, options = {}) {
     let rows = await this.inspect(goal, options);
     if (Array.isArray(rows) && options.runtimeKey) rows = rows.filter(p => p.runtimeKey === options.runtimeKey);
+    if (Array.isArray(rows) && options.pageTargetId) rows = rows.filter(p => p.pageTargetId === options.pageTargetId);
     if (!Array.isArray(rows) || !rows.length || rows.length > 4) return null;
     if (rows.some(p => p?.conversationId !== goal.conversationId || !p.latestUserMessageId || p.chatMode !== true)) return null;
     if (!options.allowDivergent && new Set(rows.map(p => p.latestUserMessageId)).size !== 1) return null;
@@ -158,6 +159,40 @@ export class GoalContinuationSupervisor {
       row.state='delivered'; row.redeemed=true; row.reason='agent-redeemed-uncertain-delivery'; await this.save(); return;
     }
     if (goal.continuation?.continuationId !== row.continuationId || !row.finalAssistantId) return;
+    if (row.deliveryMode === 'hidden-assistant-continuation') {
+      const pages = await this.pages(goal, {
+        runtimeKey: row.dispatchRuntimeKey || row.sourceRuntimeKey,
+        pageTargetId: row.dispatchPageTargetId,
+        allowDivergent: true,
+        includeNativeBranch: true,
+        sourceUserMessageId: row.sourceUserId,
+        baselineAssistantMessageId: row.finalAssistantId,
+      });
+      if (this.closed || !pages || pages.length !== 1) return;
+      const proof = pages[0].nativeContinuation;
+      if (!proof?.resolved || proof.sourceUserFound !== true || proof.baselineAssistantFound !== true) return;
+      const assistantIndex = Number(proof.newAssistantAfterBaselineIndex);
+      const userIndex = Number(proof.newUserAfterBaselineIndex);
+      const hiddenAssistantFirst = assistantIndex >= 0 && (userIndex < 0 || assistantIndex < userIndex);
+      if (!hiddenAssistantFirst) {
+        if (userIndex >= 0) {
+          row.state='cancelled'; row.reason='new-user-turn-before-hidden-continuation'; await this.save();
+        }
+        return;
+      }
+      if (proof.latestUserMessageId !== row.sourceUserId || !proof.newAssistantAfterBaselineMessageId) return;
+      row.state='delivered'; row.reason='uncertain-hidden-send-confirmed-by-native-branch';
+      await this.save();
+      try {
+        await this.goalRuntime.roundBegin({goalId:row.goalId,continuationId:row.continuationId});
+        if (row.leaseId) {
+          await this.goalRuntime.continuation({goalId:row.goalId,action:'ack',leaseId:row.leaseId}).catch(() => {});
+        }
+        row.redeemed=true;
+      } catch { row.reason='delivered-awaiting-agent-redemption'; }
+      await this.save();
+      return;
+    }
     const pages = await this.pages(goal, { runtimeKey: row.sourceRuntimeKey });
     if (this.closed || !pages || !pages.every(p =>
       p.latestUserMessageId !== row.sourceUserId && p.previousUserMessageId === row.sourceUserId
@@ -197,6 +232,9 @@ export class GoalContinuationSupervisor {
     }
     row.state = 'dispatching'; row.attempts += 1; row.leaseId = leaseId; row.sentAt = this.now();
     row.finalAssistantId = pages[0].latestAssistantMessageId;
+    row.deliveryMode = 'hidden-assistant-continuation';
+    row.dispatchRuntimeKey = pages[0].runtimeKey || row.sourceRuntimeKey || null;
+    row.dispatchPageTargetId = pages[0].pageTargetId || null;
     if(row.causalDisplayProof)row.sourceRuntimeKey=pages[0].runtimeKey||null;
     await this.save(); // durable before any possible transport side effect
     const authorized = await this.goalRuntime.status(row.goalId);
@@ -208,10 +246,17 @@ export class GoalContinuationSupervisor {
     let sent;
     try {
       sent = await this.dispatch({ goal: current, page: pages[0], sourceUserId: row.sourceUserId,
-        assistantMessageId: pages[0].latestAssistantMessageId, continuationId: row.continuationId });
+        assistantMessageId: pages[0].latestAssistantMessageId,
+        prompt: claimed.claim.prompt,
+        continuationId: claimed.claim.continuationId,
+        leaseId: claimed.claim.leaseId,
+        round: claimed.claim.round,
+        reportedAt: current.lastRoundReport?.reportedAt || null });
     } catch (error) { sent = { ok: false, definiteFailure: false, error: error.message }; }
-    if (sent?.ok === true && sent.visibilityVerified === true) {
-      row.state = 'delivered'; row.reason = 'one-visible-continuation';
+    if (sent?.ok === true && (sent.backgroundAccepted === true || sent.visibilityVerified === true)) {
+      row.state = 'delivered'; row.reason = sent.backgroundAccepted === true
+        ? 'one-hidden-continuation'
+        : 'one-visible-continuation';
       await this.save();
       try {
         await this.goalRuntime.roundBegin({ goalId: row.goalId, continuationId: row.continuationId });

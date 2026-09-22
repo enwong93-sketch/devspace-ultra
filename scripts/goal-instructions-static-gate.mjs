@@ -18,6 +18,13 @@ assert.match(source, /do not call.*(?:more|additional).*tool.*after.*devspace_go
 assert.match(source, /first call devspace_goal_round_begin/i);
 assert.match(source, /do not.*(?:CDP|composer).*continu/i);
 assert.match(source, /do not.*(?:fake|synthetic) user/i);
+assert.match(source, /only the ordinary exact-conversation Rescue transport may emit the exact visible user text `- 繼續`/i,
+  "visible Rescue and normal post-report Goal continuation must remain distinct contracts");
+assert.match(source, /Visible same-round Goal Recovery is retired/i);
+assert.match(source, /no Goal guard, host RPC, app relay, CDP path, or fallback may dispatch/i);
+assert.match(source, /continue(?:s)? the same (?:working )?round.*devspace_goal_round_begin/i);
+assert.match(source, /Normal post-report Goal continuation remains a separate backend-owned path/i);
+assert.match(source, /must never fall back to visible composer automation/i);
 assert.match(source, /completion.*(?:every|all).*success criter/i);
 assert.match(source, /authoritative evidence/i);
 assert.match(source, /blocked.*3 consecutive/i);
