@@ -149,6 +149,9 @@ function descriptor(id) {
     sleepImpl: async (ms) => { now += ms; },
     minimumFetchGapMs: 0,
     rateLimitCooldownMs: 90_000,
+    // This fixture explicitly models a shared quota domain. Production keeps
+    // the conversation-isolated default asserted by context-guardian-cdp.test.
+    rateLimitScope: "shared",
     retryDelaysMs: [0, 1, 2],
   });
   const limited = async () => {

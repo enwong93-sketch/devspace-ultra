@@ -25,20 +25,60 @@ function observedAt() { return new Date().toISOString(); }
 export function parseNativeDescriptorRetryAfterMs(value, nowMs = Date.now()) {
   const text = String(value ?? "").trim();
   if (!text) return null;
-  const seconds = Number(text);
-  if (Number.isFinite(seconds) && seconds >= 0) return Math.min(5 * 60_000, Math.ceil(seconds * 1_000));
+  // RFC 9110 permits integer delay-seconds or an HTTP date. Never shorten a
+  // server's Retry-After to the former five-minute local cap.
+  if (/^\d+$/.test(text)) {
+    const milliseconds = Number(text) * 1_000;
+    return Number.isSafeInteger(milliseconds) && nowMs + milliseconds <= 8.64e15 ? milliseconds : null;
+  }
+  if (!/[A-Za-z]{3}/.test(text)) return null;
   const at = Date.parse(text);
-  return Number.isFinite(at) ? Math.max(0, Math.min(5 * 60_000, at - nowMs)) : null;
+  return Number.isFinite(at) ? Math.max(0, at - nowMs) : null;
 }
 
 function isNativeDescriptorRateLimit(error) {
   const message = error instanceof Error ? error.message : String(error);
-  return error?.code === "NATIVE_DESCRIPTOR_RATE_LIMIT" || /Native conversation descriptor HTTP 429/i.test(message);
+  return Number(error?.status) === 429 || error?.code === "NATIVE_DESCRIPTOR_RATE_LIMIT" || /Native conversation descriptor HTTP 429/i.test(message);
 }
 
 function isNativeDescriptorTransient(error) {
   return error?.code === "NATIVE_DESCRIPTOR_HTTP"
     && NATIVE_DESCRIPTOR_TRANSIENT_STATUSES.has(Number(error?.status));
+}
+
+export function classicSourcePageIdentity(snapshot) {
+  const documentId = typeof snapshot?.documentId === "string" ? snapshot.documentId.trim() : "";
+  const conversationId = typeof snapshot?.conversationId === "string" ? snapshot.conversationId.trim() : "";
+  const epoch = Number(snapshot?.routeEpoch);
+  if (!documentId || !conversationId || documentId.includes(":") || conversationId.includes(":") || !Number.isSafeInteger(epoch) || epoch < 1) return null;
+  return `${documentId}:${epoch}:${conversationId}`;
+}
+
+export function stableClassicSourceRoute(snapshot, minimumStableMs = 3_000) {
+  return Boolean(classicSourcePageIdentity(snapshot)
+    && snapshot?.ok !== false && snapshot?.mode === "chat"
+    && snapshot.documentReadyState === "complete" && snapshot.composerReady === true
+    && snapshot.routeHydrated === true && Number.isFinite(Number(snapshot.routeStableForMs))
+    && Number(snapshot.routeStableForMs) >= Math.max(0, Number(minimumStableMs) || 0));
+}
+
+function descriptorBoundaryError(message, code) {
+  const error = new Error(message);
+  error.code = code;
+  return error;
+}
+
+export async function readStableClassicDescriptor({ inspectSource, fetchDescriptor, minimumStableMs = 3_000 } = {}) {
+  if (typeof inspectSource !== "function" || typeof fetchDescriptor !== "function") throw new TypeError("Descriptor read requires source inspection and fetch functions.");
+  const before = await inspectSource();
+  if (!stableClassicSourceRoute(before, minimumStableMs)) throw descriptorBoundaryError("Native descriptor source route is not stable.", "NATIVE_DESCRIPTOR_SOURCE_UNSTABLE");
+  const descriptor = await fetchDescriptor(before.conversationId);
+  const after = await inspectSource();
+  if (!stableClassicSourceRoute(after, minimumStableMs) || classicSourcePageIdentity(before) !== classicSourcePageIdentity(after)) {
+    throw descriptorBoundaryError("Native descriptor source page changed during the read.", "NATIVE_DESCRIPTOR_SOURCE_CHANGED");
+  }
+  if (descriptor?.conversationId !== before.conversationId || !descriptor?.currentNode) throw descriptorBoundaryError("Native descriptor does not match the inspected source.", "NATIVE_DESCRIPTOR_SOURCE_MISMATCH");
+  return descriptor;
 }
 
 export class NativeConversationDescriptorCoordinator {
@@ -49,7 +89,12 @@ export class NativeConversationDescriptorCoordinator {
     rateLimitCooldownMs = NATIVE_DESCRIPTOR_RATE_LIMIT_COOLDOWN_MS,
     retryDelaysMs = NATIVE_DESCRIPTOR_RETRY_DELAYS_MS,
     maxCacheEntries = NATIVE_DESCRIPTOR_MAX_CACHE_ENTRIES,
+    minimumFetchGapMs = 0,
+    failureCooldownMs = 300_000,
+    transientCooldownMs = 30_000,
+    rateLimitScope = "conversation",
   } = {}) {
+    if (!["conversation", "shared"].includes(rateLimitScope)) throw new TypeError("Unknown descriptor rate-limit scope.");
     this.now = now;
     this.sleep = sleepImpl;
     this.cacheTtlMs = Math.max(0, Number(cacheTtlMs) || 0);
@@ -58,6 +103,17 @@ export class NativeConversationDescriptorCoordinator {
       ? retryDelaysMs.map((value) => Math.max(0, Number(value) || 0))
       : [0];
     this.maxCacheEntries = Math.max(1, Number(maxCacheEntries) || NATIVE_DESCRIPTOR_MAX_CACHE_ENTRIES);
+    this.minimumFetchGapMs = Math.max(0, Number(minimumFetchGapMs) || 0);
+    this.failureCooldownMs = Math.max(1_000, Number(failureCooldownMs) || 300_000);
+    this.transientCooldownMs = Math.max(1_000, Number(transientCooldownMs) || 30_000);
+    // A shared rate-limit domain must be explicitly selected by its owner.
+    // The default never freezes unrelated Main conversations after one 429.
+    this.rateLimitScope = rateLimitScope;
+    this.cooldownUntil = 0;
+    this.failureCooldowns = new Map();
+    this.generation = 0;
+    this.pacingTail = null;
+    this.lastFetchAt = null;
     this.cache = new Map();
     this.inFlight = new Map();
     this.cooldowns = new Map();
@@ -66,8 +122,26 @@ export class NativeConversationDescriptorCoordinator {
   #cooldownError(cooldownUntil) {
     const error = new Error(`Native conversation descriptor rate limited until ${new Date(cooldownUntil).toISOString()}`);
     error.code = "NATIVE_DESCRIPTOR_COOLDOWN";
+    error.status = 429;
     error.retryAt = new Date(cooldownUntil).toISOString();
     return error;
+  }
+
+  #assertGeneration(generation) {
+    if (generation !== this.generation) throw descriptorBoundaryError("Descriptor coordinator was cleared during the read.", "NATIVE_DESCRIPTOR_CLEARED");
+  }
+
+  #checkCooldown(id) {
+    const now = this.now();
+    const until = Math.max(Number(this.cooldowns.get(id) || 0), this.rateLimitScope === "shared" ? this.cooldownUntil : 0);
+    if (until > now) throw this.#cooldownError(until);
+    const failure = this.failureCooldowns.get(id);
+    if (failure?.until > now) {
+      const error = descriptorBoundaryError("Native descriptor failure cooldown is active.", "NATIVE_DESCRIPTOR_FAILURE_COOLDOWN");
+      error.status = failure.status;
+      error.retryAt = new Date(failure.until).toISOString();
+      throw error;
+    }
   }
 
   #pruneCache() {
@@ -75,6 +149,8 @@ export class NativeConversationDescriptorCoordinator {
     for (const [conversationId, until] of this.cooldowns) {
       if (Number(until || 0) <= now) this.cooldowns.delete(conversationId);
     }
+    for (const [id, failure] of this.failureCooldowns) if (failure.until <= now) this.failureCooldowns.delete(id);
+    while (this.failureCooldowns.size > this.maxCacheEntries) this.failureCooldowns.delete(this.failureCooldowns.keys().next().value);
     if (this.cache.size <= this.maxCacheEntries && this.cooldowns.size <= this.maxCacheEntries) return;
     const oldest = [...this.cache.entries()].sort((a, b) => Number(a[1]?.observedAtMs || 0) - Number(b[1]?.observedAtMs || 0));
     for (const [conversationId] of oldest) {
@@ -92,60 +168,90 @@ export class NativeConversationDescriptorCoordinator {
     const id = String(conversationId || "").trim();
     if (!id) throw new Error("Native conversation descriptor requires a conversation id.");
     if (typeof fetchDescriptor !== "function") throw new Error("Native conversation descriptor requires a fetch function.");
+    this.#pruneCache();
+    this.#checkCooldown(id);
     const now = this.now();
     const cached = this.cache.get(id);
-    if (!force && cached && now - cached.observedAtMs < this.cacheTtlMs) return cached.descriptor;
-    const cooldownUntil = Number(this.cooldowns.get(id) || 0);
-    if (cooldownUntil > now) {
-      if (cached?.descriptor) return cached.descriptor;
-      throw this.#cooldownError(cooldownUntil);
-    }
+    if (!force && cached && now - cached.observedAtMs < this.cacheTtlMs) return structuredClone(cached.descriptor);
     const existing = this.inFlight.get(id);
-    if (existing) return await existing;
-    const pending = this.#loadFresh(id, cached, fetchDescriptor);
+    if (existing) return structuredClone(await existing);
+    if (this.inFlight.size >= this.maxCacheEntries) throw descriptorBoundaryError("Descriptor in-flight capacity reached.", "NATIVE_DESCRIPTOR_CAPACITY");
+    const pending = this.#loadFresh(id, fetchDescriptor, this.generation);
     this.inFlight.set(id, pending);
     try {
-      return await pending;
+      return structuredClone(await pending);
     } finally {
       if (this.inFlight.get(id) === pending) this.inFlight.delete(id);
     }
   }
 
-  async #loadFresh(id, cached, fetchDescriptor) {
+  async #fetchPaced(id, fetchDescriptor, generation) {
+    this.#assertGeneration(generation);
+    this.#checkCooldown(id);
+    if (!this.minimumFetchGapMs) return await fetchDescriptor();
+    const previous = this.pacingTail;
+    let release;
+    this.pacingTail = new Promise((resolve) => { release = resolve; });
+    try {
+      if (previous) await previous;
+      this.#assertGeneration(generation);
+      this.#checkCooldown(id);
+      const gap = this.lastFetchAt == null ? 0 : this.lastFetchAt + this.minimumFetchGapMs - this.now();
+      if (gap > 0) await this.sleep(gap);
+      this.#assertGeneration(generation);
+      this.#checkCooldown(id);
+      this.lastFetchAt = this.now();
+      const pending = fetchDescriptor();
+      release();
+      return await pending;
+    } finally { release(); }
+  }
+
+  async #loadFresh(id, fetchDescriptor, generation) {
     let lastError = null;
+    let retryAfterMs = 0;
     for (let index = 0; index < this.retryDelaysMs.length; index += 1) {
-      const delayMs = this.retryDelaysMs[index];
+      const delayMs = Math.max(this.retryDelaysMs[index], retryAfterMs);
       if (delayMs > 0) await this.sleep(delayMs);
-      const now = this.now();
-      const cooldownUntil = Number(this.cooldowns.get(id) || 0);
-      if (cooldownUntil > now) {
-        if (cached?.descriptor) return cached.descriptor;
-        throw this.#cooldownError(cooldownUntil);
-      }
+      this.#assertGeneration(generation);
+      this.#checkCooldown(id);
       try {
-        const descriptor = await fetchDescriptor();
-        this.cache.set(id, { descriptor, observedAtMs: this.now() });
+        const descriptor = await this.#fetchPaced(id, fetchDescriptor, generation);
+        this.#assertGeneration(generation);
+        if (descriptor?.conversationId !== id || !descriptor?.currentNode) throw descriptorBoundaryError("Descriptor response names the wrong conversation or lacks its boundary.", "NATIVE_DESCRIPTOR_IDENTITY");
+        this.cache.set(id, { descriptor: structuredClone(descriptor), observedAtMs: this.now() });
         this.cooldowns.delete(id);
+        this.failureCooldowns.delete(id);
         this.#pruneCache();
         return descriptor;
       } catch (error) {
+        this.#assertGeneration(generation);
+        if (/^NATIVE_DESCRIPTOR_(?:SOURCE_|COOLDOWN|FAILURE_COOLDOWN|CLEARED)/.test(String(error?.code || ""))) throw error;
         lastError = error;
         if (isNativeDescriptorRateLimit(error)) {
           const retryAfterMs = parseNativeDescriptorRetryAfterMs(error?.retryAfter, this.now());
           const cooldownMs = Math.max(this.rateLimitCooldownMs, retryAfterMs ?? 0);
           const next = this.now() + cooldownMs;
           this.cooldowns.set(id, Math.max(Number(this.cooldowns.get(id) || 0), next));
+          if (this.rateLimitScope === "shared") this.cooldownUntil = Math.max(this.cooldownUntil, next);
           this.#pruneCache();
           break;
         }
-        if (!isNativeDescriptorTransient(error) || index + 1 >= this.retryDelaysMs.length) break;
+        const transient = isNativeDescriptorTransient(error);
+        retryAfterMs = parseNativeDescriptorRetryAfterMs(error?.retryAfter, this.now()) ?? 0;
+        if (!transient || index + 1 >= this.retryDelaysMs.length) {
+          this.failureCooldowns.set(id, { until: this.now() + Math.max(retryAfterMs, transient ? this.transientCooldownMs : this.failureCooldownMs), status: Number(error?.status) || null });
+          this.#pruneCache();
+          break;
+        }
       }
     }
-    if (cached?.descriptor) return cached.descriptor;
+    // Never turn a failed fresh boundary read into a successful stale result.
     throw lastError || new Error("Native conversation descriptor unavailable.");
   }
 
   status() {
+    this.#pruneCache();
     const now = this.now();
     const activeCooldowns = [...this.cooldowns.entries()]
       .filter(([, until]) => Number(until || 0) > now)
@@ -153,19 +259,27 @@ export class NativeConversationDescriptorCoordinator {
     return {
       cachedConversations: this.cache.size,
       inFlight: this.inFlight.size,
+      minimumFetchGapMs: this.minimumFetchGapMs,
+      failureCooldowns: this.failureCooldowns.size,
+      rateLimitScope: this.rateLimitScope,
+      cooldownUntil: this.rateLimitScope === "shared" && this.cooldownUntil > now ? new Date(this.cooldownUntil).toISOString() : null,
       rateLimitedConversations: activeCooldowns.length,
       nextCooldownExpiry: activeCooldowns.length ? new Date(activeCooldowns[0][1]).toISOString() : null,
     };
   }
 
   clear() {
+    this.generation += 1;
     this.cache.clear();
     this.inFlight.clear();
     this.cooldowns.clear();
+    this.failureCooldowns.clear();
+    this.cooldownUntil = 0;
+    this.lastFetchAt = null;
   }
 }
 
-const sharedNativeConversationDescriptorCoordinator = new NativeConversationDescriptorCoordinator();
+const sharedNativeConversationDescriptorCoordinator = new NativeConversationDescriptorCoordinator({ minimumFetchGapMs: 2_000 });
 
 async function fetchJson(url, { fetchImpl = globalThis.fetch, timeoutMs = DEFAULT_PROBE_TIMEOUT_MS } = {}) {
   if (typeof fetchImpl !== "function") throw new Error("fetch is unavailable for Context Guardian CDP discovery.");
@@ -1509,10 +1623,10 @@ export async function connectClassicContextMetadataPort(port, {
       return await evaluate(client, text);
     },
     async nativeConversationDescriptor({ force = false } = {}) {
-      const current = await evaluate(client, inspectExpression());
-      const conversationId = String(current?.conversationId || "").trim();
-      if (!conversationId) throw new Error("Native conversation descriptor requires the current ChatGPT conversation id.");
-      const descriptor = await loadNativeConversationDescriptor(conversationId, { force });
+      const descriptor = await readStableClassicDescriptor({
+        inspectSource: () => evaluate(client, inspectExpression()),
+        fetchDescriptor: (conversationId) => loadNativeConversationDescriptor(conversationId, { force }),
+      });
       return { runtimeKey, port, ...descriptor, observedAt: observedAt() };
     },
     async refreshSnapshot() {
@@ -1650,8 +1764,8 @@ export class ClassicContextMetadataCdpAdapter {
     return await this.#session(runtimeKey).refreshSnapshot();
   }
 
-  async nativeConversationDescriptor(runtimeKey) {
-    return await this.#session(runtimeKey).nativeConversationDescriptor();
+  async nativeConversationDescriptor(runtimeKey, options = {}) {
+    return await this.#session(runtimeKey).nativeConversationDescriptor(options);
   }
 
   async evaluateRuntime(runtimeKey, expression) {

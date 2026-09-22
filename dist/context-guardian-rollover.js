@@ -5,6 +5,8 @@ const DEFAULT_POLL_MS = 5_000;
 const DEFAULT_ROUTE_SETTLE_MS = 3_000;
 const PREPARE_REUSE_MS = 30_000;
 const NATIVE_STRUCTURAL_SEED_TTL_MS = 60_000;
+const DESCRIPTOR_FAILURE_COOLDOWN_MS = 60_000;
+const MAX_FAILURE_CIRCUITS = 64;
 
 function clip(value, max = 2_400) {
   const text = String(value ?? "").trim();
@@ -145,6 +147,10 @@ export class ContextGuardianRolloverCoordinator {
     this.closed = false;
     this.prepared = new Map();
     this.nativeSeedCache = new Map();
+    this.descriptorFailures = new Map();
+    this.compactFailures = new Map();
+    this.committing = new Set();
+    this.preparationVersions = new Map();
   }
 
   async start({ schedule = true } = {}) {
@@ -193,13 +199,28 @@ export class ContextGuardianRolloverCoordinator {
     const id = String(conversationId || "").trim();
     if (!id) return null;
     const now = Date.now();
+    const failureKey = JSON.stringify([runtimeKey, id]);
+    const failed = this.descriptorFailures.get(failureKey);
+    if (failed?.conversationId === id && now < failed.retryAfterMs) {
+      const error = new Error("Native descriptor failure circuit is open for this conversation.");
+      error.code = "NATIVE_DESCRIPTOR_CIRCUIT_OPEN";
+      throw error;
+    }
+    this.descriptorFailures.delete(failureKey);
     const cached = this.nativeSeedCache.get(runtimeKey);
     if (!force && cached?.conversationId === id && now - cached.observedAtMs < NATIVE_STRUCTURAL_SEED_TTL_MS) {
       return cached.descriptor;
     }
-    const descriptor = await this.contextAdapter.nativeConversationDescriptor(runtimeKey);
-    if (!descriptor?.conversationId || descriptor.conversationId !== id) {
-      throw new Error("Native structural descriptor does not match the current Context Guardian conversation.");
+    let descriptor;
+    try {
+      descriptor = await this.contextAdapter.nativeConversationDescriptor(runtimeKey);
+      if (!descriptor?.conversationId || descriptor.conversationId !== id) {
+        throw new Error("Native structural descriptor does not match the current Context Guardian conversation.");
+      }
+    } catch (error) {
+      this.descriptorFailures.set(failureKey, { conversationId: id, retryAfterMs: Date.now() + DESCRIPTOR_FAILURE_COOLDOWN_MS });
+      while (this.descriptorFailures.size > MAX_FAILURE_CIRCUITS) this.descriptorFailures.delete(this.descriptorFailures.keys().next().value);
+      throw error;
     }
     this.nativeSeedCache.set(runtimeKey, {
       conversationId: id,
@@ -245,7 +266,8 @@ export class ContextGuardianRolloverCoordinator {
     };
   }
 
-  async #checkpoint({ runtimeKey, goal, plan, context, recentMessages, mode = "user-turn", force = false }) {
+  async #checkpoint({ runtimeKey, goal, plan, context, recentMessages, mode = "user-turn", force = false, preparationVersion = this.preparationVersions.get(runtimeKey) || 0 }) {
+    this.#assertPreparationCurrent(runtimeKey, preparationVersion);
     const used = Number(context?.pressure?.usedTokens ?? 0);
     const prior = this.prepared.get(runtimeKey);
     const now = Date.now();
@@ -253,6 +275,7 @@ export class ContextGuardianRolloverCoordinator {
       return prior.record;
     }
     const sourceDescriptor = await this.#nativeDescriptor(runtimeKey, context?.conversationId);
+    this.#assertPreparationCurrent(runtimeKey, preparationVersion);
     if (!sourceDescriptor?.conversationId || sourceDescriptor.conversationId !== context?.conversationId || !sourceDescriptor.currentNode) {
       throw new Error("Auto Compact source descriptor does not match the current Context Guardian conversation.");
     }
@@ -276,6 +299,7 @@ export class ContextGuardianRolloverCoordinator {
       continuityKey: `context-guardian:${uiContinuityKey}`,
       ...capsule,
     });
+    this.#assertPreparationCurrent(runtimeKey, preparationVersion);
     this.prepared.set(runtimeKey, {
       conversationId: context?.conversationId || null,
       usedTokens: used,
@@ -294,7 +318,7 @@ export class ContextGuardianRolloverCoordinator {
     const next = String(rolled?.conversationId ?? "").trim();
     if (!runtimeKey || !prior || !next || prior === next) return false;
     try {
-      await this.onVerifiedRollover({
+      const result = await this.onVerifiedRollover({
         goalId: goalId || null,
         planId: planId || null,
         runtimeKey,
@@ -302,11 +326,47 @@ export class ContextGuardianRolloverCoordinator {
         newConversationId: next,
         rollover: rolled,
       });
-      return true;
+      // Existing void callbacks signal success by completing. An explicit
+      // rejection must not be converted into a successful authority migration.
+      return result !== false && result?.ok !== false;
     } catch {
-      // The fresh Chat is already verified. Projection notification is best-effort
-      // and must never turn one successful rollover into a duplicate retry.
+      // The caller retains the source authority and blocks automatic re-arming.
       return false;
+    }
+  }
+
+  #compactFailure(runtimeKey, conversationId) {
+    return this.compactFailures.get(JSON.stringify([runtimeKey, conversationId])) || null;
+  }
+
+  async #abortCompact({ runtimeKey, oldConversationId, newConversationId, capsuleId, status, error }) {
+    this.compactFailures.set(JSON.stringify([runtimeKey, oldConversationId]), { conversationId: oldConversationId, reason: status });
+    while (this.compactFailures.size > MAX_FAILURE_CIRCUITS) this.compactFailures.delete(this.compactFailures.keys().next().value);
+    this.prepared.delete(runtimeKey);
+    this.nativeSeedCache.delete(runtimeKey);
+    if (typeof this.contextAdapter.cancelUserTurnRollover === "function") {
+      try { await this.contextAdapter.cancelUserTurnRollover(runtimeKey); } catch { /* Remain blocked even if cancellation fails. */ }
+    }
+    if (capsuleId && typeof this.continuityRuntime.updateCapsuleMeta === "function") {
+      try {
+        await this.continuityRuntime.updateCapsuleMeta(capsuleId, {
+          status,
+          sourceConversationPreserved: true,
+          ...(newConversationId ? { candidateConversationId: newConversationId } : {}),
+          error: String(error || status).slice(0, 2_000),
+          failedAt: new Date().toISOString(),
+        });
+      } catch { /* The in-memory safety circuit still prevents duplicate commits. */ }
+    }
+    return false;
+  }
+
+  #assertPreparationCurrent(runtimeKey, version) {
+    if (this.closed || this.continuityRuntime.enabled !== true || this.committing.has(runtimeKey)
+      || (this.preparationVersions.get(runtimeKey) || 0) !== version) {
+      const error = new Error("Auto Compact preparation was superseded or closed.");
+      error.code = "AUTO_COMPACT_STALE_PREPARATION";
+      throw error;
     }
   }
 
@@ -325,9 +385,16 @@ export class ContextGuardianRolloverCoordinator {
     const results = [];
     for (const item of runtimes) {
       const runtimeKey = item.runtimeKey;
+      const preparationVersion = this.preparationVersions.get(runtimeKey) || 0;
       try {
+        if (this.committing.has(runtimeKey)) {
+          results.push({ runtimeKey, action: "compact-commit-in-progress" });
+          continue;
+        }
         let snapshot = await this.#refresh(runtimeKey);
+        this.#assertPreparationCurrent(runtimeKey, preparationVersion);
         let context = await this.contextGuardian.status(runtimeKey);
+        this.#assertPreparationCurrent(runtimeKey, preparationVersion);
         if (!snapshot?.ok || context.supportedChatMode !== true || snapshot.mode === "work") {
           results.push({ runtimeKey, action: "skipped-unsupported" });
           continue;
@@ -336,7 +403,13 @@ export class ContextGuardianRolloverCoordinator {
           results.push({ runtimeKey, action: "skipped-route-hydration" });
           continue;
         }
+        const failure = this.#compactFailure(runtimeKey, snapshot.conversationId);
+        if (failure) {
+          results.push({ runtimeKey, action: "compact-circuit-open", conversationId: failure.conversationId, reason: failure.reason });
+          continue;
+        }
         ({ snapshot, context } = await this.#ensureNativeSeed(runtimeKey, snapshot, context));
+        this.#assertPreparationCurrent(runtimeKey, preparationVersion);
         const stage = context?.pressure?.stage;
         if (stage !== "prepare" && stage !== "rollover") {
           results.push({ runtimeKey, action: "normal", stage });
@@ -352,7 +425,9 @@ export class ContextGuardianRolloverCoordinator {
           this.#resolvePlan(conversationId),
           this.contextAdapter.recentVisibleMessages(runtimeKey, { limit: 8 }),
         ]);
-        const record = await this.#checkpoint({ runtimeKey, goal, plan, context, recentMessages, mode: "user-turn", force: stage === "rollover" });
+        this.#assertPreparationCurrent(runtimeKey, preparationVersion);
+        const record = await this.#checkpoint({ runtimeKey, goal, plan, context, recentMessages, mode: "user-turn", force: stage === "rollover", preparationVersion });
+        this.#assertPreparationCurrent(runtimeKey, preparationVersion);
         const capsule = record?.capsule || null;
         if (stage === "prepare") {
           results.push({
@@ -409,26 +484,47 @@ export class ContextGuardianRolloverCoordinator {
           carryEstimatedTokens: capsule?.compression?.carryEstimatedTokens ?? null,
         });
       } catch (error) {
-        results.push({ runtimeKey, action: "error", error: error instanceof Error ? error.message : String(error) });
+        results.push({ runtimeKey, action: error?.code === "AUTO_COMPACT_STALE_PREPARATION" ? "skipped-stale-preparation" : "error", error: error instanceof Error ? error.message : String(error) });
       }
     }
     return { ok: true, results };
   }
 
   async noteUserTurnRollover(event = {}) {
-    if (event?.ok !== true) return false;
+    if (this.closed) return false;
     const runtimeKey = String(event?.runtimeKey || "").trim();
     const oldConversationId = String(event?.oldConversationId || "").trim();
     const newConversationId = String(event?.newConversationId || event?.conversationId || "").trim();
-    const goalId = String(event?.goalId || "").trim() || null;
-    const planId = String(event?.planId || "").trim() || null;
     const capsuleId = String(event?.capsuleId || "").trim() || null;
-    if (!runtimeKey || !oldConversationId || !newConversationId || oldConversationId === newConversationId) return false;
+    const prepared = this.prepared.get(runtimeKey);
+    const expectedCapsuleId = prepared?.record?.capsuleId || prepared?.record?.id || null;
+    // A stale or unrelated completion cannot cancel or rebind a different chat.
+    if (!prepared || prepared.conversationId !== oldConversationId || !capsuleId || capsuleId !== expectedCapsuleId) return false;
+    const goalId = prepared.record.capsule?.continuity?.goalId || null;
+    const planId = prepared.record.capsule?.continuity?.planId || null;
+    if ((event.goalId && event.goalId !== goalId) || (event.planId && event.planId !== planId)) return false;
+    if (this.committing.has(runtimeKey)) return false;
+    this.committing.add(runtimeKey);
+    this.preparationVersions.set(runtimeKey, (this.preparationVersions.get(runtimeKey) || 0) + 1);
+    try {
+      return await this.#commitPreparedRollover({ event, prepared, runtimeKey, oldConversationId, newConversationId, goalId, planId, capsuleId });
+    } finally {
+      this.committing.delete(runtimeKey);
+    }
+  }
+
+  async #commitPreparedRollover({ event, prepared, runtimeKey, oldConversationId, newConversationId, goalId, planId, capsuleId }) {
+    if (event?.ok !== true) {
+      if (event?.ok !== false) return false;
+      return await this.#abortCompact({ runtimeKey, oldConversationId, newConversationId, capsuleId, status: "source-preserved-abort", error: event.error });
+    }
     const target = event?.targetDescriptor || {};
     let validation;
     try {
+      if (!newConversationId || oldConversationId === newConversationId) throw new Error("Auto Compact requires a distinct target conversation.");
+      if (target.conversationId !== newConversationId) throw new Error("Auto Compact target descriptor does not match the completion conversation.");
       validation = validateAutoCompactContinuation({
-        contract: event?.compressionContract,
+        contract: prepared.record.capsule,
         sourceConversationId: oldConversationId,
         targetConversationId: newConversationId,
         targetMappingCount: target?.mappingCount,
@@ -439,21 +535,15 @@ export class ContextGuardianRolloverCoordinator {
         visibleAssistants: event?.visibleAssistants,
         uiContinuityVerified: Boolean(
           event?.uiContinuityKey
+          && event.uiContinuityKey === prepared.uiContinuityKey
           && target?.devspaceContinuity?.uiContinuityKey === event.uiContinuityKey
           && target?.devspaceContinuity?.sourceConversationId === oldConversationId
+          && target?.devspaceContinuity?.capsuleFingerprint === prepared.record.capsule?.continuity?.capsuleFingerprint
         ),
         nativeContinuationSourceId: event?.nativeContinuationSourceId || null,
       });
     } catch (error) {
-      if (capsuleId && typeof this.continuityRuntime.updateCapsuleMeta === "function") {
-        await this.continuityRuntime.updateCapsuleMeta(capsuleId, {
-          status: "verification-failed",
-          candidateConversationId: newConversationId,
-          error: error instanceof Error ? error.message : String(error),
-          verifiedAt: new Date().toISOString(),
-        }).catch(() => {});
-      }
-      return false;
+      return await this.#abortCompact({ runtimeKey, oldConversationId, newConversationId, capsuleId, status: "verification-failed", error: error instanceof Error ? error.message : String(error) });
     }
     const rebound = await this.#notifyVerifiedRollover({
       goalId,
@@ -462,9 +552,13 @@ export class ContextGuardianRolloverCoordinator {
       oldConversationId,
       rolled: { ...event, ...validation, ok: true, conversationId: newConversationId },
     });
-    if ((goalId || planId) && rebound !== true) return false;
+    if (rebound !== true) {
+      return await this.#abortCompact({ runtimeKey, oldConversationId, newConversationId, capsuleId, status: "authority-rebind-failed", error: "Verified target authority migration was rejected." });
+    }
     this.prepared.delete(runtimeKey);
     this.nativeSeedCache.delete(runtimeKey);
+    this.descriptorFailures.delete(JSON.stringify([runtimeKey, oldConversationId]));
+    this.compactFailures.delete(JSON.stringify([runtimeKey, oldConversationId]));
     if (capsuleId && typeof this.continuityRuntime.updateCapsuleMeta === "function") {
       await this.continuityRuntime.updateCapsuleMeta(capsuleId, {
         status: "verified-continuation",
@@ -477,17 +571,26 @@ export class ContextGuardianRolloverCoordinator {
   }
 
   async beforeGoalContinuation({ runtimeKey, goalId, continuationPrompt } = {}) {
+    const preparationVersion = this.preparationVersions.get(runtimeKey) || 0;
     const prompt = String(continuationPrompt ?? "").trim();
     if (!runtimeKey || !goalId || !prompt) return { handled: false, reason: "missing-input" };
+    if (this.closed || this.committing.has(runtimeKey)) return { handled: false, blocked: true, reason: "compact-commit-in-progress" };
     if (this.continuityRuntime.enabled !== true) return { handled: false, reason: "auto-compact-disabled" };
     let snapshot = await this.#refresh(runtimeKey);
+    this.#assertPreparationCurrent(runtimeKey, preparationVersion);
     let baseContext = await this.contextGuardian.status(runtimeKey);
+    this.#assertPreparationCurrent(runtimeKey, preparationVersion);
     if (!stableHydratedConversationRoute(snapshot, this.routeSettleMs)) {
       return { handled: false, blocked: true, reason: "route-not-stable", context: baseContext };
     }
+    if (this.#compactFailure(runtimeKey, snapshot.conversationId)) {
+      return { handled: false, blocked: true, reason: "compact-circuit-open", context: baseContext };
+    }
     ({ snapshot, context: baseContext } = await this.#ensureNativeSeed(runtimeKey, snapshot, baseContext));
+    this.#assertPreparationCurrent(runtimeKey, preparationVersion);
     const nextInputTokens = estimateClassicInputTokens(prompt) + 128;
     const context = await this.contextGuardian.status(runtimeKey, { nextInputTokens });
+    this.#assertPreparationCurrent(runtimeKey, preparationVersion);
     if (!snapshot?.ok || context.supportedChatMode !== true || snapshot.mode === "work" || snapshot.generating || Number(snapshot.composerTextChars || 0) > 0) {
       return { handled: false, reason: "unsafe-boundary", context };
     }
@@ -499,7 +602,8 @@ export class ContextGuardianRolloverCoordinator {
           this.#resolvePlan(conversationId),
           this.contextAdapter.recentVisibleMessages(runtimeKey, { limit: 8 }),
         ]);
-        await this.#checkpoint({ runtimeKey, goal, plan, context, recentMessages, mode: "hidden-goal-continuation" });
+        this.#assertPreparationCurrent(runtimeKey, preparationVersion);
+        await this.#checkpoint({ runtimeKey, goal, plan, context, recentMessages, mode: "hidden-goal-continuation", preparationVersion });
       }
       return { handled: false, reason: "headroom-available", context };
     }
@@ -508,7 +612,9 @@ export class ContextGuardianRolloverCoordinator {
       this.#resolvePlan(conversationId),
       this.contextAdapter.recentVisibleMessages(runtimeKey, { limit: 8 }),
     ]);
-    const record = await this.#checkpoint({ runtimeKey, goal, plan, context, recentMessages, mode: "hidden-goal-continuation", force: true });
+    this.#assertPreparationCurrent(runtimeKey, preparationVersion);
+    const record = await this.#checkpoint({ runtimeKey, goal, plan, context, recentMessages, mode: "hidden-goal-continuation", force: true, preparationVersion });
+    this.#assertPreparationCurrent(runtimeKey, preparationVersion);
     const capsule = record?.capsule || null;
     const armed = await this.contextAdapter.startHiddenRollover(runtimeKey, {
       prompt: compactPrompt(record, { goal, sameRound: false, continuationPrompt: prompt }),
@@ -554,5 +660,8 @@ export class ContextGuardianRolloverCoordinator {
     this.timer = null;
     if (this.polling) await this.polling.catch(() => {});
     this.nativeSeedCache.clear();
+    this.descriptorFailures.clear();
+    this.compactFailures.clear();
+    this.preparationVersions.clear();
   }
 }

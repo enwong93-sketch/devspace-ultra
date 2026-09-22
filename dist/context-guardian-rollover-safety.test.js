@@ -123,6 +123,7 @@ function makeHarness({
     ],
   };
   const continuityRuntime = {
+    enabled,
     async checkpoint(input) {
       calls.checkpoints.push(input);
       return { ok: true, capsuleId: `capsule-${calls.checkpoints.length}`, capsule: input };
@@ -137,7 +138,6 @@ function makeHarness({
     async activePlans() { return [plan]; },
   };
   const coordinator = new ContextGuardianRolloverCoordinator({
-    enabled,
     contextGuardian,
     contextAdapter,
     continuityRuntime,
@@ -155,7 +155,8 @@ function makeHarness({
 {
   const { coordinator, calls } = makeHarness({ enabled: false, stage: "rollover" });
   const result = await coordinator.pollOnce();
-  assert.equal(result.disabled, true);
+  assert.equal(result.enabled, false);
+  assert.equal(result.action, "auto-compact-disabled");
   assert.equal(calls.status, 0);
   assert.equal(calls.descriptors.length, 0);
   assert.equal(calls.arms.length, 0);
@@ -168,7 +169,7 @@ function makeHarness({
     snapshot: stableSnapshot({ routeHydrated: false, routeStableForMs: 0 }),
   });
   const result = await coordinator.pollOnce();
-  assert.equal(result.results[0].action, "normal");
+  assert.equal(result.results[0].action, "skipped-route-hydration");
   assert.equal(calls.descriptors.length, 0, "re-entry hydration must not trigger a descriptor request");
   await coordinator.close();
 }
@@ -294,6 +295,171 @@ function makeHarness({
   await coordinator.close();
 }
 
+function validContinuationEvent(arm) {
+  return {
+    ok: true,
+    mode: "user-turn",
+    runtimeKey: "main-02",
+    oldConversationId: "conversation-source",
+    newConversationId: "conversation-valid-target",
+    goalId: "goal-safety",
+    planId: "plan-safety",
+    capsuleId: "capsule-1",
+    hiddenMessages: 1,
+    visibleUsers: 1,
+    visibleAssistants: 1,
+    uiContinuityKey: arm.uiContinuityKey,
+    nativeContinuationSourceId: "conversation-source",
+    compressionContract: arm.compressionContract,
+    targetDescriptor: {
+      conversationId: "conversation-valid-target",
+      mappingCount: 4,
+      branchMessageCount: 3,
+      payloadBytes: 20_000,
+      devspaceContinuity: {
+        sourceConversationId: "conversation-source",
+        uiContinuityKey: arm.uiContinuityKey,
+        capsuleFingerprint: arm.capsuleFingerprint,
+      },
+    },
+  };
+}
+
+{
+  const { coordinator, calls } = makeHarness({ stage: "rollover" });
+  await coordinator.pollOnce();
+  const event = validContinuationEvent(calls.arms[0].input);
+  for (const wrongScope of [
+    { oldConversationId: "conversation-foreign" },
+    { capsuleId: "capsule-foreign" },
+    { goalId: "goal-foreign" },
+    { planId: "plan-foreign" },
+  ]) {
+    assert.equal(await coordinator.noteUserTurnRollover({ ...event, ...wrongScope }), false);
+  }
+  assert.equal(calls.cancels.length, 0, "Unrelated events must not cancel the prepared conversation.");
+  assert.equal(calls.verified.length, 0);
+  assert.equal(await coordinator.noteUserTurnRollover(event), true);
+  assert.equal(calls.verified.length, 1);
+  assert.equal(await coordinator.noteUserTurnRollover(event), false, "A duplicate event must not rebind authority twice.");
+  assert.equal(calls.verified.length, 1);
+  await coordinator.close();
+}
+
+for (const invalidTarget of ["same-id", "fingerprint"]) {
+  const { coordinator, calls } = makeHarness({ stage: "rollover" });
+  await coordinator.pollOnce();
+  const event = validContinuationEvent(calls.arms[0].input);
+  if (invalidTarget === "same-id") event.newConversationId = event.oldConversationId;
+  else event.targetDescriptor.devspaceContinuity.capsuleFingerprint = "mismatched-fingerprint";
+  assert.equal(await coordinator.noteUserTurnRollover(event), false);
+  assert.equal(calls.verified.length, 0);
+  assert.equal((await coordinator.pollOnce()).results[0].action, "compact-circuit-open");
+  const beforeHidden = calls.descriptors.length;
+  const hidden = await coordinator.beforeGoalContinuation({ runtimeKey: "main-02", goalId: "goal-safety", continuationPrompt: "Continue the isolated fixture." });
+  assert.equal(hidden.blocked, true);
+  assert.equal(hidden.reason, "compact-circuit-open");
+  assert.equal(calls.descriptors.length, beforeHidden);
+  assert.equal(calls.arms.length, 1, "Neither path may re-arm a rejected target.");
+  await coordinator.close();
+}
+
+{
+  const { coordinator, calls } = makeHarness({ stage: "rollover", onVerifiedRollover: async () => ({ ok: false }) });
+  await coordinator.pollOnce();
+  assert.equal(await coordinator.noteUserTurnRollover(validContinuationEvent(calls.arms[0].input)), false);
+  assert.equal(calls.capsuleMeta.at(-1).patch.status, "authority-rebind-failed");
+  await coordinator.close();
+}
+
+{
+  const { coordinator, calls } = makeHarness({ descriptorError: new Error("isolated descriptor failure") });
+  await coordinator.pollOnce();
+  await coordinator.pollOnce();
+  assert.equal(calls.descriptors.length, 1);
+  // Advance only this fixture's circuit; no wall-clock waits or live requests.
+  coordinator.descriptorFailures.get(JSON.stringify(["main-02", "conversation-source"])).retryAfterMs = 0;
+  await coordinator.pollOnce();
+  assert.equal(calls.descriptors.length, 2, "Descriptor reads may retry after the bounded cooldown.");
+  await coordinator.pollOnce();
+  assert.equal(calls.descriptors.length, 2, "A second failure must restore the cooldown.");
+  await coordinator.close();
+  assert.equal(coordinator.descriptorFailures.size, 0);
+}
+
+{
+  const { coordinator, calls } = makeHarness({ stage: "rollover" });
+  await coordinator.pollOnce();
+  const event = validContinuationEvent(calls.arms[0].input);
+  event.targetDescriptor.conversationId = "conversation-foreign-descriptor";
+  assert.equal(await coordinator.noteUserTurnRollover(event), false, "Target descriptor must name the same target as the completion event.");
+  assert.equal(calls.verified.length, 0);
+  await coordinator.close();
+}
+
+{
+  let release;
+  const hold = new Promise((resolve) => { release = resolve; });
+  const { coordinator, calls } = makeHarness({ stage: "rollover", onVerifiedRollover: async () => { await hold; return true; } });
+  await coordinator.pollOnce();
+  const event = validContinuationEvent(calls.arms[0].input);
+  const first = coordinator.noteUserTurnRollover(event);
+  const duplicate = coordinator.noteUserTurnRollover(event);
+  const poll = await coordinator.pollOnce();
+  release();
+  const results = await Promise.all([first, duplicate]);
+  assert.equal(calls.verified.length, 1, "Simultaneous duplicate events must migrate authority only once.");
+  assert.deepEqual(results, [true, false]);
+  assert.equal(calls.arms.length, 1, "A poll during authority migration must not replace its prepared capsule.");
+  assert.equal(poll.results[0].action, "compact-commit-in-progress");
+  await coordinator.close();
+}
+
+{
+  const snapshot = stableSnapshot();
+  const { coordinator, calls } = makeHarness({ stage: "rollover", snapshot });
+  await coordinator.pollOnce();
+  await coordinator.noteUserTurnRollover({ ...validContinuationEvent(calls.arms[0].input), ok: false });
+  snapshot.conversationId = "conversation-foreign-route";
+  await coordinator.pollOnce();
+  snapshot.conversationId = "conversation-source";
+  assert.equal((await coordinator.pollOnce()).results[0].action, "compact-circuit-open", "Visiting another conversation must not clear the original failure circuit.");
+  assert.equal(calls.arms.length, 1);
+  await coordinator.close();
+}
+
+{
+  const { coordinator, calls } = makeHarness({ stage: "rollover" });
+  await coordinator.pollOnce();
+  const event = validContinuationEvent(calls.arms[0].input);
+  let releaseSnapshot, announceSnapshot;
+  const snapshotPending = new Promise((resolve) => { releaseSnapshot = resolve; });
+  const snapshotStarted = new Promise((resolve) => { announceSnapshot = resolve; });
+  coordinator.contextAdapter.refreshSnapshot = async () => { announceSnapshot(); return snapshotPending; };
+  const oldPoll = coordinator.pollOnce();
+  await snapshotStarted;
+  assert.equal(await coordinator.noteUserTurnRollover(event), true);
+  releaseSnapshot(stableSnapshot());
+  await oldPoll;
+  assert.equal(calls.arms.length, 1, "A poll started before a completed commit must not re-arm its stale source.");
+  assert.equal(coordinator.prepared.size, 0, "Late pre-commit work must not recreate consumed prepared authority.");
+  await coordinator.close();
+}
+
+{
+  const { coordinator, calls } = makeHarness({ stage: "rollover" });
+  let releaseSnapshot, announceSnapshot;
+  const snapshotPending = new Promise((resolve) => { releaseSnapshot = resolve; });
+  const snapshotStarted = new Promise((resolve) => { announceSnapshot = resolve; });
+  coordinator.contextAdapter.refreshSnapshot = async () => { announceSnapshot(); return snapshotPending; };
+  const oldPoll = coordinator.pollOnce();
+  await snapshotStarted;
+  const closing = coordinator.close();
+  releaseSnapshot(stableSnapshot());
+  await Promise.all([closing, oldPoll]);
+  assert.equal(calls.arms.length, 0, "Closing during an awaited snapshot must prevent all later preparation/arming.");
+}
+
 console.log(JSON.stringify({
   ok: true,
   gate: "context-guardian-rollover-safety",
@@ -304,4 +470,17 @@ console.log(JSON.stringify({
   verificationFailureCircuit: true,
   authorityRebindFailureCircuit: true,
   singleDescriptorPerCommitPreparation: true,
+  successfulContinuationPreserved: true,
+  duplicateAuthorityMigrationRejected: true,
+  foreignScopeEventsRejected: true,
+  fingerprintMismatchRejected: true,
+  hiddenContinuationHonorsFailureCircuit: true,
+  explicitNegativeRebindRejected: true,
+  descriptorCooldownAllowsBoundedRetry: true,
+  targetDescriptorIdentityRequired: true,
+  concurrentDuplicateMigrationRejected: true,
+  pollDuringCommitDoesNotRearm: true,
+  failureCircuitSurvivesRouteRoundTrip: true,
+  latePreCommitPollRejected: true,
+  closeDuringSnapshotCannotArm: true,
 }));
