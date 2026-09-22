@@ -105,6 +105,48 @@ function Stop-VerifiedDedicatedListener {
     return $true
 }
 
+function Get-GatewayPorts {
+    $configFile = Join-Path $configPath "config.json"
+    $config = if (Test-Path -LiteralPath $configFile) {
+        Get-Content -LiteralPath $configFile -Raw | ConvertFrom-Json
+    }
+    else { $null }
+    $gatewayPort = if ($config -and $config.stableGatewayPort) { [int]$config.stableGatewayPort } elseif ($config -and $config.edgeBackendPort) { [int]$config.edgeBackendPort } else { 7678 }
+    $coreA = if ($config -and $config.stableGatewayCoreAPort) { [int]$config.stableGatewayCoreAPort } else { $gatewayPort + 10 }
+    $coreB = if ($config -and $config.stableGatewayCoreBPort) { [int]$config.stableGatewayCoreBPort } else { $gatewayPort + 11 }
+    return [pscustomobject]@{ Gateway=$gatewayPort; Cores=@($coreA,$coreB) }
+}
+
+function Set-LiveGatewayPriorities {
+    $ports = Get-GatewayPorts
+    $changes = @()
+    $gatewayListener = Get-NetTCPConnection -State Listen -LocalPort $ports.Gateway -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($gatewayListener) {
+        $gatewayProcess = Get-Process -Id $gatewayListener.OwningProcess -ErrorAction SilentlyContinue
+        if ($gatewayProcess) {
+            try { $gatewayProcess.PriorityClass = [System.Diagnostics.ProcessPriorityClass]::AboveNormal } catch {}
+            $changes += [pscustomobject]@{ Role="gateway"; Pid=$gatewayProcess.Id; Priority=$gatewayProcess.PriorityClass.ToString() }
+            $gatewayWmi = Get-CimInstance Win32_Process -Filter ("ProcessId = {0}" -f $gatewayProcess.Id) -ErrorAction SilentlyContinue
+            if ($gatewayWmi -and $gatewayWmi.ParentProcessId) {
+                $launcher = Get-Process -Id $gatewayWmi.ParentProcessId -ErrorAction SilentlyContinue
+                if ($launcher) {
+                    try { $launcher.PriorityClass = [System.Diagnostics.ProcessPriorityClass]::Normal } catch {}
+                    $changes += [pscustomobject]@{ Role="launcher"; Pid=$launcher.Id; Priority=$launcher.PriorityClass.ToString() }
+                }
+            }
+        }
+    }
+    foreach ($port in $ports.Cores) {
+        $listener = Get-NetTCPConnection -State Listen -LocalPort $port -ErrorAction SilentlyContinue | Select-Object -First 1
+        if (-not $listener) { continue }
+        $core = Get-Process -Id $listener.OwningProcess -ErrorAction SilentlyContinue
+        if (-not $core) { continue }
+        try { $core.PriorityClass = [System.Diagnostics.ProcessPriorityClass]::Normal } catch {}
+        $changes += [pscustomobject]@{ Role="core"; Pid=$core.Id; Priority=$core.PriorityClass.ToString(); Port=$port }
+    }
+    return @($changes)
+}
+
 function Wait-GatewayReady {
     while ($true) {
         Start-Sleep -Milliseconds 400
@@ -226,6 +268,7 @@ switch ($Action) {
             -Settings (New-GatewayTaskSettings) `
             -Principal (New-GatewayTaskPrincipal) | Out-Null
         Install-GatewayWatchdog
+        $priorityState = Set-LiveGatewayPriorities
         $after = Get-GatewayTask
         [ordered]@{
             Ok = $true
@@ -238,6 +281,7 @@ switch ($Action) {
             MultipleInstances = "IgnoreNew"
             WatchdogTaskName = $watchdogTaskName
             WatchdogMinutes = 1
+            RuntimePriorities = $priorityState
             ConfigDir = $configPath
             SecretValuesLogged = $false
         } | ConvertTo-Json -Depth 8 -Compress
@@ -284,7 +328,7 @@ switch ($Action) {
     "watchdog" {
         $gateway = Invoke-GatewayHelper -Status
         if ($gateway.ok -eq $true -and $gateway.state -in @('already-running','ready','running-foreground','started')) {
-            [ordered]@{ Ok=$true; State="healthy"; Started=$false; SecretValuesLogged=$false } | ConvertTo-Json -Compress
+            [ordered]@{ Ok=$true; State="healthy"; Started=$false; RuntimePriorities=(Set-LiveGatewayPriorities); SecretValuesLogged=$false } | ConvertTo-Json -Depth 5 -Compress
             break
         }
         $task = Get-GatewayTask

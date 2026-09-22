@@ -129,6 +129,10 @@ assert.match(stableGatewayStartup, /DevSpace-Stable-Gateway-Watchdog/);
 assert.match(stableGatewayStartup, /RepetitionInterval \(New-TimeSpan -Minutes 1\)/, "a separate periodic watchdog must recover a fully dead Task without repeatedly triggering the healthy long-running Task");
 assert.match(stableGatewayStartup, /State = if \(\$started\) \{ "recovery-started" \} else \{ "unhealthy-task-running" \}/,
   "watchdog may start a stopped Task but must not kill or duplicate a running process tree");
+assert.match(stableGatewayStartup, /ProcessPriorityClass\]::AboveNormal/,
+  "watchdog must keep the small Gateway control plane above ordinary saturated workloads");
+assert.match(stableGatewayStartup, /ProcessPriorityClass\]::Normal/,
+  "watchdog must keep launcher and Core at Normal rather than allowing inherited AboveNormal work");
 assert.match(stableGatewayStartup, /Set-ScheduledTask[\s\S]*RunningInstancePreserved/, "Task hardening must be installable without restarting the current healthy Gateway");
 assert.doesNotMatch(stableGatewayStartup, /(?:Stop|Start|Unregister)-ScheduledTask[^\n]*(?:DevSpace-Fixed-Edge-Tunnel|DevSpace-Fixed-Backend)/i, "Stable Gateway startup must not mutate legacy edge tasks");
 assert.match(stableGatewayStartup, /Get-NetTCPConnection[\s\S]*7678|GatewayPort/, "restart must verify the dedicated Gateway/Core listeners rather than killing arbitrary Node processes");
