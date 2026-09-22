@@ -1,0 +1,30 @@
+{
+  "auditId": "autocompact-canary-20260922-unknown-goal-continuation",
+  "observedAt": "2026-09-22T04:21:59.214Z",
+  "conversationId": "6aacc828-96f0-83e8-b368-a550e2c8ae27",
+  "requestedGoalId": "goal_6d3f91bfdf7ae01f",
+  "roundBeginAccepted": false,
+  "primaryEndpointResult": "Unknown goal",
+  "secondEndpointReadResult": "Unknown goal",
+  "persistedRegistryCheck": {
+    "requestedGoalFound": false,
+    "requestedContinuationFound": false,
+    "sameConversationGoals": [],
+    "sameConversationPlans": [
+      {"id": "plan_1d9c73b3a0a5ca2d", "status": "completed"},
+      {"id": "plan_3114a058278b993f", "status": "completed"}
+    ]
+  },
+  "existingEvidenceAuditId": "autocompact-canary-20260922-descriptor",
+  "existingEvidenceHashCount": 6,
+  "existingEvidenceHashesMatch": true,
+  "gitDiffCheckExitCode": 0,
+  "newTestsExecuted": false,
+  "storedPassedTestEntries": 19,
+  "liveAcceptance": false,
+  "rootCauseEstablished": false,
+  "sourceCodeChanged": false,
+  "replacementGoalCreated": false,
+  "productionChanges": false,
+  "note": "The delivered continuation cannot be redeemed against either connected endpoint or the inspected registry. The full original Goal objective and success criteria were unavailable; no replacement objective was inferred. Existing isolated repair evidence remains intact. This diagnostic is not completion of a Goal round or live compression acceptance."
+}

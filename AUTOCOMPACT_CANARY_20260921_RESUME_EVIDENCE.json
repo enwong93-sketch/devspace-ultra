@@ -1,0 +1,63 @@
+{
+  "auditId": "autocompact-canary-20260921-resume",
+  "evidenceKind": "agent-authored-summary-of-observed-tool-results-not-raw-log",
+  "date": "2026-09-21",
+  "worktree": "C:\\Users\\enwong\\.devspace\\worktrees\\devspace-ae006673",
+  "baseCommit": "e2ee59caa9622277fd3e63b143f11ab1715e6313",
+  "runtimeSha256": "1d0999e2cc84fef73fb105d17919bbc65b9686dc12871de5e8abfa42cae5be8a",
+  "safetyTestSha256": "f436c59f3d38ee3fa313250aab360082ae9fde18eb4e5b8971ed65f3cc5a0611",
+  "installedRuntimeSha256": "92383b31bb4b071264de59ae8c27d4f2d66f18e6d3230cf09d6d468552337eca",
+  "gitDiffCheck": "pass",
+  "latestRegression": {
+    "command": "node --test dist/context-guardian-rollover-safety.test.js dist/context-guardian-rollover.test.js dist/context-guardian-structural-seed.test.js",
+    "exitCode": 0,
+    "testFilesPassed": 3,
+    "testFilesFailed": 0,
+    "scope": "in-process synthetic fixtures, not live UI compression"
+  },
+  "newCounterexample": {
+    "case": "target descriptor names a different conversation",
+    "beforeFix": { "accepted": true, "expected": false, "exitCode": 1 },
+    "afterFix": "rejected by passing regression"
+  },
+  "additionalPassingCases": [
+    "simultaneous duplicate completions migrate authority once",
+    "a poll started during commit does not rearm",
+    "failure circuit survives route round trip"
+  ],
+  "separateUnresolvedTest": {
+    "file": "dist/context-guardian-descriptor-coordinator.test.js",
+    "result": "load-failure",
+    "error": "context-guardian-cdp.js does not export classicSourcePageIdentity",
+    "testOrImplementationModifiedInThisResume": false
+  },
+  "conversation": {
+    "id": "6aacc828-96f0-83e8-b368-a550e2c8ae27",
+    "runtimeKey": "main-06",
+    "port": 9736,
+    "planId": "plan_1d9c73b3a0a5ca2d",
+    "exactPageVerified": true,
+    "progressCardMounted": true,
+    "progressConversationMatched": true,
+    "exactBridgeWriteVerified": true,
+    "subsequentDirectProgressWriteVerified": true,
+    "directProgressObservedAt": "2026-09-21T13:36:04.189Z",
+    "generatingAtPreflight": true
+  },
+  "production": {
+    "autoCompactEnabled": false,
+    "contextGuardianEnabled": true,
+    "deployed": false,
+    "serviceRestarted": false,
+    "pageNavigated": false,
+    "syntheticUserMessageSent": false,
+    "liveCompressionAttempted": false,
+    "liveCompressionAccepted": false,
+    "exactNativeTokenUsageAvailable": false
+  },
+  "remaining": [
+    "descriptor coordinator export compatibility",
+    "remaining race interleavings and restart persistence",
+    "idle-boundary isolated live selective-compression acceptance"
+  ]
+}

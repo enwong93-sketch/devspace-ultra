@@ -1,0 +1,131 @@
+TAP version 13
+# {"ok":true,"gate":"auto-compact-contract","backendIdMayChange":true,"uiContinuityRequired":true,"fullHistoryInheritanceRejected":true,"zeroContextRejected":true,"sourceToCarryRatioMeasured":true,"goalPlanFrontierRequired":true,"rawTranscriptForbidden":true}
+# Subtest: dist\\auto-compact-contract.test.js
+ok 1 - dist\\auto-compact-contract.test.js
+  ---
+  duration_ms: 251.2787
+  type: 'test'
+  ...
+# {"ok":true,"gate":"auto-compact-structural-usage","payloadByteSignal":true,"textSignal":true,"messageOverheadSignal":true,"explicitHigherBoundPreserved":true,"exactClaimed":false,"rawContentUsed":false}
+# Subtest: dist\\auto-compact-structural-usage.test.js
+ok 2 - dist\\auto-compact-structural-usage.test.js
+  ---
+  duration_ms: 229.6587
+  type: 'test'
+  ...
+# {"ok":true,"gate":"context-guardian-cdp","safeMetadataOnly":true,"chatMainPorts":true,"cjkAwareEstimator":true}
+# Subtest: dist\\context-guardian-cdp.test.js
+ok 3 - dist\\context-guardian-cdp.test.js
+  ---
+  duration_ms: 257.1435
+  type: 'test'
+  ...
+# {"ok":true,"gate":"context-guardian-descriptor-coordinator","sourcePageIdentityBound":true,"stableRouteRequired":true,"singleflight":true,"globallyPaced":true,"negativeCache404":true,"transientCircuit":true,"global429Circuit":true}
+# Subtest: dist\\context-guardian-descriptor-coordinator.test.js
+ok 4 - dist\\context-guardian-descriptor-coordinator.test.js
+  ---
+  duration_ms: 232.9894
+  type: 'test'
+  ...
+# Subtest: unstable or incomplete source never reaches the fetch
+ok 5 - unstable or incomplete source never reaches the fetch
+  ---
+  duration_ms: 3.1711
+  type: 'test'
+  ...
+# Subtest: page, epoch, route and hydration changes reject the returned descriptor
+ok 6 - page, epoch, route and hydration changes reject the returned descriptor
+  ---
+  duration_ms: 1.0392
+  type: 'test'
+  ...
+# Subtest: source read accepts only its own descriptor and current boundary
+ok 7 - source read accepts only its own descriptor and current boundary
+  ---
+  duration_ms: 1.404
+  type: 'test'
+  ...
+# Subtest: late success after clear cannot overwrite the next generation cache
+ok 8 - late success after clear cannot overwrite the next generation cache
+  ---
+  duration_ms: 2.7853
+  type: 'test'
+  ...
+# Subtest: late failure after clear cannot poison the next generation
+ok 9 - late failure after clear cannot poison the next generation
+  ---
+  duration_ms: 0.8044
+  type: 'test'
+  ...
+# Subtest: force failure rejects instead of returning old cached success
+ok 10 - force failure rejects instead of returning old cached success
+  ---
+  duration_ms: 2.9996
+  type: 'test'
+  ...
+# Subtest: foreign descriptor cannot enter the cache, and returned values are independent
+ok 11 - foreign descriptor cannot enter the cache, and returned values are independent
+  ---
+  duration_ms: 0.7989
+  type: 'test'
+  ...
+# Subtest: concurrent different conversations obey one start-time pace
+ok 12 - concurrent different conversations obey one start-time pace
+  ---
+  duration_ms: 0.6055
+  type: 'test'
+  ...
+# Subtest: queued fetch rechecks the explicit shared cooldown after its wait
+ok 13 - queued fetch rechecks the explicit shared cooldown after its wait
+  ---
+  duration_ms: 0.6654
+  type: 'test'
+  ...
+# Subtest: default rate-limit scope does not block unrelated conversations
+ok 14 - default rate-limit scope does not block unrelated conversations
+  ---
+  duration_ms: 0.6851
+  type: 'test'
+  ...
+# Subtest: Retry-After is not shortened and invalid numeric forms are rejected
+ok 15 - Retry-After is not shortened and invalid numeric forms are rejected
+  ---
+  duration_ms: 0.5645
+  type: 'test'
+  ...
+# Subtest: in-flight and completed caches remain bounded
+ok 16 - in-flight and completed caches remain bounded
+  ---
+  duration_ms: 0.5485
+  type: 'test'
+  ...
+# {"ok":true,"gate":"context-guardian-rollover-safety","disabledMeansNoDescriptorTraffic":true,"reentryHydrationNoDescriptorTraffic":true,"descriptorFailureCircuit":true,"sourcePreservingAbortCircuit":true,"verificationFailureCircuit":true,"authorityRebindFailureCircuit":true,"singleDescriptorPerCommitPreparation":true,"successfulContinuationPreserved":true,"duplicateAuthorityMigrationRejected":true,"foreignScopeEventsRejected":true,"fingerprintMismatchRejected":true,"hiddenContinuationHonorsFailureCircuit":true,"explicitNegativeRebindRejected":true,"descriptorCooldownAllowsBoundedRetry":true,"targetDescriptorIdentityRequired":true,"concurrentDuplicateMigrationRejected":true,"pollDuringCommitDoesNotRearm":true,"failureCircuitSurvivesRouteRoundTrip":true,"latePreCommitPollRejected":true,"closeDuringSnapshotCannotArm":true}
+# Subtest: dist\\context-guardian-rollover-safety.test.js
+ok 6 - dist\\context-guardian-rollover-safety.test.js
+  ---
+  duration_ms: 276.2502
+  type: 'test'
+  ...
+# {"ok":true,"gate":"context-guardian-rollover","checkpointOnlyAtPressure":true,"selectiveContinuationCompaction":true,"backendConversationIdMayChange":true,"uiContinuityKeyRequired":true,"fullHistoryInheritanceRejected":true,"zeroContextRejected":true,"userTurnArmedAtRollover":true,"hiddenGoalContinuationArmedAtRollover":true,"authorityRebindAfterVerificationOnly":true}
+# Subtest: dist\\context-guardian-rollover.test.js
+ok 7 - dist\\context-guardian-rollover.test.js
+  ---
+  duration_ms: 226.7007
+  type: 'test'
+  ...
+# {"ok":true,"gate":"context-guardian-structural-seed","restartLedgerTokens":3654,"structuralSnapshotTokens":250000,"usageSource":"classic-conversation-snapshot","exactUsageClaimed":false,"descriptorFetches":1,"descriptorCacheBounded":true,"rawContentReturned":false,"credentialsReturned":false}
+# Subtest: dist\\context-guardian-structural-seed.test.js
+ok 8 - dist\\context-guardian-structural-seed.test.js
+  ---
+  duration_ms: 242.3291
+  type: 'test'
+  ...
+1..19
+# tests 19
+# suites 0
+# pass 19
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 466.8236

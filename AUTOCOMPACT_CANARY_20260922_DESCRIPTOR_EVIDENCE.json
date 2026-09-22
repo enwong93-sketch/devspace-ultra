@@ -1,0 +1,55 @@
+{
+  "auditId": "autocompact-canary-20260922-descriptor",
+  "observedAt": "2026-09-21T19:48:53.859Z",
+  "localDate": "2026-09-22",
+  "timeZone": "Asia/Hong_Kong",
+  "workspace": "C:\\Users\\enwong\\.devspace\\worktrees\\devspace-ae006673",
+  "base": "e2ee59caa9622277fd3e63b143f11ab1715e6313",
+  "conversationId": "6aacc828-96f0-83e8-b368-a550e2c8ae27",
+  "planId": "plan_3114a058278b993f",
+  "nodeVersion": "v25.4.0",
+  "testCommand": "node --test --test-reporter=dot --test-reporter=tap --test-reporter-destination=stdout --test-reporter-destination=AUTOCOMPACT_CANARY_20260922_DESCRIPTOR.tap dist/context-guardian-rollover-safety.test.js dist/context-guardian-rollover.test.js dist/context-guardian-structural-seed.test.js dist/context-guardian-descriptor-coordinator.test.js dist/context-guardian-descriptor-lifecycle.test.js dist/context-guardian-cdp.test.js dist/auto-compact-contract.test.js dist/auto-compact-structural-usage.test.js",
+  "testFileCount": 8,
+  "nodeTestEntries": 19,
+  "passed": 19,
+  "failed": 0,
+  "cancelled": 0,
+  "skipped": 0,
+  "todo": 0,
+  "testExitCode": 0,
+  "gitDiffCheckExitCode": 0,
+  "testScope": "isolated deterministic fixtures and imported production-module logic; not live native continuation",
+  "reproducedBeforeRepair": [
+    "descriptor-coordinator test failed to load because classicSourcePageIdentity was not exported while cdp test passed",
+    "poll started before successful commit armed the old source again after completion: actual arm calls 2, expected 1"
+  ],
+  "rateLimitDecision": {
+    "defaultScope": "conversation",
+    "sharedScope": "explicit opt-in fixture only; not enabled on the shared live singleton",
+    "singletonMinimumFetchGapMs": 2000,
+    "priorAssertionsRemoved": false,
+    "sharedFixtureChange": "explicit rateLimitScope: shared, preserving all original shared-domain assertions"
+  },
+  "hashes": {
+    "dist/context-guardian-cdp.js": "890dd4771356e80b4407c5857d90b19f08f01bfd028222c44e74a9a52a54683c",
+    "dist/context-guardian-descriptor-coordinator.test.js": "ea2e7e7dd4a850dac4026d52097cdedb29892a106aa71c685b3488049b9d2bca",
+    "dist/context-guardian-descriptor-lifecycle.test.js": "b839ec46ff7ec0abe8cfe9fa2cc4d2000f741b40b570dbb02b6d65b79d3d467d",
+    "dist/context-guardian-rollover.js": "7d6b9d7c2654238947b8676cc4a4f53a77cb136ef75ccb7c3e99e7bc3f6ee59b",
+    "dist/context-guardian-rollover-safety.test.js": "e5a468531adb05b0f8e309dbfa7274494318529e42b40c0091e3eff2286ace4a",
+    "AUTOCOMPACT_CANARY_20260922_DESCRIPTOR.tap": "e0c95b9faf129ddc64f4dbe110dd95bf7ee50e8620a962f784aa20a8ce7c138d"
+  },
+  "productionStatusObserved": { "autoCompactEnabled": false, "contextGuardianEnabled": true },
+  "actionsThisTurn": { "deployment": false, "serviceRestart": false, "globalEnablement": false, "pageNavigation": false, "syntheticUserMessages": 0 },
+  "liveAcceptance": false,
+  "processRestartPersistenceVerified": false,
+  "remaining": [
+    "durable failure and commit recovery across real process restart",
+    "remaining native arm/cancel/finalization interleavings",
+    "live scoped selective compression and completed assistant continuation",
+    "live transactional Goal/Plan/MCP/progress/overlay migration and rollback"
+  ],
+  "references": [
+    "https://www.rfc-editor.org/rfc/rfc9110.html#section-10.2.3",
+    "https://www.rfc-editor.org/rfc/rfc6585.html#section-4"
+  ]
+}
