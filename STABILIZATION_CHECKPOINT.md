@@ -48,14 +48,16 @@
    Commit `4b36a38` adds a separate one-minute watchdog Task instead of
    repeatedly triggering the healthy long-running Task. The watchdog only
    starts the main Task when health is down and it is not already running; it
-   never stops a running process tree. A real watchdog run returned 0 while
-   Gateway/Core PIDs remained unchanged and health stayed true.
+   never stops a running process tree. Commit `b47b59f` also makes every healthy
+   watchdog pass reassert Gateway=AboveNormal and launcher/Core=Normal, covering
+   a Core restarted by the already-running pre-fix Gateway. A real watchdog run
+   returned 0 while Gateway/Core PIDs remained unchanged and health stayed true.
 
 ### Acceptance
 
 - Focused Stable Gateway, Goal, Rescue/liveness and Classic safety suites pass.
-- Clean-revision full audit `87365529-fc2e-45a4-b5b6-b736430ead78` on
-  `4b36a38e5b801b91d41f1f1e4cba892ff39ea1c5` passed 174 named gates, exit 0,
+- Final clean-revision full audit `9e985ade-35d0-43a8-9671-77102713cee5` on
+  `b47b59f232122a1d3040afbd61f597aa32bad886` passed 174 named gates, exit 0,
   with an empty tracked diff.
 - The exact conversation progress marker was persisted and read from the real
   floating card (`cardAcceptancePassed=true`); all five observed Main runtimes
