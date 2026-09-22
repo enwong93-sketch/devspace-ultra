@@ -306,3 +306,39 @@ workers, memory/logging, setup, Gateway sessions and transport regressions;
 it does not imply that every production UI path has received a live test.
 Investigate persistent upstream delivery failures using timestamps and
 endpoint evidence rather than reducing safeguards or reenabling Auto Compact.
+
+## 2026-09-22 Project conversation route hotfix
+
+The user reported that reopening Goal conversation
+`6aacf595-b3d0-83ee-a31f-043786b41e85` repeatedly returned Main-02 to the
+ComfyUI Project root and that the Goal/Plan surface therefore appeared inert.
+Backend state was not lost: `goal_9ddde493694349b9` remained active in round 3
+and `plan_2cf98fb844a5d59b` remained active. Authority evidence showed Main-02
+on the exact conversation at `2026-09-22T07:48:45.784Z`, followed later by the
+Project-root URL, while the new progress report stayed a pending exact-page
+claim.
+
+The hidden progress/start claim relay still called the ChatGPT host UI-close
+API at claim expiry. That host-level operation was introduced to retire stale
+iframes and later delayed to the claim lifetime, but it is unsafe for a hidden
+ownership receipt on the current Desktop Project surface. Hotfix `8dd574b`
+removes every host-close request from the relay. Expiry now only marks the
+one-shot relay retired and detaches its `openai:set_globals` and `message`
+listeners; it performs no navigation, reload, foreground activation or host UI
+closure.
+
+Verification passed for `verify:visible-progress`, `verify:progress-liveness`,
+`verify:goal`, `verify:host-overlay`, `verify:classic-safety`, the exact-page
+claim registry/conversation isolation tests and `git diff --check`. Stable
+Gateway handover `192684db-4403-4c19-aa3f-8d1123b419f6` completed without a
+schema change or Gateway/Main/Blender restart; active Core PID became 27924.
+The deployed file was read back with `requestClose` absent and local retirement
+present. Auto Compact remains OFF.
+
+Do not mark the incident fully accepted yet. Main-02 was still at the Project
+root after deployment, because that was the pre-hotfix destination. The next
+manual entry into the exact conversation must be observed read-only and kept
+open beyond the two-minute claim TTL; then verify the Goal strip, Plan HUD and
+one ordinary narration-card readback. Do not remount Goal/Plan or emit another
+progress relay merely to manufacture the test condition, and do not navigate
+ChatGPT programmatically.
