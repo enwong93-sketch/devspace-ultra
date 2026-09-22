@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // Read-only operational evidence. No restart, navigation, input or credential read.
 import { ClassicCdpClient } from '../dist/classic-cdp-client.js';
+import { defaultMainDebugPorts } from '../dist/goal-host-bridge.js';
 
 const args = process.argv.slice(2);
 const option = (name) => args[args.indexOf(name) + 1];
@@ -25,7 +26,7 @@ const [health, memory, progress, live] = await Promise.all([
 ]);
 const rows = (progress.value?.messages || []).filter((x) => x.conversationId === conversationId);
 const pages = [];
-for (const port of [9721, 9732, 9733, 9734, 9735, 9736]) {
+for (const port of defaultMainDebugPorts({ includeObserved: true, refresh: true })) {
   const targets = await get(`http://127.0.0.1:${port}/json/list`);
   if (!targets.ok || !Array.isArray(targets.value)) continue;
   for (const target of targets.value) {

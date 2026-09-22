@@ -47,8 +47,7 @@ import { PlanRuntime } from "./plan-runtime.js";
 import { registerPlanTools } from "./plan-tools.js";
 import { GoalRuntime } from "./goal-runtime.js";
 import { registerGoalTools } from "./goal-tools.js";
-import { ClassicGoalHostBridge } from "./goal-host-bridge.js";
-import { inspectGoalContinuationPages } from "./goal-host-bridge.js";
+import { ClassicGoalHostBridge, defaultMainDebugPorts, inspectGoalContinuationPages } from "./goal-host-bridge.js";
 import { GoalContinuationSupervisor } from './goal-continuation-supervisor.js';
 import { ClassicGoalRoundCompletionGuard } from "./goal-round-completion-guard.js";
 import { goalRecoveryRescueDecision } from "./goal-rescue-arbitration.js";
@@ -2229,9 +2228,14 @@ export function createServer(config = loadConfig(), options = {}) {
             error: error instanceof Error ? error.message : String(error),
         });
     });
-    const classicCdpOptions = Array.isArray(config.classicMainDebugPorts)
-        ? { ports: config.classicMainDebugPorts }
-        : {};
+    const configuredClassicPorts = Array.isArray(config.classicMainDebugPorts)
+        ? config.classicMainDebugPorts.filter(Number.isInteger)
+        : [];
+    const classicCdpOptions = {
+        ports: configuredClassicPorts.length
+            ? configuredClassicPorts
+            : defaultMainDebugPorts({ includeObserved: true, refresh: true }),
+    };
     const primaryDebugGuard = process.platform === "win32"
         ? new ClassicPrimaryDebugGuard()
         : null;

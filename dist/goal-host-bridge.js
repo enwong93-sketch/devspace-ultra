@@ -1,10 +1,7 @@
 import { ClassicCdpClient } from "./classic-cdp-client.js";
 import { readComposerDraft } from "./classic-composer-draft.js";
+import { classicMainDebugPorts, runtimeLabelForClassicPort } from './classic-main-debug-ports.js';
 
-const DEFAULT_PRIMARY_DEBUG_PORT = 9721;
-const DEFAULT_INTERACTIVE_DEBUG_BASE_PORT = 9730;
-const MIN_INTERACTIVE_MAIN = 2;
-const MAX_INTERACTIVE_MAIN = 32;
 const DEFAULT_PROBE_TIMEOUT_MS = 500;
 const DEFAULT_CONTEXT_SETTLE_MS = 80;
 const DEFAULT_VISIBLE_REPORT_TIMEOUT_MS = 30_000;
@@ -22,12 +19,7 @@ function errorMessage(error) {
 }
 
 function runtimeLabelForPort(port) {
-  if (port === DEFAULT_PRIMARY_DEBUG_PORT) return "Main-01";
-  const number = port - DEFAULT_INTERACTIVE_DEBUG_BASE_PORT;
-  if (number >= MIN_INTERACTIVE_MAIN && number <= MAX_INTERACTIVE_MAIN) {
-    return `Main-${String(number).padStart(2, "0")}`;
-  }
-  return `Main@${port}`;
+  return runtimeLabelForClassicPort(port);
 }
 
 function conversationIdFromPageUrl(url) {
@@ -176,14 +168,8 @@ export async function waitForVisibleReportBoundary({
   };
 }
 
-export function defaultMainDebugPorts() {
-  return [
-    DEFAULT_PRIMARY_DEBUG_PORT,
-    ...Array.from(
-      { length: MAX_INTERACTIVE_MAIN - MIN_INTERACTIVE_MAIN + 1 },
-      (_, index) => DEFAULT_INTERACTIVE_DEBUG_BASE_PORT + MIN_INTERACTIVE_MAIN + index,
-    ),
-  ];
+export function defaultMainDebugPorts(options = {}) {
+  return classicMainDebugPorts(options);
 }
 
 class CdpClient extends ClassicCdpClient {

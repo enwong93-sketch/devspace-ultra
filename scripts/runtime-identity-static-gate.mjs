@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 
 const read = (path) => readFile(new URL(`../${path}`, import.meta.url), "utf8");
-const [clone, provisioner, controller, updateManager, runtime, identity, continuity, sessionSeed, chatSwarm, handover, bootstrap] = await Promise.all([
+const [clone, provisioner, controller, updateManager, runtime, identity, continuity, sessionSeed, chatSwarm, handover, bootstrap, interactiveRuntime] = await Promise.all([
   read("scripts/chat-swarm-classic-runtime-clone.ps1"),
   read("scripts/chat-classic-runtime-provision.ps1"),
   read("scripts/chat-swarm-classic-controller.ps1"),
@@ -14,6 +14,7 @@ const [clone, provisioner, controller, updateManager, runtime, identity, continu
   read("dist/chat-swarm.js"),
   read("scripts/devspace-server-handover.mjs"),
   read("scripts/chat-swarm-classic-cdp-bootstrap.mjs"),
+  read("scripts/chat-classic-interactive-runtime.ps1"),
 ]);
 
 // Worker packages must never own global Primary launch surfaces. The legacy
@@ -61,6 +62,10 @@ assert.match(runtime, /const runtimePlan = await planClassicRuntimePool/);
 assert.match(runtime, /runtimeNumbers: result\.runtimeNumbers/);
 assert.match(runtime, /chat_swarm_runtime_identity_status/);
 assert.match(runtime, /chat_swarm_runtime_identity_repair/);
+assert.match(interactiveRuntime, /--remote-debugging-port=\(\\d\+\)/,
+  "secondary Main status must inspect the actual root-process debug port instead of reporting only the configured default");
+assert.match(interactiveRuntime, /DebugPort = \$effectiveDebugPort/);
+assert.match(interactiveRuntime, /DebugPortSource = if \(\$observedDebugPort\)/);
 
 // Logon guard identifies protocol misrouting, protects a running owner, and makes Primary visible.
 assert.match(identity, /Invoke-PowerShellChild/);

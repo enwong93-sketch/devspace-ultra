@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { ConversationProgressLivenessCdpAdapter, isClassicTurnErrorText, _test } from "./conversation-progress-liveness-cdp.js";
+import { observedClassicMainPortEntries } from './classic-main-debug-ports.js';
 
 assert.equal(isClassicTurnErrorText("思考失敗"), true);
 assert.equal(isClassicTurnErrorText("思考失败"), true);
@@ -236,6 +237,65 @@ assert.deepEqual(await rescueAdapter.sendContinue({
   target: rescueResolvedTarget,
 }), { ok: false, definiteFailure: true, dispatchCommitted: false, state: "rescue-source-user-required" });
 
+let fallbackConnections = 0;
+const fallbackAdapter = new ConversationProgressLivenessCdpAdapter({
+  runtimeKeys: ['main-02'],
+  listTargets: async port => port === 9732 ? [{
+    id: 'fallback-page', type: 'page', url: 'https://chatgpt.com/c/conversation-fallback',
+    webSocketDebuggerUrl: 'ws://fallback-page',
+  }] : [],
+  connect: async () => {
+    fallbackConnections += 1;
+    return {
+      async evaluate() {
+        if (fallbackConnections === 1) throw Object.assign(new Error('large DOM evaluation timed out'), { name: 'TimeoutError' });
+        return {
+          exact: true, conversationId: 'conversation-fallback', hydrated: true,
+          generating: true, latestMessageRole: 'user', latestMessageTextLength: 12,
+          latestUserMessageId: 'user-fallback-1234', previousUserMessageId: null,
+          hasTurnError: true, normalCompletion: false, incompleteUserTurn: false,
+          composerFound: true, composerEmpty: true, composerLength: 0,
+          progressCardMounted: true, progressConversationId: 'conversation-fallback',
+          url: 'https://chatgpt.com/c/conversation-fallback', inspectionFallback: 'latest-turn-bounded',
+        };
+      },
+      close() {},
+    };
+  },
+});
+const fallback = await fallbackAdapter.findAtRuntime({ conversationId: 'conversation-fallback', runtimeKey: 'main-02' });
+assert.equal(fallback.exact, true);
+assert.equal(fallback.hasTurnError, true);
+assert.equal(fallback.boundedInspectionFallback, true);
+assert.equal(fallback.primaryInspectionErrorName, 'TimeoutError');
+assert.equal(fallbackConnections, 2);
+
+observedClassicMainPortEntries({ rows: [{
+  port: 19735, mainNumber: 5,
+  commandLine: 'chatgpt-classic-main05.exe --remote-debugging-port=19735',
+}] });
+const driftAdapter = new ConversationProgressLivenessCdpAdapter({
+  runtimeKeys: ['main-05'],
+  listTargets: async port => port === 19735 ? [{
+    id: 'main05-drift-page', type: 'page', url: 'https://chatgpt.com/c/conversation-main05-drift',
+    webSocketDebuggerUrl: 'ws://main05-drift-page',
+    snapshot: {
+      exact: true, conversationId: 'conversation-main05-drift', hydrated: true,
+      generating: false, latestMessageRole: 'assistant', hasTurnError: false,
+      normalCompletion: true, incompleteUserTurn: false, composerFound: true,
+      composerEmpty: true, progressCardMounted: true,
+      progressConversationId: 'conversation-main05-drift',
+      url: 'https://chatgpt.com/c/conversation-main05-drift',
+    },
+  }] : [],
+  connect: async target => ({ async evaluate() { return structuredClone(target.snapshot); }, close() {} }),
+});
+const drift = await driftAdapter.findAtRuntime({ conversationId: 'conversation-main05-drift', runtimeKey: 'main-05' });
+assert.equal(drift.exact, true);
+assert.equal(drift.port, 19735);
+assert.deepEqual(drift.attemptedPorts, undefined, 'successful runtime inspection returns only authoritative located port');
+observedClassicMainPortEntries({ rows: [] });
+
 console.log(JSON.stringify({
   ok: true,
   gate: "conversation-progress-liveness-cdp",
@@ -250,4 +310,6 @@ console.log(JSON.stringify({
   multipleActiveDuplicatesFailClosed: true,
   rescueEpisodeBoundaryRequired: true,
   oldContinueTextCannotSatisfyNewRescue: true,
+  boundedInspectionFallback: true,
+  observedDebugPortAuthority: true,
 }));
