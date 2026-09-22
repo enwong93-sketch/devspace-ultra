@@ -94,10 +94,53 @@ test('legacy conversation collisions fail closed for automatic Goal continuation
   assert.equal(inspected, 0, 'conflict is rejected before page discovery');
 });
 
+test('verified legacy collision repair stops only older unprogressed duplicates', async t => {
+  const { runtime, input } = await fixture(t);
+  const stale = await runtime.start({ conversationId: 'conversation-stale-source', ...input('stale') });
+  const keep = await runtime.start({ conversationId: 'conversation-repair-target', ...input('keep') });
+  runtime.state.goals[stale.id].conversationId = keep.conversationId;
+  runtime.state.goals[stale.id].roundRecovery = {
+    state: 'dispatched', round: 1, recoveryId: 'recovery_1234567890abcdef', attempts: 1,
+    claimedAt: stale.createdAt, dispatchedAt: stale.updatedAt, retryAfterAt: null,
+  };
+  await runtime.save();
+
+  const result = await runtime.resolveConversationCollision({
+    conversationId: keep.conversationId,
+    keepGoalId: keep.id,
+    reason: 'exact-page-overlay-selected-current-goal',
+  });
+  assert.equal(result.repaired, true);
+  assert.equal(result.kept.id, keep.id);
+  assert.deepEqual(result.stopped.map((goal) => goal.id), [stale.id]);
+  const stopped = await runtime.status(stale.id);
+  assert.equal(stopped.status, 'stopped');
+  assert.equal(stopped.supersededByGoalId, keep.id);
+  assert.equal(stopped.roundRecovery.state, 'idle');
+  assert.equal((await runtime.status(keep.id)).status, 'active');
+  assert.deepEqual(await runtime.conversationCollisions(), []);
+});
+
+test('legacy collision repair refuses any duplicate that already reported progress', async t => {
+  const { runtime, input } = await fixture(t);
+  const progressed = await runtime.start({ conversationId: 'conversation-progressed-source', ...input('progressed') });
+  await runtime.turnReport({ goalId: progressed.id, summary: 'authoritative prior progress', meaningfulProgress: true });
+  const keep = await runtime.start({ conversationId: 'conversation-progressed-target', ...input('keep') });
+  runtime.state.goals[progressed.id].conversationId = keep.conversationId;
+  await runtime.save();
+  await assert.rejects(
+    () => runtime.resolveConversationCollision({ conversationId: keep.conversationId, keepGoalId: keep.id }),
+    /contain progressed or non-older state/,
+  );
+  assert.equal((await runtime.status(progressed.id)).status, 'active');
+  assert.equal((await runtime.conversationCollisions()).length, 1);
+});
+
 console.log(JSON.stringify({
   ok: true,
   gate: 'goal-conversation-invariant',
   oneNonterminalGoalPerConversation: true,
   concurrentStartFailClosed: true,
   legacyCollisionDispatchBlocked: true,
+  explicitSafeLegacyRepair: true,
 }));

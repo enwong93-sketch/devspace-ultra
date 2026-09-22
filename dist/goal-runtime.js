@@ -680,6 +680,51 @@ export class GoalRuntime {
       .map(([conversationId, goals]) => ({ conversationId, goals: goals.map((goal) => ({ ...goal })) }));
   }
 
+  async resolveConversationCollision({ conversationId, keepGoalId, reason = "verified-legacy-duplicate-repair" } = {}) {
+    await this.ready;
+    const expected = normalizeConversationId(conversationId);
+    const keepId = String(keepGoalId || "").trim();
+    const keep = this.getGoal(keepId);
+    if (!expected || keep.conversationId !== expected || !NONTERMINAL_GOAL_STATUSES.has(keep.status)) {
+      throw new Error("Collision repair requires the exact nonterminal Goal currently bound to the conversation.");
+    }
+    const group = nonterminalConversationGoals(this.state, expected);
+    if (group.length <= 1) return { kept: clone(keep), stopped: [], repaired: false };
+    if (!group.some((goal) => goal.id === keep.id)) {
+      throw new Error(`Goal ${keep.id} is not part of the current conversation collision.`);
+    }
+    const keepCreatedAt = Date.parse(String(keep.createdAt || ""));
+    const stale = group.filter((goal) => goal.id !== keep.id);
+    const unsafe = stale.filter((goal) => (
+      goal.round !== 1
+      || goal.roundState !== "working"
+      || goal.lastRoundReport != null
+      || (Array.isArray(goal.recentReports) && goal.recentReports.length > 0)
+      || goal.completionEvidence != null
+      || goal.continuation?.state !== "idle"
+      || !Number.isFinite(Date.parse(String(goal.createdAt || "")))
+      || !Number.isFinite(keepCreatedAt)
+      || Date.parse(String(goal.createdAt)) >= keepCreatedAt
+    ));
+    if (unsafe.length) {
+      throw new Error(`Collision repair refused: Goals ${unsafe.map((goal) => goal.id).join(", ")} contain progressed or non-older state.`);
+    }
+    const repairedAt = this.nowIso();
+    const normalizedReason = cleanText(reason, 240, "Collision repair reason");
+    for (const goal of stale) {
+      goal.status = "stopped";
+      goal.stoppedAt = repairedAt;
+      goal.continuation = idleContinuation();
+      goal.roundRecovery = idleRoundRecovery(goal.round);
+      goal.supersededByGoalId = keep.id;
+      goal.supersededAt = repairedAt;
+      goal.supersededReason = normalizedReason;
+      this.touch(goal);
+    }
+    await this.save();
+    return { kept: clone(keep), stopped: stale.map((goal) => clone(goal)), repaired: true };
+  }
+
   async claimRoundRecovery({ goalId } = {}) {
     await this.ready;
     const goal = ensureRoundRecoveryShape(this.getGoal(goalId));
