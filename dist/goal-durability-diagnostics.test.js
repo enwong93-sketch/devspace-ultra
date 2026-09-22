@@ -35,6 +35,10 @@ test("loopback diagnostics invoke the real guard contract and return no state pa
     goalRoundCompletionGuard: guard,
     goalRuntime: { lastPersistError: null, persistFailureCount: 2, persistRecoveryCount: 2 },
     planRuntime: { lastPersistError: "bounded failure", persistFailureCount: 1, persistRecoveryCount: 0 },
+    conversationCollisions: [{
+      conversationId: "conversation-duplicate",
+      goals: [{ id: "goal_a", status: "active", round: 3 }, { id: "goal_b", status: "paused", round: 1 }],
+    }],
   });
   assert.equal(result.goalRoundRecovery.closed, false);
   assert.deepEqual(result.statePersistence.goal, {
@@ -50,6 +54,10 @@ test("loopback diagnostics invoke the real guard contract and return no state pa
   assert.equal(result.rawStateReturned, false);
   assert.equal(result.diagnosticsAvailable, true);
   assert.equal(result.diagnosticsError, null);
+  assert.equal(result.goalConversationCollisions.count, 1);
+  assert.deepEqual(result.goalConversationCollisions.groups[0].goalIds, ["goal_a", "goal_b"]);
+  assert.equal(result.goalConversationCollisions.automaticDispatchBlocked, true);
+  assert.equal(result.goalConversationCollisions.rawObjectivesReturned, false);
   assert.equal(JSON.stringify(result).includes("objective"), false);
   await guard.close();
 });
@@ -64,10 +72,12 @@ test("missing status contract fails in tests instead of becoming an HTTP 500 aft
     goalRoundCompletionGuard: {},
     goalRuntime: { persistFailureCount: 1 },
     planRuntime: {},
+    conversationCollisions: [],
   });
   assert.equal(safe.diagnosticsAvailable, false);
   assert.equal(safe.diagnosticsError, "goal-durability-contract-unavailable");
   assert.equal(safe.goalRoundRecovery.running, false);
   assert.equal(safe.statePersistence.goal.failureCount, 1);
+  assert.equal(safe.goalConversationCollisions.count, 0);
   assert.equal(safe.rawStateReturned, false);
 });

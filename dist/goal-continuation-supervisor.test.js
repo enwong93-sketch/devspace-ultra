@@ -54,6 +54,34 @@ test('report alone never sends; final boundary delivers once and redeems next ro
   await h.tick(); assert.equal(h.sends(),1);
 });
 
+test('temporary page loss after a committed hidden send does not poison later notification', async t => {
+  let notifications = 0;
+  const h = await harness(t, { onHiddenContinuationStarted: async () => { notifications += 1; } });
+  const originalPages = h.driver.pages.bind(h.driver);
+  const originalDispatch = h.driver.dispatch;
+  let hidePages = false;
+  h.driver.dispatch = async payload => {
+    const result = await originalDispatch(payload);
+    hidePages = true;
+    return result;
+  };
+  h.driver.pages = async (...args) => hidePages ? null : originalPages(...args);
+  h.final();
+  await h.tick();
+  await h.tick();
+  assert.equal(h.sends(), 1);
+  assert.equal((await h.runtime.status(h.g.id)).round, 2);
+  assert.equal(h.driver.status().lastError, null);
+  assert.equal(h.driver.status().records[0].hiddenEpisodeNotified, false);
+  assert.equal(notifications, 0);
+
+  hidePages = false;
+  await h.tick();
+  assert.equal(notifications, 1);
+  assert.equal(h.driver.status().records[0].hiddenEpisodeNotified, true);
+  assert.equal(h.sends(), 1, 'notification recovery never replays the hidden continuation');
+});
+
 test('old assistant text, latest user, safety state and generation never authorize dispatch', async t => {
   const h = await harness(t);
   h.setPages([{...h.page(),generating:false}]);

@@ -72,6 +72,8 @@ assert.match(source, /registerGoalTools\(server, goalRuntime,[\s\S]{0,800}resolv
 assert.match(source, /createMcpServer\([^)]*goalRuntime[^)]*goalHostBridge[^)]*hostOverlayProjection[^)]*conversationAuthority[^)]*conversationAuthorityReady/s);
 assert.match(source, /safeGoalDurabilityDiagnostics\(\{[\s\S]{0,180}goalRoundCompletionGuard,[\s\S]{0,180}goalRuntime,[\s\S]{0,180}planRuntime/,
   "loopback diagnostics must invoke the bounded fail-safe Goal durability wrapper instead of calling an unchecked method inline");
+assert.match(source, /goalRuntime\.conversationCollisions\(\{ limit: 20 \}\)/,
+  "loopback diagnostics must expose bounded legacy multi-Goal collisions so automatic dispatch failures are diagnosable");
 assert.match(source, /goalContinuation:\s*goalContinuationSupervisor\.status\(\),[\s\S]{0,80}\.\.\.durability/,
   "memory status must include the bounded Goal recovery and persistence diagnostics helper output");
 assert.match(source, /await goalRuntime\.close\(\)/);

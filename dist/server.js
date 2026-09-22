@@ -3087,7 +3087,7 @@ export function createServer(config = loadConfig(), options = {}) {
     app.get("/healthz", (_req, res) => {
         res.json({ ok: true, name: "devspace", executionPolicy: executionPolicySnapshot(), chatSwarmUi: CHAT_SWARM_UI_DIAGNOSTICS });
     });
-    app.get("/__devspace/memory/status", (req, res) => {
+    app.get("/__devspace/memory/status", async (req, res) => {
         const remoteAddress = String(req.socket?.remoteAddress ?? "");
         const loopback = remoteAddress === "127.0.0.1" || remoteAddress === "::1" || remoteAddress === "::ffff:127.0.0.1";
         if (!loopback) {
@@ -3099,10 +3099,14 @@ export function createServer(config = loadConfig(), options = {}) {
             requested: req.query?.gc === "1",
             passiveCore: config.passiveCore === true,
         });
+        const conversationCollisions = typeof goalRuntime.conversationCollisions === "function"
+            ? await goalRuntime.conversationCollisions({ limit: 20 }).catch(() => [])
+            : [];
         const durability = safeGoalDurabilityDiagnostics({
             goalRoundCompletionGuard,
             goalRuntime,
             planRuntime,
+            conversationCollisions,
         });
         res.json({ ...createMemoryDiagnostics({
             transports,

@@ -62,6 +62,10 @@ export class GoalContinuationSupervisor {
   async arm(goal, { resume = false, reportAuthority = null } = {}) {
     await this.ready;
     if (!this.enabled || this.closed || !pending(goal)) return { armed: false, reason: 'not-eligible' };
+    if (typeof this.goalRuntime.hasConversationCollision === 'function'
+      && await this.goalRuntime.hasConversationCollision({ goalId: goal.id })) {
+      return { armed: false, reason: 'conversation-goal-conflict' };
+    }
     const id = goal.continuation.continuationId;
     if (this.records.has(id)) return { armed: this.records.get(id).state === 'waiting', state: this.records.get(id).state };
     // Never infer a source turn for old pending Goals merely found on disk.
@@ -163,7 +167,7 @@ export class GoalContinuationSupervisor {
       pageTargetId: row.dispatchPageTargetId || null,
       allowDivergent: true,
     });
-    if (!pages.length) return false;
+    if (!pages?.length) return false;
     const currentUsers = new Set(pages.map(page => page.latestUserMessageId).filter(Boolean));
     if (row.sourceUserId && (currentUsers.size !== 1 || !currentUsers.has(row.sourceUserId))) {
       row.hiddenEpisodeNotified = true;

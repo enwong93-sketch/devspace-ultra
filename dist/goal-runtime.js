@@ -6,6 +6,7 @@ import { enqueueRecoverablePersist } from "./recoverable-persist-queue.js";
 
 const STATE_VERSION = 1;
 const GOAL_STATUSES = new Set(["active", "paused", "blocked", "completed", "stopped"]);
+const NONTERMINAL_GOAL_STATUSES = new Set(["active", "paused", "blocked"]);
 const ROUND_STATES = new Set(["working", "reported"]);
 const CONTINUATION_STATES = new Set(["idle", "pending", "dispatching", "dispatched"]);
 const MIN_CRITERIA = 1;
@@ -150,6 +151,16 @@ function normalizeSuccessCriteria(values) {
   }));
 }
 
+function nonterminalConversationGoals(state, conversationId, excludeGoalId = null) {
+  const expected = normalizeConversationId(conversationId);
+  if (!expected) return [];
+  return Object.values(state?.goals || {}).filter((goal) => (
+    goal?.id !== excludeGoalId
+    && NONTERMINAL_GOAL_STATUSES.has(goal?.status)
+    && normalizeConversationId(goal?.conversationId) === expected
+  ));
+}
+
 function validateGoalShape(goal) {
   if (!goal || !/^goal_[a-f0-9]{16}$/.test(String(goal.id ?? ""))) {
     throw new Error("invalid persisted goal id");
@@ -249,9 +260,14 @@ export class GoalRuntime {
   async start({ objective, successCriteria, conversationId }) {
     await this.ready;
     const timestamp = this.nowIso();
+    const normalizedConversationId = normalizeConversationId(conversationId);
+    const collision = nonterminalConversationGoals(this.state, normalizedConversationId)[0] || null;
+    if (collision) {
+      throw new Error(`Conversation ${normalizedConversationId} already has nonterminal Goal ${collision.id} (${collision.status}); resume that Goal instead of creating another.`);
+    }
     const goal = {
       id: randomId("goal"),
-      conversationId: normalizeConversationId(conversationId),
+      conversationId: normalizedConversationId,
       objective: cleanText(objective, MAX_OBJECTIVE_CHARS, "Goal objective"),
       status: "active",
       round: 1,
@@ -337,6 +353,10 @@ export class GoalRuntime {
     if (current) {
       throw new Error(`Goal ${goal.id} is already bound to conversation ${current} and cannot move without a verified Auto Compact continuation.`);
     }
+    const collision = nonterminalConversationGoals(this.state, target, goal.id)[0] || null;
+    if (collision) {
+      throw new Error(`Conversation ${target} already has nonterminal Goal ${collision.id} (${collision.status}); refusing to bind a second Goal.`);
+    }
     goal.conversationId = target;
     this.touch(goal);
     await this.save();
@@ -353,8 +373,8 @@ export class GoalRuntime {
     const current = normalizeConversationId(goal.conversationId);
     if (current === next) return clone(goal);
     if (current !== prior) throw new Error(`Goal ${goal.id} is bound to ${current || "none"}, not expected source ${prior}.`);
-    const collision = Object.values(this.state.goals).find((item) => item?.id !== goal.id && item?.status === "active" && normalizeConversationId(item.conversationId) === next);
-    if (collision) throw new Error(`Target conversation ${next} is already bound to active Goal ${collision.id}.`);
+    const collision = nonterminalConversationGoals(this.state, next, goal.id)[0] || null;
+    if (collision) throw new Error(`Target conversation ${next} is already bound to nonterminal Goal ${collision.id} (${collision.status}).`);
     goal.conversationId = next;
     goal.conversationContinuity = [
       ...(Array.isArray(goal.conversationContinuity) ? goal.conversationContinuity : []),
@@ -618,14 +638,46 @@ export class GoalRuntime {
 
   async recoverableWorkingRounds() {
     await this.ready;
+    const counts = new Map();
+    for (const goal of Object.values(this.state.goals)) {
+      const conversationId = normalizeConversationId(goal?.conversationId);
+      if (!conversationId || !NONTERMINAL_GOAL_STATUSES.has(goal?.status)) continue;
+      counts.set(conversationId, Number(counts.get(conversationId) || 0) + 1);
+    }
     return Object.values(this.state.goals)
       .filter((goal) => (
         goal.status === "active"
         && goal.roundState === "working"
         && goal.round >= 1
         && Boolean(goal.roundBeganAt)
+        && (!goal.conversationId || counts.get(goal.conversationId) === 1)
       ))
       .map((goal) => clone(ensureRoundRecoveryShape(goal)));
+  }
+
+  async hasConversationCollision({ goalId, conversationId } = {}) {
+    await this.ready;
+    const goal = goalId ? this.getGoal(goalId) : null;
+    const expected = normalizeConversationId(conversationId ?? goal?.conversationId);
+    if (!expected) return false;
+    return nonterminalConversationGoals(this.state, expected, goal?.id || null).length > 0;
+  }
+
+  async conversationCollisions({ limit = 20 } = {}) {
+    await this.ready;
+    const groups = new Map();
+    for (const goal of Object.values(this.state.goals)) {
+      const conversationId = normalizeConversationId(goal?.conversationId);
+      if (!conversationId || !NONTERMINAL_GOAL_STATUSES.has(goal?.status)) continue;
+      const rows = groups.get(conversationId) || [];
+      rows.push({ id: goal.id, status: goal.status, round: goal.round, roundState: goal.roundState, updatedAt: goal.updatedAt });
+      groups.set(conversationId, rows);
+    }
+    return [...groups.entries()]
+      .filter(([, goals]) => goals.length > 1)
+      .sort((left, right) => right[1].length - left[1].length || left[0].localeCompare(right[0]))
+      .slice(0, Math.max(1, Math.min(100, Number(limit) || 20)))
+      .map(([conversationId, goals]) => ({ conversationId, goals: goals.map((goal) => ({ ...goal })) }));
   }
 
   async claimRoundRecovery({ goalId } = {}) {

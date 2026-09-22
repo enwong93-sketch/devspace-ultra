@@ -19,10 +19,32 @@ function boundedPersistence(goalRuntime, planRuntime) {
   };
 }
 
+function boundedCollisions(value) {
+  const rows = Array.isArray(value) ? value.slice(0, 20) : [];
+  return {
+    count: rows.length,
+    groups: rows.map((row) => ({
+      conversationId: String(row?.conversationId || "").slice(0, 240) || null,
+      goalIds: (Array.isArray(row?.goals) ? row.goals : []).slice(0, 20)
+        .map((goal) => String(goal?.id || "").slice(0, 200))
+        .filter(Boolean),
+      statuses: (Array.isArray(row?.goals) ? row.goals : []).slice(0, 20)
+        .map((goal) => String(goal?.status || "").slice(0, 40))
+        .filter(Boolean),
+      rounds: (Array.isArray(row?.goals) ? row.goals : []).slice(0, 20)
+        .map((goal) => Number.isInteger(goal?.round) ? goal.round : null),
+    })),
+    automaticDispatchBlocked: rows.length > 0,
+    rawObjectivesReturned: false,
+    rawReportsReturned: false,
+  };
+}
+
 export function goalDurabilityDiagnostics({
   goalRoundCompletionGuard,
   goalRuntime,
   planRuntime,
+  conversationCollisions = [],
 } = {}) {
   if (!goalRoundCompletionGuard || typeof goalRoundCompletionGuard.status !== "function") {
     throw new Error("Goal round recovery diagnostics require a status-capable guard.");
@@ -30,6 +52,7 @@ export function goalDurabilityDiagnostics({
   return {
     goalRoundRecovery: goalRoundCompletionGuard.status(),
     statePersistence: boundedPersistence(goalRuntime, planRuntime),
+    goalConversationCollisions: boundedCollisions(conversationCollisions),
     diagnosticsAvailable: true,
     diagnosticsError: null,
     rawStateReturned: false,
@@ -58,6 +81,7 @@ export function safeGoalDurabilityDiagnostics(input = {}) {
         rawConversationContentReturned: false,
       },
       statePersistence: boundedPersistence(input.goalRuntime, input.planRuntime),
+      goalConversationCollisions: boundedCollisions(input.conversationCollisions),
       diagnosticsAvailable: false,
       diagnosticsError: "goal-durability-contract-unavailable",
       rawStateReturned: false,
