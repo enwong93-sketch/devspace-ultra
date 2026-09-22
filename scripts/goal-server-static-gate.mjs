@@ -74,6 +74,12 @@ assert.match(source, /safeGoalDurabilityDiagnostics\(\{[\s\S]{0,180}goalRoundCom
   "loopback diagnostics must invoke the bounded fail-safe Goal durability wrapper instead of calling an unchecked method inline");
 assert.match(source, /goalRuntime\.conversationCollisions\(\{ limit: 20 \}\)/,
   "loopback diagnostics must expose bounded legacy multi-Goal collisions so automatic dispatch failures are diagnosable");
+assert.match(source, /app\.post\('\/__devspace\/goal\/repair-collision'/,
+  "legacy collision repair must use one explicit owner-authorized loopback endpoint rather than out-of-process state writes");
+assert.match(source, /assertGoalCollisionRepairAuthority\(\{[\s\S]{0,240}conversationId,[\s\S]{0,240}keepGoalId,[\s\S]{0,240}projection,[\s\S]{0,240}pageResolution/,
+  "collision repair requires both the current backend projection and one exact current ChatGPT page");
+assert.match(source, /goalRuntime\.resolveConversationCollision\(\{/,
+  "the active Core must serialize collision repair through its authoritative GoalRuntime");
 assert.match(source, /goalContinuation:\s*goalContinuationSupervisor\.status\(\),[\s\S]{0,80}\.\.\.durability/,
   "memory status must include the bounded Goal recovery and persistence diagnostics helper output");
 assert.match(source, /await goalRuntime\.close\(\)/);

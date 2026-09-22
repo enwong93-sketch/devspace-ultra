@@ -3,6 +3,7 @@
 // It never navigates a page, edits a composer, stops a runtime, or chooses a Goal
 // by timestamp/activity alone. The currently rendered Goal strip is authority.
 import { loadConfig } from '../dist/config.js';
+import { loadDevspaceFiles } from '../dist/user-config.js';
 import { GoalRuntime } from '../dist/goal-runtime.js';
 import { ClassicCdpClient } from '../dist/classic-cdp-client.js';
 import { defaultMainDebugPorts } from '../dist/goal-host-bridge.js';
@@ -73,6 +74,7 @@ if (pages.some(page => page.proof.goalStatus !== 'active')) {
 }
 
 const runtime = new GoalRuntime({ stateDir: loadConfig().stateDir });
+let runtimeClosed = false;
 try {
   await runtime.ready;
   const before = (await runtime.conversationCollisions({ limit: 100 }))
@@ -97,18 +99,31 @@ try {
     if (!execute) {
       console.log(JSON.stringify(preflight, null, 2));
     } else {
-      const repaired = await runtime.resolveConversationCollision({
-        conversationId,
-        keepGoalId,
-        reason: 'exact-page-overlay-selected-current-goal',
+      // Never write the shared Goal file from a second process while the active
+      // Core is serving requests. Close the read-only snapshot and ask that Core
+      // to re-verify projection/page authority and serialize the mutation.
+      await runtime.close();
+      runtimeClosed = true;
+      const files = loadDevspaceFiles();
+      const response = await fetch('http://127.0.0.1:7678/__devspace/goal/repair-collision', {
+        method: 'POST',
+        cache: 'no-store',
+        signal: AbortSignal.timeout(10_000),
+        headers: {
+          'content-type': 'application/json',
+          'x-devspace-owner-token': files.auth.ownerToken,
+        },
+        body: JSON.stringify({ conversationId, keepGoalId }),
       });
-      const after = (await runtime.conversationCollisions({ limit: 100 }))
-        .find(row => row.conversationId === conversationId) || null;
-      if (after) throw new Error('Collision remains after repair; authoritative state not accepted.');
+      const result = await response.json().catch(() => null);
+      if (!response.ok || result?.ok !== true) {
+        throw new Error(result?.error || `Active Core collision repair HTTP ${response.status}.`);
+      }
       console.log(JSON.stringify({ ...preflight, state: 'repaired', executed: true,
-        stoppedGoalIds: repaired.stopped.map(goal => goal.id), collisionRemaining: false }, null, 2));
+        stoppedGoalIds: result.stoppedGoalIds || [], collisionRemaining: false,
+        activeCoreSerialized: true }, null, 2));
     }
   }
 } finally {
-  await runtime.close();
+  if (!runtimeClosed) await runtime.close();
 }

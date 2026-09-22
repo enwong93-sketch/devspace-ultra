@@ -53,6 +53,7 @@ import { GoalContinuationSupervisor } from './goal-continuation-supervisor.js';
 import { ClassicGoalRoundCompletionGuard } from "./goal-round-completion-guard.js";
 import { goalRecoveryRescueDecision } from "./goal-rescue-arbitration.js";
 import { safeGoalDurabilityDiagnostics } from "./goal-durability-diagnostics.js";
+import { assertGoalCollisionRepairAuthority } from "./goal-collision-repair-authority.js";
 import { ClassicPrimaryDebugGuard } from "./primary-debug-guard.js";
 import { ClassicStreamRecoveryGuard } from "./classic-stream-recovery-guard.js";
 import { ClassicStreamRecoveryCdpAdapter, runtimeKeyForPort } from "./classic-stream-recovery-cdp.js";
@@ -3125,6 +3126,50 @@ export function createServer(config = loadConfig(), options = {}) {
             goalContinuation: goalContinuationSupervisor.status(),
             ...durability,
             diagnosticGc });
+    });
+    app.post('/__devspace/goal/repair-collision', express.json({ limit: '4kb' }), async (req, res) => {
+        if (config.passiveCore || !localBindingAuthorized(req, config.oauth.ownerToken) || req.headers['x-forwarded-for']) {
+            res.status(403).json({ ok: false, error: 'local-owner-authorization-required' });
+            return;
+        }
+        const conversationId = String(req.body?.conversationId || '').trim();
+        const keepGoalId = String(req.body?.keepGoalId || '').trim();
+        try {
+            await hostOverlayProjection.syncOnce();
+            const projection = hostOverlayProjection.status()?.conversationProjections?.[conversationId] || null;
+            const pageResolution = await goalHostBridge.findExactConversationPage(conversationId);
+            const authority = assertGoalCollisionRepairAuthority({
+                conversationId,
+                keepGoalId,
+                projection,
+                pageResolution,
+            });
+            const repaired = await goalRuntime.resolveConversationCollision({
+                conversationId,
+                keepGoalId,
+                reason: 'exact-page-overlay-selected-current-goal',
+            });
+            await hostOverlayProjection.syncOnce();
+            res.json({
+                ok: true,
+                repaired: repaired.repaired === true,
+                conversationId: authority.conversationId,
+                keepGoalId: authority.keepGoalId,
+                stoppedGoalIds: repaired.stopped.map((goal) => goal.id),
+                exactPageVerified: true,
+                backendProjectionVerified: true,
+                pageNavigation: false,
+                composerMutation: false,
+                runtimeRestart: false,
+                rawGoalContentReturned: false,
+            });
+        } catch (error) {
+            res.status(409).json({
+                ok: false,
+                error: error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500),
+                rawGoalContentReturned: false,
+            });
+        }
     });
     app.post('/__devspace/conversation/bind-progress-claim', express.json({ limit: '4kb' }), async (req, res) => {
         if (config.passiveCore || !localBindingAuthorized(req, config.oauth.ownerToken) || req.headers['x-forwarded-for']) {
