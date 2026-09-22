@@ -99,8 +99,12 @@ assert.match(progressRelay, /startClaim\.toolName === "devspace_plan_start"/);
 assert.match(progressRelay, /window\.openai\.callTool\(action\.toolName, action\.arguments\)/);
 assert.match(progressRelay, /window\.openai\?\.toolResponseMetadata/,
   "claim relay must accept result metadata when toolOutput is null");
-assert.match(progressRelay, /window\.openai\?\.requestClose/,
-  "failed one-shot relay iframes must retire instead of exhausting ChatGPT app render slots");
+assert.doesNotMatch(progressRelay, /requestClose/,
+  "a hidden exact-page relay must never ask ChatGPT to close host UI");
+assert.match(progressRelay, /retireRelay/,
+  "expired one-shot relays must retire their own listeners locally");
+assert.match(progressRelay, /removeEventListener/,
+  "local relay retirement must detach host event listeners");
 assert.match(progressRelay, /devspace\/conversationStartClaim/);
 assert.match(startClaims, /devspace_goal_start/);
 assert.match(startClaims, /devspace_plan_start/);

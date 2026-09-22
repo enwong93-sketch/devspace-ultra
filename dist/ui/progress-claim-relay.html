@@ -23,6 +23,7 @@
 <script>
 (() => {
   let dispatchStarted = false;
+  let relayRetired = false;
 
   const progressClaimFrom = (value) => {
     if (!value || typeof value !== "object") return null;
@@ -95,24 +96,31 @@
 
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-  const closeRelay = async () => {
-    try {
-      if (typeof window.openai?.requestClose === "function") await window.openai.requestClose();
-    } catch {}
+  let onOpenAiGlobals = null;
+  let onHostMessage = null;
+  const retireRelay = () => {
+    if (relayRetired) return;
+    relayRetired = true;
+    dispatchStarted = true;
+    if (onOpenAiGlobals) window.removeEventListener?.("openai:set_globals", onOpenAiGlobals);
+    if (onHostMessage) window.removeEventListener?.("message", onHostMessage);
+    onOpenAiGlobals = null;
+    onHostMessage = null;
   };
 
   const dispatch = async (value) => {
     const action = relayActionFrom(value);
-    if (!action || dispatchStarted) return;
+    if (!action || dispatchStarted || relayRetired) return;
     dispatchStarted = true;
     // The receipt is a live exact-page proof for subsequent Goal/Plan tools.
-    // Closing immediately on success, or 1.2s after a host failure, races the
-    // backend scan and invalidates that proof. Retain it only until its own
-    // bounded expiry, even when a host call never settles.
+    // Retain it until its bounded expiry, then retire only this relay's local
+    // listeners. A hidden ownership relay must never ask the ChatGPT host to
+    // close UI: host-level widget closure can make current Desktop builds
+    // leave a Project conversation's exact chat route.
     const expiresAt = Date.parse(String(action.expiresAt || ''));
     const lifetimeMs = Number.isFinite(expiresAt)
       ? Math.max(0, Math.min(120000, expiresAt - Date.now())) : 120000;
-    setTimeout(async () => { await closeRelay(); }, lifetimeMs);
+    setTimeout(() => { retireRelay(); }, lifetimeMs);
     for (let attempt = 0; attempt < 3; attempt += 1) {
       try {
         if (typeof window.openai?.callTool !== "function") throw new Error("tool bridge unavailable");
@@ -135,18 +143,20 @@
     // The expiry timer, not the host RPC result, owns resource retirement.
   };
 
-  window.addEventListener("openai:set_globals", () => {
+  onOpenAiGlobals = () => {
     dispatchGlobals();
-  }, { passive: true });
+  };
+  window.addEventListener("openai:set_globals", onOpenAiGlobals, { passive: true });
 
-  window.addEventListener("message", (event) => {
+  onHostMessage = (event) => {
     if (event.source !== window.parent) return;
     const message = event.data;
     if (!message || message.jsonrpc !== "2.0") return;
     if (message.method === "ui/notifications/tool-result") {
       void dispatch(message.params?.structuredContent ?? message.params);
     }
-  }, { passive: true });
+  };
+  window.addEventListener("message", onHostMessage, { passive: true });
 
   dispatchGlobals();
 })();

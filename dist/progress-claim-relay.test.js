@@ -10,8 +10,10 @@ assert.match(html, /toolName:\s*"devspace_progress_report"/);
 assert.match(html, /startClaim\.toolName === "devspace_goal_start"/);
 assert.match(html, /startClaim\.toolName === "devspace_plan_start"/);
 assert.match(html, /window\.openai\.callTool\(action\.toolName, action\.arguments\)/);
-assert.match(html, /window\.openai\?\.requestClose/);
-assert.match(html, /await closeRelay\(\)/);
+assert.doesNotMatch(html, /requestClose/,
+  "a hidden exact-page relay must not ask ChatGPT to close host UI");
+assert.match(html, /retireRelay/);
+assert.match(html, /removeEventListener/);
 assert.match(html, /window\.openai\?\.toolResponseMetadata/,
   "progress claim relay must consume tool-result metadata when toolOutput is unavailable");
 assert.match(html, /devspace\/progressClaim/,
@@ -29,4 +31,6 @@ console.log(JSON.stringify({
   hidden: true,
   noSyntheticUserTurn: true,
   oneShot: true,
+  localRetirement: true,
+  hostUiClose: false,
 }));
