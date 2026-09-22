@@ -1,5 +1,108 @@
 # DevSpace Ultra v0.5.8 stabilization — 2026-09-20
 
+## Round 3: long-run Goal/Rescue compatibility — 2026-09-22
+
+### Deployed revision and exact acceptance
+
+- Product revision: `d2eb86e4b4a4e3d83ca8a3ef7f14248e421bc81f`
+  (`fix: sustain Goal and Rescue across long runs`). Package remains `0.5.8`.
+- Clean-revision full audit: `32866092-d48f-469d-8ee8-7966033740b4`,
+  exit `0`, 169 named gates, completed 2026-09-22T15:12:38Z.
+- Normal compatible handover `5ceb819d-a350-4f77-b48a-969920312ff3`
+  failed closed at candidate schema. No Core was promoted by that attempt.
+- The passive candidate fingerprint was independently measured as
+  `e450ec8cc5190bbf20327225a432a680408521d8ffcc7455805669428fb629c8`;
+  tool count stayed 119. The difference was the corrected Goal/Rescue model
+  contract, so a semantic fresh-session handover was required.
+- Verified semantic handover `4faa1a22-3342-4ff8-a82a-4a4bcb42ffe6`
+  completed with active slot `b`, Core PID `57824`, no rollback, a fresh
+  verifier session and the same 119-tool catalogue. It replayed one session,
+  deferred three and dropped TWO old-schema sessions (`schema-stale`: 2,
+  `initialize-failed`: 3). Never report this handover as zero-session impact.
+- Gateway remained healthy and admission reopened. Auto Compact remains OFF.
+  `goalRoundRecoveryEnabled`, Rescue/liveness, Context Guardian, Host Overlay,
+  Stream Recovery, plugins, skills and artifacts are enabled.
+- Main PIDs observed after handover: Main-02 1796, Main-03 6412, Main-04 5884,
+  Main-06 1812. Their runtime controllers report no Primary restart. The one
+  currently online Blender remains PID 17000 / port 9879; no Blender runtime
+  was started, stopped or transferred by this work.
+
+### Why a Goal could work for several rounds and then stop
+
+No hard three-round limit exists. Production already contains a Goal at
+round 13. Two independent long-run faults were demonstrated and repaired:
+
+1. GoalRuntime, PlanRuntime and GoalContinuationSupervisor chained every
+   persistence operation directly from the preceding Promise. One transient
+   rejected disk write permanently poisoned every later save. Their queues now
+   reject the failed caller but recover for the next fresh snapshot; Goal and
+   Plan use atomic JSON writes. A failed pre-send continuation journal releases
+   its exclusive lease before any host transport and can retry once after the
+   bounded backoff without duplicate sends.
+2. Hidden Goal continuations correctly keep the same latest user message ID.
+   Liveness previously reused the prior Rescue episode, so one earlier Rescue
+   could exhaust all later Goal rounds. Every unique hidden continuation ID now
+   creates one fresh Rescue episode. Duplicate/reconciled notifications are
+   idempotent and never reset the twenty-minute clock. Current Goal/branch
+   evidence is rechecked before notifying liveness, so stale historical driver
+   records cannot rearm Rescue after restart.
+
+Executable evidence includes 160 consecutive post-report Goal continuations
+through journal pruning, periodic driver restarts, duplicate displays and
+acknowledgement loss (final round 161); three distinct Goal-round Rescue
+episodes across a Core restart; recoverable injected persistence failures; and
+64 rounds of exactly-once same-round recovery. Bounded `recentReports` length
+32 and driver record pruning are storage bounds, NOT round limits.
+
+### Same-round recovery and Rescue arbitration
+
+Disabling the unsafe visible recovery sender entirely caused another stop:
+when a physical assistant turn completed normally but omitted
+`devspace_goal_turn_report`, Rescue correctly disarmed on normal completion,
+while post-report continuation never armed. The Goal remained `Active /
+Working` forever.
+
+Same-round recovery is now restored only as a backend hidden assistant turn:
+
+- exact conversation plus exact page/relay are required;
+- composer must be empty before dispatch and throughout native confirmation;
+- no user message, page navigation, foreground activation or Primary repair;
+- any exact-owned leaked Goal control draft is detected and removed, and that
+  committed attempt is never retried;
+- acknowledgement loss is reconciled from the native conversation branch;
+- one committed recovery permanently closes that Goal round's recovery episode;
+- round 1 is recoverable as well as later rounds;
+- if ordinary interrupted-turn Rescue owns or has committed the episode,
+  hidden Goal recovery waits or delegates rather than racing it. Rescue remains
+  the only path allowed to emit visible text, exactly `- 繼續`.
+
+Reserved Main-06 live canary passed after the implementation: one hidden
+same-round recovery send; user-message count 5 -> 5; composer empty before and
+after; at least one new assistant node; no page navigation; the second guard
+poll produced no second send; temp Goal recovery state became `dispatched`.
+The earlier normal hidden-continuation canary likewise proved one assistant
+turn, no user message, an empty composer and round advancement.
+
+### Post-handover observations and remaining boundaries
+
+The current real Goal automatically redeemed its Round-2 continuation and is
+now Round 3 / working with Plan `plan_2cf98fb844a5d59b`. No user message or
+composer text was created for that transition.
+
+Immediately after semantic handover, Main-03 timed out even on a trivial CDP
+Runtime.evaluate and its progress projection reported 3/4 synced. It recovered
+without restart after a bounded 20-second wait; a direct read then completed in
+30 ms and the next overlay poll reported all four Mains connected/synced. This
+transient is recorded, not reclassified as a permanent fix. All observed Main
+composers were subsequently empty with no Goal recovery/continuation prefix.
+
+Two unrelated Auto Compact working-tree files were stashed during the clean
+audit and restored afterwards unchanged:
+`dist/context-guardian-rollover-safety.test.js` and
+`scripts/auto-compact-product-static-gate.mjs`. Do not mix them into this
+stabilization commit. V0.6/Auto Compact remains a separate gate and stays OFF
+until its own source, restart and live-continuation acceptance is complete.
+
 ## Round 2: Goal continuation closure (latest work)
 
 ### Latest resumed work — 2026-09-20 16:04Z onward
