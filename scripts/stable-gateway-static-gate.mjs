@@ -116,7 +116,7 @@ assert.match(fixedBackend, /peer-gateway-ready/,
   "a real competing healthy Gateway may resolve a launcher race without causing a restart storm");
 assert.doesNotMatch(fixedBackend, /\["dist\/cli\.js",\s*"serve"\]/, "fixed backend launcher must not expose Core lifetime as the public listener lifetime");
 
-assert.match(stableGatewayStartup, /ValidateSet\("install",\s*"status",\s*"remove",\s*"start",\s*"restart",\s*"repair"\)/, "Stable Gateway lifecycle must expose restart plus in-place Task repair");
+assert.match(stableGatewayStartup, /ValidateSet\("install",\s*"status",\s*"remove",\s*"start",\s*"restart",\s*"repair",\s*"watchdog"\)/, "Stable Gateway lifecycle must expose restart, in-place Task repair and a bounded health watchdog");
 assert.match(stableGatewayStartup, /DevSpace-Stable-Gateway/, "Stable Gateway startup must use an independent Scheduled Task identity");
 assert.match(stableGatewayStartup, /--foreground/, "Stable Gateway Scheduled Task must own the foreground Gateway lifetime");
 assert.match(stableGatewayStartup, /--config-dir/, "Stable Gateway Scheduled Task must bind to one explicit config directory");
@@ -125,7 +125,10 @@ assert.match(stableGatewayStartup, /ExecutionTimeLimit[^\n]*(Seconds 0|TimeSpan:
 assert.match(stableGatewayStartup, /RestartCount 999/, "Stable Gateway Task must survive repeated process crashes rather than exhausting three retries");
 assert.match(stableGatewayStartup, /MultipleInstances IgnoreNew/, "watchdog triggers must never create duplicate Gateway trees");
 assert.match(stableGatewayStartup, /Priority 4/, "future Gateway launchers must run at Normal priority rather than BelowNormal");
-assert.match(stableGatewayStartup, /RepetitionInterval \(New-TimeSpan -Minutes 1\)/, "a periodic watchdog trigger must recover a fully dead Task without waiting for logon");
+assert.match(stableGatewayStartup, /DevSpace-Stable-Gateway-Watchdog/);
+assert.match(stableGatewayStartup, /RepetitionInterval \(New-TimeSpan -Minutes 1\)/, "a separate periodic watchdog must recover a fully dead Task without repeatedly triggering the healthy long-running Task");
+assert.match(stableGatewayStartup, /State = if \(\$started\) \{ "recovery-started" \} else \{ "unhealthy-task-running" \}/,
+  "watchdog may start a stopped Task but must not kill or duplicate a running process tree");
 assert.match(stableGatewayStartup, /Set-ScheduledTask[\s\S]*RunningInstancePreserved/, "Task hardening must be installable without restarting the current healthy Gateway");
 assert.doesNotMatch(stableGatewayStartup, /(?:Stop|Start|Unregister)-ScheduledTask[^\n]*(?:DevSpace-Fixed-Edge-Tunnel|DevSpace-Fixed-Backend)/i, "Stable Gateway startup must not mutate legacy edge tasks");
 assert.match(stableGatewayStartup, /Get-NetTCPConnection[\s\S]*7678|GatewayPort/, "restart must verify the dedicated Gateway/Core listeners rather than killing arbitrary Node processes");

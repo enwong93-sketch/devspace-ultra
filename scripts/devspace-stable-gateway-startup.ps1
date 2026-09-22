@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("install", "status", "remove", "start", "restart", "repair")]
+    [ValidateSet("install", "status", "remove", "start", "restart", "repair", "watchdog")]
     [string]$Action = "status",
     [string]$ConfigDir = "$env:USERPROFILE\.devspace",
     [ValidateRange(0,30)]
@@ -8,6 +8,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $taskName = "DevSpace-Stable-Gateway"
+$watchdogTaskName = "DevSpace-Stable-Gateway-Watchdog"
 $packageRoot = Split-Path $PSScriptRoot -Parent
 $helper = Join-Path $PSScriptRoot "devspace-fixed-backend.mjs"
 $node = (Get-Command node -ErrorAction Stop).Source
@@ -33,13 +34,15 @@ function New-GatewayTaskAction {
 }
 
 function New-GatewayTaskTriggers {
-    $logon = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
-    $watchdog = New-ScheduledTaskTrigger `
+    return @(New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME)
+}
+
+function New-GatewayWatchdogTrigger {
+    return New-ScheduledTaskTrigger `
         -Once `
         -At ((Get-Date).AddMinutes(1)) `
         -RepetitionInterval (New-TimeSpan -Minutes 1) `
         -RepetitionDuration (New-TimeSpan -Days 3650)
-    return @($logon, $watchdog)
 }
 
 function New-GatewayTaskSettings {
@@ -59,6 +62,26 @@ function New-GatewayTaskPrincipal {
         -UserId ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name) `
         -LogonType Interactive `
         -RunLevel Limited
+}
+
+function Install-GatewayWatchdog {
+    $watchdogArgs = '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}" -Action watchdog -ConfigDir "{1}"' -f $PSCommandPath, $configPath
+    $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $watchdogArgs -WorkingDirectory $packageRoot
+    $settings = New-ScheduledTaskSettingsSet `
+        -ExecutionTimeLimit (New-TimeSpan -Minutes 2) `
+        -MultipleInstances IgnoreNew `
+        -Priority 4 `
+        -StartWhenAvailable `
+        -AllowStartIfOnBatteries `
+        -DontStopIfGoingOnBatteries
+    $principal = New-GatewayTaskPrincipal
+    $existing = Get-ScheduledTask -TaskName $watchdogTaskName -ErrorAction SilentlyContinue
+    if ($existing) {
+        Set-ScheduledTask -TaskName $watchdogTaskName -Action $action -Trigger (New-GatewayWatchdogTrigger) -Settings $settings -Principal $principal | Out-Null
+    }
+    else {
+        Register-ScheduledTask -TaskName $watchdogTaskName -Action $action -Trigger (New-GatewayWatchdogTrigger) -Settings $settings -Principal $principal | Out-Null
+    }
 }
 
 function Get-DedicatedListenerProcess {
@@ -126,6 +149,7 @@ switch ($Action) {
             -Trigger $triggers `
             -Settings $settings `
             -Principal $principal | Out-Null
+        Install-GatewayWatchdog
         Start-ScheduledTask -TaskName $taskName
         $gateway = Wait-GatewayReady
         $task = Get-GatewayTask
@@ -201,6 +225,7 @@ switch ($Action) {
             -Trigger (New-GatewayTaskTriggers) `
             -Settings (New-GatewayTaskSettings) `
             -Principal (New-GatewayTaskPrincipal) | Out-Null
+        Install-GatewayWatchdog
         $after = Get-GatewayTask
         [ordered]@{
             Ok = $true
@@ -211,12 +236,18 @@ switch ($Action) {
             RestartCount = 999
             Priority = 4
             MultipleInstances = "IgnoreNew"
+            WatchdogTaskName = $watchdogTaskName
             WatchdogMinutes = 1
             ConfigDir = $configPath
             SecretValuesLogged = $false
         } | ConvertTo-Json -Depth 8 -Compress
     }
     "remove" {
+        $watchdog = Get-ScheduledTask -TaskName $watchdogTaskName -ErrorAction SilentlyContinue
+        if ($watchdog) {
+            Stop-ScheduledTask -TaskName $watchdogTaskName -ErrorAction SilentlyContinue
+            Unregister-ScheduledTask -TaskName $watchdogTaskName -Confirm:$false
+        }
         $task = Get-GatewayTask
         if ($task) {
             if ($task.State -eq "Running") {
@@ -235,6 +266,7 @@ switch ($Action) {
     }
     "status" {
         $task = Get-GatewayTask
+        $watchdog = Get-ScheduledTask -TaskName $watchdogTaskName -ErrorAction SilentlyContinue
         $gateway = Invoke-GatewayHelper -Status
         [ordered]@{
             Ok = $true
@@ -242,9 +274,32 @@ switch ($Action) {
             TaskName = $taskName
             TaskInstalled = ($null -ne $task)
             TaskState = if ($task) { $task.State.ToString() } else { $null }
+            WatchdogInstalled = ($null -ne $watchdog)
+            WatchdogState = if ($watchdog) { $watchdog.State.ToString() } else { $null }
             ConfigDir = $configPath
             Gateway = $gateway
             SecretValuesLogged = $false
         } | ConvertTo-Json -Depth 8 -Compress
+    }
+    "watchdog" {
+        $gateway = Invoke-GatewayHelper -Status
+        if ($gateway.ok -eq $true -and $gateway.state -in @('already-running','ready','running-foreground','started')) {
+            [ordered]@{ Ok=$true; State="healthy"; Started=$false; SecretValuesLogged=$false } | ConvertTo-Json -Compress
+            break
+        }
+        $task = Get-GatewayTask
+        if (-not $task) { throw "Scheduled Task $taskName is not installed." }
+        $started = $false
+        if ($task.State -ne "Running") {
+            Start-ScheduledTask -TaskName $taskName
+            $started = $true
+        }
+        [ordered]@{
+            Ok = $true
+            State = if ($started) { "recovery-started" } else { "unhealthy-task-running" }
+            Started = $started
+            TaskState = (Get-GatewayTask).State.ToString()
+            SecretValuesLogged = $false
+        } | ConvertTo-Json -Compress
     }
 }
