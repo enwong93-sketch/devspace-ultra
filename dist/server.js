@@ -52,6 +52,7 @@ import { inspectGoalContinuationPages } from "./goal-host-bridge.js";
 import { GoalContinuationSupervisor } from './goal-continuation-supervisor.js';
 import { ClassicGoalRoundCompletionGuard } from "./goal-round-completion-guard.js";
 import { goalRecoveryRescueDecision } from "./goal-rescue-arbitration.js";
+import { safeGoalDurabilityDiagnostics } from "./goal-durability-diagnostics.js";
 import { ClassicPrimaryDebugGuard } from "./primary-debug-guard.js";
 import { ClassicStreamRecoveryGuard } from "./classic-stream-recovery-guard.js";
 import { ClassicStreamRecoveryCdpAdapter, runtimeKeyForPort } from "./classic-stream-recovery-cdp.js";
@@ -3098,6 +3099,11 @@ export function createServer(config = loadConfig(), options = {}) {
             requested: req.query?.gc === "1",
             passiveCore: config.passiveCore === true,
         });
+        const durability = safeGoalDurabilityDiagnostics({
+            goalRoundCompletionGuard,
+            goalRuntime,
+            planRuntime,
+        });
         res.json({ ...createMemoryDiagnostics({
             transports,
             processSessions,
@@ -3113,19 +3119,7 @@ export function createServer(config = loadConfig(), options = {}) {
             config,
         }), conversationCorrelation: mcpRequestCorrelationDiagnostics.diagnostics(), progressBootstrap: progressBootstrapAuthority.diagnostics(), conversationStartClaims: conversationStartClaimRegistry.diagnostics(), progressProjection: progressNarrationOverlay.status(),
             goalContinuation: goalContinuationSupervisor.status(),
-            goalRoundRecovery: goalRoundCompletionGuard.status(),
-            statePersistence: {
-                goal: {
-                    lastError: goalRuntime.lastPersistError || null,
-                    failureCount: Number(goalRuntime.persistFailureCount || 0),
-                    recoveryCount: Number(goalRuntime.persistRecoveryCount || 0),
-                },
-                plan: {
-                    lastError: planRuntime.lastPersistError || null,
-                    failureCount: Number(planRuntime.persistFailureCount || 0),
-                    recoveryCount: Number(planRuntime.persistRecoveryCount || 0),
-                },
-            },
+            ...durability,
             diagnosticGc });
     });
     app.post('/__devspace/conversation/bind-progress-claim', express.json({ limit: '4kb' }), async (req, res) => {

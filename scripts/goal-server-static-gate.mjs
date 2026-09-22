@@ -70,10 +70,10 @@ assert.match(source, /conversationStartClaimRelay/,
 assert.match(source, /registerGoalTools\(server, goalRuntime,[\s\S]{0,800}resolveStartClaimPage/,
   "Goal tools must receive the exact-page CDP claim resolver");
 assert.match(source, /createMcpServer\([^)]*goalRuntime[^)]*goalHostBridge[^)]*hostOverlayProjection[^)]*conversationAuthority[^)]*conversationAuthorityReady/s);
-assert.match(source, /goalRoundRecovery:\s*goalRoundCompletionGuard\.status\(\)/,
-  "loopback diagnostics must expose whether hidden same-round recovery is actually running");
-assert.match(source, /statePersistence:[\s\S]{0,700}goalRuntime\.lastPersistError[\s\S]{0,700}planRuntime\.lastPersistError/,
-  "loopback diagnostics must expose Goal\/Plan persistence failure and recovery counters without state payloads");
+assert.match(source, /safeGoalDurabilityDiagnostics\(\{[\s\S]{0,180}goalRoundCompletionGuard,[\s\S]{0,180}goalRuntime,[\s\S]{0,180}planRuntime/,
+  "loopback diagnostics must invoke the bounded fail-safe Goal durability wrapper instead of calling an unchecked method inline");
+assert.match(source, /goalContinuation:\s*goalContinuationSupervisor\.status\(\),[\s\S]{0,80}\.\.\.durability/,
+  "memory status must include the bounded Goal recovery and persistence diagnostics helper output");
 assert.match(source, /await goalRuntime\.close\(\)/);
 
 const resourceIndex = source.indexOf('registerAppResource(server, "DevSpace Goal Dock"');
