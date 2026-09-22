@@ -66,11 +66,14 @@
 ### Boundary
 
 The live production backend was recovered manually through the canonical Task
-before this source fix. The new no-listener `--execute` branch was not tested by
-deliberately destroying production again; its isolated no-mutation preflight,
-the same canonical Task start path, exhaustive tests and the actual manual Task
-recovery are the current evidence. Do not state that CPU, OOM or LiveKernelEvent
-141 definitely caused the outage without a future process-exit/resource event.
+before this source fix; production was not deliberately destroyed again. The
+new no-listener `--execute` branch was instead accepted with a temporary,
+isolated Scheduled Task and ports 17678/17688/17689. It returned
+`cold-start-ready`, stopped zero PIDs, started exactly one Gateway/Core pair,
+matched the Core listener to memory-status PID, left production 7678 healthy,
+then removed the canary Task, listeners and state. Do not state that CPU, OOM
+or LiveKernelEvent 141 definitely caused the outage without a future
+process-exit/resource event.
 
 ## Round 3: long-run Goal/Rescue compatibility — 2026-09-22
 
