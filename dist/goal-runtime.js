@@ -1,6 +1,8 @@
 import { randomBytes } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
+import { atomicWriteJson } from "./atomic-file.js";
+import { enqueueRecoverablePersist } from "./recoverable-persist-queue.js";
 
 const STATE_VERSION = 1;
 const GOAL_STATUSES = new Set(["active", "paused", "blocked", "completed", "stopped"]);
@@ -228,12 +230,8 @@ export class GoalRuntime {
   }
 
   async save() {
-    const snapshot = JSON.stringify(this.state, null, 2);
-    this.persistQueue = this.persistQueue.then(async () => {
-      await mkdir(dirname(this.statePath), { recursive: true });
-      await writeFile(this.statePath, snapshot, "utf8");
-    });
-    await this.persistQueue;
+    const snapshot = clone(this.state);
+    await enqueueRecoverablePersist(this, () => atomicWriteJson(this.statePath, snapshot));
   }
 
   getGoal(goalId) {
@@ -624,8 +622,7 @@ export class GoalRuntime {
       .filter((goal) => (
         goal.status === "active"
         && goal.roundState === "working"
-        && goal.round >= 2
-        && Boolean(goal.lastConsumedContinuationId)
+        && goal.round >= 1
         && Boolean(goal.roundBeganAt)
       ))
       .map((goal) => clone(ensureRoundRecoveryShape(goal)));
@@ -634,7 +631,7 @@ export class GoalRuntime {
   async claimRoundRecovery({ goalId } = {}) {
     await this.ready;
     const goal = ensureRoundRecoveryShape(this.getGoal(goalId));
-    if (goal.status !== "active" || goal.roundState !== "working" || goal.round < 2 || !goal.lastConsumedContinuationId) {
+    if (goal.status !== "active" || goal.roundState !== "working" || goal.round < 1 || !goal.roundBeganAt) {
       return { goal: clone(goal), claimed: false, reason: "round-not-recoverable" };
     }
 

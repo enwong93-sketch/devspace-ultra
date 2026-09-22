@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { atomicWriteJson } from './atomic-file.js';
+import { enqueueRecoverablePersist } from './recoverable-persist-queue.js';
 
 const digest = text => createHash('sha256').update(String(text || '')).digest('hex');
 const pending = goal => goal?.status === 'active' && goal.roundState === 'reported'
@@ -17,9 +18,12 @@ const finalPage = page => page?.chatMode === true && page.generating === false
  */
 export class GoalContinuationSupervisor {
   constructor({ goalRuntime, inspect, dispatch, statePath = null, enabled = true,
-    now = () => Date.now(), pollMs = 1000, settleMs = 750, maxRecords = 128 } = {}) {
+    now = () => Date.now(), pollMs = 1000, settleMs = 750, maxRecords = 128,
+    onHiddenContinuationStarted = null } = {}) {
     if (!goalRuntime || typeof inspect !== 'function' || typeof dispatch !== 'function') throw new Error('Goal continuation adapters are required');
     Object.assign(this, { goalRuntime, inspect, dispatch, statePath, enabled, now, pollMs, settleMs, maxRecords });
+    this.onHiddenContinuationStarted = typeof onHiddenContinuationStarted === 'function'
+      ? onHiddenContinuationStarted : null;
     this.records = new Map(); this.timer = null; this.polling = null; this.closed = false;
     this.persistQueue = Promise.resolve(); this.lastError = null;
     this.ready = this.load();
@@ -44,8 +48,7 @@ export class GoalContinuationSupervisor {
     const snapshot = { version: 1, records: [...this.records.values()].map(row => {
       const { candidateKey, settledAt, ...durable } = row; return durable;
     }) };
-    this.persistQueue = this.persistQueue.then(() => atomicWriteJson(this.statePath, snapshot));
-    await this.persistQueue;
+    await enqueueRecoverablePersist(this, () => atomicWriteJson(this.statePath, snapshot));
   }
   async pages(goal, options = {}) {
     let rows = await this.inspect(goal, options);
@@ -102,7 +105,13 @@ export class GoalContinuationSupervisor {
       baseline: resume && !causalDisplayProof ? [] : pages.map(p => ({ id: p.latestAssistantMessageId || null, hash: digest(p.latestAssistantText) })),
       state: 'waiting', reason: 'awaiting-visible-final', attempts: 0, createdAt: this.now(),
     };
-    this.records.set(id, row); await this.save();
+    this.records.set(id, row);
+    try { await this.save(); }
+    catch (error) {
+      // An unpersisted record must not remain armed only in this process.
+      this.records.delete(id);
+      throw error;
+    }
     return { armed: true, state: row.state };
   }
   start() {
@@ -119,13 +128,64 @@ export class GoalContinuationSupervisor {
     return this.polling;
   }
   async poll() {
+    let cycleError = null;
     for (const row of this.records.values()) {
       if (this.closed) break;
+      if (row.state === 'delivered' && row.redeemed === true
+        && row.deliveryMode === 'hidden-assistant-continuation'
+        && row.hiddenEpisodeNotified !== true) {
+        try { await this.notifyHiddenContinuationStarted(row); }
+        catch (error) { cycleError = error.message; }
+        continue;
+      }
       if (!['waiting','uncertain'].includes(row.state) || (row.retryAt || 0) > this.now()) continue;
       try { if (row.state === 'uncertain') await this.reconcile(row); else await this.advance(row); }
-      catch (error) { this.lastError = error.message; row.reason = 'inspection-or-persistence-error'; }
+      catch (error) { cycleError = error.message; row.reason = 'inspection-or-persistence-error'; }
     }
+    this.lastError = cycleError;
     return { ok: !this.lastError, ...this.status() };
+  }
+  async notifyHiddenContinuationStarted(row) {
+    if (row.hiddenEpisodeNotified === true || row.redeemed !== true
+      || row.deliveryMode !== 'hidden-assistant-continuation') return false;
+    const goal = await this.goalRuntime.status(row.goalId).catch(() => null);
+    if (!goal || goal.status !== 'active' || goal.roundState !== 'working'
+      || goal.round !== Number(row.round || 0) + 1
+      || goal.lastConsumedContinuationId !== row.continuationId) {
+      row.hiddenEpisodeNotified = true;
+      row.hiddenEpisodeSkipReason = 'goal-already-advanced-or-not-working';
+      await this.save();
+      return false;
+    }
+    const pages = await this.pages(goal, {
+      sourceOnly: true,
+      runtimeKey: row.dispatchRuntimeKey || row.sourceRuntimeKey || null,
+      pageTargetId: row.dispatchPageTargetId || null,
+      allowDivergent: true,
+    });
+    if (!pages.length) return false;
+    const currentUsers = new Set(pages.map(page => page.latestUserMessageId).filter(Boolean));
+    if (row.sourceUserId && (currentUsers.size !== 1 || !currentUsers.has(row.sourceUserId))) {
+      row.hiddenEpisodeNotified = true;
+      row.hiddenEpisodeSkipReason = 'new-user-superseded-hidden-continuation';
+      await this.save();
+      return false;
+    }
+    if (this.onHiddenContinuationStarted) {
+      await this.onHiddenContinuationStarted({
+        goalId: row.goalId,
+        conversationId: row.conversationId,
+        continuationId: row.continuationId,
+        sourceUserMessageId: row.sourceUserId,
+        runtimeKey: row.dispatchRuntimeKey || row.sourceRuntimeKey || null,
+        round: Number(row.round || 0) + 1,
+        observedAtMs: Number(row.sentAt || row.createdAt || this.now()),
+      });
+    }
+    row.hiddenEpisodeNotified = true;
+    row.hiddenEpisodeSkipReason = null;
+    await this.save();
+    return true;
   }
   matchesFinal(row, pages) {
     return pages && pages.every(p => p.latestUserMessageId === row.sourceUserId && finalPage(p))
@@ -156,7 +216,10 @@ export class GoalContinuationSupervisor {
     const goal = await this.goalRuntime.status(row.goalId);
     if (goal.status !== 'active' || this.closed) return;
     if (goal.lastConsumedContinuationId === row.continuationId) {
-      row.state='delivered'; row.redeemed=true; row.reason='agent-redeemed-uncertain-delivery'; await this.save(); return;
+      row.state='delivered'; row.redeemed=true; row.reason='agent-redeemed-uncertain-delivery';
+      await this.save();
+      await this.notifyHiddenContinuationStarted(row);
+      return;
     }
     if (goal.continuation?.continuationId !== row.continuationId || !row.finalAssistantId) return;
     if (row.deliveryMode === 'hidden-assistant-continuation') {
@@ -191,6 +254,7 @@ export class GoalContinuationSupervisor {
         row.redeemed=true;
       } catch { row.reason='delivered-awaiting-agent-redemption'; }
       await this.save();
+      await this.notifyHiddenContinuationStarted(row);
       return;
     }
     const pages = await this.pages(goal, { runtimeKey: row.sourceRuntimeKey });
@@ -236,7 +300,21 @@ export class GoalContinuationSupervisor {
     row.dispatchRuntimeKey = pages[0].runtimeKey || row.sourceRuntimeKey || null;
     row.dispatchPageTargetId = pages[0].pageTargetId || null;
     if(row.causalDisplayProof)row.sourceRuntimeKey=pages[0].runtimeKey||null;
-    await this.save(); // durable before any possible transport side effect
+    try {
+      await this.save(); // durable before any possible transport side effect
+    } catch (error) {
+      // No host transport has run yet. Roll back the in-memory dispatch marker
+      // and release the exclusive Goal lease so one transient disk failure
+      // cannot leave this round permanently stuck in `dispatching`.
+      await this.goalRuntime.continuation({ goalId: row.goalId, action: 'release', leaseId }).catch(() => {});
+      row.state = 'waiting'; row.reason = 'pre-send-journal-persist-failed';
+      row.retryAt = this.now() + 5000; row.leaseId = null; row.sentAt = null;
+      row.finalAssistantId = null; row.deliveryMode = null;
+      row.dispatchRuntimeKey = null; row.dispatchPageTargetId = null;
+      await this.save().catch(() => {});
+      this.lastError = error instanceof Error ? error.message : String(error);
+      return;
+    }
     const authorized = await this.goalRuntime.status(row.goalId);
     if (this.closed || authorized.status !== 'active' || authorized.roundState !== 'reported'
       || authorized.continuation?.leaseId !== leaseId) {
@@ -263,7 +341,9 @@ export class GoalContinuationSupervisor {
         await this.goalRuntime.continuation({ goalId: row.goalId, action: 'ack', leaseId });
         row.redeemed = true;
       } catch { row.reason = 'delivered-awaiting-agent-redemption'; }
-      await this.save(); return;
+      await this.save();
+      await this.notifyHiddenContinuationStarted(row);
+      return;
     }
     if (sent?.definiteFailure === true && sent.dispatchCommitted === false) {
       await this.goalRuntime.continuation({ goalId: row.goalId, action: 'release', leaseId }).catch(() => {});
@@ -283,8 +363,13 @@ export class GoalContinuationSupervisor {
   }
   status() {
     return { enabled: this.enabled, running: Boolean(this.timer), lastError: this.lastError,
+      lastPersistError: this.lastPersistError || null,
+      persistFailureCount: Number(this.persistFailureCount || 0),
+      persistRecoveryCount: Number(this.persistRecoveryCount || 0),
       records: [...this.records.values()].map(r => ({ goalId: r.goalId, round: r.round, state: r.state,
-        reason: r.reason, attempts: r.attempts, redeemed: r.redeemed === true })) };
+        reason: r.reason, attempts: r.attempts, redeemed: r.redeemed === true,
+        hiddenEpisodeNotified: r.hiddenEpisodeNotified === true,
+        hiddenEpisodeSkipReason: r.hiddenEpisodeSkipReason || null })) };
   }
   async close() {
     this.closed = true; clearInterval(this.timer); this.timer = null;

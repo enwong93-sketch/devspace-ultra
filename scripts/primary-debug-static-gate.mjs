@@ -12,14 +12,15 @@ assert.match(server, /const\s+classicCdpOptions\s*=\s*Array\.isArray\(config\.cl
 assert.match(server, /new ClassicGoalHostBridge\(\{\s*\.\.\.classicCdpOptions,\s*beforeDispatch:\s*config\.passiveCore\s*\|\|\s*!primaryDebugGuard\s*\?\s*undefined\s*:\s*\(\) => primaryDebugGuard\.pollOnce\(\),?\s*\}\)/s);
 assert.doesNotMatch(server, /sendExactGoalRecovery|sendRecovery:\s*/,
   "same-round Goal Recovery must not wire a page-composer sender through Primary Debug Guard");
-assert.doesNotMatch(server, /goalRoundCompletionGuard\.start\(/,
-  "same-round Goal Recovery is retired and cannot trigger Primary debug repair indirectly");
+assert.match(server, /if\s*\(config\.goalRoundRecoveryEnabled\)[\s\S]{0,220}goalRoundCompletionGuard\.start\(/,
+  "hidden same-round Goal Recovery may run independently of Primary debug repair");
 const recoveryStart = bridge.indexOf("async dispatchRoundRecovery");
 const recoveryEnd = bridge.indexOf("setBeforeRawDispatch", recoveryStart);
 assert.ok(recoveryStart >= 0 && recoveryEnd > recoveryStart);
-assert.match(bridge.slice(recoveryStart, recoveryEnd), /visible-goal-recovery-transport-retired/);
-assert.doesNotMatch(bridge.slice(recoveryStart, recoveryEnd), /primaryDebugGuard|beforeDispatch|this\.sendRaw\(|findExactConversation/,
-  "retired same-round Goal Recovery must fail before repair, discovery, or host dispatch");
+assert.match(bridge.slice(recoveryStart, recoveryEnd), /classic-hidden-round-recovery/);
+assert.match(bridge.slice(recoveryStart, recoveryEnd), /findExactConversationRelay/);
+assert.doesNotMatch(bridge.slice(recoveryStart, recoveryEnd), /primaryDebugGuard|beforeDispatch|findMatchingCandidate/,
+  "hidden same-round Goal Recovery may use only the exact relay and must never trigger Primary repair or broad Goal-widget discovery");
 assert.match(server, /if\s*\(!config\.passiveCore\)[\s\S]*if\s*\(primaryDebugGuard\)[\s\S]*primaryDebugGuard\.start\(\)/,
   "Windows production Core keeps Primary Debug Guard while passive/non-Windows Core suppresses it");
 assert.match(server, /await primaryDebugGuard\?\.close\?\.\(\)/);

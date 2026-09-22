@@ -232,14 +232,12 @@ export function loadConfig(env = process.env) {
         passiveCore: env.DEVSPACE_PASSIVE_CORE === undefined
             ? false
             : parseBoolean(env.DEVSPACE_PASSIVE_CORE),
-        // Retired permanently: same-round Goal Recovery previously reached
-        // ChatGPT through host/composer follow-up APIs. Current Desktop builds
-        // can leave the full DEVSPACE_GOAL_ROUND_RECOVERY control payload in
-        // the user's visible composer without sending it. Goal control data
-        // must never become user-visible. Interrupted working rounds are
-        // resumed by the ordinary exact-conversation Rescue (`- 繼續`) path;
-        // normal post-report Goal continuation remains separately backend-owned.
-        goalRoundRecoveryEnabled: false,
+        // Same-round recovery is safe-on only through the backend-owned hidden
+        // host continuation. The retired page-composer sender remains hard
+        // fail-closed and can never expose Goal control metadata to the user.
+        goalRoundRecoveryEnabled: env.DEVSPACE_GOAL_ROUND_RECOVERY === undefined
+            ? files.config.goalRoundRecoveryEnabled !== false
+            : parseBoolean(env.DEVSPACE_GOAL_ROUND_RECOVERY),
         classicMainDebugPorts: parsePortList(env.DEVSPACE_CLASSIC_MAIN_DEBUG_PORTS ?? files.config.classicMainDebugPorts, "DEVSPACE_CLASSIC_MAIN_DEBUG_PORTS"),
         classicStreamRecoveryEnabled: env.DEVSPACE_CLASSIC_STREAM_RECOVERY === undefined
             ? files.config.classicStreamRecoveryEnabled !== false

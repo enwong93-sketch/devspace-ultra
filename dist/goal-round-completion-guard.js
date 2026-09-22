@@ -35,8 +35,8 @@ export function shouldRecoverWorkingRound(goal, snapshot, {
   minimumRoundSettleMs = DEFAULT_ROUND_SETTLE_MS,
 } = {}) {
   if (!goal || goal.status !== "active" || goal.roundState !== "working") return false;
-  if (!Number.isInteger(goal.round) || goal.round < 2) return false;
-  if (!goal.lastConsumedContinuationId || !goal.roundBeganAt) return false;
+  if (!Number.isInteger(goal.round) || goal.round < 1) return false;
+  if (!goal.roundBeganAt) return false;
   const beganAt = Date.parse(String(goal.roundBeganAt));
   if (!Number.isFinite(beganAt) || nowMs - beganAt < minimumRoundSettleMs) return false;
   if (snapshot?.chatMode !== true || snapshot?.recoverySessionEligible === false) return false;

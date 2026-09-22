@@ -16,15 +16,18 @@ assert.match(config, /classicHostOverlayEnabled/);
 assert.match(config, /DEVSPACE_PASSIVE_CORE/);
 assert.match(config, /passiveCore/);
 assert.match(config, /goalRoundRecoveryEnabled/);
-assert.match(config, /goalRoundRecoveryEnabled:\s*false/,
-  "legacy config/env values must never revive visible same-round Goal Recovery");
+assert.match(config, /DEVSPACE_GOAL_ROUND_RECOVERY/);
+assert.match(config, /goalRoundRecoveryEnabled:[\s\S]{0,220}files\.config\.goalRoundRecoveryEnabled !== false/,
+  "hidden same-round Goal Recovery is safe-on but remains operator-pausable");
 assert.match(server, /if\s*\(config\.classicStreamRecoveryEnabled\)/);
 assert.match(server, /if\s*\(config\.contextGuardianEnabled \|\| config\.classicHostOverlayEnabled\)/);
 assert.match(server, /if\s*\(config\.contextGuardianEnabled && config\.autoCompactEnabled\)/);
 assert.match(server, /if\s*\(config\.classicHostOverlayEnabled\)/);
 assert.match(server, /if\s*\(!config\.passiveCore\)[\s\S]*primaryDebugGuard\.start/, "passive Core must not start Primary Debug Guard");
-assert.doesNotMatch(server, /goalRoundCompletionGuard\.start\(/,
-  "production must never start the retired visible same-round Goal recovery dispatcher");
+assert.match(server, /if\s*\(config\.goalRoundRecoveryEnabled\)[\s\S]{0,220}goalRoundCompletionGuard\.start\(/,
+  "production may start only the hidden same-round Goal recovery guard");
+assert.doesNotMatch(server, /progressLivenessAdapter\.sendGoalRecovery|sendRecovery:\s*sendExactGoalRecovery/,
+  "the hidden Goal guard must never revive the visible page-composer sender");
 assert.match(server, /if\s*\(!config\.contextGuardianEnabled \|\| !config\.autoCompactEnabled\)\s*return\s*\{\s*handled:\s*false/);
 assert.match(server, /streamRecoveryAdapter\.start/);
 assert.match(server, /streamRecoveryGuard\.start/);

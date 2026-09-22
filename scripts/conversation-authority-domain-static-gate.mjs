@@ -189,6 +189,14 @@ assert.match(liveness, /stalledGeneratingSilenceRescue:\s*true/,
   "twenty minutes of exact-page generating silence must become bounded stalled-generation rescue evidence");
 assert.match(liveness, /substantiveToolActivityResetsRescueClock:\s*true/,
   "fresh substantive tool activity must reset only that conversation's rescue clock");
+assert.match(liveness, /kind === "goal-continuation-started"/,
+  "a backend hidden Goal continuation must create a fresh physical-turn Rescue episode even when the latest user id is unchanged");
+assert.match(liveness, /record\.lastGoalContinuationId === goalContinuationId/,
+  "duplicate reconciliation of one hidden continuation must be idempotent and must not reset the Rescue clock");
+assert.match(liveness, /hiddenGoalContinuationStartsNewRescueEpisode:\s*true/);
+assert.match(liveness, /duplicateGoalContinuationDoesNotResetClock:\s*true/);
+assert.match(server, /onHiddenContinuationStarted:[\s\S]{0,700}kind:\s*"goal-continuation-started"[\s\S]{0,400}goalContinuationId:\s*continuationId/,
+  "the hidden Goal driver must explicitly bind the new assistant turn to a new Rescue episode");
 assert.match(liveness, /"stalled-generating"/);
 assert.match(liveness, /record\.interruptedAt = value\?\.interruptedAt[\s\S]{0,260}value\?\.lastActivityAt/,
   "Core restart evidence must preserve the pre-restart activity anchor instead of restarting the twenty-minute clock");
@@ -224,6 +232,8 @@ console.log(JSON.stringify({
   staleGeneratingInterruptedTurnRecoverable: true,
   stalledGeneratingSilenceRecoverable: true,
   substantiveToolActivityResetsRescueClock: true,
+  hiddenGoalContinuationStartsNewRescueEpisode: true,
+  duplicateGoalContinuationDoesNotResetClock: true,
   coreRestartPreservesElapsedRescueClock: true,
   restartRestoresActiveEpisodeAsInterrupted: true,
   rescueText: "- 繼續",

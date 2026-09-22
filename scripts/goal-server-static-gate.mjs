@@ -17,6 +17,17 @@ assert.match(source, /dispatch:\s*\(\{ goal, page,[\s\S]{0,500}return goalHostBr
   "the Goal continuation supervisor must dispatch through the hidden host bridge");
 assert.match(source, /expectedPageTargetId:\s*candidate\.pageTargetId/,
   "hidden continuation must remain bound to the exact page proven at the visible-final boundary");
+assert.match(source, /onHiddenContinuationStarted:\s*async \(\{ conversationId, continuationId, sourceUserMessageId, runtimeKey, observedAtMs \}\)/,
+  "successful or reconciled hidden continuation must notify the liveness owner instead of reusing a prior Rescue episode forever");
+assert.match(source, /kind:\s*"goal-continuation-started"[\s\S]{0,220}goalContinuationId:\s*continuationId/);
+assert.match(source, /goalRecoveryRescueDecision\(rescueRecord\)/,
+  "same-round Goal recovery and interrupted-turn Rescue must share one explicit arbitration policy");
+assert.match(source, /arbitration\.action === "delegate"[\s\S]{0,320}ordinary-interrupted-turn-rescue/,
+  "a committed Rescue must close the Goal recovery episode without another send");
+assert.match(source, /arbitration\.action === "wait"[\s\S]{0,260}state:\s*arbitration\.reason/,
+  "a pending Rescue must block hidden Goal recovery from racing it");
+assert.match(source, /goalHostBridge\.dispatchRoundRecovery\(\{[\s\S]{0,420}sourceUserMessageId:[\s\S]{0,220}baselineAssistantMessageId:/,
+  "hidden same-round recovery must retain the exact native branch boundary for acknowledgement reconciliation");
 assert.match(source, /registerAppResource\(server, "DevSpace Goal Dock", GOAL_DOCK_URI,/);
 assert.match(source, /new URL\("\.\/ui\/goal-dock\.html", import\.meta\.url\)/);
 assert.match(source, /registerAppResource\(server, "DevSpace Goal Continuation Relay", GOAL_RELAY_URI,/);

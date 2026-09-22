@@ -1,4 +1,5 @@
 import { ClassicCdpClient } from "./classic-cdp-client.js";
+import { readComposerDraft } from "./classic-composer-draft.js";
 
 const DEFAULT_PRIMARY_DEBUG_PORT = 9721;
 const DEFAULT_INTERACTIVE_DEBUG_BASE_PORT = 9730;
@@ -9,6 +10,8 @@ const DEFAULT_CONTEXT_SETTLE_MS = 80;
 const DEFAULT_VISIBLE_REPORT_TIMEOUT_MS = 30_000;
 const DEFAULT_VISIBLE_REPORT_POLL_MS = 150;
 const DEFAULT_VISIBLE_REPORT_SETTLE_MS = 400;
+const DEFAULT_HIDDEN_CONFIRM_TIMEOUT_MS = 15_000;
+const DEFAULT_HIDDEN_CONFIRM_POLL_MS = 200;
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -34,6 +37,63 @@ function conversationIdFromPageUrl(url) {
     return parsed.pathname.match(/\/c\/([^/?#]+)/)?.[1] || null;
   } catch {
     return null;
+  }
+}
+
+async function inspectExactPageComposer(candidate, expectedText = null, options = {}) {
+  if (!candidate?.pageWebSocketDebuggerUrl || !candidate?.conversationId) {
+    return { ok: false, state: "page-composer-unavailable" };
+  }
+  const client = new ClassicCdpClient(candidate.pageWebSocketDebuggerUrl, options);
+  await client.open();
+  try {
+    const result = await client.call("Runtime.evaluate", {
+      expression: `(() => {
+        const expectedConversation=${JSON.stringify(candidate.conversationId)};
+        const expectedText=${JSON.stringify(String(expectedText || ""))};
+        const actual=location.pathname.match(/\\/c\\/([^/?#]+)/)?.[1]||null;
+        if(actual!==expectedConversation)return {ok:false,state:'route-changed'};
+        const editor=document.querySelector('#prompt-textarea,textarea,div.ProseMirror[contenteditable="true"],[data-lexical-editor="true"][contenteditable="true"],[contenteditable="true"][role="textbox"]');
+        if(!editor)return {ok:false,state:'composer-missing'};
+        const read=${readComposerDraft.toString()};
+        const draft=read(editor);
+        return {ok:true,state:draft===null?'protected-content':draft===''?'empty':'non-empty',
+          exactOwnedPayload:typeof draft==='string'&&expectedText.length>0&&draft===expectedText};
+      })()`,
+      returnByValue: true,
+    });
+    return result?.result?.value || { ok: false, state: "composer-inspection-empty" };
+  } finally {
+    client.close();
+  }
+}
+
+async function clearExactOwnedComposerPayload(candidate, expectedText, options = {}) {
+  if (!candidate?.pageWebSocketDebuggerUrl || !candidate?.conversationId || !expectedText) {
+    return { ok: false, state: "composer-cleanup-unavailable" };
+  }
+  const client = new ClassicCdpClient(candidate.pageWebSocketDebuggerUrl, options);
+  await client.open();
+  try {
+    const result = await client.call("Runtime.evaluate", {
+      expression: `(() => {
+        const expectedConversation=${JSON.stringify(candidate.conversationId)};
+        const expectedText=${JSON.stringify(String(expectedText))};
+        const actual=location.pathname.match(/\\/c\\/([^/?#]+)/)?.[1]||null;
+        if(actual!==expectedConversation)return {ok:false,state:'route-changed'};
+        const editor=document.querySelector('#prompt-textarea,textarea,div.ProseMirror[contenteditable="true"],[data-lexical-editor="true"][contenteditable="true"],[contenteditable="true"][role="textbox"]');
+        if(!editor)return {ok:false,state:'composer-missing'};
+        const read=${readComposerDraft.toString()};
+        if(read(editor)!==expectedText)return {ok:false,state:'composer-ownership-lost'};
+        if(editor instanceof HTMLTextAreaElement)editor.value='';else editor.textContent='';
+        editor.dispatchEvent(new InputEvent('input',{bubbles:true,inputType:'deleteContentBackward',data:null}));
+        return {ok:read(editor)==='',state:'owned-goal-control-draft-cleared'};
+      })()`,
+      returnByValue: true,
+    });
+    return result?.result?.value || { ok: false, state: "composer-cleanup-empty" };
+  } finally {
+    client.close();
   }
 }
 
@@ -700,8 +760,12 @@ export class ClassicGoalHostBridge {
     beforeRawDispatch,
     waitForVisibleReport,
     inspectVisibleReport,
+    inspectComposer,
+    clearOwnedComposer,
     visibleReportTimeoutMs = DEFAULT_VISIBLE_REPORT_TIMEOUT_MS,
     visibleReportPollMs = DEFAULT_VISIBLE_REPORT_POLL_MS,
+    hiddenConfirmTimeoutMs = DEFAULT_HIDDEN_CONFIRM_TIMEOUT_MS,
+    hiddenConfirmPollMs = DEFAULT_HIDDEN_CONFIRM_POLL_MS,
     sleep: sleepImpl = sleep,
     fetchImpl = globalThis.fetch,
     WebSocketImpl = globalThis.WebSocket,
@@ -716,7 +780,9 @@ export class ClassicGoalHostBridge {
     this.sendRaw = sendRaw || ((candidate, payload) => sendRawHostFollowUp(candidate, payload, this.options));
     this.beforeDispatch = beforeDispatch;
     this.beforeRawDispatch = beforeRawDispatch;
-    this.inspectVisibleReport = inspectVisibleReport || ((candidate, payload) => inspectVisibleReportCommit(candidate, { ...this.options, payload }));
+    this.inspectVisibleReport = inspectVisibleReport || ((candidate, payload = {}) => inspectVisibleReportCommit(candidate, { ...this.options, ...payload }));
+    this.inspectComposer = inspectComposer || ((candidate, expectedText) => inspectExactPageComposer(candidate, expectedText, this.options));
+    this.clearOwnedComposer = clearOwnedComposer || ((candidate, expectedText) => clearExactOwnedComposerPayload(candidate, expectedText, this.options));
     this.waitForVisibleReport = waitForVisibleReport || ((candidate, payload) => waitForVisibleReportBoundary({
       inspect: () => this.inspectVisibleReport(candidate, payload),
       reportedAt: payload?.reportedAt,
@@ -725,6 +791,79 @@ export class ClassicGoalHostBridge {
       pollMs: visibleReportPollMs,
       sleep: sleepImpl,
     }));
+    this.hiddenConfirmTimeoutMs = Math.max(1_000, Number(hiddenConfirmTimeoutMs || DEFAULT_HIDDEN_CONFIRM_TIMEOUT_MS));
+    this.hiddenConfirmPollMs = Math.max(50, Number(hiddenConfirmPollMs || DEFAULT_HIDDEN_CONFIRM_POLL_MS));
+    this.sleep = sleepImpl;
+  }
+
+  async waitForHiddenAssistant(candidate, {
+    sourceUserMessageId,
+    baselineAssistantMessageId,
+    expectedControlText = null,
+  } = {}) {
+    const sourceUser = String(sourceUserMessageId || "").trim();
+    const baselineAssistant = String(baselineAssistantMessageId || "").trim();
+    if (!sourceUser || !baselineAssistant) {
+      return { ok: false, state: "hidden-boundary-unavailable", definiteFailure: false };
+    }
+    const startedAt = Date.now();
+    let lastState = "native-branch-unavailable";
+    while (Date.now() - startedAt <= this.hiddenConfirmTimeoutMs) {
+      try {
+        const composer = await this.inspectComposer(candidate, expectedControlText);
+        if (composer?.exactOwnedPayload === true) {
+          const cleared = await this.clearOwnedComposer(candidate, expectedControlText).catch(() => null);
+          return {
+            ok: false,
+            state: "hidden-control-composer-exposure-cleared",
+            definiteFailure: false,
+            composerMutation: true,
+            composerCleanupVerified: cleared?.ok === true,
+          };
+        }
+        if (composer?.ok !== true || composer?.state !== "empty") {
+          return {
+            ok: false,
+            state: composer?.state || "composer-postflight-unavailable",
+            definiteFailure: false,
+            composerMutation: composer?.state === "non-empty",
+          };
+        }
+        const snapshot = await this.inspectVisibleReport(candidate, {
+          includeNativeBranch: true,
+          sourceUserMessageId: sourceUser,
+          baselineAssistantMessageId: baselineAssistant,
+          timeoutMs: Math.max(8_000, this.hiddenConfirmTimeoutMs),
+        });
+        const native = snapshot?.nativeContinuation;
+        lastState = native?.state || lastState;
+        if (native?.resolved === true) {
+          if (native.newUserAfterBaselineMessageId) {
+            return {
+              ok: false,
+              state: "new-user-before-hidden-assistant",
+              definiteFailure: true,
+              nativeBranchResolved: true,
+            };
+          }
+          if (native.sourceUserFound === true
+            && native.baselineAssistantFound === true
+            && native.latestUserMessageId === sourceUser
+            && native.newAssistantAfterBaselineMessageId) {
+            return {
+              ok: true,
+              state: "hidden-assistant-confirmed-by-native-branch",
+              nativeBranchResolved: true,
+              assistantMessageId: native.newAssistantAfterBaselineMessageId,
+            };
+          }
+        }
+      } catch (error) {
+        lastState = errorMessage(error);
+      }
+      await this.sleep(this.hiddenConfirmPollMs);
+    }
+    return { ok: false, state: lastState || "hidden-assistant-confirmation-timeout", definiteFailure: false };
   }
 
   async findMatchingCandidate(goalId, { conversationId = null, runtimePort = null } = {}) {
@@ -967,29 +1106,163 @@ export class ClassicGoalHostBridge {
     conversationId = null,
     runtimePort = null,
     expectedPageTargetId = null,
+    sourceUserMessageId = null,
+    baselineAssistantMessageId = null,
   } = {}) {
-    void goalId;
-    void prompt;
-    void round;
-    void recoveryId;
-    void attempt;
-    void conversationId;
-    void runtimePort;
-    void expectedPageTargetId;
-    // Fail closed before target discovery or host RPC. `sendFollowUpMessage`
-    // is not a hidden control channel on current ChatGPT Desktop builds: it can
-    // populate the visible composer with the complete recovery payload and
-    // leave it unsent. Same-round recovery therefore delegates to the ordinary
-    // exact-conversation interrupted-turn Rescue path (`- 繼續`) instead.
-    return {
+    const expectedConversationId = String(conversationId || "").trim();
+    const recoveryPrompt = String(prompt || "").trim();
+    const sourceUser = String(sourceUserMessageId || "").trim();
+    const baselineAssistant = String(baselineAssistantMessageId || "").trim();
+    if (!String(goalId || "").trim() || !expectedConversationId
+      || !recoveryPrompt.startsWith("[DEVSPACE_GOAL_ROUND_RECOVERY]")
+      || !sourceUser || !baselineAssistant) {
+      return {
+        ok: false,
+        definiteFailure: true,
+        dispatchCommitted: false,
+        state: "invalid-hidden-goal-recovery-boundary",
+      };
+    }
+    const resolved = await this.findExactConversationRelay(expectedConversationId, { runtimePort });
+    const matching = resolved.candidate;
+    if (!matching) {
+      return {
+        ok: false,
+        definiteFailure: true,
+        dispatchCommitted: false,
+        ambiguous: resolved.ambiguous === true,
+        matchCount: Number(resolved.matchCount || 0),
+        error: resolved.error || `No exact hidden relay is open for Goal ${goalId}.`,
+      };
+    }
+    const expectedTarget = String(expectedPageTargetId || "").trim();
+    if (expectedTarget && matching.pageTargetId !== expectedTarget) {
+      return {
+        ok: false,
+        definiteFailure: true,
+        dispatchCommitted: false,
+        state: "goal-recovery-page-target-changed",
+      };
+    }
+    const composerBefore = await this.inspectComposer(matching, recoveryPrompt).catch((error) => ({
       ok: false,
-      definiteFailure: true,
-      dispatchCommitted: false,
-      backgroundAccepted: false,
+      state: errorMessage(error),
+    }));
+    if (composerBefore?.ok !== true || composerBefore?.state !== "empty") {
+      return {
+        ok: false,
+        definiteFailure: true,
+        dispatchCommitted: false,
+        state: composerBefore?.state || "goal-recovery-composer-preflight-failed",
+      };
+    }
+
+    const sent = await this.sendRaw(matching, {
+      prompt: recoveryPrompt,
+      scrollToBottom: false,
+      purpose: "goal-round-recovery-hidden",
+      goalId,
+      round,
+      recoveryId,
+      attempt,
+    });
+    const composerAfter = await this.inspectComposer(matching, recoveryPrompt).catch((error) => ({
+      ok: false,
+      state: errorMessage(error),
+    }));
+    if (composerAfter?.exactOwnedPayload === true) {
+      const cleared = await this.clearOwnedComposer(matching, recoveryPrompt).catch(() => null);
+      return {
+        ok: false,
+        definiteFailure: false,
+        dispatchCommitted: sent?.dispatchCommitted === true || sent?.ok === true,
+        backgroundAccepted: false,
+        visibleUserMessage: false,
+        composerMutation: true,
+        composerCleanupVerified: cleared?.ok === true,
+        state: "hidden-goal-recovery-composer-exposure-cleared",
+      };
+    }
+    if (composerAfter?.ok !== true || composerAfter?.state !== "empty") {
+      return {
+        ok: false,
+        definiteFailure: sent?.dispatchCommitted !== true && sent?.ok !== true,
+        dispatchCommitted: sent?.dispatchCommitted === true || sent?.ok === true,
+        backgroundAccepted: false,
+        visibleUserMessage: false,
+        composerMutation: composerAfter?.state === "non-empty",
+        state: composerAfter?.state || "goal-recovery-composer-postflight-failed",
+      };
+    }
+
+    if (sent?.ok !== true) {
+      if (sent?.dispatchCommitted === true) {
+        const reconciled = await this.waitForHiddenAssistant(matching, {
+          sourceUserMessageId: sourceUser,
+          baselineAssistantMessageId: baselineAssistant,
+          expectedControlText: recoveryPrompt,
+        });
+        if (reconciled.ok === true) {
+          return {
+            ok: true,
+            transport: "classic-hidden-round-recovery-native-reconciled",
+            conversationId: expectedConversationId,
+            runtimeLabel: matching.runtimeLabel,
+            runtimePort: matching.runtimePort,
+            pageTargetId: matching.pageTargetId,
+            dispatchCommitted: true,
+            backgroundAccepted: true,
+            nativeBranchReconciled: true,
+            visibleUserMessage: false,
+            composerMutation: false,
+            foregroundActivation: false,
+            pageNavigation: false,
+          };
+        }
+      }
+      return {
+        ok: false,
+        definiteFailure: sent?.definiteFailure === true,
+        dispatchCommitted: sent?.dispatchCommitted === true,
+        backgroundAccepted: false,
+        visibleUserMessage: false,
+        composerMutation: false,
+        state: sent?.state || "hidden-goal-recovery-not-confirmed",
+        error: sent?.error || null,
+      };
+    }
+    const confirmed = await this.waitForHiddenAssistant(matching, {
+      sourceUserMessageId: sourceUser,
+      baselineAssistantMessageId: baselineAssistant,
+      expectedControlText: recoveryPrompt,
+    });
+    if (confirmed.ok !== true) {
+      return {
+        ok: false,
+        definiteFailure: confirmed.definiteFailure === true,
+        dispatchCommitted: true,
+        backgroundAccepted: false,
+        visibleUserMessage: false,
+        composerMutation: confirmed.composerMutation === true,
+        composerCleanupVerified: confirmed.composerCleanupVerified === true,
+        state: confirmed.state || "hidden-goal-recovery-native-confirmation-missing",
+      };
+    }
+    return {
+      ok: true,
+      transport: "classic-hidden-round-recovery",
+      conversationId: expectedConversationId,
+      runtimeLabel: matching.runtimeLabel,
+      runtimePort: matching.runtimePort,
+      pageTargetId: matching.pageTargetId,
+      dispatchCommitted: true,
+      backgroundAccepted: true,
+      nativeBranchReconciled: true,
       visibilityVerified: false,
       visibleUserMessage: false,
       composerMutation: false,
-      state: "visible-goal-recovery-transport-retired",
+      foregroundActivation: false,
+      pageNavigation: false,
     };
   }
 

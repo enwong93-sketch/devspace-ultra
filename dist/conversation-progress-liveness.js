@@ -119,6 +119,7 @@ function serializableRecord(record) {
     planRevision: Number(record.planRevision || 0),
     episodeRevision: Number(record.episodeRevision || 0),
     sourceUserMessageId: cleanMessageId(record.sourceUserMessageId),
+    lastGoalContinuationId: cleanMessageId(record.lastGoalContinuationId),
     armed: record.armed === true,
     turnState: cleanText(record.turnState, 80) || "idle",
     duplicatePageObserved: record.duplicatePageObserved === true,
@@ -206,6 +207,7 @@ export class ConversationProgressLivenessSupervisor {
       record.planId = cleanText(value?.planId, 200);
       record.planRevision = Number(value?.planRevision || 0);
       record.sourceUserMessageId = cleanMessageId(value?.sourceUserMessageId);
+      record.lastGoalContinuationId = cleanMessageId(value?.lastGoalContinuationId);
       record.lastReportAt = value?.lastReportAt || null;
       record.lastContinueAt = value?.lastContinueAt || null;
       record.restartObservedAt = finiteTime(value?.restartObservedAt) ? value.restartObservedAt : null;
@@ -277,6 +279,12 @@ export class ConversationProgressLivenessSupervisor {
     const kind = String(event?.kind || "").toLowerCase();
     const record = this.#record(conversationId);
     const sourceUserMessageId = cleanMessageId(event?.sourceUserMessageId);
+    const goalContinuationId = cleanMessageId(event?.goalContinuationId ?? event?.continuationId);
+    const goalContinuationEvent = kind === "goal-continuation-started";
+    const duplicateGoalContinuation = goalContinuationEvent
+      && goalContinuationId
+      && record.lastGoalContinuationId === goalContinuationId;
+    const invalidGoalContinuation = goalContinuationEvent && !goalContinuationId;
     const sameActiveUserTurn = kind === "started"
       && sourceUserMessageId
       && record.armed === true
@@ -286,11 +294,47 @@ export class ConversationProgressLivenessSupervisor {
       && event?.canceled === true
       && record.generationResetPending === true;
     const transportOnlyFinish = kind === "finished" && event?.transportOnly === true;
-    const transportOnlyObservation = transportOnlyFinish || ["metadata", "resumed"].includes(kind) || sameActiveUserTurn;
+    const transportOnlyObservation = transportOnlyFinish || ["metadata", "resumed"].includes(kind)
+      || sameActiveUserTurn || duplicateGoalContinuation || invalidGoalContinuation;
     if (!generatedResetCancellation && !transportOnlyObservation) record.lastActivityAt = at;
     record.updatedAt = new Date(this.now()).toISOString();
 
-    if (sameActiveUserTurn) {
+    if (duplicateGoalContinuation) {
+      // The hidden continuation supervisor can reconcile the same committed
+      // host send more than once after acknowledgement loss or Core restart.
+      // The continuation id is the episode id: duplicate notification must
+      // never reset the twenty-minute clock or replenish the one-shot Rescue.
+      record.lastDispatchState = "duplicate-hidden-goal-continuation-observed";
+    } else if (invalidGoalContinuation) {
+      record.lastDispatchState = "invalid-hidden-goal-continuation-ignored";
+    } else if (goalContinuationEvent) {
+      // A backend-owned hidden assistant continuation is a new physical turn
+      // even though ChatGPT correctly keeps the same latest user message id.
+      // Explicitly create a fresh Rescue episode so one rescue used in an
+      // earlier Goal round cannot exhaust all later rounds.
+      record.armed = true;
+      record.episodeRevision = Number(record.episodeRevision || 0) + 1;
+      record.turnState = "running";
+      record.sourceUserMessageId = sourceUserMessageId || record.sourceUserMessageId;
+      record.lastGoalContinuationId = goalContinuationId;
+      record.startedAt = at;
+      record.interruptedAt = null;
+      record.completedAt = null;
+      record.lastActivityAt = at;
+      record.lastReportAt = null;
+      record.lastContinueAt = null;
+      record.restartObservedAt = null;
+      record.generationResetAt = null;
+      record.generationResetPending = false;
+      record.continueAttempts = 0;
+      record.idleObservedAt = null;
+      record.reportOverdue = false;
+      record.rescuePending = false;
+      record.rescueEvidence = null;
+      record.duplicatePageObserved = false;
+      record.uiCleanupPending = true;
+      record.lastDispatchState = "hidden-goal-continuation-turn-started";
+    } else if (sameActiveUserTurn) {
       // ChatGPT can retry the same backend turn via /conversation instead of
       // /conversation/resume. The stable source user-message id proves no new
       // user intent, so the twenty-minute Rescue clock must not restart.
@@ -679,6 +723,8 @@ export class ConversationProgressLivenessSupervisor {
       stalledGeneratingSilenceRescue: true,
       substantiveToolActivityResetsRescueClock: true,
       oneRescuePerInterruptionEpisode: true,
+      hiddenGoalContinuationStartsNewRescueEpisode: true,
+      duplicateGoalContinuationDoesNotResetClock: true,
       activePlansDoNotArmRescue: true,
       legacyEpisodesRestartDisarmed: true,
       terminalEpisodesRestartDisarmed: true,
@@ -697,6 +743,7 @@ export class ConversationProgressLivenessSupervisor {
       planRevision: 0,
       episodeRevision: 0,
       sourceUserMessageId: null,
+      lastGoalContinuationId: null,
       armed: false,
       turnState: "idle",
       duplicatePageObserved: false,

@@ -227,51 +227,151 @@ assert.equal(defaultBoundary.ok, true);
 assert.equal(defaultBoundaryInspections.length, 1, "production default must inspect the visible report boundary");
 assert.equal(defaultBoundaryRawCalls.length, 1);
 
-let retiredRecoveryProbes = 0;
-let retiredRecoverySends = 0;
-let retiredRecoveryBeforeDispatchCalls = 0;
+let hiddenRecoveryProbes = 0;
+let hiddenRecoverySends = 0;
+let hiddenRecoveryBeforeDispatchCalls = 0;
 const recoveryBridge = new moduleUnderTest.ClassicGoalHostBridge({
   ports: [9721, 9732],
-  async beforeDispatch() { retiredRecoveryBeforeDispatchCalls += 1; },
-  async probeConversationPage() { retiredRecoveryProbes += 1; return []; },
-  async probeRelayPort() { retiredRecoveryProbes += 1; return []; },
-  async sendRaw() { retiredRecoverySends += 1; return { ok: true }; },
+  async beforeDispatch() { hiddenRecoveryBeforeDispatchCalls += 1; },
+  async probeRelayPort(port, conversationId) {
+    hiddenRecoveryProbes += 1;
+    if (port !== 9732 || conversationId !== "conversation_recovery") return [];
+    return [{ runtimePort: 9732, runtimeLabel: "Main-02", targetId: "hidden-recovery-relay",
+      pageTargetId: "recovery-page", conversationId, chatMode: true,
+      webSocketDebuggerUrl: "ws://hidden-recovery-relay", pageWebSocketDebuggerUrl: "ws://hidden-recovery-page" }];
+  },
+  async inspectComposer() { return { ok: true, state: "empty", exactOwnedPayload: false }; },
+  async sendRaw(_candidate, payload) {
+    hiddenRecoverySends += 1;
+    assert.match(payload.prompt, /^\[DEVSPACE_GOAL_ROUND_RECOVERY\]/);
+    return { ok: true, dispatchCommitted: true, backgroundAccepted: true };
+  },
+  async inspectVisibleReport() {
+    return { nativeContinuation: { resolved: true, sourceUserFound: true,
+      baselineAssistantFound: true, latestUserMessageId: "user-hidden-recovery",
+      newUserAfterBaselineMessageId: null,
+      newAssistantAfterBaselineMessageId: "assistant-hidden-recovery" } };
+  },
+  hiddenConfirmTimeoutMs: 1000,
+  hiddenConfirmPollMs: 50,
+  sleep: async () => {},
 });
-const retiredRecoveryExpected = {
+const hiddenRecovery = await recoveryBridge.dispatchRoundRecovery({
+  goalId: "goal_recovery",
+  conversationId: "conversation_recovery",
+  round: 2,
+  recoveryId: "recovery_aaaaaaaaaaaaaaaa",
+  attempt: 1,
+  expectedPageTargetId: "recovery-page",
+  sourceUserMessageId: "user-hidden-recovery",
+  baselineAssistantMessageId: "assistant-before-hidden-recovery",
+  prompt: "[DEVSPACE_GOAL_ROUND_RECOVERY] continue same round",
+});
+assert.equal(hiddenRecovery.ok, true);
+assert.equal(hiddenRecovery.transport, "classic-hidden-round-recovery");
+assert.equal(hiddenRecovery.backgroundAccepted, true);
+assert.equal(hiddenRecovery.visibleUserMessage, false);
+assert.equal(hiddenRecovery.composerMutation, false);
+assert.equal(hiddenRecoverySends, 1);
+assert.ok(hiddenRecoveryProbes >= 1);
+assert.equal(hiddenRecoveryBeforeDispatchCalls, 0,
+  "same-round hidden recovery must never run Primary debug or foreground repair");
+
+const invalidHiddenRecovery = await recoveryBridge.dispatchRoundRecovery({
+  goalId: "goal_recovery",
+  conversationId: "conversation_recovery",
+  prompt: "arbitrary stale caller payload",
+});
+assert.deepEqual(invalidHiddenRecovery, {
   ok: false,
   definiteFailure: true,
   dispatchCommitted: false,
-  backgroundAccepted: false,
-  visibilityVerified: false,
-  visibleUserMessage: false,
-  composerMutation: false,
-  state: "visible-goal-recovery-transport-retired",
-};
-for (const input of [
-  {
-    goalId: "goal_recovery",
-    conversationId: "conversation_recovery",
-    round: 2,
-    recoveryId: "recovery_aaaaaaaaaaaaaaaa",
-    attempt: 1,
-    expectedPageTargetId: "recovery-page",
-    prompt: "[DEVSPACE_GOAL_ROUND_RECOVERY] continue same round",
+  state: "invalid-hidden-goal-recovery-boundary",
+});
+
+let blockedRecoverySends = 0;
+const blockedRecoveryBridge = new moduleUnderTest.ClassicGoalHostBridge({
+  ports: [9732],
+  async probeRelayPort(_port, conversationId) {
+    return [{ runtimePort: 9732, runtimeLabel: "Main-02", targetId: "blocked-relay",
+      pageTargetId: "blocked-page", conversationId, chatMode: true,
+      webSocketDebuggerUrl: "ws://blocked-relay", pageWebSocketDebuggerUrl: "ws://blocked-page" }];
   },
-  {
-    goalId: "goal_duplicate_recovery",
-    conversationId: "conversation_duplicate_recovery",
-    prompt: "arbitrary stale caller payload",
+  async inspectComposer() { return { ok: true, state: "non-empty", exactOwnedPayload: false }; },
+  async sendRaw() { blockedRecoverySends += 1; return { ok: true }; },
+});
+const blockedRecovery = await blockedRecoveryBridge.dispatchRoundRecovery({
+  goalId: "goal_blocked_recovery", conversationId: "conversation_blocked_recovery",
+  round: 2, recoveryId: "recovery_blocked_recovery", attempt: 1,
+  expectedPageTargetId: "blocked-page",
+  sourceUserMessageId: "user-blocked-recovery",
+  baselineAssistantMessageId: "assistant-before-blocked-recovery",
+  prompt: "[DEVSPACE_GOAL_ROUND_RECOVERY] must not overwrite a user draft",
+});
+assert.equal(blockedRecovery.ok, false);
+assert.equal(blockedRecovery.state, "non-empty");
+assert.equal(blockedRecoverySends, 0);
+
+const exposedChecks = [{ ok: true, state: "empty", exactOwnedPayload: false },
+  { ok: true, state: "non-empty", exactOwnedPayload: true }];
+let exposedCleanup = 0;
+const exposedRecoveryBridge = new moduleUnderTest.ClassicGoalHostBridge({
+  ports: [9732],
+  async probeRelayPort(_port, conversationId) {
+    return [{ runtimePort: 9732, runtimeLabel: "Main-02", targetId: "exposed-relay",
+      pageTargetId: "exposed-page", conversationId, chatMode: true,
+      webSocketDebuggerUrl: "ws://exposed-relay", pageWebSocketDebuggerUrl: "ws://exposed-page" }];
   },
-  {},
-]) {
-  assert.deepEqual(await recoveryBridge.dispatchRoundRecovery(input), retiredRecoveryExpected);
-}
-assert.equal(retiredRecoveryProbes, 0,
-  "retired Goal recovery must fail before page/widget discovery");
-assert.equal(retiredRecoverySends, 0,
-  "retired Goal recovery must never call host follow-up or mutate the composer");
-assert.equal(retiredRecoveryBeforeDispatchCalls, 0,
-  "retired Goal recovery must never run Primary debug or foreground hooks");
+  async inspectComposer() { return exposedChecks.shift(); },
+  async clearOwnedComposer() { exposedCleanup += 1; return { ok: true }; },
+  async sendRaw() { return { ok: false, dispatchCommitted: true, definiteFailure: false }; },
+});
+const exposedRecovery = await exposedRecoveryBridge.dispatchRoundRecovery({
+  goalId: "goal_exposed_recovery", conversationId: "conversation_exposed_recovery",
+  round: 2, recoveryId: "recovery_exposed_recovery", attempt: 1,
+  expectedPageTargetId: "exposed-page",
+  sourceUserMessageId: "user-exposed-recovery",
+  baselineAssistantMessageId: "assistant-before-exposed-recovery",
+  prompt: "[DEVSPACE_GOAL_ROUND_RECOVERY] exact owned payload",
+});
+assert.equal(exposedRecovery.state, "hidden-goal-recovery-composer-exposure-cleared");
+assert.equal(exposedRecovery.dispatchCommitted, true);
+assert.equal(exposedRecovery.composerCleanupVerified, true);
+assert.equal(exposedCleanup, 1);
+
+const uncertainRecoveryBridge = new moduleUnderTest.ClassicGoalHostBridge({
+  ports: [9732],
+  async probeRelayPort(_port, conversationId) {
+    return [{ runtimePort: 9732, runtimeLabel: "Main-02", targetId: "uncertain-recovery-relay",
+      pageTargetId: "uncertain-recovery-page", conversationId, chatMode: true,
+      webSocketDebuggerUrl: "ws://uncertain-recovery-relay", pageWebSocketDebuggerUrl: "ws://uncertain-recovery-page" }];
+  },
+  async inspectComposer() { return { ok: true, state: "empty", exactOwnedPayload: false }; },
+  async sendRaw() {
+    return { ok: false, definiteFailure: false, dispatchCommitted: true,
+      state: "raw-host-acknowledgement-lost" };
+  },
+  async inspectVisibleReport() {
+    return { nativeContinuation: { resolved: true, sourceUserFound: true,
+      baselineAssistantFound: true, latestUserMessageId: "user-recovery-boundary",
+      newUserAfterBaselineMessageId: null,
+      newAssistantAfterBaselineMessageId: "assistant-hidden-recovery" } };
+  },
+  hiddenConfirmTimeoutMs: 1000,
+  hiddenConfirmPollMs: 50,
+  sleep: async () => {},
+});
+const uncertainRecoveryResult = await uncertainRecoveryBridge.dispatchRoundRecovery({
+  goalId: "goal_uncertain_recovery", conversationId: "conversation_uncertain_recovery",
+  round: 2, recoveryId: "recovery_uncertain_recovery", attempt: 1,
+  expectedPageTargetId: "uncertain-recovery-page",
+  sourceUserMessageId: "user-recovery-boundary",
+  baselineAssistantMessageId: "assistant-visible-before-recovery",
+  prompt: "[DEVSPACE_GOAL_ROUND_RECOVERY] reconcile hidden acknowledgement loss",
+});
+assert.equal(uncertainRecoveryResult.ok, true);
+assert.equal(uncertainRecoveryResult.nativeBranchReconciled, true);
+assert.equal(uncertainRecoveryResult.transport, "classic-hidden-round-recovery-native-reconciled");
 
 const livenessFollowUps = [];
 const livenessBridge = new moduleUnderTest.ClassicGoalHostBridge({
@@ -377,15 +477,24 @@ const conversationSafeBridge = new moduleUnderTest.ClassicGoalHostBridge({
       title: "DevSpace Goal Relay",
     }];
   },
-  async inspectVisibleReport(candidate) {
+  async inspectVisibleReport(candidate, payload = {}) {
     return {
       chatMode: true,
       generating: false,
       streamStatus: "COMPLETE",
       latestAssistantText: "",
       conversationId: candidate.conversationId,
+      ...(payload.includeNativeBranch === true ? { nativeContinuation: {
+        resolved: true,
+        sourceUserFound: true,
+        baselineAssistantFound: true,
+        latestUserMessageId: "user-authoritative-recovery",
+        newUserAfterBaselineMessageId: null,
+        newAssistantAfterBaselineMessageId: "assistant-authoritative-hidden-recovery",
+      } } : {}),
     };
   },
+  async inspectComposer() { return { ok: true, state: "empty", exactOwnedPayload: false }; },
   async sendRaw(candidate, payload) {
     exactConversationDispatches.push({ candidate, payload });
     return { ok: true, dispatchCommitted: true, backgroundAccepted: true };
@@ -405,11 +514,17 @@ const conversationSafeDispatch = await conversationSafeBridge.dispatchRoundRecov
   round: 3,
   recoveryId: "recovery_conversation_safe",
   expectedPageTargetId: "authoritative-conversation-page",
+  sourceUserMessageId: "user-authoritative-recovery",
+  baselineAssistantMessageId: "assistant-before-authoritative-recovery",
   prompt: "[DEVSPACE_GOAL_ROUND_RECOVERY] stay on authoritative conversation",
 });
-assert.deepEqual(conversationSafeDispatch, retiredRecoveryExpected);
-assert.equal(exactConversationDispatches.length, 0,
-  "even an exact authoritative page cannot revive visible same-round Goal recovery");
+assert.equal(conversationSafeDispatch.ok, true);
+assert.equal(conversationSafeDispatch.transport, "classic-hidden-round-recovery");
+assert.equal(conversationSafeDispatch.visibleUserMessage, false);
+assert.equal(conversationSafeDispatch.composerMutation, false);
+assert.equal(exactConversationDispatches.length, 1,
+  "the exact authoritative page may receive one hidden same-round recovery without composer automation");
+assert.equal(exactConversationDispatches[0].candidate.pageTargetId, "authoritative-conversation-page");
 
 const rolloverHookCalls = [];
 const rolloverBridge = new moduleUnderTest.ClassicGoalHostBridge({
@@ -505,9 +620,10 @@ console.log(JSON.stringify({
   main32: ports.at(-1),
   chatModeOnly: true,
   singleRawDispatch: true,
-  hiddenHostRecovery: false,
+  hiddenHostRecovery: true,
   visibleSameRoundRecoveryRetired: true,
   visibleComposerRecovery: false,
+  composerExposureDetectedAndCleared: true,
   recoveryForegroundActivation: false,
   recoveryPageNavigation: false,
 }));
