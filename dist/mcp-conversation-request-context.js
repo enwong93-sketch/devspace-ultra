@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import { cleanOpenaiIdentity } from './openai-conversation-binding.js';
 
 function cleanFingerprint(value) {
   const text = String(value ?? "").trim().toLowerCase();
@@ -29,12 +30,17 @@ export class McpConversationRequestContext {
     progressAuthorityPromise = null,
     sessionFingerprint = null,
     mcpSessionId = null,
+    traceCorrelationFingerprints = [],
+    openaiIdentity = null,
+    callFingerprint = null,
   } = {}, operation) {
     if (typeof operation !== "function") throw new Error("operation is required.");
     const selectedCapabilityAuthority = capabilityAuthority || authority;
     const capabilityConversationId = cleanConversation(selectedCapabilityAuthority?.conversationId);
     const progressConversationId = cleanConversation(progressAuthority?.conversationId);
     const context = {
+      openaiIdentity: cleanOpenaiIdentity(openaiIdentity),
+      callFingerprint: cleanFingerprint(callFingerprint),
       authority: capabilityConversationId
         ? {
             ...selectedCapabilityAuthority,
@@ -58,6 +64,8 @@ export class McpConversationRequestContext {
         : null,
       sessionFingerprint: cleanFingerprint(sessionFingerprint) || cleanFingerprint(selectedCapabilityAuthority?.sessionFingerprint) || cleanFingerprint(progressAuthority?.sessionFingerprint),
       mcpSessionId: cleanConversation(mcpSessionId),
+      traceCorrelationFingerprints: [...new Set((Array.isArray(traceCorrelationFingerprints)
+        ? traceCorrelationFingerprints : []).slice(0, 8).map(cleanFingerprint).filter(Boolean))],
       authorityPromise: authorityPromise && typeof authorityPromise.then === "function"
         ? Promise.resolve(authorityPromise)
         : null,
@@ -72,11 +80,15 @@ export class McpConversationRequestContext {
     const value = this.storage.getStore();
     if (!value) return null;
     return {
+      ...(value.openaiIdentity ? { openaiIdentity: { ...value.openaiIdentity } } : {}),
+      ...(value.callFingerprint ? { callFingerprint: value.callFingerprint } : {}),
       authority: value.authority ? structuredClone(value.authority) : null,
       capabilityAuthority: value.capabilityAuthority ? structuredClone(value.capabilityAuthority) : null,
       progressAuthority: value.progressAuthority ? structuredClone(value.progressAuthority) : null,
       sessionFingerprint: value.sessionFingerprint,
       mcpSessionId: value.mcpSessionId,
+      ...(value.traceCorrelationFingerprints.length
+        ? { traceCorrelationFingerprints: [...value.traceCorrelationFingerprints] } : {}),
       ...(value.authorityPromise ? { authorityPromise: value.authorityPromise } : {}),
       ...(value.progressAuthorityPromise ? { progressAuthorityPromise: value.progressAuthorityPromise } : {}),
     };

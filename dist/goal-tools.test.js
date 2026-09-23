@@ -4,6 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { GoalRuntime } from "./goal-runtime.js";
 import { registerGoalTools } from "./goal-tools.js";
+import './goal-result-view.test.js';
+import './context-payload-audit.test.js';
+import './workspace-discovery-view.test.js';
+import './workspace-discovery-scan.test.js';
+import { ConversationStartClaimRegistry } from "./conversation-start-claim-registry.js";
 
 const root = await mkdtemp(join(tmpdir(), "devspace-goal-tools-"));
 
@@ -166,7 +171,13 @@ try {
   assert.equal(resumedResult.structuredContent.goal.status, "active");
 
   const mountResult = await mount.handler({ goalId: goal1.id });
-  assert.deepEqual(mountResult.structuredContent.goal, resumedResult.structuredContent.goal);
+  assert.deepEqual(mountResult.structuredContent.goal, await runtime.status(goal1.id),
+    'read-only mount must return the full authoritative history, not the acknowledgement projection');
+  assert.deepEqual(mountResult.structuredContent.goal.lastRoundReport, resumedResult.structuredContent.goal.lastRoundReport);
+  assert.deepEqual(mountResult.structuredContent.goal.continuation, resumedResult.structuredContent.goal.continuation);
+  assert.deepEqual(mountResult.structuredContent.goal.successCriteria, resumedResult.structuredContent.goal.successCriteria);
+  assert.equal(resumedResult.structuredContent.goal.recentReports.some(r => JSON.stringify(r) === JSON.stringify(resumedResult.structuredContent.goal.lastRoundReport)), false,
+    'mutation acknowledgements must not repeat the latest report twice');
   assert.deepEqual(mountOwnerRebinds, [{ goalId: goal1.id, revision: resumedResult.structuredContent.goal.revision }], "explicit Goal mount must arm exact-owner Host Overlay recovery without changing Goal state");
 
   const completionGoalResult = await start.handler({
@@ -208,6 +219,10 @@ try {
       const boundRuntime = new GoalRuntime({ stateDir: boundRoot });
       await boundRuntime.ready;
       const boundRegistered = new Map();
+      let claimCounter = 0;
+      const startClaims = new ConversationStartClaimRegistry({
+        createId: () => `goal_claim_${String(++claimCounter).padStart(20, "0")}`,
+      });
       const boundServer = {
         registerTool(name, config, handler) {
           boundRegistered.set(name, { name, config, handler });
@@ -218,7 +233,20 @@ try {
         resourceUri: "ui://devspace/goal-dock.html",
         relayResourceUri: "ui://devspace/goal-continuation-relay.html",
         hostBridge,
-        resolveConversation: async (extra) => extra?.conversationId ? { conversationId: extra.conversationId } : null,
+        resolveConversation: async (extra) => extra?.conversationId ? extra : null,
+        resolveBootstrapConversation: async (extra, toolName) => extra?.bootstrap === true && toolName === "devspace_goal_start"
+          ? { conversationId: "conversation-tools-bootstrap", runtimeKey: "main-01", pageVerified: true }
+          : null,
+        startClaimRegistry: startClaims,
+        claimRelayResourceUri: "ui://devspace/progress-claim-relay.html",
+        resolveStartClaimPage: async (claimId) => ({
+          conversationId: "conversation-tools-claimed",
+          runtimeKey: "main-03",
+          claimId,
+          source: "classic-exact-page-start-claim-cdp-page-verified",
+          observedAt: "2026-09-17T03:00:00.000Z",
+          pageVerified: true,
+        }),
       });
       const boundStart = boundRegistered.get("devspace_goal_start");
       const boundStatus = boundRegistered.get("devspace_goal_status");
@@ -227,8 +255,29 @@ try {
         objective: "Must not become global",
         successCriteria: ["Stay bound"],
       }, {});
-      assert.equal(unresolved.isError, true);
-      assert.match(unresolved.content[0].text, /conversation identity is unresolved|unbound Goal/i);
+      assert.equal(unresolved.isError, undefined);
+      assert.equal(unresolved.structuredContent.pending, true);
+      assert.equal(unresolved.structuredContent.goal, undefined);
+      assert.equal(unresolved.structuredContent.conversationStartClaim.toolName, "devspace_goal_start");
+      assert.equal(JSON.stringify(unresolved.structuredContent.conversationStartClaim).includes("Must not become global"), false,
+        "pending Goal claim must not expose the stored objective");
+      const goalClaimId = unresolved.structuredContent.conversationStartClaim.claimId;
+      const claimedGoal = await boundStart.handler({
+        objective: "[exact-page-claim-relay]",
+        successCriteria: ["[exact-page-claim-relay]"],
+        claimId: goalClaimId,
+      }, {});
+      assert.equal(claimedGoal.structuredContent.claimed, true);
+      assert.equal(claimedGoal.structuredContent.goal.conversationId, "conversation-tools-claimed");
+      assert.equal(claimedGoal.structuredContent.goal.objective, "Must not become global",
+        "exact-page relay must execute the stored original Goal input, never its schema placeholders");
+
+      const bootstrappedGoal = await boundStart.handler({
+        objective: "Cached schema Goal",
+        successCriteria: ["Use exact progress bootstrap"],
+      }, { bootstrap: true });
+      assert.equal(bootstrappedGoal.structuredContent.goal.conversationId, "conversation-tools-bootstrap",
+        "an already-open cached schema may start Goal only from the short-lived exact-progress bootstrap resolver");
 
       const startedBound = await boundStart.handler({
         objective: "Conversation A Goal",
@@ -264,6 +313,7 @@ try {
     legacyInlineDockTools: 0,
     relayRenderTools: 1,
     conversationBound: true,
+    exactPageStartClaim: true,
   }));
 } finally {
   await rm(root, { recursive: true, force: true });

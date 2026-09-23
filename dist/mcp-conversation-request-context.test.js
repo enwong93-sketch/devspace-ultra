@@ -81,6 +81,15 @@ await context.run({
   assert.equal((await current.progressAuthorityPromise).conversationId, "conversation-progress-deferred");
 });
 
+await context.run({ traceCorrelationFingerprints: [fingerprint, fingerprint, 'not-a-trace'] }, async () => {
+  await Promise.resolve();
+  const first = context.current();
+  assert.deepEqual(first.traceCorrelationFingerprints, [fingerprint]);
+  first.traceCorrelationFingerprints.push('e'.repeat(64));
+  assert.deepEqual(context.current().traceCorrelationFingerprints, [fingerprint], 'callers cannot mutate the stored request trace');
+});
+assert.equal(context.current(), null);
+
 console.log(JSON.stringify({
   ok: true,
   gate: "mcp-conversation-request-context",

@@ -1,5 +1,6 @@
 import { ClassicCdpClient } from "./classic-cdp-client.js";
 import { defaultMainDebugPorts } from "./goal-host-bridge.js";
+import { runtimeKeyForClassicPort } from './classic-main-debug-ports.js';
 
 const DEFAULT_CONNECTION_POLL_MS = 15_000;
 const DEFAULT_PROBE_TIMEOUT_MS = 700;
@@ -9,9 +10,7 @@ function sleep(ms) {
 }
 
 function runtimeKeyForPort(port) {
-  if (port === 9721) return "main-01";
-  const number = port - 9730;
-  return number >= 2 && number <= 32 ? `main-${String(number).padStart(2, "0")}` : `main@${port}`;
+  return runtimeKeyForClassicPort(port);
 }
 
 function streamStatusConversationId(url) {

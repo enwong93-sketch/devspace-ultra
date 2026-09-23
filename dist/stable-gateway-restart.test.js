@@ -1,10 +1,44 @@
 import assert from "node:assert/strict";
+import {execFileSync} from 'node:child_process';
+import {readFileSync} from 'node:fs';
 import {
   buildRestartPowerShell,
+  classifyGatewayReplacementBoundary,
+  classifyGatewayRestartTopology,
   parseNetstatListeners,
   queryListenerProcesses,
   validateDevspaceListeners,
 } from "./stable-gateway-restart.js";
+
+assert.equal(classifyGatewayReplacementBoundary({
+  gateway: {
+    handoverInProgress: false,
+    admission: { closed: false, activeRequests: 0 },
+    sessions: { totalActiveRequests: 0, totalNonStreamActiveRequests: 0 },
+  },
+  activity: { running: 0 },
+}), "quiet");
+assert.equal(classifyGatewayReplacementBoundary({
+  gateway: {
+    handoverInProgress: true,
+    admission: { closed: true, activeRequests: 3, queuedRequests: 236 },
+    sessions: { totalActiveRequests: 0, totalNonStreamActiveRequests: 0 },
+  },
+  activity: { running: 0 },
+}), "stuck-handover");
+assert.equal(classifyGatewayReplacementBoundary({
+  gateway: {
+    handoverInProgress: true,
+    admission: { closed: true, activeRequests: 3 },
+    sessions: { totalActiveRequests: 1, totalNonStreamActiveRequests: 1 },
+  },
+  activity: { running: 0 },
+}), null, "real MCP work must never be mistaken for leaked admission accounting");
+assert.equal(classifyGatewayRestartTopology([]), "cold-start");
+assert.equal(classifyGatewayRestartTopology([{ role: "gateway", pid: 1 }]), "replacement");
+assert.equal(classifyGatewayRestartTopology([{ role: "gateway", pid: 1 }, { role: "core", pid: 2 }]), "replacement");
+assert.equal(classifyGatewayRestartTopology([{ role: "core", pid: 2 }]), "orphan-core");
+assert.equal(classifyGatewayRestartTopology([{ role: "gateway" }, { role: "gateway" }]), "invalid");
 
 const listeners = parseNetstatListeners(`
   TCP    127.0.0.1:7678    0.0.0.0:0    LISTENING    100
@@ -74,12 +108,18 @@ const script = buildRestartPowerShell({
   helperTaskName: "DevSpace-Stable-Gateway-Restart-test",
   delaySeconds: 5,
 });
-assert.match(script, /Stop-ScheduledTask/);
+assert.doesNotMatch(script, /Stop-ScheduledTask|Stop-Job|TerminateJobObject/,
+  'replacing Gateway must never kill a shared Windows Job containing Blender');
 assert.match(script, /Stop-Process -Id \$pidValue -Force/);
 assert.match(script, /Start-ScheduledTask/);
 assert.match(script, /__devspace\/gateway\/healthz/);
 assert.match(script, /while \(-not \$ok\)/, "restart health verification must wait for actual readiness rather than a wall-clock deadline");
-assert.doesNotMatch(script, /deadline|health-timeout|TimeoutSec/, "restart must not fail or kill work merely because startup is slow");
+assert.doesNotMatch(script.slice(script.indexOf('  Start-ScheduledTask')), /quietDeadline|health-timeout/,
+  "startup has no overall deadline; the bounded quiet check may only abort BEFORE stopping any work");
+assert.ok(script.indexOf('$quietSamples -lt 3') < script.indexOf(' Stop-Process'));
+assert.ok(script.indexOf('Process identity changed; restart cancelled.') < script.indexOf(' Stop-Process'));
+assert.match(script, /admission\.activeRequests -eq 0/);
+assert.match(script, /activity\.running -eq 0/);
 assert.match(script, /\$oldPids=@\(100,200\)/);
 assert.match(script, /secretValuesLogged=\$false/);
 assert.match(script, /Unregister-ScheduledTask -TaskName \$helperTaskName/);
@@ -92,6 +132,16 @@ const coldStartScript = buildRestartPowerShell({
   resultPath: "x",
 });
 assert.match(coldStartScript, /\$oldPids=@\(\)/, "zero-listener recovery must be a supported cold-start path");
+assert.match(coldStartScript, /\$hasGateway=\$false/);
+const preserveJobScript=buildRestartPowerShell({taskName:'x',gatewayPort:7678,gatewayPid:100,corePids:[200],resultPath:'x',
+  nodePath:'C:\\Node\\node.exe',launcherPath:'C:\\DevSpace\\scripts\\devspace-fixed-backend.mjs',configDir:'C:\\State'});
+assert.match(preserveJobScript,/Start-Process -FilePath \$nodePath/);
+assert.doesNotMatch(preserveJobScript,/Stop-ScheduledTask|Start-ScheduledTask|Unregister-ScheduledTask/);
+if (process.platform === 'win32') {
+  const encoded=Buffer.from(preserveJobScript,'utf8').toString('base64');
+  const check=`$t=$null;$e=$null;[System.Management.Automation.Language.Parser]::ParseInput([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encoded}')),[ref]$t,[ref]$e)|Out-Null; if($e.Count){$e|ForEach-Object{$_.Message};exit 1}`;
+  execFileSync('powershell.exe',['-NoProfile','-NonInteractive','-Command',check],{windowsHide:true});
+}
 
 {
   const rows = await queryListenerProcesses([100, 200], {
@@ -106,6 +156,26 @@ assert.match(coldStartScript, /\$oldPids=@\(\)/, "zero-listener recovery must be
   assert.equal(rows[0].processId, 100);
   assert.equal(Object.hasOwn(rows[0], "parentProcessId"), false, "fixture confirms parser preserves only fields returned by PowerShell");
 }
+
+const worker=readFileSync(new URL('../scripts/devspace-gateway-replace-worker.mjs',import.meta.url),'utf8');
+const wholeRestart=readFileSync(new URL('../scripts/devspace-stable-gateway-whole-restart.mjs',import.meta.url),'utf8');
+assert.ok(wholeRestart.indexOf('topology === "cold-start"') < wholeRestart.indexOf('const jobProbe'),
+  "zero-listener cold start must bypass breakaway proof because no process is stopped");
+assert.match(wholeRestart, /Start-ScheduledTask -TaskName/);
+assert.match(wholeRestart, /cold-start-ready/);
+assert.match(wholeRestart, /currentCores\.length === 1/);
+assert.match(wholeRestart, /currentCores\[0\]\.pid === Number\(memoryBody\.pid\)/);
+assert.doesNotMatch(worker,/Stop-ScheduledTask|TerminateJobObject|taskkill|Stop-Job/);
+assert.match(worker,/actual\.createdAt!==p\.createdAt/);
+assert.match(worker,/job\.breakawayAllowed!==true/);
+assert.match(worker,/job\.silentBreakaway!==true/);
+assert.ok(worker.indexOf("if(!quiet(await snapshot()))") < worker.indexOf('process.kill(p.pid)'));
+assert.match(worker,/await save\('replacing-exact-processes'/);
+assert.match(worker,/if\(process\.argv\.includes\('--preflight-only'\)\)/);
+assert.match(worker,/devspace-fixed-backend\.mjs/);
+assert.match(worker,/classifyGatewayReplacementBoundary/);
+assert.match(worker,/boundaryMode/);
+assert.match(worker,/--launch-breakaway/);
 
 console.log(JSON.stringify({
   ok: true,

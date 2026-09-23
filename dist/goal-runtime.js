@@ -1,9 +1,12 @@
 import { randomBytes } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
+import { atomicWriteJson } from "./atomic-file.js";
+import { enqueueRecoverablePersist } from "./recoverable-persist-queue.js";
 
 const STATE_VERSION = 1;
 const GOAL_STATUSES = new Set(["active", "paused", "blocked", "completed", "stopped"]);
+const NONTERMINAL_GOAL_STATUSES = new Set(["active", "paused", "blocked"]);
 const ROUND_STATES = new Set(["working", "reported"]);
 const CONTINUATION_STATES = new Set(["idle", "pending", "dispatching", "dispatched"]);
 const MIN_CRITERIA = 1;
@@ -15,6 +18,7 @@ const MAX_BLOCKER_FINGERPRINT_CHARS = 500;
 const MAX_EVIDENCE_CHARS = 4_000;
 const MAX_CONVERSATION_ID_CHARS = 240;
 const REPORT_HISTORY_LIMIT = 32;
+const ROUND_BEGIN_TIMESTAMP_SLOP_MS = 5_000;
 const DEFAULT_DISPATCH_LEASE_MS = 45_000;
 const DEFAULT_DISPATCH_RECOVERY_MS = 120_000;
 const DEFAULT_ROUND_RECOVERY_RELEASE_MS = 5_000;
@@ -75,9 +79,9 @@ function buildRoundRecoveryPrompt(goal, recoveryId) {
   return [
     "[DEVSPACE_GOAL_ROUND_RECOVERY]",
     `Resume DevSpace Goal ${goal.id} in the same working round ${goal.round}.`,
-    "The previous assistant turn ended before devspace_goal_turn_report. DevSpace inserted this recovery turn into the exact same conversation page; it is not new user intent and not a new Goal round.",
+    "The previous assistant turn ended before devspace_goal_turn_report. DevSpace resumed this exact conversation through a backend-owned hidden host continuation; no user message or composer draft was created. This is not new user intent and not a new Goal round.",
     "Do not call devspace_goal_round_begin. Read the current Goal and Plan state, continue meaningful unfinished work for this same round, verify progress, then call devspace_goal_turn_report as the final tool call before one complete visible final report.",
-    "Do not stop after merely acknowledging this recovery prompt. Do not send another recovery/follow-up turn. Preserve the full original Goal objective and success criteria.",
+    "Do not stop after merely acknowledging this hidden recovery instruction. Do not send another recovery/follow-up turn. Preserve the full original Goal objective and success criteria.",
     `Recovery id: ${recoveryId}`,
   ].join("\n");
 }
@@ -138,6 +142,20 @@ function normalizeBlockerFingerprint(value) {
     .replace(/\s+/g, " ");
 }
 
+function normalizeObservedRoundBeganAt(value, { reportedAt = null, nowMs = Date.now() } = {}) {
+  if (value === undefined || value === null || String(value).trim() === "") return null;
+  const parsed = Date.parse(String(value));
+  if (!Number.isFinite(parsed)) throw new Error("Observed Goal round start timestamp is invalid.");
+  const reportMs = Date.parse(String(reportedAt || ""));
+  if (Number.isFinite(reportMs) && parsed < reportMs - ROUND_BEGIN_TIMESTAMP_SLOP_MS) {
+    throw new Error("Observed Goal round start predates the reported continuation boundary.");
+  }
+  if (parsed > Number(nowMs) + 60_000) {
+    throw new Error("Observed Goal round start is implausibly in the future.");
+  }
+  return new Date(parsed).toISOString();
+}
+
 function normalizeSuccessCriteria(values) {
   if (!Array.isArray(values) || values.length < MIN_CRITERIA || values.length > MAX_CRITERIA) {
     throw new Error(`Goal requires ${MIN_CRITERIA}-${MAX_CRITERIA} success criteria.`);
@@ -146,6 +164,16 @@ function normalizeSuccessCriteria(values) {
     id: randomId("criterion"),
     text: cleanText(value, MAX_CRITERION_CHARS, "Success criterion"),
   }));
+}
+
+function nonterminalConversationGoals(state, conversationId, excludeGoalId = null) {
+  const expected = normalizeConversationId(conversationId);
+  if (!expected) return [];
+  return Object.values(state?.goals || {}).filter((goal) => (
+    goal?.id !== excludeGoalId
+    && NONTERMINAL_GOAL_STATUSES.has(goal?.status)
+    && normalizeConversationId(goal?.conversationId) === expected
+  ));
 }
 
 function validateGoalShape(goal) {
@@ -228,12 +256,8 @@ export class GoalRuntime {
   }
 
   async save() {
-    const snapshot = JSON.stringify(this.state, null, 2);
-    this.persistQueue = this.persistQueue.then(async () => {
-      await mkdir(dirname(this.statePath), { recursive: true });
-      await writeFile(this.statePath, snapshot, "utf8");
-    });
-    await this.persistQueue;
+    const snapshot = clone(this.state);
+    await enqueueRecoverablePersist(this, () => atomicWriteJson(this.statePath, snapshot));
   }
 
   getGoal(goalId) {
@@ -251,9 +275,14 @@ export class GoalRuntime {
   async start({ objective, successCriteria, conversationId }) {
     await this.ready;
     const timestamp = this.nowIso();
+    const normalizedConversationId = normalizeConversationId(conversationId);
+    const collision = nonterminalConversationGoals(this.state, normalizedConversationId)[0] || null;
+    if (collision) {
+      throw new Error(`Conversation ${normalizedConversationId} already has nonterminal Goal ${collision.id} (${collision.status}); resume that Goal instead of creating another.`);
+    }
     const goal = {
       id: randomId("goal"),
-      conversationId: normalizeConversationId(conversationId),
+      conversationId: normalizedConversationId,
       objective: cleanText(objective, MAX_OBJECTIVE_CHARS, "Goal objective"),
       status: "active",
       round: 1,
@@ -339,6 +368,10 @@ export class GoalRuntime {
     if (current) {
       throw new Error(`Goal ${goal.id} is already bound to conversation ${current} and cannot move without a verified Auto Compact continuation.`);
     }
+    const collision = nonterminalConversationGoals(this.state, target, goal.id)[0] || null;
+    if (collision) {
+      throw new Error(`Conversation ${target} already has nonterminal Goal ${collision.id} (${collision.status}); refusing to bind a second Goal.`);
+    }
     goal.conversationId = target;
     this.touch(goal);
     await this.save();
@@ -355,8 +388,8 @@ export class GoalRuntime {
     const current = normalizeConversationId(goal.conversationId);
     if (current === next) return clone(goal);
     if (current !== prior) throw new Error(`Goal ${goal.id} is bound to ${current || "none"}, not expected source ${prior}.`);
-    const collision = Object.values(this.state.goals).find((item) => item?.id !== goal.id && item?.status === "active" && normalizeConversationId(item.conversationId) === next);
-    if (collision) throw new Error(`Target conversation ${next} is already bound to active Goal ${collision.id}.`);
+    const collision = nonterminalConversationGoals(this.state, next, goal.id)[0] || null;
+    if (collision) throw new Error(`Target conversation ${next} is already bound to nonterminal Goal ${collision.id} (${collision.status}).`);
     goal.conversationId = next;
     goal.conversationContinuity = [
       ...(Array.isArray(goal.conversationContinuity) ? goal.conversationContinuity : []),
@@ -587,13 +620,32 @@ export class GoalRuntime {
     throw new Error(`Invalid Goal continuation action: ${command}`);
   }
 
-  async roundBegin({ goalId, continuationId }) {
+  async roundBegin({ goalId, continuationId, roundBeganAt = null }) {
     await this.ready;
     const goal = this.getGoal(goalId);
     const requestedContinuationId = String(continuationId ?? "");
     if (!requestedContinuationId) throw new Error("Goal round begin requires continuationId.");
 
+    const observedRoundBeganAt = normalizeObservedRoundBeganAt(roundBeganAt, {
+      reportedAt: goal.lastRoundReport?.reportedAt || null,
+      nowMs: this.now(),
+    });
+
     if (goal.lastConsumedContinuationId === requestedContinuationId) {
+      // A real user turn can supersede a hidden continuation while the host
+      // acknowledgement is lost. The driver may only learn the exact native
+      // user timestamp after restart. Correct the current round boundary
+      // backwards once, never forwards, so same-round recovery can correlate
+      // the already-running turn without reopening or replaying it.
+      const existingMs = Date.parse(String(goal.roundBeganAt || ""));
+      const observedMs = Date.parse(String(observedRoundBeganAt || ""));
+      if (observedRoundBeganAt && goal.status === "active" && goal.roundState === "working"
+        && goal.lastRoundReport?.round === goal.round - 1
+        && (!Number.isFinite(existingMs) || (Number.isFinite(observedMs) && observedMs < existingMs))) {
+        goal.roundBeganAt = observedRoundBeganAt;
+        this.touch(goal);
+        await this.save();
+      }
       return clone(goal);
     }
     if (goal.status !== "active") throw new Error(`Goal ${goal.id} cannot begin a new round from ${goal.status}.`);
@@ -610,7 +662,7 @@ export class GoalRuntime {
     goal.lastConsumedLeaseId = goal.continuation.leaseId ?? null;
     goal.round += 1;
     goal.roundState = "working";
-    goal.roundBeganAt = this.nowIso();
+    goal.roundBeganAt = observedRoundBeganAt || this.nowIso();
     goal.roundRecovery = idleRoundRecovery(goal.round);
     goal.continuation = idleContinuation();
     this.touch(goal);
@@ -620,21 +672,97 @@ export class GoalRuntime {
 
   async recoverableWorkingRounds() {
     await this.ready;
+    const counts = new Map();
+    for (const goal of Object.values(this.state.goals)) {
+      const conversationId = normalizeConversationId(goal?.conversationId);
+      if (!conversationId || !NONTERMINAL_GOAL_STATUSES.has(goal?.status)) continue;
+      counts.set(conversationId, Number(counts.get(conversationId) || 0) + 1);
+    }
     return Object.values(this.state.goals)
       .filter((goal) => (
         goal.status === "active"
         && goal.roundState === "working"
-        && goal.round >= 2
-        && Boolean(goal.lastConsumedContinuationId)
+        && goal.round >= 1
         && Boolean(goal.roundBeganAt)
+        && (!goal.conversationId || counts.get(goal.conversationId) === 1)
       ))
       .map((goal) => clone(ensureRoundRecoveryShape(goal)));
+  }
+
+  async hasConversationCollision({ goalId, conversationId } = {}) {
+    await this.ready;
+    const goal = goalId ? this.getGoal(goalId) : null;
+    const expected = normalizeConversationId(conversationId ?? goal?.conversationId);
+    if (!expected) return false;
+    return nonterminalConversationGoals(this.state, expected, goal?.id || null).length > 0;
+  }
+
+  async conversationCollisions({ limit = 20 } = {}) {
+    await this.ready;
+    const groups = new Map();
+    for (const goal of Object.values(this.state.goals)) {
+      const conversationId = normalizeConversationId(goal?.conversationId);
+      if (!conversationId || !NONTERMINAL_GOAL_STATUSES.has(goal?.status)) continue;
+      const rows = groups.get(conversationId) || [];
+      rows.push({ id: goal.id, status: goal.status, round: goal.round, roundState: goal.roundState, updatedAt: goal.updatedAt });
+      groups.set(conversationId, rows);
+    }
+    return [...groups.entries()]
+      .filter(([, goals]) => goals.length > 1)
+      .sort((left, right) => right[1].length - left[1].length || left[0].localeCompare(right[0]))
+      .slice(0, Math.max(1, Math.min(100, Number(limit) || 20)))
+      .map(([conversationId, goals]) => ({ conversationId, goals: goals.map((goal) => ({ ...goal })) }));
+  }
+
+  async resolveConversationCollision({ conversationId, keepGoalId, reason = "verified-legacy-duplicate-repair" } = {}) {
+    await this.ready;
+    const expected = normalizeConversationId(conversationId);
+    const keepId = String(keepGoalId || "").trim();
+    const keep = this.getGoal(keepId);
+    if (!expected || keep.conversationId !== expected || !NONTERMINAL_GOAL_STATUSES.has(keep.status)) {
+      throw new Error("Collision repair requires the exact nonterminal Goal currently bound to the conversation.");
+    }
+    const group = nonterminalConversationGoals(this.state, expected);
+    if (group.length <= 1) return { kept: clone(keep), stopped: [], repaired: false };
+    if (!group.some((goal) => goal.id === keep.id)) {
+      throw new Error(`Goal ${keep.id} is not part of the current conversation collision.`);
+    }
+    const keepCreatedAt = Date.parse(String(keep.createdAt || ""));
+    const stale = group.filter((goal) => goal.id !== keep.id);
+    const unsafe = stale.filter((goal) => (
+      goal.round !== 1
+      || goal.roundState !== "working"
+      || goal.lastRoundReport != null
+      || (Array.isArray(goal.recentReports) && goal.recentReports.length > 0)
+      || goal.completionEvidence != null
+      || goal.continuation?.state !== "idle"
+      || !Number.isFinite(Date.parse(String(goal.createdAt || "")))
+      || !Number.isFinite(keepCreatedAt)
+      || Date.parse(String(goal.createdAt)) >= keepCreatedAt
+    ));
+    if (unsafe.length) {
+      throw new Error(`Collision repair refused: Goals ${unsafe.map((goal) => goal.id).join(", ")} contain progressed or non-older state.`);
+    }
+    const repairedAt = this.nowIso();
+    const normalizedReason = cleanText(reason, 240, "Collision repair reason");
+    for (const goal of stale) {
+      goal.status = "stopped";
+      goal.stoppedAt = repairedAt;
+      goal.continuation = idleContinuation();
+      goal.roundRecovery = idleRoundRecovery(goal.round);
+      goal.supersededByGoalId = keep.id;
+      goal.supersededAt = repairedAt;
+      goal.supersededReason = normalizedReason;
+      this.touch(goal);
+    }
+    await this.save();
+    return { kept: clone(keep), stopped: stale.map((goal) => clone(goal)), repaired: true };
   }
 
   async claimRoundRecovery({ goalId } = {}) {
     await this.ready;
     const goal = ensureRoundRecoveryShape(this.getGoal(goalId));
-    if (goal.status !== "active" || goal.roundState !== "working" || goal.round < 2 || !goal.lastConsumedContinuationId) {
+    if (goal.status !== "active" || goal.roundState !== "working" || goal.round < 1 || !goal.roundBeganAt) {
       return { goal: clone(goal), claimed: false, reason: "round-not-recoverable" };
     }
 

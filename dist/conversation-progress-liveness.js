@@ -23,6 +23,11 @@ function cleanConversationId(value) {
   return text && /^[A-Za-z0-9_-]{8,200}$/.test(text) ? text : null;
 }
 
+function cleanMessageId(value) {
+  const text = cleanText(value, 200);
+  return text && /^[A-Za-z0-9_-]{8,200}$/.test(text) ? text : null;
+}
+
 function finiteTime(value) {
   if (Number.isFinite(Number(value))) return Number(value);
   const parsed = Date.parse(String(value || ""));
@@ -113,6 +118,8 @@ function serializableRecord(record) {
     planId: record.planId || null,
     planRevision: Number(record.planRevision || 0),
     episodeRevision: Number(record.episodeRevision || 0),
+    sourceUserMessageId: cleanMessageId(record.sourceUserMessageId),
+    lastGoalContinuationId: cleanMessageId(record.lastGoalContinuationId),
     armed: record.armed === true,
     turnState: cleanText(record.turnState, 80) || "idle",
     duplicatePageObserved: record.duplicatePageObserved === true,
@@ -199,10 +206,17 @@ export class ConversationProgressLivenessSupervisor {
       const record = this.#newRecord(conversationId);
       record.planId = cleanText(value?.planId, 200);
       record.planRevision = Number(value?.planRevision || 0);
+      record.sourceUserMessageId = cleanMessageId(value?.sourceUserMessageId);
+      record.lastGoalContinuationId = cleanMessageId(value?.lastGoalContinuationId);
       record.lastReportAt = value?.lastReportAt || null;
       record.lastContinueAt = value?.lastContinueAt || null;
       record.restartObservedAt = finiteTime(value?.restartObservedAt) ? value.restartObservedAt : null;
       record.generationResetAt = finiteTime(value?.generationResetAt) ? value.generationResetAt : null;
+      // Keep the episode identity monotonic across Core restarts even when the
+      // persisted episode is terminal/rescued and must remain disarmed. Only
+      // preserving the counter is safe; eligibility, attempts and timing are
+      // still rebuilt below from the stricter restorable-state checks.
+      record.episodeRevision = Math.max(0, Number(value?.episodeRevision || 0));
       const persistedTurnState = cleanText(value?.turnState, 80);
       const startedAtMs = finiteTime(value?.startedAt) || 0;
       const interruptedAtMs = finiteTime(value?.interruptedAt) || 0;
@@ -218,7 +232,7 @@ export class ConversationProgressLivenessSupervisor {
       if (restorable) {
         const restartObservedAt = new Date(startupNow).toISOString();
         const alreadyInterrupted = persistedTurnState === "interrupted";
-        record.episodeRevision = Math.max(1, Number(value?.episodeRevision || 1));
+        record.episodeRevision = Math.max(1, record.episodeRevision || 1);
         record.armed = true;
         // A replacement Core cannot continue an in-flight MCP/tool request
         // owned by its predecessor. Preserve the episode but make the restart
@@ -269,17 +283,72 @@ export class ConversationProgressLivenessSupervisor {
     const at = new Date(atMs).toISOString();
     const kind = String(event?.kind || "").toLowerCase();
     const record = this.#record(conversationId);
+    const sourceUserMessageId = cleanMessageId(event?.sourceUserMessageId);
+    const goalContinuationId = cleanMessageId(event?.goalContinuationId ?? event?.continuationId);
+    const goalContinuationEvent = kind === "goal-continuation-started";
+    const duplicateGoalContinuation = goalContinuationEvent
+      && goalContinuationId
+      && record.lastGoalContinuationId === goalContinuationId;
+    const invalidGoalContinuation = goalContinuationEvent && !goalContinuationId;
+    const sameActiveUserTurn = kind === "started"
+      && sourceUserMessageId
+      && record.armed === true
+      && record.sourceUserMessageId === sourceUserMessageId
+      && ["running", "interrupted", "restart-interrupted", "completion-pending", "uncertain"].includes(record.turnState);
     const generatedResetCancellation = kind === "failed"
       && event?.canceled === true
       && record.generationResetPending === true;
     const transportOnlyFinish = kind === "finished" && event?.transportOnly === true;
-    if (!generatedResetCancellation && !transportOnlyFinish) record.lastActivityAt = at;
+    const transportOnlyObservation = transportOnlyFinish || ["metadata", "resumed"].includes(kind)
+      || sameActiveUserTurn || duplicateGoalContinuation || invalidGoalContinuation;
+    if (!generatedResetCancellation && !transportOnlyObservation) record.lastActivityAt = at;
     record.updatedAt = new Date(this.now()).toISOString();
 
-    if (kind === "started") {
+    if (duplicateGoalContinuation) {
+      // The hidden continuation supervisor can reconcile the same committed
+      // host send more than once after acknowledgement loss or Core restart.
+      // The continuation id is the episode id: duplicate notification must
+      // never reset the twenty-minute clock or replenish the one-shot Rescue.
+      record.lastDispatchState = "duplicate-hidden-goal-continuation-observed";
+    } else if (invalidGoalContinuation) {
+      record.lastDispatchState = "invalid-hidden-goal-continuation-ignored";
+    } else if (goalContinuationEvent) {
+      // A backend-owned hidden assistant continuation is a new physical turn
+      // even though ChatGPT correctly keeps the same latest user message id.
+      // Explicitly create a fresh Rescue episode so one rescue used in an
+      // earlier Goal round cannot exhaust all later rounds.
       record.armed = true;
       record.episodeRevision = Number(record.episodeRevision || 0) + 1;
       record.turnState = "running";
+      record.sourceUserMessageId = sourceUserMessageId || record.sourceUserMessageId;
+      record.lastGoalContinuationId = goalContinuationId;
+      record.startedAt = at;
+      record.interruptedAt = null;
+      record.completedAt = null;
+      record.lastActivityAt = at;
+      record.lastReportAt = null;
+      record.lastContinueAt = null;
+      record.restartObservedAt = null;
+      record.generationResetAt = null;
+      record.generationResetPending = false;
+      record.continueAttempts = 0;
+      record.idleObservedAt = null;
+      record.reportOverdue = false;
+      record.rescuePending = false;
+      record.rescueEvidence = null;
+      record.duplicatePageObserved = false;
+      record.uiCleanupPending = true;
+      record.lastDispatchState = "hidden-goal-continuation-turn-started";
+    } else if (sameActiveUserTurn) {
+      // ChatGPT can retry the same backend turn via /conversation instead of
+      // /conversation/resume. The stable source user-message id proves no new
+      // user intent, so the twenty-minute Rescue clock must not restart.
+      record.lastDispatchState = "same-user-turn-request-reobserved-nonterminal";
+    } else if (kind === "started") {
+      record.armed = true;
+      record.episodeRevision = Number(record.episodeRevision || 0) + 1;
+      record.turnState = "running";
+      record.sourceUserMessageId = sourceUserMessageId;
       record.startedAt = at;
       record.interruptedAt = null;
       record.completedAt = null;
@@ -296,6 +365,13 @@ export class ConversationProgressLivenessSupervisor {
       record.duplicatePageObserved = false;
       record.uiCleanupPending = true;
       record.lastDispatchState = "conversation-turn-started";
+    } else if (kind === "resumed") {
+      // A stream reconnect is neither new user intent nor useful Agent work.
+      // Preserve the existing episode and silence anchors exactly as-is.
+      record.lastDispatchState = record.armed
+        ? "conversation-turn-stream-resumed-nonterminal"
+        : "idle-stream-resume-observed";
+      if (!record.sourceUserMessageId && sourceUserMessageId) record.sourceUserMessageId = sourceUserMessageId;
     } else if (kind === "finished" && event?.transportOnly === true) {
       // Network.loadingFinished closes only the browser HTTP transport. A
       // ChatGPT tool-using assistant turn can continue for many more MCP calls
@@ -390,11 +466,29 @@ export class ConversationProgressLivenessSupervisor {
     return serializableRecord(record);
   }
 
-  async noteActivity({ conversationId, observedAtMs } = {}) {
+  async noteActivity({ conversationId, observedAtMs, sourceUserMessageId } = {}) {
     const id = cleanConversationId(conversationId);
     if (!id) return null;
     const record = this.#record(id);
     if (!record.armed) return serializableRecord(record);
+    const source = cleanMessageId(sourceUserMessageId);
+    if (!source) {
+      record.lastDispatchState = "substantive-tool-activity-without-current-source-ignored";
+      record.updatedAt = new Date(this.now()).toISOString();
+      await this.#persist();
+      return serializableRecord(record);
+    }
+    if (record.sourceUserMessageId && record.sourceUserMessageId !== source) {
+      // A reusable MCP/session identity can outlive the browser turn that
+      // created it. Never let work from another or older turn postpone this
+      // conversation's Rescue. The caller must re-read the exact live page and
+      // pass its current source user-message id for every accepted activity.
+      record.lastDispatchState = "substantive-tool-activity-source-mismatch-ignored";
+      record.updatedAt = new Date(this.now()).toISOString();
+      await this.#persist();
+      return serializableRecord(record);
+    }
+    if (!record.sourceUserMessageId) record.sourceUserMessageId = source;
     const atMs = finiteTime(observedAtMs) || this.now();
     const existingMs = finiteTime(record.lastActivityAt) || 0;
     if (atMs >= existingMs) record.lastActivityAt = new Date(atMs).toISOString();
@@ -474,7 +568,10 @@ export class ConversationProgressLivenessSupervisor {
           : page?.state || "conversation-page-not-open";
         continue;
       }
-      record.duplicatePageObserved = false;
+      record.duplicatePageObserved = page.duplicatePageObserved === true;
+      if (!record.sourceUserMessageId) {
+        record.sourceUserMessageId = cleanMessageId(page.latestUserMessageId);
+      }
 
       if (page.normalCompletion === true) {
         this.#disarm(record, "completed", now, "normal-completion-observed-on-page");
@@ -584,6 +681,7 @@ export class ConversationProgressLivenessSupervisor {
         conversationId,
         target: page,
         attempt: 1,
+        sourceUserMessageId: record.sourceUserMessageId,
         silenceMs: rescueSilenceMs,
         rescueEvidence: record.rescueEvidence,
       }).catch((error) => ({ ok: false, state: error instanceof Error ? error.message : String(error) }));
@@ -648,6 +746,8 @@ export class ConversationProgressLivenessSupervisor {
       stalledGeneratingSilenceRescue: true,
       substantiveToolActivityResetsRescueClock: true,
       oneRescuePerInterruptionEpisode: true,
+      hiddenGoalContinuationStartsNewRescueEpisode: true,
+      duplicateGoalContinuationDoesNotResetClock: true,
       activePlansDoNotArmRescue: true,
       legacyEpisodesRestartDisarmed: true,
       terminalEpisodesRestartDisarmed: true,
@@ -665,6 +765,8 @@ export class ConversationProgressLivenessSupervisor {
       planId: null,
       planRevision: 0,
       episodeRevision: 0,
+      sourceUserMessageId: null,
+      lastGoalContinuationId: null,
       armed: false,
       turnState: "idle",
       duplicatePageObserved: false,

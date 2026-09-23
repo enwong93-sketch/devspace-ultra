@@ -628,6 +628,8 @@ export async function rewriteHiddenRolloverPausedRequest(client, params, {
 
 export function parseClassicTurnRequest(request = {}) {
   if (String(request.method || "").toUpperCase() !== "POST" || !isTurnUrl(request.url)) return null;
+  let requestPath = null;
+  try { requestPath = new URL(String(request.url || "")).pathname; } catch {}
   let body;
   try { body = JSON.parse(String(request.postData || "{}")); } catch { return null; }
   const modelSlug = typeof body?.model === "string" ? body.model.trim() : "";
@@ -638,7 +640,12 @@ export function parseClassicTurnRequest(request = {}) {
       .filter((value) => /^[A-Za-z0-9_.:-]{1,220}$/.test(value))
       .slice(0, 256),
   )];
+  const sourceUserMessageId = [...(Array.isArray(body?.messages) ? body.messages : [])]
+    .reverse()
+    .find((message) => message?.author?.role === "user" && typeof message?.id === "string")
+    ?.id?.trim() || null;
   return {
+    transportKind: requestPath === "/backend-api/f/conversation/resume" ? "resume" : "start",
     modelSlug,
     thinkingEffort: typeof body?.thinking_effort === "string"
       ? body.thinking_effort
@@ -648,6 +655,9 @@ export function parseClassicTurnRequest(request = {}) {
     sessionCorrelationFingerprints: sessionCorrelationFingerprintsFromHeaders(request?.headers || {}),
     turnTraceFingerprint: turnTraceFingerprintFromClassicRequest(request),
     traceCorrelationFingerprints: requestTraceCorrelationFingerprints(request?.headers || {}),
+    sourceUserMessageId: sourceUserMessageId && /^[A-Za-z0-9_-]{8,200}$/.test(sourceUserMessageId)
+      ? sourceUserMessageId
+      : null,
     localFunctionNames,
     estimatedInputTokens: estimateMessageTokens(body?.messages),
   };

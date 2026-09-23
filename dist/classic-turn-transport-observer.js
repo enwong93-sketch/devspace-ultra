@@ -105,6 +105,7 @@ export class ClassicTurnTransportTracker {
     const firstSeenAt = this.now();
     this.pending.set(requestId, {
       conversationId: metadata.conversationId,
+      sourceUserMessageId: metadata.sourceUserMessageId || null,
       firstSeenAt,
       localFunctionNames: metadata.localFunctionNames || [],
       turnTraceFingerprint: metadata.turnTraceFingerprint || null,
@@ -114,9 +115,13 @@ export class ClassicTurnTransportTracker {
     });
     this.#enforceCap();
     this.#emitActiveTurn({
-      kind: "started",
+      // /conversation/resume reconnects an existing response stream. Treating
+      // it as a fresh user turn would reset the exact-conversation Rescue clock
+      // on every reconnect and can postpone recovery forever.
+      kind: metadata.transportKind === "resume" ? "resumed" : "started",
       requestId,
       conversationId: metadata.conversationId,
+      sourceUserMessageId: metadata.sourceUserMessageId || null,
       localFunctionNames: metadata.localFunctionNames || [],
       turnTraceFingerprint: metadata.turnTraceFingerprint || null,
       sessionFingerprint: metadata.sessionFingerprint || null,
@@ -152,6 +157,7 @@ export class ClassicTurnTransportTracker {
         kind: "metadata",
         requestId,
         conversationId: entry.conversationId,
+        sourceUserMessageId: entry.sourceUserMessageId || null,
         sessionFingerprint: entry.sessionFingerprint || null,
         sessionCorrelationFingerprints,
         traceCorrelationFingerprints,
@@ -239,6 +245,7 @@ export class ClassicTurnTransportTracker {
         kind: "failed",
         requestId,
         conversationId: entry.conversationId,
+        sourceUserMessageId: entry.sourceUserMessageId || null,
         errorText: String(params?.errorText || "").slice(0, 180),
         canceled: params?.canceled === true,
         blockedReason: params?.blockedReason ? String(params.blockedReason).slice(0, 120) : null,
@@ -263,6 +270,7 @@ export class ClassicTurnTransportTracker {
         transportOnly: true,
         requestId,
         conversationId: entry.conversationId,
+        sourceUserMessageId: entry.sourceUserMessageId || null,
         sessionCorrelationFingerprints: entry.sessionCorrelationFingerprints || [],
         traceCorrelationFingerprints: entry.traceCorrelationFingerprints || [],
         observedAt: observedAt(atMs),

@@ -71,7 +71,7 @@ async function resolveLiveConversation(runtimeKey, expectedConversationId = null
     clearTimeout(timer);
   }
   const pages = (Array.isArray(targets) ? targets : [])
-    .filter((target) => target?.type === "page" && /chatgpt\.com/i.test(String(target?.url || "")));
+    .filter((target) => { try { const url = new URL(target?.url); return target?.type === 'page' && url.protocol === 'https:' && url.hostname === 'chatgpt.com'; } catch { return false; } });
   if (pages.length !== 1) fail(`${runtimeKey} must expose exactly one ChatGPT page; observed ${pages.length}.`);
   const url = String(pages[0].url || "");
   const conversationId = new URL(url).pathname.match(/\/c\/([^/?#]+)/)?.[1] || null;
@@ -231,7 +231,25 @@ const liveConversation = await resolveLiveConversation(runtimeKey, flags["expect
 const conversationId = liveConversation.conversationId;
 const authorityStateCurrent = authorityMentionsConversation(authorityState, runtimeKey, conversationId);
 
-if (command === "progress") {
+if (command === 'bind-progress') {
+  if (!flags['expected-conversation-id'] || !/^[A-Za-z0-9_-]{16,200}$/.test(String(flags['claim-id'] || ''))) {
+    fail('bind-progress requires the original opaque --claim-id and explicit --expected-conversation-id.');
+  }
+  const gatewayPort = Number(files.config.stableGatewayPort || files.config.edgeBackendPort || 7678);
+  const snapshot = await fetch(`http://127.0.0.1:${gatewayPort}/__devspace/live/snapshot`, { signal: AbortSignal.timeout(4000) }).then(r => r.json());
+  const slot = snapshot.gateway?.activeSlot;
+  if (!['a', 'b'].includes(slot)) fail('No verified active Core slot.');
+  const port = Number(slot === 'a' ? files.config.stableGatewayCoreAPort || gatewayPort + 10 : files.config.stableGatewayCoreBPort || gatewayPort + 11);
+  if (!Number.isInteger(port) || port < 1024 || port > 65535) fail('Invalid active Core port.');
+  const response = await fetch(`http://127.0.0.1:${port}/__devspace/conversation/bind-progress-claim`, {
+    method: 'POST', signal: AbortSignal.timeout(12000),
+    headers: { 'content-type': 'application/json', 'x-devspace-owner-token': files.auth.ownerToken },
+    body: JSON.stringify({ claimId: String(flags['claim-id']), runtimeKey, expectedConversationId: conversationId }),
+  });
+  const result = await response.json();
+  if (!response.ok || !result.bound || result.conversationId !== conversationId) fail(result.error || 'Exact provider binding failed.');
+  console.log(JSON.stringify({ ...result, ownerBootstrap: true, rawIdentityReturned: false, credentialsReturned: false }));
+} else if (command === "progress") {
   const message = flags["message-file"]
     ? await readFile(String(flags["message-file"]), "utf8")
     : String(flags.message || "");

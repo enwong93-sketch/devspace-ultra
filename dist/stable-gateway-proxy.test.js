@@ -77,7 +77,7 @@ function postJson(baseUrl, body, headers = {}, { onData } = {}) {
   });
 }
 
-async function createFakeCore(id, { failInitializeAt, unknownSessionOnce = false, genericFailureStatus = null, tools = FAKE_TOOLS } = {}) {
+async function createFakeCore(id, { failInitializeAt, unknownSessionOnce = false, genericFailureStatus = null, tools = FAKE_TOOLS, rejectedAuthorization = null } = {}) {
   const observed = [];
   const state = {
     streamEnded: false,
@@ -99,6 +99,9 @@ async function createFakeCore(id, { failInitializeAt, unknownSessionOnce = false
       clientSessionFingerprint: req.headers["x-devspace-client-session-fingerprint"],
     });
 
+    if (rejectedAuthorization && req.headers.authorization === rejectedAuthorization) {
+      res.statusCode=401;res.setHeader('content-type','application/json');res.end(JSON.stringify({error:'unauthorized'}));return;
+    }
     if (req.method === "GET" && req.url === "/mcp") {
       state.sseActive = true;
       res.statusCode = 200;
@@ -485,6 +488,29 @@ async function testStreamingResponseIsNotBuffered() {
   }
 }
 
+async function testRejectedAuthorizationCannotPoisonReplay() {
+  const bad='Bearer rejected-test-token';
+  const core=await createFakeCore('auth-core',{rejectedAuthorization:bad});
+  const registry=new StableGatewaySessionRegistry();
+  const gateway=createStableGatewayProxy({activeCore:{id:core.id,baseUrl:core.baseUrl},publicBaseUrl:'https://devspace-gateway.example.test',registry});
+  const server=createServer(gateway.handler);const base=await listen(server);
+  try {
+    const initialized=await postJson(base,{jsonrpc:'2.0',id:1,method:'initialize',params:{}},{authorization:'Bearer valid-test-token'});
+    const id=initialized.headers['mcp-session-id'];
+    const rejected=await postJson(base,{jsonrpc:'2.0',id:2,method:'tools/list',params:{}},{authorization:bad,'mcp-session-id':id});
+    assert.equal(rejected.status,401);
+    assert.equal(registry.lookup(id).authorization,'Bearer valid-test-token','a rejected App request must not replace the last Core-accepted replay credential');
+    const rotated=await postJson(base,{jsonrpc:'2.0',id:3,method:'tools/list',params:{}},{authorization:'Bearer rotated-valid-token','mcp-session-id':id});
+    assert.equal(rotated.status,200);
+    assert.equal(registry.lookup(id).authorization,'Bearer rotated-valid-token');
+    const replay=await gateway.replaySessionsToCore({id:core.id,baseUrl:core.baseUrl});
+    assert.equal(replay.droppedPublicSessionIds.length,0);
+    assert.equal(replay.deferredPublicSessionIds.length,0);
+    assert.deepEqual(replay.failureReasonCounts,{});
+  } finally {await close(server);await close(core.server);}
+}
+
+await testRejectedAuthorizationCannotPoisonReplay();
 await testInitializeAndStablePublicSession();
 await testGatewayForwardsOnlyDerivedClientSessionFingerprint();
 await testSessionBoundRequestTranslation();
@@ -547,6 +573,8 @@ async function testReplayPreservesPublicSessionAndInitializedNotification() {
     assert.deepEqual(tentative, {
       mappings: [{ publicSessionId, coreId: "core-b", backendSessionId: "core-b-backend-1" }],
       droppedPublicSessionIds: [],
+      deferredPublicSessionIds: [],
+      failureReasonCounts: {},
     });
     assert.equal(registry.lookup(publicSessionId).coreId, "core-a", "replay must remain tentative until an atomic commit");
     assert.deepEqual(coreB.observed.map((entry) => entry.method), ["initialize", "notifications/initialized", "tools/list"]);
@@ -575,12 +603,14 @@ async function testReplayDropsOnlyTheStaleSession() {
     }
     const replayed = await gateway.replaySessionsToCore({ id: coreB.id, baseUrl: coreB.baseUrl });
     assert.equal(replayed.mappings.length, 2, "one stale replay must not abort healthy session replay");
-    assert.equal(replayed.droppedPublicSessionIds.length, 1, "exactly one failing backend mapping must be isolated");
-    const dropped = replayed.droppedPublicSessionIds[0];
-    assert.equal(publicIds.includes(dropped), true);
-    assert.equal(registry.lookup(dropped)?.coreId, "unmapped", "failing replay must retain the lightweight public descriptor for lazy resurrection");
+    assert.equal(replayed.droppedPublicSessionIds.length, 0, "a transport/Core replay failure must not be reported as permanent session loss");
+    assert.equal(replayed.deferredPublicSessionIds.length, 1, "exactly one failing backend mapping must be deferred for lazy recovery");
+    assert.deepEqual(replayed.failureReasonCounts, { "initialize-failed": 1 });
+    const deferred = replayed.deferredPublicSessionIds[0];
+    assert.equal(publicIds.includes(deferred), true);
+    assert.equal(registry.lookup(deferred)?.coreId, "unmapped", "failing replay must retain the lightweight public descriptor for lazy resurrection");
     registry.commitMappings(replayed.mappings);
-    for (const publicId of publicIds.filter((id) => id !== dropped)) {
+    for (const publicId of publicIds.filter((id) => id !== deferred)) {
       assert.equal(registry.lookup(publicId).coreId, "core-b");
     }
   } finally {
@@ -654,7 +684,9 @@ async function testPromotionDropsOnlyFailedReplaySession() {
     const promoted = await gateway.promoteCore({ id: coreB.id, baseUrl: coreB.baseUrl }, { drainTimeoutMs: 500 });
     assert.equal(gateway.getActiveCore().id, "core-b", "healthy Core promotion must not be blocked by one stale public session");
     assert.equal(promoted.replayedSessions, 1);
-    assert.equal(promoted.droppedSessions, 1);
+    assert.equal(promoted.droppedSessions, 0);
+    assert.equal(promoted.deferredSessions, 1);
+    assert.deepEqual(promoted.replayFailureReasons, { "initialize-failed": 1 });
     const mapped = [firstPublic, secondPublic].filter((id) => registry.lookup(id)?.coreId === "core-b");
     const unmapped = [firstPublic, secondPublic].filter((id) => registry.lookup(id)?.coreId === "unmapped");
     assert.equal(unmapped.length, 1, "the stale backend mapping must be isolated without deleting the public descriptor");
@@ -823,6 +855,8 @@ async function testReplayDropsSessionWhenToolSchemaChanges() {
     const replayed = await gateway.replaySessionsToCore({ id: coreB.id, baseUrl: coreB.baseUrl });
     assert.deepEqual(replayed.mappings, []);
     assert.deepEqual(replayed.droppedPublicSessionIds, [publicSessionId]);
+    assert.deepEqual(replayed.deferredPublicSessionIds, []);
+    assert.deepEqual(replayed.failureReasonCounts, { "schema-stale": 1 });
     assert.equal(registry.lookup(publicSessionId), undefined, "schema-stale public sessions must be removed so the host performs a fresh initialize");
   } finally {
     await close(gatewayServer);
@@ -855,6 +889,8 @@ async function testReplayDropsSessionWhenRoutingDescriptionChanges() {
     const replayed = await gateway.replaySessionsToCore({ id: coreB.id, baseUrl: coreB.baseUrl });
     assert.deepEqual(replayed.mappings, []);
     assert.deepEqual(replayed.droppedPublicSessionIds, [publicSessionId]);
+    assert.deepEqual(replayed.deferredPublicSessionIds, []);
+    assert.deepEqual(replayed.failureReasonCounts, { "schema-stale": 1 });
     assert.equal(registry.lookup(publicSessionId), undefined, "description/output/routing metadata drift must force a fresh host initialize");
   } finally {
     await close(gatewayServer);

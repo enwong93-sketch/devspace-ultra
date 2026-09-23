@@ -223,7 +223,7 @@ export function createStableGatewayController({
           fatalCoreRecoveryError = null;
           noteActivity({
             title: "Core recovery completed",
-            detail: `Core ${String(slot).toUpperCase()} restarted as PID ${replacement.pid ?? "unknown"}; replayed ${replayed.mappings.length} session(s), dropped ${replayed.droppedPublicSessionIds.length} stale session(s).`,
+            detail: `Core ${String(slot).toUpperCase()} restarted as PID ${replacement.pid ?? "unknown"}; replayed ${replayed.mappings.length}, deferred ${replayed.deferredPublicSessionIds.length}, removed ${replayed.droppedPublicSessionIds.length} incompatible session(s).`,
           });
           reopenAdmission();
           return {
@@ -232,6 +232,8 @@ export function createStableGatewayController({
             activePid: replacement.pid ?? null,
             replayedSessions: replayed.mappings.length,
             droppedSessions: replayed.droppedPublicSessionIds.length,
+            deferredSessions: replayed.deferredPublicSessionIds.length,
+            replayFailureReasons: replayed.failureReasonCounts,
           };
         } catch (error) {
           if (replacement) await stopCoreSlot(replacement).catch(() => {});
@@ -280,26 +282,42 @@ export function createStableGatewayController({
       return;
     }
     const replayableStream = isReplayableMcpEventStream(req);
+    const requestAbort = new AbortController();
+    let entered = false;
+    let left = false;
+    const leave = () => {
+      if (replayableStream || !entered || left) return;
+      left = true;
+      admission.leave();
+    };
+    const markClientGone = () => {
+      requestAbort.abort();
+      leave();
+    };
+    req.once?.("aborted", markClientGone);
+    res.once?.("close", markClientGone);
     const admit = replayableStream
-      ? admission.waitForOpen()
-      : admission.enter();
+      ? admission.waitForOpen({ signal: requestAbort.signal })
+      : admission.enter({ signal: requestAbort.signal });
     void admit
-      .then(() => {
+      .then((admitted) => {
+        entered = !replayableStream && admitted === true;
+        if (admitted !== true || requestAbort.signal.aborted || req.aborted || res.destroyed || res.writableEnded) {
+          leave();
+          return;
+        }
         if (replayableStream) {
           proxy.handler(req, res);
           return;
         }
-        let left = false;
-        const leave = () => {
-          if (left) return;
-          left = true;
-          admission.leave();
-        };
         res.once("finish", leave);
-        res.once("close", leave);
         proxy.handler(req, res);
       })
-      .catch((error) => sendUnavailable(res, error instanceof Error ? error.message : String(error)));
+      .catch((error) => {
+        if (!requestAbort.signal.aborted && !res.destroyed && !res.writableEnded) {
+          sendUnavailable(res, error instanceof Error ? error.message : String(error));
+        }
+      });
   };
 
   const rollback = async ({ oldSlot, baseline, baselineFingerprint, failedHandle }) => {
@@ -317,6 +335,8 @@ export function createStableGatewayController({
       activePid: rollbackHandle.pid ?? null,
       replayedSessions: replayed.mappings.length,
       droppedSessions: replayed.droppedPublicSessionIds.length,
+      deferredSessions: replayed.deferredPublicSessionIds.length,
+      replayFailureReasons: replayed.failureReasonCounts,
     };
   };
 
@@ -410,6 +430,8 @@ export function createStableGatewayController({
         requiresFreshInitialize: schemaChanged,
         replayedSessions: replayed.mappings.length,
         droppedSessions: replayed.droppedPublicSessionIds.length,
+        deferredSessions: replayed.deferredPublicSessionIds.length,
+        replayFailureReasons: replayed.failureReasonCounts,
         rollback: false,
         durationMs: Date.now() - startedAt,
       };
@@ -437,6 +459,8 @@ export function createStableGatewayController({
           activePid: restored.activePid,
           replayedSessions: restored.replayedSessions,
           droppedSessions: restored.droppedSessions,
+          deferredSessions: restored.deferredSessions,
+          replayFailureReasons: restored.replayFailureReasons,
           rollback: true,
           error: message,
           durationMs: Date.now() - startedAt,

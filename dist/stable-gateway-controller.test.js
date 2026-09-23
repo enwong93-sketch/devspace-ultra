@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import { createServer, request as httpRequest } from "node:http";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createStableGatewayController } from "./stable-gateway-controller.js";
+import { StableGatewayAdmissionGate } from "./stable-gateway-admission.js";
 
 const PUBLIC_BASE = "https://devspace-gateway.example.test";
 const FAKE_TOOLS = Object.freeze([
@@ -107,7 +109,7 @@ function postJson(baseUrl, body, headers = {}) {
   });
 }
 
-async function createHarness({ failActiveB = false, failCandidate = false, failReplacementProbe = false, schemaChanged = false, rejectedBaselineAuthorizations = [] } = {}) {
+async function createHarness({ failActiveB = false, failCandidate = false, failReplacementProbe = false, schemaChanged = false, rejectedBaselineAuthorizations = [], admission } = {}) {
   const temp = await mkdtemp(join(tmpdir(), "stable-gateway-controller-test-"));
   const initial = await createFakeCore("core-a");
   const starts = [];
@@ -199,6 +201,7 @@ async function createHarness({ failActiveB = false, failCandidate = false, failR
     initialSlot: "a",
     initialCoreHandle: initial,
     dependencies,
+    ...(admission ? { admission } : {}),
     drainTimeoutMs: 500,
     requestTimeoutMs: 500,
   });
@@ -216,6 +219,47 @@ async function createHarness({ failActiveB = false, failCandidate = false, failR
       await rm(temp, { recursive: true, force: true });
     },
   };
+}
+
+async function testClientCloseBeforeAdmissionContinuationDoesNotLeak() {
+  const admission = new StableGatewayAdmissionGate();
+  const h = await createHarness({ admission });
+  try {
+    const req = new EventEmitter();
+    req.method = "POST";
+    req.url = "/mcp";
+    req.aborted = false;
+    const res = new EventEmitter();
+    res.headersSent = false;
+    res.destroyed = false;
+    res.writableEnded = false;
+    h.controller.handlePublicRequest(req, res);
+    res.destroyed = true;
+    res.emit("close");
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(h.controller.status().admission.activeRequests, 0,
+      "a response closed before the async admission continuation must not strand an active request");
+
+    admission.closeAdmission();
+    const queuedReq = new EventEmitter();
+    queuedReq.method = "POST";
+    queuedReq.url = "/mcp";
+    queuedReq.aborted = false;
+    const queuedRes = new EventEmitter();
+    queuedRes.headersSent = false;
+    queuedRes.destroyed = false;
+    queuedRes.writableEnded = false;
+    h.controller.handlePublicRequest(queuedReq, queuedRes);
+    await waitUntil(() => h.controller.status().admission.queuedRequests === 1);
+    queuedRes.destroyed = true;
+    queuedRes.emit("close");
+    await waitUntil(() => h.controller.status().admission.queuedRequests === 0);
+    assert.equal(h.controller.status().admission.activeRequests, 0,
+      "a client that disconnects behind a closed barrier must be removed without entering drain accounting");
+    admission.openAdmission();
+  } finally {
+    await h.close();
+  }
 }
 
 function openMcpEventStream(baseUrl, publicSessionId, { sendAccept = true } = {}) {
@@ -355,7 +399,7 @@ async function testSuccessfulHandover() {
   }
 }
 
-async function testReplayFailureDropsStaleSessionButKeepsHealthyCoreB() {
+async function testReplayFailureDefersSessionButKeepsHealthyCoreB() {
   const h = await createHarness({ failActiveB: true });
   try {
     const publicSessionId = await initializeSession(h);
@@ -365,7 +409,9 @@ async function testReplayFailureDropsStaleSessionButKeepsHealthyCoreB() {
     assert.equal(result.rollback, false);
     assert.equal(result.activeSlot, "b");
     assert.equal(result.replayedSessions, 0);
-    assert.equal(result.droppedSessions, 1);
+    assert.equal(result.droppedSessions, 0);
+    assert.equal(result.deferredSessions, 1);
+    assert.deepEqual(result.replayFailureReasons, { "initialize-failed": 1 });
     assert.equal(h.activeBStarted(), true);
     assert.equal(h.stops.includes("core-b"), false, "stale session replay must not cause a healthy Core B rollback");
 
@@ -433,6 +479,8 @@ async function testExplicitSchemaChangeDropsOldSessionsAndPromotesValidatedCore(
     assert.equal(result.replayedSessions, 0);
     assert.equal(result.droppedSessions, 1,
       "initialized sessions carrying the old model surface must be removed instead of replayed across a schema change");
+    assert.equal(result.deferredSessions, 0);
+    assert.deepEqual(result.replayFailureReasons, { "schema-stale": 1 });
     assert.deepEqual(h.candidateProbes, [
       { expectedSchemaFingerprint: "a".repeat(64), allowSchemaChange: true },
       { expectedSchemaFingerprint: "b".repeat(64), allowSchemaChange: false },
@@ -489,14 +537,15 @@ async function testSchemaChangeReplacementMismatchRollsBackOldSurface() {
   }
 }
 
+await testClientCloseBeforeAdmissionContinuationDoesNotLeak();
 await testLongLivedEventStreamDoesNotBlockHandoverDrain();
 await testEventStreamWithoutAcceptHeaderDoesNotBlockHandoverDrain();
 await testSuccessfulHandover();
-await testReplayFailureDropsStaleSessionButKeepsHealthyCoreB();
+await testReplayFailureDefersSessionButKeepsHealthyCoreB();
 await testCandidateFailureNeverStopsA();
 await testSchemaChangeRequiresExplicitAuthorization();
 await testExplicitSchemaChangeDropsOldSessionsAndPromotesValidatedCore();
 await testSchemaChangeReplacementMismatchRollsBackOldSurface();
 await testExpiredNewestAuthorizationFallsBackToLiveSession();
 
-console.log(JSON.stringify({ ok: true, gate: "stable-gateway-controller", schemaChangeOptIn: true, schemaChangeDropsOldSessions: true, replacementMatchesValidatedCandidate: true, schemaChangeMismatchRollsBack: true }));
+console.log(JSON.stringify({ ok: true, gate: "stable-gateway-controller", clientDisconnectAdmissionLeakPrevented: true, schemaChangeOptIn: true, schemaChangeDropsOldSessions: true, replacementMatchesValidatedCandidate: true, schemaChangeMismatchRollsBack: true }));

@@ -82,6 +82,14 @@ function Get-InteractiveRuntime {
     $exe = if ($package) { Join-Path $package.InstallLocation "app\ChatGPT Classic.exe" } else { $null }
     $root = if ($exe) { Get-RootProcessForExecutable -ExecutablePath $exe } else { $null }
     $process = if ($root) { Get-Process -Id $root.ProcessId -ErrorAction SilentlyContinue } else { $null }
+    $configuredDebugPort = $debugBasePort + $Number
+    $portMatch = if ($root) { [regex]::Match([string]$root.CommandLine, '--remote-debugging-port=(\d+)') } else { $null }
+    $observedDebugPort = if ($portMatch -and $portMatch.Success) { [int]$portMatch.Groups[1].Value } else { $null }
+    $effectiveDebugPort = if ($observedDebugPort -and $observedDebugPort -ge 1024 -and $observedDebugPort -le 65535) {
+        $observedDebugPort
+    } else {
+        $configuredDebugPort
+    }
     [pscustomobject]@{
         Number = $Number
         RuntimeId = "interactive-$padded"
@@ -96,7 +104,9 @@ function Get-InteractiveRuntime {
         Alias = $aliasName
         AliasPath = $aliasPath
         ProfilePath = if ($package) { Join-Path $env:LOCALAPPDATA ("Packages\{0}\LocalCache\Roaming\ChatGPT" -f $package.PackageFamilyName) } else { $null }
-        DebugPort = $debugBasePort + $Number
+        DebugPort = $effectiveDebugPort
+        ConfiguredDebugPort = $configuredDebugPort
+        DebugPortSource = if ($observedDebugPort) { "process-command-line" } else { "configured-default" }
         Registered = [bool]$package
         Running = [bool]$root
         Pid = if ($root) { [int]$root.ProcessId } else { $null }
@@ -154,6 +164,7 @@ function Write-SeedMarker {
         provisioningMode = $ProvisioningMode
         sourceRole = $SourceRole
         sourceLabel = $SourceLabel
+        debugPort = $Runtime.DebugPort
         primaryRestarted = $PrimaryRestarted
         primaryRestored = $PrimaryRestored
         provisionedAt = (Get-Date).ToString("o")

@@ -20,7 +20,8 @@ assert.match(observer, /\/backend-api\/f\/conversation\/resume/, "hidden Goal co
 assert.doesNotMatch(observer, /Runtime\.enable|Runtime\.evaluate|client\.call\("Page\.(?:reload|navigate)"|Network\.getResponseBody/, "always-on delivery observer must stay network-only and low-memory");
 assert.match(observer, /maxPending/);
 assert.match(observer, /pendingTtlMs/);
-assert.match(server, /const\s+classicCdpOptions\s*=\s*Array\.isArray\(config\.classicMainDebugPorts\)[\s\S]{0,180}ports:\s*config\.classicMainDebugPorts/, "server must derive one bounded Classic CDP port option from config");
+assert.match(server, /const configuredClassicPorts = Array\.isArray\(config\.classicMainDebugPorts\)[\s\S]{0,260}const classicCdpOptions = \{[\s\S]{0,220}configuredClassicPorts\.length[\s\S]{0,120}defaultMainDebugPorts\(\{ includeObserved: true, refresh: true \}\)/,
+  "server must prefer explicit bounded ports and otherwise merge observed process ports with canonical fallbacks");
 assert.match(server, /new ClassicTurnTransportObserver\(classicCdpOptions\)/, "always-on native observer must use the configured bounded Classic port set");
 assert.match(server, /turnTransportObserver\.start\(\)/);
 assert.match(server, /turnTransportObserver\.close\(\)/);

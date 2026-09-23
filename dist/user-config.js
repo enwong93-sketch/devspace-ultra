@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { expandHomePath } from "./roots.js";
+import { hardenPrivateFile } from './private-file-permissions.js';
 export function devspaceConfigDir(env = process.env) {
     return resolve(expandHomePath(env.DEVSPACE_CONFIG_DIR ?? join(homedir(), ".devspace")));
 }
@@ -50,6 +51,7 @@ export function writeDevspaceAuth(auth, env = process.env) {
     const filePath = devspaceAuthPath(env);
     mkdirSync(devspaceConfigDir(env), { recursive: true });
     writeJsonFile(filePath, auth, 0o600);
+    hardenPrivateFile(filePath, { env });
     return filePath;
 }
 export function generateOwnerToken() {

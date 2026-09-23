@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, opendir, readFile, realpath, stat } from "node:fs/promises";
 import { dirname, join, relative, resolve, sep } from "node:path";
-import { loadProjectContextFiles } from "@earendil-works/pi-coding-agent";
+import { loadProjectContextFiles } from "@devspace/pi-coding-agent";
 import { createManagedWorktree } from "./git-worktrees.js";
 import { assertAllowedPath, isPathInsideRoot, resolveAllowedPath } from "./roots.js";
 import { loadWorkspaceSkills, markSkillActivated, resolveSkillReadPath, } from "./skills.js";
@@ -256,6 +256,11 @@ const SKIPPED_CONTEXT_DIRS = new Set([
     ".next",
     ".turbo",
     ".cache",
+    // Generated local fixtures can contain whole plugin/repository clones.
+    // Do not advertise those as instructions for the parent project. Opening
+    // that directory explicitly still loads its own root instructions.
+    ".local",
+    ".tmp",
 ]);
 export function formatAgentsPath(path, workspaceRoot) {
     if (!workspaceRoot)

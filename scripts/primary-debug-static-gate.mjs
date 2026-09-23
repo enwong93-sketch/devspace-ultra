@@ -2,18 +2,26 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 
 const server = await readFile(new URL("../dist/server.js", import.meta.url), "utf8");
+const bridge = await readFile(new URL("../dist/goal-host-bridge.js", import.meta.url), "utf8");
 const script = await readFile(new URL("./chat-classic-primary-debug.ps1", import.meta.url), "utf8");
 
 assert.match(server, /import \{ ClassicPrimaryDebugGuard \} from "\.\/primary-debug-guard\.js";/);
 assert.match(server, /const primaryDebugGuard = process\.platform === "win32"\s*\? new ClassicPrimaryDebugGuard\(\)\s*:\s*null;/,
   "Primary Debug Guard must exist only on its supported Windows runtime");
-assert.match(server, /const\s+classicCdpOptions\s*=\s*Array\.isArray\(config\.classicMainDebugPorts\)[\s\S]{0,180}ports:\s*config\.classicMainDebugPorts/, "Primary/Host Bridge lifecycle must use the bounded configured Classic port set");
-assert.match(server, /new ClassicGoalHostBridge\(\{\s*\.\.\.classicCdpOptions,\s*beforeDispatch:\s*config\.passiveCore\s*\|\|\s*!primaryDebugGuard\s*\?\s*undefined\s*:\s*\(\) => primaryDebugGuard\.pollOnce\(\),\s*sendRecovery:\s*sendExactGoalRecovery,?\s*\}\)/s);
-const recoveryStart = server.indexOf("const sendExactGoalRecovery = async");
-const recoveryEnd = server.indexOf("const goalHostBridge = new ClassicGoalHostBridge", recoveryStart);
+assert.match(server, /const configuredClassicPorts = Array\.isArray\(config\.classicMainDebugPorts\)[\s\S]{0,260}const classicCdpOptions = \{[\s\S]{0,220}configuredClassicPorts\.length[\s\S]{0,120}defaultMainDebugPorts\(\{ includeObserved: true, refresh: true \}\)/,
+  "Primary/Host Bridge lifecycle must use explicit ports or the bounded observed-process fallback set");
+assert.match(server, /new ClassicGoalHostBridge\(\{\s*\.\.\.classicCdpOptions,\s*beforeDispatch:\s*config\.passiveCore\s*\|\|\s*!primaryDebugGuard\s*\?\s*undefined\s*:\s*\(\) => primaryDebugGuard\.pollOnce\(\),?\s*\}\)/s);
+assert.doesNotMatch(server, /sendExactGoalRecovery|sendRecovery:\s*/,
+  "same-round Goal Recovery must not wire a page-composer sender through Primary Debug Guard");
+assert.match(server, /if\s*\(config\.goalRoundRecoveryEnabled\)[\s\S]{0,220}goalRoundCompletionGuard\.start\(/,
+  "hidden same-round Goal Recovery may run independently of Primary debug repair");
+const recoveryStart = bridge.indexOf("async dispatchRoundRecovery");
+const recoveryEnd = bridge.indexOf("setBeforeRawDispatch", recoveryStart);
 assert.ok(recoveryStart >= 0 && recoveryEnd > recoveryStart);
-assert.doesNotMatch(server.slice(recoveryStart, recoveryEnd), /primaryDebugGuard|beforeDispatch/,
-  "same-round Goal Recovery must never activate Primary debug repair");
+assert.match(bridge.slice(recoveryStart, recoveryEnd), /classic-hidden-round-recovery/);
+assert.match(bridge.slice(recoveryStart, recoveryEnd), /findExactConversationRelay/);
+assert.doesNotMatch(bridge.slice(recoveryStart, recoveryEnd), /primaryDebugGuard|beforeDispatch|findMatchingCandidate/,
+  "hidden same-round Goal Recovery may use only the exact relay and must never trigger Primary repair or broad Goal-widget discovery");
 assert.match(server, /if\s*\(!config\.passiveCore\)[\s\S]*if\s*\(primaryDebugGuard\)[\s\S]*primaryDebugGuard\.start\(\)/,
   "Windows production Core keeps Primary Debug Guard while passive/non-Windows Core suppresses it");
 assert.match(server, /await primaryDebugGuard\?\.close\?\.\(\)/);

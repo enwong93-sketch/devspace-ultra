@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { loadSkills, } from "@earendil-works/pi-coding-agent";
+import { loadSkills, } from "@devspace/pi-coding-agent";
 import { expandHomePath, isPathInsideRoot } from "./roots.js";
 import { installedCapabilitySkillPaths } from "./capability-runtime.js";
 const SUBAGENT_DELEGATION_NAME = "subagent-delegation";

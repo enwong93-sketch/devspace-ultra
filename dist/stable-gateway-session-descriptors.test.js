@@ -54,7 +54,26 @@ try {
     }],
   })));
   assert.equal((await loadStableGatewaySessionDescriptors(unknownV2Path)).length, 0, "pre-v3 descriptors must be dropped once because they lack the client-session key needed for event-driven supersession");
-  console.log(JSON.stringify({ ok: true, gate: "stable-gateway-session-descriptors", credentialsPersisted: false, restartDurable: true, clientSessionFingerprintPersisted: true, legacyDescriptorReset: true, schemaRevisionPersisted: true }));
+
+  const boundedPath = join(root, "bounded-sessions.json");
+  const many = Array.from({ length: 600 }, (_, index) => ({
+    publicSessionId: `${String(index).padStart(8, "0")}-1234-1234-1234-123456789abc`,
+    initializeBody: { jsonrpc: "2.0", id: index, method: "initialize", params: {} },
+    initialized: true,
+    lastActivityAt: index,
+    clientSessionFingerprint: index >= 598 ? "d".repeat(64) : null,
+    schemaFingerprint: "e".repeat(64),
+    toolCount: 119,
+  }));
+  await saveStableGatewaySessionDescriptors(boundedPath, many);
+  const bounded = await loadStableGatewaySessionDescriptors(boundedPath);
+  assert.equal(bounded.length, 512, "restart descriptors must have a hard persistence cap");
+  assert.equal(bounded[0].lastActivityAt, 599, "newest descriptors must survive the cap");
+  assert.equal(bounded.some((item) => item.publicSessionId.startsWith("00000599-")), true,
+    "the newest descriptor for a repeated client fingerprint must survive");
+  assert.equal(bounded.some((item) => item.publicSessionId.startsWith("00000598-")), false,
+    "older duplicate client descriptors must not accumulate indefinitely");
+  console.log(JSON.stringify({ ok: true, gate: "stable-gateway-session-descriptors", credentialsPersisted: false, restartDurable: true, clientSessionFingerprintPersisted: true, legacyDescriptorReset: true, schemaRevisionPersisted: true, boundedPersistence: 512, duplicateClientsCollapsed: true }));
 } finally {
   await rm(root, { recursive: true, force: true });
 }

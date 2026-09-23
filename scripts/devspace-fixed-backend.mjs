@@ -6,6 +6,8 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadDevspaceFiles } from "../dist/user-config.js";
 import { boundedLogOptionsFromEnv, rotateLogFileSetSync } from "../dist/bounded-log-files.js";
+import { classifySupervisedGatewayExit } from "../dist/fixed-backend-supervision.js";
+import { applyDevspaceRuntimePriority } from "../dist/runtime-priority.js";
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const statusOnly = process.argv.includes("--status");
@@ -22,6 +24,7 @@ const fixedStateDir = String(config.stableGatewayStateDir ?? config.edgeFixedSta
 const logDir = join(files.dir, "logs");
 const stdoutPath = join(logDir, "fixed-backend.out.log");
 const stderrPath = join(logDir, "fixed-backend.err.log");
+const launcherPriority = applyDevspaceRuntimePriority("launcher");
 
 const sleep = (ms) => new Promise((resolvePromise) => setTimeout(resolvePromise, ms));
 const emit = (payload) => console.log(JSON.stringify({ ...payload, secretValuesLogged: false }));
@@ -104,8 +107,15 @@ async function main() {
 
   let after = null;
   let childExit = null;
-  child.once("error", (error) => { childExit = { error: error instanceof Error ? error.message : String(error) }; });
-  child.once("exit", (code, signal) => { childExit = { code, signal }; });
+  let resolveChildExit;
+  const childExitPromise = new Promise((resolvePromise) => { resolveChildExit = resolvePromise; });
+  const settleChildExit = (value) => {
+    if (childExit) return;
+    childExit = value;
+    resolveChildExit(value);
+  };
+  child.once("error", (error) => settleChildExit({ error: error instanceof Error ? error.message : String(error) }));
+  child.once("exit", (code, signal) => settleChildExit({ code, signal }));
   while (true) {
     await sleep(300);
     if (childExit) break;
@@ -115,6 +125,11 @@ async function main() {
   }
 
   if (after?.state !== "ready") {
+    const peer = await localIdentity();
+    if (peer.state === "ready") {
+      emit({ ok: true, state: "peer-gateway-ready", port: fixedPort, resource: peer.resource, launcherPriority });
+      return 0;
+    }
     emit({
       ok: false,
       state: "start-verification-failed",
@@ -144,12 +159,26 @@ async function main() {
       maxAgeMs: logOptions.maxAgeMs,
       inMemoryHistoryRetained: false,
     },
+    launcherPriority,
   });
   if (foreground) {
-    return await new Promise((resolvePromise) => {
-      child.once("error", () => resolvePromise(1));
-      child.once("exit", (code) => resolvePromise(Number(code ?? 1)));
+    const observedExit = childExit ?? await childExitPromise;
+    const peer = await localIdentity();
+    const supervised = classifySupervisedGatewayExit({
+      code: observedExit?.code ?? null,
+      signal: observedExit?.signal ?? null,
+      peerState: peer.state,
     });
+    emit({
+      ok: supervised.exitCode === 0,
+      state: supervised.state,
+      port: fixedPort,
+      childPid: child.pid,
+      childCode: observedExit?.code ?? null,
+      childSignal: observedExit?.signal ?? null,
+      launcherPriority,
+    });
+    return supervised.exitCode;
   }
   return 0;
 }

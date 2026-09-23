@@ -767,6 +767,11 @@ export class ClassicProgressNarrationOverlay {
           });
       this.last = {
         ok: results.every((item) => item.ok),
+        observedAt: new Date(this.now()).toISOString(),
+        latestInputAt: humanProgress?.updatedAt || null,
+        latestProjectableAt: Object.values(map).map((entry) => entry.updatedAt).filter(Boolean).sort().at(-1) || null,
+        inputMessages: Array.isArray(humanProgress?.messages) ? humanProgress.messages.length : 0,
+        projectableMessages: Object.values(map).reduce((total, entry) => total + entry.messages.length, 0),
         conversations: Object.keys(map).length,
         connected: runtimes.length,
         synced: results.filter((item) => item.ok).length,
@@ -783,6 +788,7 @@ export class ClassicProgressNarrationOverlay {
 
   status() {
     return {
+      producerId: this.producerId,
       disabled: Boolean(this.disabled),
       disabledReason: this.disabledReason || null,
       running: Boolean(this.timer),

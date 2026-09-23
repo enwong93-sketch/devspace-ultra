@@ -18,6 +18,36 @@ export function parseNetstatListeners(text, ports) {
   return rows;
 }
 
+export function classifyGatewayReplacementBoundary(snapshot) {
+  const gateway = snapshot?.gateway;
+  const admission = gateway?.admission;
+  const sessions = gateway?.sessions;
+  const running = Number(snapshot?.activity?.running || 0);
+  if (!admission || !sessions || running !== 0) return null;
+  if (admission.closed === false && Number(admission.activeRequests || 0) === 0) {
+    return "quiet";
+  }
+  if (
+    gateway?.handoverInProgress === true
+    && admission.closed === true
+    && Number(admission.activeRequests || 0) > 0
+    && Number(sessions.totalActiveRequests || 0) === 0
+    && Number(sessions.totalNonStreamActiveRequests || 0) === 0
+  ) {
+    return "stuck-handover";
+  }
+  return null;
+}
+
+export function classifyGatewayRestartTopology(owned = []) {
+  const gateways = owned.filter(entry => entry?.role === "gateway");
+  const cores = owned.filter(entry => entry?.role === "core");
+  if (gateways.length === 0 && cores.length === 0) return "cold-start";
+  if (gateways.length === 1) return "replacement";
+  if (gateways.length === 0 && cores.length > 0) return "orphan-core";
+  return "invalid";
+}
+
 function normalizePath(value) {
   return String(value || "").replaceAll("/", "\\").toLowerCase();
 }
@@ -78,36 +108,65 @@ export function buildRestartPowerShell({
   resultPath,
   helperTaskName = null,
   delaySeconds = 5,
+  expectedProcesses = [],
+  nodePath = null,
+  launcherPath = null,
+  configDir = null,
 }) {
   const allPids = [...new Set([gatewayPid, ...corePids].map(Number).filter((value) => Number.isInteger(value) && value > 0))];
   const pidList = allPids.join(",");
   return [
     "$ErrorActionPreference='Stop'",
-    `[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false)`,
+    `try { [Console]::OutputEncoding=[Text.UTF8Encoding]::new($false) } catch {}`,
     `$taskName=${psQuote(taskName)}`,
     `$resultPath=${psQuote(resultPath)}`,
     `$gatewayPort=${Number(gatewayPort)}`,
+    `$hasGateway=${Number(gatewayPid)>0?'$true':'$false'}`,
     `$oldPids=@(${pidList})`,
     `$startedAt=[DateTime]::UtcNow.ToString('o')`,
     `$ok=$false`,
     `$state='scheduled'`,
     `$reason=$null`,
+    `$quietVerified=$false`,
+    `$expectedProcesses=ConvertFrom-Json ${psQuote(JSON.stringify(expectedProcesses))}`,
     "try {",
     `  Start-Sleep -Seconds ${Number(delaySeconds)}`,
-    "  Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue",
+    "  if ($hasGateway) {",
+    "  $quietSamples=0; $quietDeadline=[DateTime]::UtcNow.AddMinutes(2)",
+    "  while ($quietSamples -lt 3) {",
+    "    if ([DateTime]::UtcNow -gt $quietDeadline) { throw 'No safe quiet window; restart cancelled before stopping any process.' }",
+    "    $snapshot=Invoke-RestMethod -TimeoutSec 3 -Uri ('http://127.0.0.1:'+$gatewayPort+'/__devspace/live/snapshot')",
+    "    if ($snapshot.gateway.admission.closed -eq $false -and $snapshot.gateway.admission.activeRequests -eq 0 -and $snapshot.activity.running -eq 0) { $quietSamples++ } else { $quietSamples=0 }",
+    "    Start-Sleep -Milliseconds 250",
+    "  }",
+    "  }",
+    "  foreach ($identity in $expectedProcesses) {",
+    "    $current=Get-CimInstance Win32_Process -Filter ('ProcessId='+$identity.processId) -ErrorAction Stop",
+    "    if (-not $current -or $current.CreationDate.ToUniversalTime().ToString('o') -ne $identity.createdAt) { throw 'Process identity changed; restart cancelled.' }",
+    "  }",
+    "  $quietVerified=$true",
+    // Never terminate the Task Scheduler Job: detached Blender processes can
+    // still belong to it. Only the preflighted Gateway/Core PIDs are retired.
     "  foreach ($pidValue in $oldPids) { Stop-Process -Id $pidValue -Force -ErrorAction SilentlyContinue }",
     "  Start-Sleep -Seconds 2",
-    "  Start-ScheduledTask -TaskName $taskName",
+    ...(nodePath && launcherPath && configDir ? [
+      `  $nodePath=${psQuote(nodePath)}`,
+      `  $launcherPath=${psQuote(launcherPath)}`,
+      `  $configDir=${psQuote(configDir)}`,
+      `  $launcherArgs='"'+$launcherPath+'" --foreground --config-dir "'+$configDir+'"'`,
+      "  $replacement=Start-Process -FilePath $nodePath -ArgumentList $launcherArgs -WindowStyle Hidden -PassThru",
+    ] : ["  Start-ScheduledTask -TaskName $taskName"]),
     "  while (-not $ok) {",
     "    Start-Sleep -Milliseconds 500",
     "    try {",
     "      $response=Invoke-RestMethod -Uri ('http://127.0.0.1:'+$gatewayPort+'/__devspace/gateway/healthz')",
-    "      if ($response.ok -eq $true) { $ok=$true; $state='ready'; break }",
+    "      if ($response.ok -eq $true) { $core=Invoke-RestMethod -TimeoutSec 3 -Uri ('http://127.0.0.1:'+$gatewayPort+'/__devspace/memory/status'); if ($core.pid -gt 0) { $ok=$true; $state='ready'; break } }",
     "    } catch {}",
+    "    if ($replacement -and $replacement.HasExited -and $replacement.ExitCode -ne 0) { throw 'Canonical replacement launcher exited before readiness.' }",
     "    $task=Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue",
     "    $taskInfo=Get-ScheduledTaskInfo -TaskName $taskName -ErrorAction SilentlyContinue",
     "    $listener=Get-NetTCPConnection -State Listen -LocalPort $gatewayPort -ErrorAction SilentlyContinue | Select-Object -First 1",
-    "    if (-not $listener -and $task -and $task.State -ne 'Running' -and $taskInfo -and $taskInfo.LastTaskResult -notin @(0,267009)) {",
+    "    if (-not $replacement -and -not $listener -and $task -and $task.State -ne 'Running' -and $taskInfo -and $taskInfo.LastTaskResult -notin @(0,267009)) {",
     "      throw ('Stable Gateway task exited before readiness (LastTaskResult='+$taskInfo.LastTaskResult+').')",
     "    }",
     "  }",
@@ -115,7 +174,7 @@ export function buildRestartPowerShell({
     "  $state='failed'",
     "  $reason=$_.Exception.GetType().Name",
     "}",
-    "$payload=[ordered]@{ok=$ok;state=$state;reason=$reason;taskName=$taskName;gatewayPort=$gatewayPort;oldPids=$oldPids;startedAt=$startedAt;completedAt=[DateTime]::UtcNow.ToString('o');secretValuesLogged=$false}",
+    "$payload=[ordered]@{ok=$ok;state=$state;reason=$reason;quietVerified=$quietVerified;taskName=$taskName;gatewayPort=$gatewayPort;oldPids=$oldPids;startedAt=$startedAt;completedAt=[DateTime]::UtcNow.ToString('o');secretValuesLogged=$false}",
     "$directory=Split-Path -Parent $resultPath",
     "New-Item -ItemType Directory -Path $directory -Force | Out-Null",
     "$payload | ConvertTo-Json -Compress | Set-Content -LiteralPath $resultPath -Encoding UTF8",
@@ -134,7 +193,7 @@ export async function queryListenerProcesses(pids, { run = execFileAsync } = {})
   const script = [
     "$ErrorActionPreference='Stop'",
     "[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false)",
-    `@(Get-CimInstance Win32_Process | Where-Object { ${filter} } | ForEach-Object { [pscustomobject]@{processId=[int]$_.ProcessId;parentProcessId=[int]$_.ParentProcessId;name=[string]$_.Name;executablePath=[string]$_.ExecutablePath;commandLine=[string]$_.CommandLine} }) | ConvertTo-Json -Compress`,
+    `@(Get-CimInstance Win32_Process | Where-Object { ${filter} } | ForEach-Object { [pscustomobject]@{processId=[int]$_.ProcessId;parentProcessId=[int]$_.ParentProcessId;name=[string]$_.Name;executablePath=[string]$_.ExecutablePath;commandLine=[string]$_.CommandLine;createdAt=$_.CreationDate.ToUniversalTime().ToString('o')} }) | ConvertTo-Json -Compress`,
   ].join("; ");
   const result = await run("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
     windowsHide: true,

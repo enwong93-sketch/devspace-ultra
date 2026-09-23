@@ -1,6 +1,8 @@
 import { randomBytes } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
+import { atomicWriteJson } from "./atomic-file.js";
+import { enqueueRecoverablePersist } from "./recoverable-persist-queue.js";
 
 const STATE_VERSION = 1;
 const PLAN_STATUSES = new Set(["active", "completed"]);
@@ -138,12 +140,8 @@ export class PlanRuntime {
   }
 
   async save() {
-    const snapshot = JSON.stringify(this.state, null, 2);
-    this.persistQueue = this.persistQueue.then(async () => {
-      await mkdir(dirname(this.statePath), { recursive: true });
-      await writeFile(this.statePath, snapshot, "utf8");
-    });
-    await this.persistQueue;
+    const snapshot = JSON.parse(JSON.stringify(this.state));
+    await enqueueRecoverablePersist(this, () => atomicWriteJson(this.statePath, snapshot));
   }
 
   async start({ title, steps, conversationId }) {

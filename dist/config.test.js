@@ -31,8 +31,10 @@ try {
   assert.equal(loadConfig({ ...baseEnv, DEVSPACE_PROGRESS_REMINDER_SECONDS: "30" }).conversationProgressReportSeconds, 30,
     "legacy configuration must change the report SLO only and must not restore automatic reminders");
   assert.equal(loadConfig({ ...baseEnv, DEVSPACE_PROGRESS_CONTINUE_SECONDS: "60" }).conversationProgressContinueSeconds, 60);
-  assert.equal(loadConfig(baseEnv).goalRoundRecoveryEnabled, true, "same-round Goal recovery should be enabled by default");
-  assert.equal(loadConfig({ ...baseEnv, DEVSPACE_GOAL_ROUND_RECOVERY: "false" }).goalRoundRecoveryEnabled, false, "operators must be able to pause automatic Goal re-entry without pausing the Goal itself");
+  assert.equal(loadConfig(baseEnv).goalRoundRecoveryEnabled, true,
+    "backend-owned hidden same-round Goal Recovery should be safe-on by default");
+  assert.equal(loadConfig({ ...baseEnv, DEVSPACE_GOAL_ROUND_RECOVERY: "false" }).goalRoundRecoveryEnabled, false,
+    "operators may pause hidden same-round Goal Recovery without pausing the Goal itself");
   assert.equal(loadConfig({ ...baseEnv, DEVSPACE_CLASSIC_STREAM_RECOVERY: "false" }).classicStreamRecoveryEnabled, false);
   assert.equal(loadConfig({ ...baseEnv, DEVSPACE_CONTEXT_GUARDIAN: "0" }).contextGuardianEnabled, false);
   assert.equal(loadConfig({ ...baseEnv, DEVSPACE_CLASSIC_HOST_OVERLAY: "false" }).classicHostOverlayEnabled, false);

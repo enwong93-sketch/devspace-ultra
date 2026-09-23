@@ -26,16 +26,18 @@ import { fingerprintClassicSession } from "./classic-conversation-authority.js";
       thinking_effort: "max",
       conversation_id: "conv-12345678",
       parent_message_id: "parent-secret-ish-id",
-      messages: [{ author: { role: "user" }, content: { content_type: "text", parts: ["private prompt body"] } }],
+      messages: [{ id: "user-message-12345678", author: { role: "user" }, content: { content_type: "text", parts: ["private prompt body"] } }],
       local_function_names: ["blender_runtime", "blender_mcp", "blender_runtime", "invalid tool name"],
     }),
   });
   assert.equal(parsed.modelSlug, "gpt-5-6-thinking");
+  assert.equal(parsed.transportKind, "start");
   assert.equal(parsed.thinkingEffort, "max");
   assert.equal(parsed.conversationId, "conv-12345678");
   assert.equal(parsed.sessionFingerprint, fingerprintClassicSession("native-session-value"));
   assert.deepEqual(parsed.sessionCorrelationFingerprints, [fingerprintClassicSession("native-session-value")]);
   assert.equal(parsed.turnTraceFingerprint, fingerprintClassicSession("turn-trace-secret"));
+  assert.equal(parsed.sourceUserMessageId, "user-message-12345678");
   assert.deepEqual(parsed.localFunctionNames, ["blender_runtime", "blender_mcp"]);
   assert.ok(Number.isInteger(parsed.estimatedInputTokens));
   assert.ok(parsed.estimatedInputTokens > 0);
@@ -46,9 +48,11 @@ import { fingerprintClassicSession } from "./classic-conversation-authority.js";
     url: "https://chatgpt.com/backend-api/f/conversation/resume",
     method: "POST",
     headers: {},
-    postData: JSON.stringify({ model: "gpt-test", conversation_id: "conv-resume-1234", messages: [] }),
+    postData: JSON.stringify({ model: "gpt-test", conversation_id: "conv-resume-1234", messages: [{ id: "resume-user-message", author: { role: "user" }, content: { parts: ["continue"] } }] }),
   });
   assert.equal(parsedResume?.conversationId, "conv-resume-1234");
+  assert.equal(parsedResume?.sourceUserMessageId, "resume-user-message");
+  assert.equal(parsedResume?.transportKind, "resume");
   assert.equal(parseClassicTurnRequest({ url: "https://chatgpt.com/backend-api/other", method: "POST", postData: "{}" }), null);
 }
 

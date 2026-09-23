@@ -5,32 +5,57 @@ const server = await readFile(new URL("../dist/server.js", import.meta.url), "ut
 const runtime = await readFile(new URL("../dist/goal-runtime.js", import.meta.url), "utf8");
 const bridge = await readFile(new URL("../dist/goal-host-bridge.js", import.meta.url), "utf8");
 const guard = await readFile(new URL("../dist/goal-round-completion-guard.js", import.meta.url), "utf8");
+const continuation = await readFile(new URL("../dist/goal-continuation-supervisor.js", import.meta.url), "utf8");
 
-assert.match(server, /ClassicGoalRoundCompletionGuard/);
-assert.match(server, /if\s*\(config\.goalRoundRecoveryEnabled\)[\s\S]*goalRoundCompletionGuard\.start\(\)/, "automatic same-round recovery must support an explicit operator hold");
+assert.match(server, /ClassicGoalRoundCompletionGuard/,
+  "same-round recovery state remains durable for existing persisted Goals");
+assert.match(server, /if \(config\.goalRoundRecoveryEnabled\)[\s\S]{0,260}goalRoundCompletionGuard\.start\(/,
+  "production starts same-round recovery only behind the explicit hidden-recovery feature flag");
 assert.match(server, /goalRoundCompletionGuard\.close\(\)/);
 assert.match(server, /goalHostBridge\.inspectWorkingRound/);
 assert.match(server, /goalHostBridge\.dispatchRoundRecovery/);
-assert.match(server, /progressLivenessAdapter\.sendGoalRecovery/,
-  "Goal Recovery must reuse the exact page-composer transport proven by interrupted-turn rescue");
-assert.match(server, /sendRecovery:\s*sendExactGoalRecovery/);
+assert.doesNotMatch(server, /progressLivenessAdapter\.sendGoalRecovery|sendRecovery:\s*sendExactGoalRecovery/,
+  "Goal Recovery must never share interrupted-turn Rescue's visible page-composer transport");
 assert.match(runtime, /recoverableWorkingRounds/);
 assert.match(runtime, /claimRoundRecovery/);
 assert.match(runtime, /DEVSPACE_GOAL_ROUND_RECOVERY/);
 assert.match(runtime, /Do not call devspace_goal_round_begin/i);
 assert.match(runtime, /recovery-already-dispatched/,
-  "one successfully visible Goal recovery must close the current round recovery episode");
+  "a committed hidden recovery remains exactly-once across restart");
 assert.match(bridge, /inspectWorkingRound/);
 assert.match(bridge, /dispatchRoundRecovery/);
-assert.match(bridge, /findExactConversationPage/);
-assert.match(bridge, /classic-exact-page-composer/);
-assert.match(bridge, /foregroundActivation:\s*false/);
-assert.match(bridge, /pageNavigation:\s*false/);
+assert.match(bridge, /transport:\s*"classic-hidden-round-recovery"/);
+assert.match(bridge, /classic-hidden-round-recovery-native-reconciled/);
+assert.match(bridge, /findExactConversationRelay/);
+assert.match(bridge, /inspectComposer/);
+assert.match(bridge, /clearOwnedComposer/);
+assert.match(bridge, /hidden-goal-recovery-composer-exposure-cleared/);
+assert.match(bridge, /backgroundAccepted:\s*true/);
+assert.match(bridge, /visibleUserMessage:\s*false/);
+assert.match(bridge, /composerMutation:\s*false/);
+assert.match(bridge, /DEFAULT_PAGE_INSPECTION_TIMEOUT_MS\s*=\s*12_000/,
+  "large long-running conversations must not share the 500ms discovery budget for native page inspection");
+const rawHostStart = bridge.indexOf("export async function sendRawHostFollowUp");
+const rawHostEnd = bridge.indexOf("export class ClassicGoalHostBridge", rawHostStart);
+const rawHostBody = bridge.slice(rawHostStart, rawHostEnd);
+assert.match(rawHostBody, /awaitPromise:\s*false/,
+  "hidden continuation host invocation must acknowledge synchronously instead of waiting for the whole assistant turn");
+assert.match(bridge, /classic-hidden-continuation-native-confirmed/,
+  "normal Goal continuation must verify a native assistant branch before reporting acceptance");
+assert.match(bridge, /newUserAfterBaselineCreatedAt/,
+  "native continuation inspection must retain the bounded new-user timestamp needed to repair round recovery after restart");
 const recoveryStart = bridge.indexOf("async dispatchRoundRecovery");
 const recoveryEnd = bridge.indexOf("setBeforeRawDispatch", recoveryStart);
 const recoveryBody = bridge.slice(recoveryStart, recoveryEnd);
-assert.doesNotMatch(recoveryBody, /beforeDispatch|sendRaw|findConversationRelay|findMatchingCandidate/,
-  "Goal Recovery must not run Primary repair, app-relay discovery, or raw host follow-up RPC");
+assert.match(recoveryBody, /findExactConversationRelay/);
+assert.match(recoveryBody, /this\.sendRaw\(/,
+  "same-round recovery must use the backend hidden host RPC");
+assert.match(recoveryBody, /composerBefore[\s\S]{0,280}state !== "empty"/,
+  "hidden recovery must require an empty composer before dispatch");
+assert.match(recoveryBody, /composerAfter[\s\S]{0,500}exactOwnedPayload/,
+  "any host regression that exposes Goal control text must be detected and cleaned only under exact ownership");
+assert.doesNotMatch(recoveryBody, /beforeDispatch|sendRecovery|sendGoalRecovery|findExactConversationPage|Input\.insertText|send-button/,
+  "hidden Goal Recovery must not run Primary repair or use the visible composer sender");
 assert.doesNotMatch(recoveryBody, /Page\.navigate|Page\.reload|bringToFront|activate|showWindow/i,
   "Goal Recovery must not navigate, foreground, or pop another conversation window");
 assert.match(guard, /streamStatus/);
@@ -45,6 +70,16 @@ assert.match(guard, /currentTurnTransportFinished/,
   "normal recovery must not exhaust attempts while the current assistant turn is still visibly generating");
 assert.match(guard, /sawCurrentRoundAssistant/,
   "a stale GUI stop control needs current-round assistant proof before recovery");
+assert.match(guard, /currentRoundTransportFinished/,
+  "persisted exact request/finished evidence must restore same-round recovery after a Core restart");
+assert.match(continuation, /redeemHumanContinuation/);
+assert.match(continuation, /human-user-turn-started-next-round/,
+  "a real new user turn must redeem the pending Goal round instead of leaving Active\/Reported stuck forever");
+assert.match(continuation, /manualUserObservedAt/,
+  "human continuation must persist its exact native start time for restart-safe same-round recovery");
+assert.match(runtime, /normalizeObservedRoundBeganAt/);
+assert.match(runtime, /roundBeganAt:\s*observedAt|roundBeganAt\s*=\s*observedRoundBeganAt/,
+  "GoalRuntime must accept only the internal verified observed start boundary; the public round-begin tool schema remains unchanged");
 assert.match(runtime, /priorAttempts >= MAX_ROUND_RECOVERY_ATTEMPTS/,
   "transient failed recovery attempts must become eligible again after their cooldown");
 assert.match(server, /ClassicTurnDeliveryEvidenceStore/);
@@ -54,14 +89,12 @@ console.log(JSON.stringify({
   ok: true,
   gate: "goal-round-completion-static",
   sameRoundRecovery: true,
-  noUserPromptRequired: true,
+  visibleSameRoundRecoveryRetired: true,
+  interruptedWorkingRoundUsesOrdinaryRescueWithoutRace: true,
   chatModeOnly: true,
-  nativeCompleteOrTransportFailureRequired: true,
-  staleGuiGeneratingRequiresCurrentTurnProof: true,
-  transientAttemptBurstCanRecover: true,
+  legacyStateReadable: true,
   guiAloneNeverAuthoritative: true,
-  exactPageComposerTransport: true,
-  oneVisibleRecoveryPerRound: true,
-  foregroundActivation: false,
-  pageNavigation: false,
+  hiddenHostRecoveryTransport: true,
+  visibleComposerTransport: false,
+  hostRpcDispatch: true,
 }));

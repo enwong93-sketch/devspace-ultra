@@ -232,6 +232,9 @@ export function loadConfig(env = process.env) {
         passiveCore: env.DEVSPACE_PASSIVE_CORE === undefined
             ? false
             : parseBoolean(env.DEVSPACE_PASSIVE_CORE),
+        // Same-round recovery is safe-on only through the backend-owned hidden
+        // host continuation. The retired page-composer sender remains hard
+        // fail-closed and can never expose Goal control metadata to the user.
         goalRoundRecoveryEnabled: env.DEVSPACE_GOAL_ROUND_RECOVERY === undefined
             ? files.config.goalRoundRecoveryEnabled !== false
             : parseBoolean(env.DEVSPACE_GOAL_ROUND_RECOVERY),

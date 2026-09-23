@@ -11,20 +11,54 @@ const liveness = await readFile(new URL("../dist/conversation-progress-liveness.
 const livenessCdp = await readFile(new URL("../dist/conversation-progress-liveness-cdp.js", import.meta.url), "utf8");
 const transportObserver = await readFile(new URL("../dist/classic-turn-transport-observer.js", import.meta.url), "utf8");
 const progressClaims = await readFile(new URL("../dist/progress-claim-registry.js", import.meta.url), "utf8");
+const startClaims = await readFile(new URL("../dist/conversation-start-claim-registry.js", import.meta.url), "utf8");
 const progressRelay = await readFile(new URL("../dist/ui/progress-claim-relay.html", import.meta.url), "utf8");
+const claimCdp = await readFile(new URL("../dist/conversation-start-claim-cdp.js", import.meta.url), "utf8");
 
 assert.match(server, /const resolveCapabilityConversationAuthority = async \(extra\) =>/);
 assert.match(server, /const resolveProgressConversationAuthority = async \(extra\) =>/);
 assert.match(server, /const resolveConversationAuthority = resolveCapabilityConversationAuthority;/);
 assert.match(server, /const resolveConversation = resolveCapabilityConversationAuthority;/);
 assert.match(server, /const resolveProgressConversation = resolveProgressConversationAuthority;/);
+assert.match(server, /localBindingAuthorized\(req, config\.oauth\.ownerToken\)/,
+  'first Pro bootstrap is a direct-loopback owner operation, never unauthenticated UI or arbitrary tool arguments');
+assert.match(server, /progressClaimRegistry\.requestIdentity\(claimId\)/,
+  'operator pairing must use the identity saved from the original pending authenticated call');
+assert.match(server, /progressBootstrapAuthority\?\.consume\?\.\(\{[\s\S]{0,400}traceCorrelationFingerprints:[\s\S]{0,180}verifyPage:\s*resolveProgressClaimPage/,
+  'cached Goal/Plan bootstrap requires the current request trace and live exact claim page, never session affinity alone');
+assert.match(server, /traceCorrelationFingerprints:\s*requestTraceCorrelationFingerprints\(req\?\.headers \|\| \{\}\)/,
+  'the bootstrap trace must originate in this authenticated HTTP request rather than caller tool arguments');
 assert.match(server, /registerAppTool\(server, "devspace_progress_report"[\s\S]*const resolved = await resolveProgressConversation\(extra\);/);
 assert.match(server, /resourceUri:\s*PROGRESS_CLAIM_RELAY_URI/);
 assert.match(server, /resourceUri:\s*PROGRESS_CLAIM_RELAY_URI,[\s\S]{0,800}visibility:\s*\["model",\s*"app"\]/,
   "the progress relay must be callable by the exact page MCP App as well as the model");
-assert.match(server, /progressClaimRegistry\.create\(\{ message:\s*reportMessage, kind \}\)/);
+assert.match(server, /progressClaimRegistry\.create\(\{[\s\S]{0,260}message:\s*reportMessage,[\s\S]{0,180}kind,[\s\S]{0,260}requestBinding:[\s\S]{0,180}sessionFingerprint:\s*currentRequestContext\?\.sessionFingerprint/,
+  "pending progress must retain only the hashed request session needed for a short-lived cached-schema bootstrap lease");
 assert.match(server, /claimId:\s*z\.string\(\)\.min\(16\)\.max\(200\)\.optional\(\)/);
 assert.match(server, /progressClaimRegistry\.claim\(/);
+assert.match(server, /ConversationStartClaimCdpResolver/,
+  "pending narration must recover exact page ownership from the mounted claim iframe when app callTool has no request correlation");
+assert.match(server, /resolveProgressClaimPage\?\.\(relayClaimId\)/);
+assert.match(server, /EXACT_PAGE_CLAIM_PROOF/);
+assert.match(server, /claimPendingProgressFromExactPage/,
+  "pending Agent narration must complete from exact iframe-parent authority even when app callTool fails");
+assert.match(server, /void claimPendingProgressFromExactPage\(progressClaim\)/);
+assert.match(server, /progressClaimRegistry\.pendingClaims\(\{ limit: 8 \}\)/,
+  "a bounded background sweep must keep resolving claims that mount after the initial tool handler has returned");
+assert.match(server, /config\.passiveCore \? null : setInterval\(\(\) => \{ void sweepPendingProgressClaims\(\)\.catch/,
+  'passive candidates must not run progress claim sweeps');
+assert.match(server, /conversationStartClaimRegistry\.pendingClaims\(\{ limit: 8 \}\)/,
+  "Goal\/Plan bootstrap claims must also be swept only from bounded exact-page pending state");
+assert.match(server, /config\.passiveCore \? null : setInterval\(\(\) => \{ void sweepPendingConversationStartClaims\(\)\.catch/,
+  'passive candidates must not mutate Goal/Plan through claim sweeps');
+assert.match(server, /mcpServerTemplate\.__devspaceStopClaimSweeps\?\.\(\)/,
+  'runtime shutdown must stop claim timers before releasing transports and Goal/Plan stores');
+assert.match(server, /new ProgressBootstrapAuthorityRegistry\(\)/,
+  "cached Goal\/Plan bootstrap must use a bounded short-lived in-memory registry");
+assert.match(server, /progressBootstrapAuthority\?\.register\?\.\(\{[\s\S]{0,300}sessionFingerprint:\s*bootstrapSessionFingerprint/,
+  "only a successfully persisted exact progress report may mint a cached-schema bootstrap lease");
+assert.match(server, /progressBootstrapAuthority\?\.consume\?\.\(\{[\s\S]{0,200}sessionFingerprint:\s*requestContext\?\.sessionFingerprint,[\s\S]{0,120}toolName/,
+  "Goal\/Plan bootstrap must consume the lease through the current request's hashed session only");
 assert.match(server, /outputSchema:[\s\S]{0,1200}progressClaim:\s*z\.object\(/,
   "progress tool must declare the structured claim output so ChatGPT can hydrate the relay App");
 assert.match(server, /"devspace\/progressClaim":\s*progressClaim/,
@@ -53,15 +87,47 @@ assert.match(server, /mcpCallCorrelator\.waitForIdentity\([\s\S]{0,700}verifyCor
 assert.match(server, /progressLivenessAdapter\.find\(\{[\s\S]*conversationId:\s*candidate\.conversationId/);
 assert.match(server, /page\.runtimeKey !== candidateRuntimeKey/);
 assert.match(server, /page\.progressCardMounted === true && page\.progressConversationId !== candidate\.conversationId/);
-assert.match(server, /resolved\?\.pageVerified !== true \|\| !resolved\?\.runtimeKey \|\| !resolved\?\.callFingerprint/,
-  "progress writes require exact page plus canonical tool invocation proof");
-assert.match(server, /ownershipProof:\s*EXACT_CONVERSATION_REQUEST_PROOF/);
+assert.match(server, /const activityPage = await progressLivenessAdapter\.find\(\{[\s\S]{0,180}conversationId:\s*gateConversationId/,
+  "substantive tool activity must re-read the globally exact live page before postponing Rescue");
+assert.match(server, /activityPage\.runtimeKey === gateRuntimeKey[\s\S]{0,180}activityPage\.generating === true[\s\S]{0,180}activityPage\.hasTurnError !== true/,
+  "idle, failed, duplicate or stale-session pages cannot refresh the Rescue clock");
+assert.match(server, /sourceUserMessageId:\s*activityPage\.latestUserMessageId/,
+  "accepted tool activity must be bound to the exact current source user message");
+assert.match(liveness, /substantive-tool-activity-source-mismatch-ignored/,
+  "older or cross-turn tool activity must fail closed instead of postponing Rescue");
+assert.match(liveness, /substantive-tool-activity-without-current-source-ignored/,
+  "unproved tool activity must not reset Rescue silence");
+assert.match(server, /const exactPageClaim = Boolean\(/);
+assert.match(server, /const exactRequest = Boolean\(/);
+assert.match(server, /ownershipProof,\s*ownershipSource:\s*resolved\.source/);
 assert.match(progressClaims, /exact page-verified conversation authority/);
 assert.match(progressClaims, /another conversation page/);
 assert.match(progressClaims, /durableConversationOwners:\s*0/);
-assert.match(progressRelay, /window\.openai\.callTool\("devspace_progress_report"/);
+assert.match(progressRelay, /toolName:\s*"devspace_progress_report"/);
+assert.match(progressRelay, /startClaim\.toolName === "devspace_goal_start"/);
+assert.match(progressRelay, /startClaim\.toolName === "devspace_plan_start"/);
+assert.match(progressRelay, /window\.openai\.callTool\(action\.toolName, action\.arguments\)/);
 assert.match(progressRelay, /window\.openai\?\.toolResponseMetadata/,
   "claim relay must accept result metadata when toolOutput is null");
+assert.doesNotMatch(progressRelay, /requestClose/,
+  "a hidden exact-page relay must never ask ChatGPT to close host UI");
+assert.match(progressRelay, /retireRelay/,
+  "expired one-shot relays must retire their own listeners locally");
+assert.match(progressRelay, /removeEventListener/,
+  "local relay retirement must detach host event listeners");
+assert.match(progressRelay, /devspace\/conversationStartClaim/);
+assert.match(startClaims, /devspace_goal_start/);
+assert.match(startClaims, /devspace_plan_start/);
+assert.match(startClaims, /exact page-verified conversation authority/);
+assert.match(startClaims, /rawInputsExposed:\s*false/);
+assert.match(claimCdp, /chooseAppContext/);
+assert.match(claimCdp, /classic-exact-page-progress-claim-cdp-page-verified/);
+assert.match(claimCdp, /classic-exact-page-start-claim-cdp-page-verified/);
+assert.match(claimCdp, /parentId/);
+assert.doesNotMatch(claimCdp, /Page\.navigate|Page\.reload|location\.href\s*=/,
+  "exact-page claim recovery must remain read-only and never navigate a Main");
+assert.match(server, /conversationStartClaimRelay/,
+  "Goal\/Plan relay retries must bypass the ordinary substantive-tool progress gate");
 assert.doesNotMatch(progressRelay, /sendFollowUpMessage|prompt-textarea|composer/);
 
 assert.doesNotMatch(server, /resolveVerifiedDirectSession\(|persistVerifiedDirectSessionIdentity|directRequestAuthorityRegistry/,
@@ -133,6 +199,14 @@ assert.match(liveness, /stalledGeneratingSilenceRescue:\s*true/,
   "twenty minutes of exact-page generating silence must become bounded stalled-generation rescue evidence");
 assert.match(liveness, /substantiveToolActivityResetsRescueClock:\s*true/,
   "fresh substantive tool activity must reset only that conversation's rescue clock");
+assert.match(liveness, /kind === "goal-continuation-started"/,
+  "a backend hidden Goal continuation must create a fresh physical-turn Rescue episode even when the latest user id is unchanged");
+assert.match(liveness, /record\.lastGoalContinuationId === goalContinuationId/,
+  "duplicate reconciliation of one hidden continuation must be idempotent and must not reset the Rescue clock");
+assert.match(liveness, /hiddenGoalContinuationStartsNewRescueEpisode:\s*true/);
+assert.match(liveness, /duplicateGoalContinuationDoesNotResetClock:\s*true/);
+assert.match(server, /onHiddenContinuationStarted:[\s\S]{0,700}kind:\s*"goal-continuation-started"[\s\S]{0,400}goalContinuationId:\s*continuationId/,
+  "the hidden Goal driver must explicitly bind the new assistant turn to a new Rescue episode");
 assert.match(liveness, /"stalled-generating"/);
 assert.match(liveness, /record\.interruptedAt = value\?\.interruptedAt[\s\S]{0,260}value\?\.lastActivityAt/,
   "Core restart evidence must preserve the pre-restart activity anchor instead of restarting the twenty-minute clock");
@@ -168,6 +242,8 @@ console.log(JSON.stringify({
   staleGeneratingInterruptedTurnRecoverable: true,
   stalledGeneratingSilenceRecoverable: true,
   substantiveToolActivityResetsRescueClock: true,
+  hiddenGoalContinuationStartsNewRescueEpisode: true,
+  duplicateGoalContinuationDoesNotResetClock: true,
   coreRestartPreservesElapsedRescueClock: true,
   restartRestoresActiveEpisodeAsInterrupted: true,
   rescueText: "- 繼續",

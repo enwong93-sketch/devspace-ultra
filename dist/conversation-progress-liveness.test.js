@@ -324,7 +324,7 @@ assert.equal(supervisor.status().stalledGeneratingSilenceRescue, true);
 assert.equal(supervisor.status().substantiveToolActivityResetsRescueClock, true);
 assert.equal(supervisor.status().maxContinueAttempts, 1);
 
-await supervisor.noteTurn({ kind: "started", conversationId: "conversation-running", runtimeKey: "main-01", observedAtMs: now });
+await supervisor.noteTurn({ kind: "started", conversationId: "conversation-running", runtimeKey: "main-01", sourceUserMessageId: "user-message-running", observedAtMs: now });
 await supervisor.noteTurn({ kind: "started", conversationId: "conversation-complete", runtimeKey: "main-02", observedAtMs: now });
 await supervisor.noteTurn({ kind: "finished", conversationId: "conversation-complete", runtimeKey: "main-02", observedAtMs: now + 1_000 });
 await supervisor.noteTurn({ kind: "started", conversationId: "conversation-finish-pending", runtimeKey: "main-02", observedAtMs: now });
@@ -359,11 +359,19 @@ await supervisor.noteTurn({
   canceled: true,
   observedAtMs: now + 3_000,
 });
+await supervisor.noteTurn({
+  kind: "started",
+  conversationId: "conversation-running",
+  runtimeKey: "main-01",
+  sourceUserMessageId: "user-message-running",
+  observedAtMs: now + 5 * 60_000,
+});
 
 let completeRecord = supervisor.status().records.find((row) => row.conversationId === "conversation-complete");
 let finishPendingRecord = supervisor.status().records.find((row) => row.conversationId === "conversation-finish-pending");
 let cancelledRecord = supervisor.status().records.find((row) => row.conversationId === "conversation-cancelled");
 const transportOnlyRecord = supervisor.status().records.find((row) => row.conversationId === "conversation-transport-only");
+const retriedSameTurnRecord = supervisor.status().records.find((row) => row.conversationId === "conversation-running");
 assert.equal(completeRecord.armed, false, "normal native completion must immediately disarm rescue");
 assert.equal(completeRecord.turnState, "completed");
 assert.equal(finishPendingRecord.armed, true,
@@ -377,6 +385,12 @@ assert.equal(transportOnlyRecord.interruptedAt, null,
 assert.equal(transportOnlyRecord.lastActivityAt, new Date(now).toISOString(),
   "transport-only completion must not advance the rescue clock beyond the native turn start");
 assert.equal(transportOnlyRecord.lastDispatchState, "conversation-turn-transport-finished-nonterminal");
+assert.equal(retriedSameTurnRecord.episodeRevision, 1,
+  "a backend retry of the same source user message must not create a new Rescue episode");
+assert.equal(retriedSameTurnRecord.startedAt, new Date(now).toISOString());
+assert.equal(retriedSameTurnRecord.lastActivityAt, new Date(now).toISOString(),
+  "same-user retries must not advance the twenty-minute silence anchor");
+assert.equal(retriedSameTurnRecord.lastDispatchState, "same-user-turn-request-reobserved-nonterminal");
 assert.equal(cancelledRecord.armed, false, "an explicit user cancellation must not be auto-rescued");
 assert.equal(cancelledRecord.turnState, "cancelled");
 assert.equal(settled.some((event) => event.conversationId === "conversation-complete" && event.turnState === "completed"), true);
@@ -835,11 +849,13 @@ const silentPages = new Map([
   ["conversation-silent-main-01", {
     runtimeKey: "main-01", port: 9721, hydrated: true, generating: true,
     composerEmpty: true, latestMessageRole: "user", hasTurnError: false,
+    latestUserMessageId: "source-silent-main-01",
     normalCompletion: false, incompleteUserTurn: false,
   }],
   ["conversation-silent-main-04", {
     runtimeKey: "main-04", port: 9734, hydrated: true, generating: true,
     composerEmpty: true, latestMessageRole: "user", hasTurnError: false,
+    latestUserMessageId: "source-silent-main-04",
     normalCompletion: false, incompleteUserTurn: false,
   }],
 ]);
@@ -899,15 +915,48 @@ for (const [conversationId, page] of silentPages) {
     kind: "started",
     conversationId,
     runtimeKey: page.runtimeKey,
+    sourceUserMessageId: page.latestUserMessageId,
     observedAtMs: silentNow,
   });
 }
-silentNow += 15 * 60_000;
+silentNow += 14 * 60_000;
+const beforeWrongActivity = silentSupervisor.status().records.find((row) => row.conversationId === "conversation-silent-main-01");
 await silentSupervisor.noteActivity({
   conversationId: "conversation-silent-main-01",
+  sourceUserMessageId: "source-from-another-or-older-turn",
   observedAtMs: silentNow,
 });
-silentNow += 6 * 60_000;
+const afterWrongActivity = silentSupervisor.status().records.find((row) => row.conversationId === "conversation-silent-main-01");
+assert.equal(afterWrongActivity.lastActivityAt, beforeWrongActivity.lastActivityAt,
+  "stale or cross-turn tool activity must not postpone Rescue");
+assert.equal(afterWrongActivity.lastDispatchState, "substantive-tool-activity-source-mismatch-ignored");
+silentNow += 60_000;
+await silentSupervisor.noteActivity({
+  conversationId: "conversation-silent-main-01",
+  sourceUserMessageId: "source-silent-main-01",
+  observedAtMs: silentNow,
+});
+silentNow += 4 * 60_000;
+const main04BeforeResume = silentSupervisor.status().records.find((row) => row.conversationId === "conversation-silent-main-04");
+await silentSupervisor.noteTurn({
+  kind: "resumed",
+  conversationId: "conversation-silent-main-04",
+  runtimeKey: "main-04",
+  observedAtMs: silentNow,
+});
+await silentSupervisor.noteTurn({
+  kind: "metadata",
+  conversationId: "conversation-silent-main-04",
+  runtimeKey: "main-04",
+  observedAtMs: silentNow + 1_000,
+});
+const main04AfterResume = silentSupervisor.status().records.find((row) => row.conversationId === "conversation-silent-main-04");
+assert.equal(main04AfterResume.startedAt, main04BeforeResume.startedAt,
+  "stream resume must never create a new Rescue episode");
+assert.equal(main04AfterResume.lastActivityAt, main04BeforeResume.lastActivityAt,
+  "stream resume/metadata must not postpone the twenty-minute Rescue clock");
+assert.equal(main04AfterResume.episodeRevision, main04BeforeResume.episodeRevision);
+silentNow += 2 * 60_000;
 await silentSupervisor.tick();
 let silentMain01 = silentSupervisor.status().records.find((row) => row.conversationId === "conversation-silent-main-01");
 let silentMain04 = silentSupervisor.status().records.find((row) => row.conversationId === "conversation-silent-main-04");
@@ -1084,7 +1133,6 @@ const exactRecoveryTarget = {
 };
 const recoveryEvaluations = [];
 const recoveryCalls = [];
-let recoveryEvaluationIndex = 0;
 const exactPageRecoveryAdapter = new ConversationProgressLivenessCdpAdapter({
   runtimeKeys: ["main-03"],
   listTargets: async () => [exactRecoveryTarget],
@@ -1092,10 +1140,7 @@ const exactPageRecoveryAdapter = new ConversationProgressLivenessCdpAdapter({
   connect: async () => ({
     evaluate: async (expression) => {
       recoveryEvaluations.push(expression);
-      recoveryEvaluationIndex += 1;
-      if (recoveryEvaluationIndex === 1) return { ok: true };
-      if (recoveryEvaluationIndex === 2) return { ok: true };
-      return { ok: true, state: "visible" };
+      return { ok: true };
     },
     call: async (method, params) => {
       recoveryCalls.push({ method, params });
@@ -1122,103 +1167,40 @@ const goalRecoverySend = await exactPageRecoveryAdapter.sendGoalRecovery({
   prompt: "[DEVSPACE_GOAL_ROUND_RECOVERY]\nContinue the same verified Goal round.",
   attempt: 1,
 });
-assert.equal(goalRecoverySend.ok, true);
-assert.equal(goalRecoverySend.purpose, "goal-round-recovery");
-assert.equal(goalRecoverySend.dispatchCommitted, true);
-assert.equal(goalRecoverySend.visibilityVerified, true);
-assert.equal(goalRecoverySend.foregroundActivation, false);
-assert.equal(goalRecoverySend.pageNavigation, false);
-assert.equal(recoveryCalls.length, 1);
-assert.equal(recoveryCalls[0].method, "Input.insertText");
-assert.match(recoveryEvaluations[0], /const allowNormalCompletion = true;/,
-  "Goal Recovery must allow the completed assistant message that proves the prior round ended");
-assert.match(recoveryEvaluations[0], /const requireInterruptionEvidence = false;/,
-  "the Goal guard, not generic rescue DOM heuristics, owns recovery eligibility");
+assert.deepEqual(goalRecoverySend, {
+  ok: false,
+  definiteFailure: true,
+  dispatchCommitted: false,
+  visibilityVerified: false,
+  state: "visible-goal-recovery-transport-retired",
+});
+assert.equal(recoveryCalls.length, 0,
+  "Goal Recovery must never type control text into the user's composer");
+assert.equal(recoveryEvaluations.length, 0,
+  "the retired visible Goal transport must not even inspect or mutate the exact page");
 const invalidGoalRecovery = await exactPageRecoveryAdapter.sendGoalRecovery({
   conversationId: "conversation-goal-recovery",
   prompt: "untrusted arbitrary follow-up",
 });
-assert.deepEqual(invalidGoalRecovery, { ok: false, state: "invalid-goal-recovery-prompt" });
-
-let alreadyVisibleCalls = 0;
-const alreadyVisibleRecoveryAdapter = new ConversationProgressLivenessCdpAdapter({
-  runtimeKeys: ["main-03"],
-  listTargets: async () => [exactRecoveryTarget],
-  sleep: async () => {},
-  connect: async () => ({
-    evaluate: async () => ({ ok: true, state: "already-visible", alreadyVisible: true }),
-    call: async () => { alreadyVisibleCalls += 1; return {}; },
-    close() {},
-  }),
-});
-const alreadyVisibleRecovery = await alreadyVisibleRecoveryAdapter.sendGoalRecovery({
+assert.deepEqual(invalidGoalRecovery, goalRecoverySend,
+  "legacy callers fail closed regardless of prompt content; no visible Goal recovery transport remains");
+const retiredGoalContinuation = await exactPageRecoveryAdapter.sendGoalContinuation({
   conversationId: "conversation-goal-recovery",
-  target: {
-    exact: true,
-    conversationId: "conversation-goal-recovery",
-    runtimeKey: "main-03",
-    port: 9733,
-    target: {
-      runtimeKey: "main-03",
-      port: 9733,
-      targetId: exactRecoveryTarget.id,
-      url: exactRecoveryTarget.url,
-      webSocketDebuggerUrl: exactRecoveryTarget.webSocketDebuggerUrl,
-    },
-  },
-  prompt: "[DEVSPACE_GOAL_ROUND_RECOVERY]\nContinue the same verified Goal round.",
-  attempt: 1,
+  target: { exact: true },
+  sourceUserId: "source-user",
+  assistantMessageId: "assistant-final",
 });
-assert.equal(alreadyVisibleRecovery.ok, true);
-assert.equal(alreadyVisibleRecovery.alreadyVisible, true);
-assert.equal(alreadyVisibleRecovery.dispatchCommitted, true);
-assert.equal(alreadyVisibleCalls, 0, "an already visible exact recovery turn must not be submitted twice");
-
-let uncertainEvaluationIndex = 0;
-const uncertainRecoveryAdapter = new ConversationProgressLivenessCdpAdapter({
-  runtimeKeys: ["main-03"],
-  listTargets: async () => [exactRecoveryTarget],
-  sleep: async () => {},
-  connect: async () => ({
-    evaluate: async () => {
-      uncertainEvaluationIndex += 1;
-      if (uncertainEvaluationIndex <= 2) return { ok: true };
-      return { ok: false, state: "missing" };
-    },
-    call: async () => ({}),
-    close() {},
-  }),
+assert.deepEqual(retiredGoalContinuation, {
+  ok: false,
+  definiteFailure: true,
+  dispatchCommitted: false,
+  visibilityVerified: false,
+  state: "visible-goal-continuation-transport-retired",
 });
-const uncertainRecovery = await uncertainRecoveryAdapter.sendGoalRecovery({
-  conversationId: "conversation-goal-recovery",
-  target: {
-    exact: true,
-    conversationId: "conversation-goal-recovery",
-    runtimeKey: "main-03",
-    port: 9733,
-    target: {
-      runtimeKey: "main-03",
-      port: 9733,
-      targetId: exactRecoveryTarget.id,
-      url: exactRecoveryTarget.url,
-      webSocketDebuggerUrl: exactRecoveryTarget.webSocketDebuggerUrl,
-    },
-  },
-  prompt: "[DEVSPACE_GOAL_ROUND_RECOVERY]\nContinue one uncertain submission.",
-  attempt: 2,
-});
-assert.equal(uncertainRecovery.ok, false);
-assert.equal(uncertainRecovery.dispatchCommitted, true);
-assert.equal(uncertainRecovery.visibilityVerified, false);
-assert.equal(uncertainRecovery.definiteFailure, false);
-assert.equal(uncertainEvaluationIndex, 22,
-  "visibility verification must be bounded after one committed click");
 
 await supervisor.close();
 await runtime03Adapter.close();
 await exactPageRecoveryAdapter.close();
-await alreadyVisibleRecoveryAdapter.close();
-await uncertainRecoveryAdapter.close();
 await rm(dir, { recursive: true, force: true });
 
 console.log(JSON.stringify({
@@ -1236,7 +1218,8 @@ console.log(JSON.stringify({
   stalledGeneratingSilenceRescue: true,
   substantiveToolActivityResetsRescueClock: true,
   completionRevokesActiveTurnAuthority: true,
-  exactPageGoalRecovery: true,
+  exactPageGoalRecovery: false,
+  visibleGoalRecoveryTransportRetired: true,
   goalRecoveryForegroundActivation: false,
   goalRecoveryPageNavigation: false,
   transportFinishRequiresPageCompletion: true,

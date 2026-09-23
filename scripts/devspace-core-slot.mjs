@@ -8,6 +8,7 @@ import Database from "better-sqlite3";
 import { validateCoreNodeArgs } from "../dist/core-node-options.js";
 import { resolveFreshWindowsProcessEnvironment } from "../dist/windows-process-path.js";
 import { boundedLogOptionsFromEnv, createBoundedLogWriter } from "../dist/bounded-log-files.js";
+import { applyDevspaceRuntimePriority } from "../dist/runtime-priority.js";
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const CORE_RUNTIME_ENV_KEYS = new Set([
@@ -249,6 +250,7 @@ export async function startCoreSlot({
     shell: false,
     stdio: ["ignore", "pipe", "pipe"],
   });
+  const runtimePriority = applyDevspaceRuntimePriority("core", { pid: child.pid });
   child.stdout.pipe(stdoutLog);
   child.stderr.pipe(stderrLog);
   stdoutLog.on("error", () => child.stdout?.resume());
@@ -268,6 +270,7 @@ export async function startCoreSlot({
     nodeArgs: safeNodeArgs,
     pathSource: preparedEnvironment.pathSource,
     pathRefreshed: preparedEnvironment.refreshed,
+    runtimePriority,
     logPolicy: {
       maxBytes: logOptions.maxBytes,
       maxBackups: logOptions.maxBackups,

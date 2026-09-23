@@ -10,9 +10,14 @@ const registry = new ProgressClaimRegistry({
   createId: () => `progress-claim-${String(++ids).padStart(4, "0")}`,
 });
 
-const claim = registry.create({ message: "Exact progress message", kind: "verification" });
+const claim = registry.create({
+  message: "Exact progress message",
+  kind: "verification",
+  requestBinding: { sessionFingerprint: "c".repeat(64), openaiIdentity: { version: 1, key: 'e'.repeat(64) }, callFingerprint: 'f'.repeat(64) },
+});
 assert.equal(claim.state, "pending");
 assert.equal(registry.diagnostics().pending, 1);
+assert.equal(registry.pendingClaims()[0]?.claimId, claim.claimId);
 assert.equal(JSON.stringify(registry.diagnostics()).includes("Exact progress message"), false);
 
 const authorityA = {
@@ -28,16 +33,21 @@ let writes = 0;
 const completed = await registry.claim({
   claimId: claim.claimId,
   authority: authorityA,
-  complete: async ({ message, kind, authority }) => {
+  complete: async ({ message, kind, authority, requestBinding }) => {
     writes += 1;
     assert.equal(message, "Exact progress message");
     assert.equal(kind, "verification");
     assert.equal(authority.conversationId, "conversation-progress-a");
+    assert.equal(requestBinding.sessionFingerprint, "c".repeat(64));
     return { messageCount: 1, updatedAt: new Date(now).toISOString() };
   },
 });
 assert.equal(completed.conversationId, "conversation-progress-a");
+assert.equal(registry.claimIdentity(claim.claimId).key, 'e'.repeat(64), 'duplicate receipt retries retain only the immutable hashed owner');
+assert.equal(registry.requestIdentity(claim.claimId), null, 'completed claims cannot be paired again');
+assert.equal(registry.requestFingerprint(claim.claimId), null);
 assert.equal(writes, 1);
+assert.equal(registry.pendingClaims().some((item) => item.claimId === claim.claimId), false);
 
 const duplicate = await registry.claim({
   claimId: claim.claimId,
@@ -66,6 +76,22 @@ await assert.rejects(
   /exact page-verified/,
 );
 
+const cdpClaim = registry.create({ message: "Recovered from exact claim iframe", kind: "milestone" });
+const cdpCompleted = await registry.claim({
+  claimId: cdpClaim.claimId,
+  authority: {
+    conversationId: "conversation-progress-cdp",
+    runtimeKey: "main-03",
+    claimId: cdpClaim.claimId,
+    observedAt: new Date(now).toISOString(),
+    source: "classic-exact-page-progress-claim-cdp-page-verified",
+    pageVerified: true,
+  },
+  complete: async ({ authority }) => ({ pageVerified: authority.pageVerified }),
+});
+assert.equal(cdpCompleted.conversationId, "conversation-progress-cdp");
+assert.equal(cdpCompleted.pageVerified, true);
+
 const expired = registry.create({ message: "Expire without write", kind: "progress" });
 now += 5_001;
 registry.prune();
@@ -74,6 +100,7 @@ await assert.rejects(
   /unavailable or expired/,
 );
 assert.equal(registry.diagnostics().durableConversationOwners, 0);
+assert.equal(registry.diagnostics().rawRequestBindingsExposed, false);
 
 console.log(JSON.stringify({
   ok: true,
@@ -83,5 +110,6 @@ console.log(JSON.stringify({
   duplicateClaimIdempotent: true,
   expiredClaimWritesNothing: true,
   rawMessagesExposed: false,
+  requestBindingSecretSafe: true,
   durableConversationOwners: 0,
 }));

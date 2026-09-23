@@ -33,11 +33,24 @@ const planSchema = z.object({
   steps: z.array(planStepSchema),
 });
 const planOutputSchema = { plan: planSchema };
+const conversationStartClaimSchema = z.object({
+  claimId: z.string(),
+  toolName: z.enum(["devspace_goal_start", "devspace_plan_start"]),
+  expiresAt: z.string(),
+  state: z.string(),
+});
+const planStartOutputSchema = {
+  plan: planSchema.optional(),
+  pending: z.boolean().optional(),
+  claimed: z.boolean().optional(),
+  claimId: z.string().optional(),
+  conversationStartClaim: conversationStartClaimSchema.optional(),
+};
 
-function textResult(plan, text) {
+function textResult(plan, text, extra = {}) {
   return {
     content: [{ type: "text", text }],
-    structuredContent: { plan },
+    structuredContent: { plan, ...extra },
   };
 }
 
@@ -66,18 +79,40 @@ function modelOnlyMeta() {
 function modelAndAppMeta() {
   return { ui: { visibility: ["model", "app"] } };
 }
+function exactPageClaimMeta(resourceUri) {
+  return resourceUri
+    ? { ui: { resourceUri, visibility: ["model", "app"] } }
+    : modelOnlyMeta();
+}
 
-export function registerPlanTools(server, planRuntime, { resourceUri, resolveConversation } = {}) {
+export function registerPlanTools(server, planRuntime, {
+  resourceUri,
+  resolveConversation,
+  resolveBootstrapConversation = null,
+  startClaimRegistry = null,
+  claimRelayResourceUri = null,
+  resolveStartClaimPage = null,
+} = {}) {
   if (!resourceUri) throw new Error("registerPlanTools requires resourceUri.");
   const resolveConversationId = async (extra) => {
     if (typeof resolveConversation !== "function") return null;
     const resolved = await resolveConversation(extra);
-    const conversationId = String(resolved?.conversationId || "").trim();
-    if (!conversationId) {
-      throw new Error("ChatGPT Classic conversation identity is unresolved; refusing to create an unbound Plan.");
-    }
-    return conversationId;
+    return String(resolved?.conversationId || "").trim() || null;
   };
+
+  const pendingStartResult = (claim) => ({
+    content: [{
+      type: "text",
+      text: "Plan start is awaiting exact page-local ownership confirmation. Retry devspace_plan_start once with the returned claimId and the same title/steps before substantive work.",
+    }],
+    structuredContent: {
+      pending: true,
+      conversationStartClaim: claim,
+    },
+    _meta: {
+      "devspace/conversationStartClaim": claim,
+    },
+  });
 
   registerAppTool(server, "devspace_plan_start", {
     title: "Start DevSpace Plan",
@@ -88,13 +123,65 @@ export function registerPlanTools(server, planRuntime, { resourceUri, resolveCon
         text: z.string().min(1).max(500),
         status: stepStatusSchema,
       })).min(2).max(12),
+      claimId: z.string().min(16).max(200).optional()
+        .describe("Reserved for exact-page ownership recovery after this tool returns a pending conversationStartClaim."),
     },
-    outputSchema: planOutputSchema,
+    outputSchema: planStartOutputSchema,
     annotations: MUTATING,
-    _meta: modelOnlyMeta(),
-  }, async ({ title, steps }, extra) => {
+    _meta: exactPageClaimMeta(claimRelayResourceUri),
+  }, async ({ title, steps, claimId }, extra) => {
     try {
-      const conversationId = await resolveConversationId(extra);
+      const relayClaimId = String(claimId || "").trim();
+      if (relayClaimId) {
+        if (!startClaimRegistry) throw new Error("Plan exact-page start recovery is unavailable.");
+        const existing = startClaimRegistry.inspect({
+          claimId: relayClaimId,
+          toolName: "devspace_plan_start",
+        });
+        if (!existing) throw new Error("Plan start claim is unavailable or expired.");
+        if (existing.completed && existing.result?.plan) {
+          return textResult(existing.result.plan, `Started plan ${existing.result.plan.id}: ${existing.result.plan.title}`, {
+            claimed: true,
+            claimId: relayClaimId,
+          });
+        }
+        let resolved = await resolveConversation(extra);
+        if (!resolved?.conversationId && typeof resolveStartClaimPage === "function") {
+          resolved = await resolveStartClaimPage(relayClaimId);
+        }
+        if (!resolved?.conversationId) return pendingStartResult(existing);
+        const claimed = await startClaimRegistry.claim({
+          claimId: relayClaimId,
+          toolName: "devspace_plan_start",
+          authority: resolved,
+          complete: async ({ input, authority }) => ({
+            plan: await planRuntime.start({
+              title: input.title,
+              steps: input.steps,
+              conversationId: authority.conversationId,
+            }),
+          }),
+        });
+        return textResult(claimed.plan, `Started plan ${claimed.plan.id}: ${claimed.plan.title}`, {
+          claimed: true,
+          claimId: relayClaimId,
+        });
+      }
+      let conversationId = await resolveConversationId(extra);
+      if (!conversationId && typeof resolveBootstrapConversation === "function") {
+        const bootstrap = await resolveBootstrapConversation(extra, "devspace_plan_start");
+        conversationId = String(bootstrap?.conversationId || "").trim() || null;
+      }
+      if (typeof resolveConversation === "function" && !conversationId) {
+        if (!startClaimRegistry || !claimRelayResourceUri) {
+          throw new Error("ChatGPT Classic conversation identity is unresolved; refusing to create an unbound Plan.");
+        }
+        const claim = startClaimRegistry.create({
+          toolName: "devspace_plan_start",
+          input: { title, steps },
+        });
+        return pendingStartResult(claim);
+      }
       const plan = await planRuntime.start({ title, steps, conversationId });
       return textResult(plan, `Started plan ${plan.id}: ${plan.title}`);
     } catch (error) {

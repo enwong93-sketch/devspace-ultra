@@ -8,6 +8,29 @@ This is a product gate, not only a prompt preference. For an exact user-facing M
 
 A `pending` claim, unresolved or unbound conversation identity, unavailable recipient, omitted tool, or timeout is not proof that the floating card was updated. Use the exact-conversation compatibility bridge once when the current conversation ID is known and verify that the report appeared on this conversation. If verification still fails, state one visible progress-routing blocker in the current chat, continue the requested safe work, and never claim that the card was updated. Re-check this gate before each new long phase and before the final response. Chat Swarm workers remain backend-only and must not write the user-facing progress card.
 
+## Context-safe continuation work
+
+A single user turn can contain hundreds of model/tool messages. Preserve the
+finite chat budget: for a resumed task first read the latest checkpoint and
+current diff/status, not the whole repository, commit history or old chat.
+Prefer narrow local grep/read ranges (normally 40-100 lines) and command
+outputs of roughly 1,000-2,000 tokens. Increase only for a specific unresolved
+question. Keep complete test logs and detailed evidence on disk; return the
+exit code, failures, audit id and next action instead of replaying full logs.
+Do not repeatedly rediscover an already loaded tool catalogue or fetch the
+same unchanged file/commit. A failed local identity proof is a routing blocker,
+not permission to spend the whole turn rebuilding project history through
+remote fetch_file/fetch_commit. Use the exact authorized compatibility path
+once, preserve a bounded checkpoint and report the unresolved boundary.
+Do not turn read-only investigation into state-changing Worker resume when a
+router suggests a tool whose required ticket/worker preconditions are absent.
+Goal reports should state new decisions/results and the immediate next step;
+put detailed older evidence in a checkpoint path, not nested prior reports.
+Never label character/byte accounting as native token usage. Do not enable
+Auto Compact, copy full transcripts to a fresh chat, or discard full stored
+Goal history merely to avoid the length limit. The UI card is not the only
+place tool results consume context.
+
 ## Execution approval
 
 When the user explicitly asks this DevSpace Ultra plugin session to investigate, research, diagnose, audit, inspect, or run a non-destructive read-only probe, treat that request itself as approval to begin immediately. Do not insert a separate “continue?”, “start?”, or design-approval checkpoint before gathering evidence.
@@ -30,6 +53,27 @@ For every qualifying interactive Main task, this is an execution requirement rat
 
 ## Capability routing contract
 
+### Provider conversation identity is not a transport session
+
+OpenAI's official Plugins reference defines `_meta["openai/session"]` as an
+anonymized conversation ID. Treat it separately from reusable `mcp-session-id`
+and browser-session aliases. The `openai-conversation-binding` module accepts
+it only after OAuth/resource validation, keys it with the authenticated client,
+subject and organization, and requires an initial exact-page receipt or an
+explicit owner-authorized local bootstrap. Reuse still verifies the exact live
+conversation page; conflicts fail closed. Do not import legacy session maps.
+
+For a Pro/background turn whose original pending progress receipt is not
+rendered, the working Agent may use the existing local bridge once with
+`bind-progress --runtime-key <verified-main> --expected-conversation-id <current-id> --claim-id <original-pending-claim>`.
+This is an explicit operator pairing, not a native receipt claim: it needs the
+local owner credential, validates the actual page, and uses only the message
+and provider identity retained from the original authenticated request. It
+never accepts a caller-supplied provider key or replacement message. Confirm
+actual card text afterwards. Other chats cannot inherit this provider key.
+
+Reference: https://developers.openai.com/plugins/reference
+
 Routing is a Local Gateway product layer, not an informal prompt convention. Use `devspace_route` once at the start or resumption of a non-trivial task before generic implementation work. It is the single harness across direct tools, Agent Skills, capability plugins, MCP servers/tools, workflows, and application runtimes. After `open_workspace`, pass its `workspaceId` to `devspace_route` whenever project-local, user, or trusted plugin Agent Skills may apply. Follow every returned `routeChain` entry and its exact `nextAction`; discovery, catalog listing, or reading a Skill is never completion by itself. Use `capability_route` or `tool_search` only when `devspace_route` explicitly delegates to those compatibility sub-routers or when the user specifically requests a lower-level catalog search.
 
 ### Codex native browser gate
@@ -40,7 +84,7 @@ Every Plugin/MCP connection is conversation-isolated. Never reuse a shared state
 
 The floating progress narration card is written only by the Agent through `devspace_progress_report`. Write one natural-language update after each meaningful medium-sized step, important verification, material direction change, or genuine blocker, and during active non-atomic work keep the silent interval below ten minutes. Do not report every tool call or turn this ceiling into mechanical boilerplate. The liveness supervisor must remain silent at ten minutes; only a verified interrupted or incomplete turn may receive one rescue after twenty minutes, and normal completion or cancellation disarms that episode. A useful report should tell the user what has just become true and what the next medium step is; it must not imitate a status template, heartbeat, trace, or program log.
 
-Automatic same-round Goal Recovery uses the same exact-conversation page-composer transport as the twenty-minute interrupted-turn rescue, but eligibility remains owned by the Goal guard: the bound Goal must still be in a working round, the exact conversation route and page target must be stable, and either native completion or a matching delivery failure must prove that the prior assistant turn ended before `devspace_goal_turn_report`. Recovery must not run Primary debug repair, inspect or call a Goal iframe, activate/show a window, navigate/reload a page, or select by Runtime alone. A verified send closes that round’s recovery episode permanently; failed preflight/dispatch may release the claim for a bounded retry, but the same round may never receive a second successfully visible recovery message.
+Automatic same-round Goal Recovery is backend-owned and hidden, never a page-composer message. The exact Goal guard may dispatch one hidden assistant continuation only after a stable exact-conversation route proves that the current working round safely terminated before `devspace_goal_turn_report`. The hidden host relay must require an empty composer before and after dispatch, create no user message, expose no `[DEVSPACE_GOAL_ROUND_RECOVERY]` or other Goal control text, and never activate/show a window, navigate/reload a page, select by Runtime alone, or run Primary repair. The retired visible composer sender remains hard fail-closed. If the ordinary interrupted-turn Rescue already owns or has dispatched for that episode, Goal Recovery delegates and must not race it; Rescue remains the only path allowed to emit the exact visible user text `- 繼續`. A hidden same-round recovery continues backend Goal/Plan state without `devspace_goal_round_begin`. Normal continuation after `devspace_goal_turn_report` remains a separate backend-owned hidden path and likewise may never fall back to visible composer automation.
 
 Use progressive disclosure. Route from bounded names, aliases, descriptions, Codex-style `agents/openai.yaml` interface metadata, default prompts, declared tool dependencies, structured exclusions, trust/availability, exposure, and implicit-invocation policy. Read only the selected `SKILL.md`; inspect only the selected plugin or deferred MCP server; never bulk-load the full catalog. An explicit-only skill may be shown as blocked but must not be selected unless the user names it. A structured negative trigger is an applicability gate, not a small ranking penalty.
 

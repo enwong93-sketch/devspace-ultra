@@ -1,14 +1,17 @@
 import { ClassicCdpClient } from "./classic-cdp-client.js";
+import { readComposerDraft } from "./classic-composer-draft.js";
+import { classicMainDebugPorts, runtimeLabelForClassicPort } from './classic-main-debug-ports.js';
 
-const DEFAULT_PRIMARY_DEBUG_PORT = 9721;
-const DEFAULT_INTERACTIVE_DEBUG_BASE_PORT = 9730;
-const MIN_INTERACTIVE_MAIN = 2;
-const MAX_INTERACTIVE_MAIN = 32;
-const DEFAULT_PROBE_TIMEOUT_MS = 500;
+const DEFAULT_PROBE_TIMEOUT_MS = 2_000;
+const DEFAULT_PAGE_INSPECTION_TIMEOUT_MS = 12_000;
+const DEFAULT_RAW_DISPATCH_TIMEOUT_MS = 12_000;
+const DEFAULT_COMPOSER_TIMEOUT_MS = 5_000;
 const DEFAULT_CONTEXT_SETTLE_MS = 80;
 const DEFAULT_VISIBLE_REPORT_TIMEOUT_MS = 30_000;
 const DEFAULT_VISIBLE_REPORT_POLL_MS = 150;
 const DEFAULT_VISIBLE_REPORT_SETTLE_MS = 400;
+const DEFAULT_HIDDEN_CONFIRM_TIMEOUT_MS = 15_000;
+const DEFAULT_HIDDEN_CONFIRM_POLL_MS = 200;
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -19,20 +22,73 @@ function errorMessage(error) {
 }
 
 function runtimeLabelForPort(port) {
-  if (port === DEFAULT_PRIMARY_DEBUG_PORT) return "Main-01";
-  const number = port - DEFAULT_INTERACTIVE_DEBUG_BASE_PORT;
-  if (number >= MIN_INTERACTIVE_MAIN && number <= MAX_INTERACTIVE_MAIN) {
-    return `Main-${String(number).padStart(2, "0")}`;
-  }
-  return `Main@${port}`;
+  return runtimeLabelForClassicPort(port);
 }
 
 function conversationIdFromPageUrl(url) {
   try {
     const parsed = new URL(String(url || ""));
+    if (parsed.protocol !== 'https:' || parsed.hostname !== 'chatgpt.com') return null;
     return parsed.pathname.match(/\/c\/([^/?#]+)/)?.[1] || null;
   } catch {
     return null;
+  }
+}
+
+async function inspectExactPageComposer(candidate, expectedText = null, options = {}) {
+  if (!candidate?.pageWebSocketDebuggerUrl || !candidate?.conversationId) {
+    return { ok: false, state: "page-composer-unavailable" };
+  }
+  const client = new ClassicCdpClient(candidate.pageWebSocketDebuggerUrl, options);
+  await client.open();
+  try {
+    const result = await client.call("Runtime.evaluate", {
+      expression: `(() => {
+        const expectedConversation=${JSON.stringify(candidate.conversationId)};
+        const expectedText=${JSON.stringify(String(expectedText || ""))};
+        const actual=location.pathname.match(/\\/c\\/([^/?#]+)/)?.[1]||null;
+        if(actual!==expectedConversation)return {ok:false,state:'route-changed'};
+        const editor=document.querySelector('#prompt-textarea,textarea,div.ProseMirror[contenteditable="true"],[data-lexical-editor="true"][contenteditable="true"],[contenteditable="true"][role="textbox"]');
+        if(!editor)return {ok:false,state:'composer-missing'};
+        const read=${readComposerDraft.toString()};
+        const draft=read(editor);
+        return {ok:true,state:draft===null?'protected-content':draft===''?'empty':'non-empty',
+          exactOwnedPayload:typeof draft==='string'&&expectedText.length>0&&draft===expectedText};
+      })()`,
+      returnByValue: true,
+    });
+    return result?.result?.value || { ok: false, state: "composer-inspection-empty" };
+  } finally {
+    client.close();
+  }
+}
+
+async function clearExactOwnedComposerPayload(candidate, expectedText, options = {}) {
+  if (!candidate?.pageWebSocketDebuggerUrl || !candidate?.conversationId || !expectedText) {
+    return { ok: false, state: "composer-cleanup-unavailable" };
+  }
+  const client = new ClassicCdpClient(candidate.pageWebSocketDebuggerUrl, options);
+  await client.open();
+  try {
+    const result = await client.call("Runtime.evaluate", {
+      expression: `(() => {
+        const expectedConversation=${JSON.stringify(candidate.conversationId)};
+        const expectedText=${JSON.stringify(String(expectedText))};
+        const actual=location.pathname.match(/\\/c\\/([^/?#]+)/)?.[1]||null;
+        if(actual!==expectedConversation)return {ok:false,state:'route-changed'};
+        const editor=document.querySelector('#prompt-textarea,textarea,div.ProseMirror[contenteditable="true"],[data-lexical-editor="true"][contenteditable="true"],[contenteditable="true"][role="textbox"]');
+        if(!editor)return {ok:false,state:'composer-missing'};
+        const read=${readComposerDraft.toString()};
+        if(read(editor)!==expectedText)return {ok:false,state:'composer-ownership-lost'};
+        if(editor instanceof HTMLTextAreaElement)editor.value='';else editor.textContent='';
+        editor.dispatchEvent(new InputEvent('input',{bubbles:true,inputType:'deleteContentBackward',data:null}));
+        return {ok:read(editor)==='',state:'owned-goal-control-draft-cleared'};
+      })()`,
+      returnByValue: true,
+    });
+    return result?.result?.value || { ok: false, state: "composer-cleanup-empty" };
+  } finally {
+    client.close();
   }
 }
 
@@ -69,6 +125,8 @@ export async function waitForVisibleReportBoundary({
         last?.chatMode === true &&
         last?.generating === false &&
         nativeComplete &&
+        last?.latestMessageRole === 'assistant' &&
+        last?.safetyCheckVisible !== true && last?.deliveryTimeoutVisible !== true &&
         typeof last?.latestAssistantText === "string" &&
         last.latestAssistantText.trim().length > 0
       );
@@ -113,14 +171,8 @@ export async function waitForVisibleReportBoundary({
   };
 }
 
-export function defaultMainDebugPorts() {
-  return [
-    DEFAULT_PRIMARY_DEBUG_PORT,
-    ...Array.from(
-      { length: MAX_INTERACTIVE_MAIN - MIN_INTERACTIVE_MAIN + 1 },
-      (_, index) => DEFAULT_INTERACTIVE_DEBUG_BASE_PORT + MIN_INTERACTIVE_MAIN + index,
-    ),
-  ];
+export function defaultMainDebugPorts(options = {}) {
+  return classicMainDebugPorts(options);
 }
 
 class CdpClient extends ClassicCdpClient {
@@ -278,6 +330,10 @@ export async function inspectVisibleReportCommit(candidate, options = {}) {
         });
         const messageNodes = [...document.querySelectorAll('[data-message-author-role]')];
         const latestMessageNode = messageNodes.at(-1) || null;
+        const latestUserNode = [...messageNodes].reverse().find((node) => node.getAttribute('data-message-author-role') === 'user') || null;
+        const userNodes = messageNodes.filter(node => node.getAttribute('data-message-author-role') === 'user');
+        const beforeLatestUser = messageNodes.slice(0, messageNodes.indexOf(latestUserNode));
+        const assistantBeforeLatestUser = [...beforeLatestUser].reverse().find(node => node.getAttribute('data-message-author-role') === 'assistant') || null;
         const assistantNodes = messageNodes.filter((el) => el.getAttribute('data-message-author-role') === 'assistant');
         const assistants = assistantNodes
           .map((el) => (el.innerText || '').trim())
@@ -286,6 +342,87 @@ export async function inspectVisibleReportCommit(candidate, options = {}) {
         const latestAssistantText = String(latestAssistantNode?.innerText || '').trim();
         const match = location.pathname.match(/\\/c\\/([^/?#]+)/);
         const conversationId = match?.[1] || null;
+        let nativeContinuation = null;
+        if (conversationId && ${options.includeNativeBranch === true}) {
+          const expectedSourceUserId = ${JSON.stringify(String(options.sourceUserMessageId || "").trim())};
+          const baselineAssistantMessageId = ${JSON.stringify(String(options.baselineAssistantMessageId || "").trim())};
+          try {
+            const sessionResponse = await fetch('/api/auth/session', {
+              credentials: 'include',
+              cache: 'no-store',
+              signal: AbortSignal.timeout(3000),
+            });
+            const session = sessionResponse.ok ? await sessionResponse.json() : null;
+            const accessToken = session?.accessToken || session?.access_token || null;
+            const conversationResponse = await fetch('/backend-api/conversation/' + encodeURIComponent(conversationId), {
+              credentials: 'include',
+              cache: 'no-store',
+              signal: AbortSignal.timeout(8000),
+              headers: accessToken ? { authorization: 'Bearer ' + accessToken } : undefined,
+            });
+            if (conversationResponse.ok) {
+              const payload = await conversationResponse.json();
+              const reversed = [];
+              const seen = new Set();
+              let currentNodeId = payload?.current_node || null;
+              let nodeId = currentNodeId;
+              while (nodeId && payload?.mapping?.[nodeId] && !seen.has(nodeId) && reversed.length < 4096) {
+                seen.add(nodeId);
+                const node = payload.mapping[nodeId];
+                if (node?.message) {
+                  reversed.push({
+                    id: String(node.message.id || '').trim() || null,
+                    role: String(node.message.author?.role || '').trim().toLowerCase() || null,
+                    status: String(node.message.status || '').trim() || null,
+                    endTurn: node.message.end_turn === true,
+                    createTime: Number.isFinite(Number(node.message.create_time))
+                      ? Number(node.message.create_time)
+                      : null,
+                  });
+                }
+                nodeId = node.parent;
+              }
+              const branch = reversed.reverse();
+              const sourceIndex = expectedSourceUserId
+                ? branch.findIndex(row => row.role === 'user' && row.id === expectedSourceUserId)
+                : -1;
+              const baselineIndex = baselineAssistantMessageId
+                ? branch.findIndex(row => row.role === 'assistant' && row.id === baselineAssistantMessageId)
+                : -1;
+              const afterBaseline = baselineIndex >= 0 ? branch.slice(baselineIndex + 1) : [];
+              const newUserIndex = afterBaseline.findIndex(row => row.role === 'user');
+              const newAssistantIndex = afterBaseline.findIndex(row => row.role === 'assistant' && row.id);
+              const newUser = newUserIndex >= 0 ? afterBaseline[newUserIndex] : null;
+              const newAssistant = newAssistantIndex >= 0 ? afterBaseline[newAssistantIndex] : null;
+              const latestUser = [...branch].reverse().find(row => row.role === 'user') || null;
+              const latestAssistant = [...branch].reverse().find(row => row.role === 'assistant') || null;
+              const current = branch.at(-1) || null;
+              nativeContinuation = {
+                resolved: true,
+                currentNodeId,
+                currentRole: current?.role || null,
+                currentStatus: current?.status || null,
+                currentEndTurn: current?.endTurn === true,
+                branchMessageCount: branch.length,
+                sourceUserFound: sourceIndex >= 0,
+                baselineAssistantFound: baselineIndex >= 0,
+                latestUserMessageId: latestUser?.id || null,
+                latestAssistantMessageId: latestAssistant?.id || null,
+                newUserAfterBaselineMessageId: newUser?.id || null,
+                newUserAfterBaselineIndex: newUserIndex,
+                newUserAfterBaselineCreatedAt: newUser?.createTime
+                  ? new Date(newUser.createTime * 1000).toISOString()
+                  : null,
+                newAssistantAfterBaselineMessageId: newAssistant?.id || null,
+                newAssistantAfterBaselineIndex: newAssistantIndex,
+              };
+            } else {
+              nativeContinuation = { resolved: false, state: 'conversation-fetch-' + conversationResponse.status };
+            }
+          } catch {
+            nativeContinuation = { resolved: false, state: 'native-branch-unavailable' };
+          }
+        }
         const lifecycleNow = Date.now();
         const documentLifecycleKey = '__devspaceClassicDocumentLifecycleV1';
         const routeLifecycleKey = '__devspaceClassicConversationLifecycleV1';
@@ -311,7 +448,7 @@ export async function inspectVisibleReportCommit(candidate, options = {}) {
         routeLifecycle.hydratedSinceMs = routeHydrated ? (routeLifecycle.hydratedSinceMs || lifecycleNow) : null;
         routeLifecycle.lastSeenAtMs = lifecycleNow;
         let streamStatus = null;
-        if (conversationId) {
+        if (conversationId && ${options.skipNativeStatus !== true}) {
           try {
             const response = await fetch('/backend-api/conversation/' + conversationId + '/stream_status', {
               credentials: 'include',
@@ -333,10 +470,15 @@ export async function inspectVisibleReportCommit(candidate, options = {}) {
           latestAssistantText,
           latestMessageRole: latestMessageNode?.getAttribute('data-message-author-role') || null,
           latestMessageId: latestMessageNode?.getAttribute('data-message-id') || null,
+          latestUserMessageId: latestUserNode?.getAttribute('data-message-id') || null,
+          latestUserText: String(latestUserNode?.innerText || '').trim(),
+          previousUserMessageId: userNodes.at(-2)?.getAttribute('data-message-id') || null,
+          assistantBeforeLatestUserMessageId: assistantBeforeLatestUser?.getAttribute('data-message-id') || null,
           latestAssistantMessageId: latestAssistantNode?.getAttribute('data-message-id') || null,
           assistantCount: assistants.length,
           visibleMessageCount,
           conversationId,
+          nativeContinuation,
           streamStatus,
           pageVisibilityState: document.visibilityState || null,
           documentReadyState: document.readyState || null,
@@ -474,6 +616,39 @@ export async function probeClassicConversationPagePort(port, conversationId, opt
     }));
 }
 
+// Inspect only the already-bound exact Goal conversation. Duplicate displays
+// are returned for consensus, never treated as different task owners.
+export async function inspectGoalContinuationPages(goal, {
+  ports = defaultMainDebugPorts(),
+  skipNativeStatus = false,
+  runtimeKey = null,
+  pageTargetId = null,
+  includeNativeBranch = false,
+  sourceUserMessageId = null,
+  baselineAssistantMessageId = null,
+} = {}) {
+  if (runtimeKey) {
+    if (!/^main-(0[1-9]|[12][0-9]|3[0-2])$/.test(runtimeKey)) return [];
+    const number=Number(runtimeKey.slice(-2)); const port=number===1?9721:9730+number;
+    ports=ports.filter(value=>value===port);
+  }
+  const groups = await Promise.all(ports.map(port => probeClassicConversationPagePort(port, goal.conversationId).catch(() => [])));
+  let candidates = groups.flat();
+  if (pageTargetId) candidates = candidates.filter(candidate => candidate.pageTargetId === pageTargetId);
+  if (!candidates.length || candidates.length > 4) return [];
+  const snapshots = await Promise.all(candidates.map(async candidate => {
+    const page = await inspectVisibleReportCommit(candidate, {
+      timeoutMs: includeNativeBranch ? 12000 : 3000,
+      skipNativeStatus,
+      includeNativeBranch,
+      sourceUserMessageId,
+      baselineAssistantMessageId,
+    });
+    return { ...page, candidate, runtimeKey: candidate.runtimePort===9721?'main-01':`main-${String(candidate.runtimePort-9730).padStart(2,'0')}` };
+  }));
+  return snapshots;
+}
+
 async function findRawHostObject(client, contextId) {
   const fn = (await client.call("Runtime.evaluate", {
     contextId,
@@ -510,6 +685,8 @@ async function findRawHostObject(client, contextId) {
 
 export async function sendRawHostFollowUp(candidate, payload, options = {}) {
   const client = new CdpClient(candidate.webSocketDebuggerUrl, options);
+  let dispatchCommitted = false;
+  let dispatchAttempted = false;
   await client.open();
   try {
     await client.call("Runtime.enable");
@@ -518,18 +695,70 @@ export async function sendRawHostFollowUp(candidate, payload, options = {}) {
     const context = chooseInnerContext(client, candidate.targetId);
     if (!context) throw new Error("Goal widget execution context is unavailable.");
     const rawHost = await findRawHostObject(client, context.id);
-    const result = await client.call("Runtime.callFunctionOn", {
-      objectId: rawHost.objectId,
-      functionDeclaration: "function(message){ return this.sendFollowUpMessage(message); }",
-      arguments: [{ value: { prompt: payload.prompt, scrollToBottom: false } }],
-      awaitPromise: true,
-      returnByValue: true,
-      userGesture: false,
-    });
-    if (result.exceptionDetails) {
-      throw new Error(result.exceptionDetails.text || "Raw ChatGPT Classic follow-up RPC failed.");
+    dispatchAttempted = true;
+    let result;
+    try {
+      result = await client.call("Runtime.callFunctionOn", {
+        objectId: rawHost.objectId,
+        // Do not await the host promise. In current ChatGPT builds that promise
+        // can remain pending for the entire assistant turn, which is much
+        // longer than a safe CDP acknowledgement window. Successful return
+        // proves the host function was synchronously invoked; native branch
+        // confirmation remains the downstream authority for Goal advancement.
+        functionDeclaration: `function(message){
+          const pending=this.sendFollowUpMessage(message);
+          if(pending&&typeof pending.catch==='function')pending.catch(()=>{});
+          return {invoked:true,thenable:Boolean(pending&&typeof pending.then==='function')};
+        }`,
+        arguments: [{ value: { prompt: payload.prompt, scrollToBottom: false } }],
+        awaitPromise: false,
+        returnByValue: true,
+        userGesture: false,
+      });
+    } catch (error) {
+      // Once Runtime.callFunctionOn has been issued, losing the acknowledgement
+      // is not proof that the host rejected the hidden continuation. Return an
+      // uncertain committed result so no caller can retry and create a second
+      // hidden assistant turn.
+      return {
+        ok: false,
+        definiteFailure: false,
+        dispatchCommitted: true,
+        backgroundAccepted: false,
+        state: "raw-host-acknowledgement-lost",
+        error: errorMessage(error),
+      };
     }
-    return { ok: true };
+    if (result.exceptionDetails) {
+      return {
+        ok: false,
+        definiteFailure: false,
+        dispatchCommitted: true,
+        backgroundAccepted: false,
+        state: "raw-host-exception-after-dispatch",
+        error: result.exceptionDetails.text || "Raw ChatGPT Classic follow-up RPC failed.",
+      };
+    }
+    if (result?.result?.value?.invoked !== true) {
+      return {
+        ok: false,
+        definiteFailure: false,
+        dispatchCommitted: true,
+        backgroundAccepted: false,
+        state: "raw-host-invocation-unconfirmed",
+      };
+    }
+    dispatchCommitted = true;
+    return { ok: true, dispatchCommitted: true, backgroundAccepted: true };
+  } catch (error) {
+    return {
+      ok: false,
+      definiteFailure: dispatchAttempted !== true,
+      dispatchCommitted: dispatchAttempted,
+      backgroundAccepted: false,
+      state: dispatchAttempted ? "raw-host-acknowledgement-lost" : "raw-host-preflight-failed",
+      error: errorMessage(error),
+    };
   } finally {
     client.close();
   }
@@ -542,29 +771,51 @@ export class ClassicGoalHostBridge {
     probeRelayPort,
     probeConversationPage,
     sendRaw,
-    sendRecovery,
     beforeDispatch,
     beforeRawDispatch,
     waitForVisibleReport,
     inspectVisibleReport,
+    inspectComposer,
+    clearOwnedComposer,
     visibleReportTimeoutMs = DEFAULT_VISIBLE_REPORT_TIMEOUT_MS,
     visibleReportPollMs = DEFAULT_VISIBLE_REPORT_POLL_MS,
+    hiddenConfirmTimeoutMs = DEFAULT_HIDDEN_CONFIRM_TIMEOUT_MS,
+    hiddenConfirmPollMs = DEFAULT_HIDDEN_CONFIRM_POLL_MS,
     sleep: sleepImpl = sleep,
     fetchImpl = globalThis.fetch,
     WebSocketImpl = globalThis.WebSocket,
     probeTimeoutMs = DEFAULT_PROBE_TIMEOUT_MS,
+    pageInspectionTimeoutMs = DEFAULT_PAGE_INSPECTION_TIMEOUT_MS,
+    rawDispatchTimeoutMs = DEFAULT_RAW_DISPATCH_TIMEOUT_MS,
+    composerTimeoutMs = DEFAULT_COMPOSER_TIMEOUT_MS,
     contextSettleMs = DEFAULT_CONTEXT_SETTLE_MS,
   } = {}) {
     this.ports = [...ports];
     this.options = { fetchImpl, WebSocketImpl, timeoutMs: probeTimeoutMs, contextSettleMs };
+    this.pageInspectionOptions = {
+      fetchImpl, WebSocketImpl,
+      timeoutMs: Math.max(DEFAULT_PROBE_TIMEOUT_MS, Number(pageInspectionTimeoutMs) || DEFAULT_PAGE_INSPECTION_TIMEOUT_MS),
+      contextSettleMs,
+    };
+    this.rawDispatchOptions = {
+      fetchImpl, WebSocketImpl,
+      timeoutMs: Math.max(DEFAULT_PROBE_TIMEOUT_MS, Number(rawDispatchTimeoutMs) || DEFAULT_RAW_DISPATCH_TIMEOUT_MS),
+      contextSettleMs,
+    };
+    this.composerOptions = {
+      fetchImpl, WebSocketImpl,
+      timeoutMs: Math.max(DEFAULT_PROBE_TIMEOUT_MS, Number(composerTimeoutMs) || DEFAULT_COMPOSER_TIMEOUT_MS),
+      contextSettleMs,
+    };
     this.probePort = probePort || ((port) => probeClassicMainPort(port, this.options));
     this.probeRelayPort = probeRelayPort || ((port, conversationId) => probeClassicRelayPort(port, conversationId, this.options));
     this.probeConversationPage = probeConversationPage || ((port, conversationId) => probeClassicConversationPagePort(port, conversationId, this.options));
-    this.sendRaw = sendRaw || ((candidate, payload) => sendRawHostFollowUp(candidate, payload, this.options));
-    this.sendRecovery = typeof sendRecovery === "function" ? sendRecovery : null;
+    this.sendRaw = sendRaw || ((candidate, payload) => sendRawHostFollowUp(candidate, payload, this.rawDispatchOptions));
     this.beforeDispatch = beforeDispatch;
     this.beforeRawDispatch = beforeRawDispatch;
-    this.inspectVisibleReport = inspectVisibleReport || ((candidate, payload) => inspectVisibleReportCommit(candidate, { ...this.options, payload }));
+    this.inspectVisibleReport = inspectVisibleReport || ((candidate, payload = {}) => inspectVisibleReportCommit(candidate, { ...this.pageInspectionOptions, ...payload }));
+    this.inspectComposer = inspectComposer || ((candidate, expectedText) => inspectExactPageComposer(candidate, expectedText, this.composerOptions));
+    this.clearOwnedComposer = clearOwnedComposer || ((candidate, expectedText) => clearExactOwnedComposerPayload(candidate, expectedText, this.composerOptions));
     this.waitForVisibleReport = waitForVisibleReport || ((candidate, payload) => waitForVisibleReportBoundary({
       inspect: () => this.inspectVisibleReport(candidate, payload),
       reportedAt: payload?.reportedAt,
@@ -573,6 +824,79 @@ export class ClassicGoalHostBridge {
       pollMs: visibleReportPollMs,
       sleep: sleepImpl,
     }));
+    this.hiddenConfirmTimeoutMs = Math.max(1_000, Number(hiddenConfirmTimeoutMs || DEFAULT_HIDDEN_CONFIRM_TIMEOUT_MS));
+    this.hiddenConfirmPollMs = Math.max(50, Number(hiddenConfirmPollMs || DEFAULT_HIDDEN_CONFIRM_POLL_MS));
+    this.sleep = sleepImpl;
+  }
+
+  async waitForHiddenAssistant(candidate, {
+    sourceUserMessageId,
+    baselineAssistantMessageId,
+    expectedControlText = null,
+  } = {}) {
+    const sourceUser = String(sourceUserMessageId || "").trim();
+    const baselineAssistant = String(baselineAssistantMessageId || "").trim();
+    if (!sourceUser || !baselineAssistant) {
+      return { ok: false, state: "hidden-boundary-unavailable", definiteFailure: false };
+    }
+    const startedAt = Date.now();
+    let lastState = "native-branch-unavailable";
+    while (Date.now() - startedAt <= this.hiddenConfirmTimeoutMs) {
+      try {
+        const composer = await this.inspectComposer(candidate, expectedControlText);
+        if (composer?.exactOwnedPayload === true) {
+          const cleared = await this.clearOwnedComposer(candidate, expectedControlText).catch(() => null);
+          return {
+            ok: false,
+            state: "hidden-control-composer-exposure-cleared",
+            definiteFailure: false,
+            composerMutation: true,
+            composerCleanupVerified: cleared?.ok === true,
+          };
+        }
+        if (composer?.ok !== true || composer?.state !== "empty") {
+          return {
+            ok: false,
+            state: composer?.state || "composer-postflight-unavailable",
+            definiteFailure: false,
+            composerMutation: composer?.state === "non-empty",
+          };
+        }
+        const snapshot = await this.inspectVisibleReport(candidate, {
+          includeNativeBranch: true,
+          sourceUserMessageId: sourceUser,
+          baselineAssistantMessageId: baselineAssistant,
+          timeoutMs: Math.max(8_000, this.hiddenConfirmTimeoutMs),
+        });
+        const native = snapshot?.nativeContinuation;
+        lastState = native?.state || lastState;
+        if (native?.resolved === true) {
+          if (native.newUserAfterBaselineMessageId) {
+            return {
+              ok: false,
+              state: "new-user-before-hidden-assistant",
+              definiteFailure: true,
+              nativeBranchResolved: true,
+            };
+          }
+          if (native.sourceUserFound === true
+            && native.baselineAssistantFound === true
+            && native.latestUserMessageId === sourceUser
+            && native.newAssistantAfterBaselineMessageId) {
+            return {
+              ok: true,
+              state: "hidden-assistant-confirmed-by-native-branch",
+              nativeBranchResolved: true,
+              assistantMessageId: native.newAssistantAfterBaselineMessageId,
+            };
+          }
+        }
+      } catch (error) {
+        lastState = errorMessage(error);
+      }
+      await this.sleep(this.hiddenConfirmPollMs);
+    }
+    return { ok: false, state: lastState || "hidden-assistant-confirmation-timeout", definiteFailure: false };
   }
 
   async findMatchingCandidate(goalId, { conversationId = null, runtimePort = null } = {}) {
@@ -639,17 +963,39 @@ export class ClassicGoalHostBridge {
         matches.push(candidate);
       }
     }
-    if (matches.length !== 1) {
+    const pageGroups = new Map();
+    for (const candidate of matches) {
+      const pageTargetId = String(candidate?.pageTargetId || "").trim();
+      if (!pageTargetId || !Number.isInteger(candidate?.runtimePort)) continue;
+      const key = `${candidate.runtimePort}:${pageTargetId}:${expectedConversationId}`;
+      const group = pageGroups.get(key) || [];
+      group.push(candidate);
+      pageGroups.set(key, group);
+    }
+    if (pageGroups.size !== 1) {
       return {
         candidate: null,
-        ambiguous: matches.length > 1,
+        ambiguous: pageGroups.size > 1,
         matchCount: matches.length,
-        error: matches.length > 1
+        pageMatchCount: pageGroups.size,
+        error: pageGroups.size > 1
           ? `Conversation ${expectedConversationId} is open in more than one ChatGPT Main runtime.`
           : `No exact Chat-mode relay is open for conversation ${expectedConversationId}.`,
       };
     }
-    return { candidate: matches[0], ambiguous: false, matchCount: 1, error: null };
+    const relays = [...pageGroups.values()][0];
+    const score = (candidate) => /DevSpace Goal Relay/i.test(String(candidate?.title || "")) ? 2
+      : /DevSpace Progress Claim Relay/i.test(String(candidate?.title || "")) ? 1 : 0;
+    relays.sort((left, right) => score(right) - score(left)
+      || String(left?.targetId || "").localeCompare(String(right?.targetId || "")));
+    return {
+      candidate: relays[0],
+      ambiguous: false,
+      matchCount: matches.length,
+      pageMatchCount: 1,
+      redundantRelayCount: Math.max(0, relays.length - 1),
+      error: null,
+    };
   }
 
   async findExactConversationPage(conversationId, { runtimePort = null } = {}) {
@@ -711,6 +1057,9 @@ export class ClassicGoalHostBridge {
         return {
           ok: false,
           definiteFailure: sent?.definiteFailure === true,
+          dispatchCommitted: sent?.dispatchCommitted === true,
+          backgroundAccepted: sent?.backgroundAccepted === true,
+          state: sent?.state || null,
           error: sent?.error || "Raw ChatGPT Classic conversation follow-up RPC did not confirm dispatch.",
         };
       }
@@ -721,7 +1070,12 @@ export class ClassicGoalHostBridge {
         runtimeLabel: resolved.candidate.runtimeLabel,
         runtimePort: resolved.candidate.runtimePort,
         targetId: resolved.candidate.targetId,
+        pageTargetId: resolved.candidate.pageTargetId,
         purpose: String(purpose || "conversation-liveness").slice(0, 80),
+        dispatchCommitted: true,
+        backgroundAccepted: true,
+        visibleUserMessage: false,
+        composerMutation: false,
       };
     } catch (error) {
       return { ok: false, definiteFailure: false, error: errorMessage(error) };
@@ -785,37 +1139,33 @@ export class ClassicGoalHostBridge {
     conversationId = null,
     runtimePort = null,
     expectedPageTargetId = null,
+    sourceUserMessageId = null,
+    baselineAssistantMessageId = null,
   } = {}) {
-    if (typeof goalId !== "string" || !goalId.trim()) throw new Error("Goal round recovery dispatch requires goalId.");
-    if (typeof prompt !== "string" || !prompt.trim()) throw new Error("Goal round recovery dispatch requires prompt.");
     const expectedConversationId = String(conversationId || "").trim();
-    if (!expectedConversationId) {
+    const recoveryPrompt = String(prompt || "").trim();
+    const sourceUser = String(sourceUserMessageId || "").trim();
+    const baselineAssistant = String(baselineAssistantMessageId || "").trim();
+    if (!String(goalId || "").trim() || !expectedConversationId
+      || !recoveryPrompt.startsWith("[DEVSPACE_GOAL_ROUND_RECOVERY]")
+      || !sourceUser || !baselineAssistant) {
       return {
         ok: false,
         definiteFailure: true,
-        error: "Goal round recovery requires an exact bound conversationId.",
+        dispatchCommitted: false,
+        state: "invalid-hidden-goal-recovery-boundary",
       };
     }
-    if (typeof this.sendRecovery !== "function") {
-      return {
-        ok: false,
-        definiteFailure: true,
-        error: "Goal round recovery exact-page sender is unavailable.",
-      };
-    }
-    // Unlike ordinary Goal continuation, recovery never runs Primary debug
-    // repair and never discovers or calls an app iframe. It addresses the exact
-    // already-open conversation page, matching the proven twenty-minute rescue
-    // transport and therefore cannot open, navigate, or foreground another Main.
-    const resolved = await this.findExactConversationPage(expectedConversationId, { runtimePort });
+    const resolved = await this.findExactConversationRelay(expectedConversationId, { runtimePort });
     const matching = resolved.candidate;
     if (!matching) {
       return {
         ok: false,
         definiteFailure: true,
+        dispatchCommitted: false,
         ambiguous: resolved.ambiguous === true,
         matchCount: Number(resolved.matchCount || 0),
-        error: resolved.error || `No exact Chat-mode page was found for Goal ${goalId} in conversation ${expectedConversationId}.`,
+        error: resolved.error || `No exact hidden relay is open for Goal ${goalId}.`,
       };
     }
     const expectedTarget = String(expectedPageTargetId || "").trim();
@@ -823,54 +1173,139 @@ export class ClassicGoalHostBridge {
       return {
         ok: false,
         definiteFailure: true,
-        error: "Goal round recovery page target changed after the eligibility snapshot.",
+        dispatchCommitted: false,
+        state: "goal-recovery-page-target-changed",
       };
     }
-    try {
-      const sent = await this.sendRecovery({
-        conversationId: expectedConversationId,
-        prompt,
-        goalId,
-        round,
-        recoveryId,
-        attempt,
-        runtimePort: matching.runtimePort,
-        runtimeLabel: matching.runtimeLabel,
-        expectedPageTargetId: matching.pageTargetId,
-      });
-      if (sent?.ok !== true) {
-        return {
-          ok: false,
-          definiteFailure: sent?.definiteFailure === true,
-          dispatchCommitted: sent?.dispatchCommitted === true,
-          visibilityVerified: sent?.visibilityVerified === true,
-          state: sent?.state || null,
-          error: sent?.error || sent?.state || "Exact ChatGPT Classic page-composer recovery did not confirm dispatch.",
-        };
+    const composerBefore = await this.inspectComposer(matching, recoveryPrompt).catch((error) => ({
+      ok: false,
+      state: errorMessage(error),
+    }));
+    if (composerBefore?.ok !== true || composerBefore?.state !== "empty") {
+      return {
+        ok: false,
+        definiteFailure: true,
+        dispatchCommitted: false,
+        state: composerBefore?.state || "goal-recovery-composer-preflight-failed",
+      };
+    }
+
+    const sent = await this.sendRaw(matching, {
+      prompt: recoveryPrompt,
+      scrollToBottom: false,
+      purpose: "goal-round-recovery-hidden",
+      goalId,
+      round,
+      recoveryId,
+      attempt,
+    });
+    const composerAfter = await this.inspectComposer(matching, recoveryPrompt).catch((error) => ({
+      ok: false,
+      state: errorMessage(error),
+    }));
+    if (composerAfter?.exactOwnedPayload === true) {
+      const cleared = await this.clearOwnedComposer(matching, recoveryPrompt).catch(() => null);
+      return {
+        ok: false,
+        definiteFailure: false,
+        dispatchCommitted: sent?.dispatchCommitted === true || sent?.ok === true,
+        backgroundAccepted: false,
+        visibleUserMessage: false,
+        composerMutation: true,
+        composerCleanupVerified: cleared?.ok === true,
+        state: "hidden-goal-recovery-composer-exposure-cleared",
+      };
+    }
+    if (composerAfter?.ok !== true || composerAfter?.state !== "empty") {
+      return {
+        ok: false,
+        definiteFailure: sent?.dispatchCommitted !== true && sent?.ok !== true,
+        dispatchCommitted: sent?.dispatchCommitted === true || sent?.ok === true,
+        backgroundAccepted: false,
+        visibleUserMessage: false,
+        composerMutation: composerAfter?.state === "non-empty",
+        state: composerAfter?.state || "goal-recovery-composer-postflight-failed",
+      };
+    }
+
+    if (sent?.ok !== true) {
+      if (sent?.dispatchCommitted === true) {
+        const reconciled = await this.waitForHiddenAssistant(matching, {
+          sourceUserMessageId: sourceUser,
+          baselineAssistantMessageId: baselineAssistant,
+          expectedControlText: recoveryPrompt,
+        });
+        if (reconciled.ok === true) {
+          return {
+            ok: true,
+            transport: "classic-hidden-round-recovery-native-reconciled",
+            conversationId: expectedConversationId,
+            runtimeLabel: matching.runtimeLabel,
+            runtimePort: matching.runtimePort,
+            pageTargetId: matching.pageTargetId,
+            dispatchCommitted: true,
+            backgroundAccepted: true,
+            nativeBranchReconciled: true,
+            visibleUserMessage: false,
+            composerMutation: false,
+            foregroundActivation: false,
+            pageNavigation: false,
+          };
+        }
       }
       return {
-        ok: true,
-        transport: sent.transport || "classic-exact-page-composer",
-        conversationId: expectedConversationId,
-        runtimeLabel: matching.runtimeLabel,
-        runtimePort: matching.runtimePort,
-        pageTargetId: matching.pageTargetId,
-        relayFallback: false,
-        foregroundActivation: false,
-        pageNavigation: false,
-        dispatchCommitted: sent?.dispatchCommitted !== false,
-        visibilityVerified: sent?.visibilityVerified !== false,
+        ok: false,
+        definiteFailure: sent?.definiteFailure === true,
+        dispatchCommitted: sent?.dispatchCommitted === true,
+        backgroundAccepted: false,
+        visibleUserMessage: false,
+        composerMutation: false,
+        state: sent?.state || "hidden-goal-recovery-not-confirmed",
+        error: sent?.error || null,
       };
-    } catch (error) {
-      return { ok: false, definiteFailure: false, error: errorMessage(error) };
     }
+    const confirmed = await this.waitForHiddenAssistant(matching, {
+      sourceUserMessageId: sourceUser,
+      baselineAssistantMessageId: baselineAssistant,
+      expectedControlText: recoveryPrompt,
+    });
+    if (confirmed.ok !== true) {
+      return {
+        ok: false,
+        definiteFailure: confirmed.definiteFailure === true,
+        dispatchCommitted: true,
+        backgroundAccepted: false,
+        visibleUserMessage: false,
+        composerMutation: confirmed.composerMutation === true,
+        composerCleanupVerified: confirmed.composerCleanupVerified === true,
+        state: confirmed.state || "hidden-goal-recovery-native-confirmation-missing",
+      };
+    }
+    return {
+      ok: true,
+      transport: "classic-hidden-round-recovery",
+      conversationId: expectedConversationId,
+      runtimeLabel: matching.runtimeLabel,
+      runtimePort: matching.runtimePort,
+      pageTargetId: matching.pageTargetId,
+      dispatchCommitted: true,
+      backgroundAccepted: true,
+      nativeBranchReconciled: true,
+      visibilityVerified: false,
+      visibleUserMessage: false,
+      composerMutation: false,
+      foregroundActivation: false,
+      pageNavigation: false,
+    };
   }
 
   setBeforeRawDispatch(handler) {
     this.beforeRawDispatch = typeof handler === "function" ? handler : null;
   }
 
-  async dispatch({ goalId, prompt, continuationId, leaseId, round, reportedAt, conversationId = null, runtimePort = null } = {}) {
+  async dispatch({ goalId, prompt, continuationId, leaseId, round, reportedAt,
+    conversationId = null, runtimePort = null, expectedPageTargetId = null,
+    sourceUserId = null, assistantMessageId = null } = {}) {
     if (typeof goalId !== "string" || !goalId.trim()) throw new Error("Goal host dispatch requires goalId.");
     if (typeof prompt !== "string" || !prompt.trim()) throw new Error("Goal host dispatch requires prompt.");
 
@@ -883,7 +1318,11 @@ export class ClassicGoalHostBridge {
       }
     }
 
-    const resolved = await this.resolveRecoveryCandidate({ goalId, conversationId, runtimePort });
+    const expectedConversationId = String(conversationId || "").trim();
+    const resolved = expectedConversationId
+      ? await this.findExactConversationRelay(expectedConversationId, { runtimePort })
+      : { candidate: null, relayFallback: false, ambiguous: false, matchCount: 0,
+          error: "Goal continuation requires an exact bound conversationId." };
     const matching = resolved.candidate;
     if (!matching) {
       return {
@@ -893,6 +1332,15 @@ export class ClassicGoalHostBridge {
         error: conversationId
           ? `No matching Chat-mode DevSpace relay was found for Goal ${goalId} in conversation ${conversationId}.`
           : `No matching Chat-mode Goal widget was found for ${goalId}, and no authoritative conversation fallback is available.`,
+      };
+    }
+    const expectedTarget = String(expectedPageTargetId || "").trim();
+    if (expectedTarget && matching.pageTargetId !== expectedTarget) {
+      return {
+        ok: false,
+        definiteFailure: true,
+        dispatchCommitted: false,
+        error: "Goal continuation page target changed after the visible final boundary.",
       };
     }
 
@@ -931,6 +1379,13 @@ export class ClassicGoalHostBridge {
             runtimePort: matching.runtimePort,
             targetId: matching.targetId,
             rollover: guarded.rollover || guarded.result || null,
+            dispatchCommitted: true,
+            backgroundAccepted: true,
+            visibilityVerified: false,
+            visibleUserMessage: false,
+            composerMutation: false,
+            foregroundActivation: false,
+            pageNavigation: false,
           };
         }
       }
@@ -942,10 +1397,55 @@ export class ClassicGoalHostBridge {
         leaseId,
         round,
       });
+      const sourceUser = String(sourceUserId || "").trim();
+      const baselineAssistant = String(assistantMessageId || "").trim();
+      if ((sent?.ok === true || sent?.dispatchCommitted === true)
+        && sourceUser && baselineAssistant) {
+        const confirmed = await this.waitForHiddenAssistant(matching, {
+          sourceUserMessageId: sourceUser,
+          baselineAssistantMessageId: baselineAssistant,
+          expectedControlText: prompt,
+        });
+        if (confirmed?.ok === true) {
+          return {
+            ok: true,
+            transport: sent?.ok === true
+              ? "classic-hidden-continuation-native-confirmed"
+              : "classic-hidden-continuation-native-reconciled",
+            runtimeLabel: matching.runtimeLabel,
+            runtimePort: matching.runtimePort,
+            targetId: matching.targetId,
+            pageTargetId: matching.pageTargetId,
+            relayFallback: true,
+            dispatchCommitted: true,
+            backgroundAccepted: true,
+            nativeBranchReconciled: true,
+            visibilityVerified: false,
+            visibleUserMessage: false,
+            composerMutation: false,
+            foregroundActivation: false,
+            pageNavigation: false,
+          };
+        }
+        return {
+          ok: false,
+          definiteFailure: sent?.dispatchCommitted !== true && sent?.ok !== true
+            && confirmed?.definiteFailure === true,
+          dispatchCommitted: sent?.dispatchCommitted === true || sent?.ok === true,
+          backgroundAccepted: false,
+          state: confirmed?.state || sent?.state || "hidden-continuation-native-confirmation-missing",
+          error: sent?.error || null,
+          composerMutation: confirmed?.composerMutation === true,
+          composerCleanupVerified: confirmed?.composerCleanupVerified === true,
+        };
+      }
       if (sent?.ok !== true) {
         return {
           ok: false,
           definiteFailure: sent?.definiteFailure === true,
+          dispatchCommitted: sent?.dispatchCommitted === true,
+          backgroundAccepted: sent?.backgroundAccepted === true,
+          state: sent?.state || null,
           error: sent?.error || "Raw ChatGPT Classic follow-up RPC did not confirm dispatch.",
         };
       }
@@ -955,7 +1455,15 @@ export class ClassicGoalHostBridge {
         runtimeLabel: matching.runtimeLabel,
         runtimePort: matching.runtimePort,
         targetId: matching.targetId,
-        relayFallback: resolved.relayFallback,
+        pageTargetId: matching.pageTargetId,
+        relayFallback: true,
+        dispatchCommitted: true,
+        backgroundAccepted: true,
+        visibilityVerified: false,
+        visibleUserMessage: false,
+        composerMutation: false,
+        foregroundActivation: false,
+        pageNavigation: false,
       };
     } catch (error) {
       return {

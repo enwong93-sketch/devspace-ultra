@@ -293,6 +293,37 @@ assert.equal(uncertainRuntimeCalls.release, 0,
   "a committed send may never be released for an automatic duplicate retry");
 assert.equal(uncertain.results[0].reason, "dispatch-committed-unverified-no-retry");
 
+let restartEvidenceClaims = 0;
+const restartEvidenceGuard = new moduleUnderTest.ClassicGoalRoundCompletionGuard({
+  goalRuntime: {
+    async recoverableWorkingRounds() { return [baseGoal]; },
+    async claimRoundRecovery() {
+      restartEvidenceClaims += 1;
+      return { claimed: true, claim: { goalId: baseGoal.id, round: 2,
+        recoveryId: "recovery_restart_evidence", prompt: "recover after restart" } };
+    },
+    async roundRecovery() {},
+  },
+  now: () => Date.parse("2026-09-05T03:00:12.000Z"),
+  inspect: async () => ({
+    ...stablePageRoute,
+    chatMode: true,
+    generating: false,
+    streamStatus: "COMPLETE",
+    latestMessageRole: "assistant",
+    latestAssistantMessageId: "assistant-current-round-final",
+    latestAssistantText: "Current round completed before the guard restarted.",
+    turnRequestObservedAt: "2026-09-05T03:00:01.000Z",
+    turnFinishedObservedAt: "2026-09-05T03:00:04.000Z",
+  }),
+  dispatch: async () => ({ ok: true, transport: "hidden-restart-recovery" }),
+  pollMs: 0,
+});
+const restartEvidence = await restartEvidenceGuard.pollOnce();
+assert.equal(restartEvidence.recovered, 1,
+  "persisted exact request/finished evidence must recover a completed round on the first poll after guard restart");
+assert.equal(restartEvidenceClaims, 1);
+
 let reentryClaims = 0;
 const reentryGuard = new moduleUnderTest.ClassicGoalRoundCompletionGuard({
   goalRuntime: {
@@ -324,6 +355,7 @@ await guard.close();
 await prematureCompleteGuard.close();
 await failedGuard.close();
 await uncertainGuard.close();
+await restartEvidenceGuard.close();
 await reentryGuard.close();
 
 console.log(JSON.stringify({
@@ -334,4 +366,5 @@ console.log(JSON.stringify({
   sameRoundRecovery: true,
   failedDispatchReleased: true,
   committedDispatchNeverRetried: true,
+  restartFinishedEvidenceRecovers: true,
 }));

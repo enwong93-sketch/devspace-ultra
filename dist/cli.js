@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import * as prompts from "@clack/prompts";
-import { getShellConfig } from "@earendil-works/pi-coding-agent";
+import { getShellConfig } from "@devspace/pi-coding-agent";
 import { satisfies } from "semver";
 import { loadConfig } from "./config.js";
 import { classifyEdgeConfig, deployCloudflareWorker, deployCloudflareWorkerVpc, ensureCloudflareTunnel, ensureVpcService, installFixedEdgeStartup, planDisableEdgeConfig, planFixedEdgeCandidateConfig, planFixedEdgeConfig, probeFixedEdge, resolveWranglerAuthEnv, startCloudflareTunnelDetached } from "./edge-cloudflare.js";
@@ -21,6 +21,7 @@ import { createLocalAgentStore } from "./local-agent-store.js";
 import { ensureDevspaceDefaultSkills, generateOwnerToken, loadDevspaceFiles, resolveSubagentsFlag, writeDevspaceAuth, writeDevspaceConfig, } from "./user-config.js";
 import { expandHomePath } from "./roots.js";
 import { shutdownHttpServer } from "./server-shutdown.js";
+import { attachHttpRuntimeLifecycle } from "./http-runtime-lifecycle.js";
 const require = createRequire(import.meta.url);
 const SUPPORTED_NODE_RANGE = ">=22.19 <27";
 async function main(argv) {
@@ -398,6 +399,10 @@ async function serve() {
             console.log(`subagent providers: ${formatLocalAgentProviderAvailabilitySummary(localAgentProviders)}`);
         }
     });
+    attachHttpRuntimeLifecycle(httpServer, close, { onError: (error) => {
+        console.error('devspace HTTP lifecycle failed', error?.code || error?.name || 'Error');
+        process.exitCode = 1;
+    } });
     let shuttingDown = false;
     const shutdown = async () => {
         if (shuttingDown)

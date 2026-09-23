@@ -15,7 +15,7 @@ assert.equal(typeof moduleUnderTest?.probeClassicConversationPagePort, "function
 {
   const snapshots = [
     { chatMode: true, generating: true, streamStatus: "IN_PROGRESS", latestAssistantText: "" },
-    { chatMode: true, generating: false, streamStatus: "COMPLETE", latestAssistantText: "MAIN1-GOAL-R2 — visible summary" },
+    { chatMode: true, generating: false, streamStatus: "COMPLETE", latestMessageRole: "assistant", latestAssistantText: "MAIN1-GOAL-R2 — visible summary" },
   ];
   let index = 0;
   let now = Date.parse("2026-09-05T01:00:00.000Z");
@@ -39,7 +39,7 @@ assert.equal(typeof moduleUnderTest?.probeClassicConversationPagePort, "function
   const boundary = await moduleUnderTest.waitForVisibleReportBoundary({
     inspect: async () => {
       inspections += 1;
-      return { chatMode: true, generating: false, streamStatus: "COMPLETE", latestAssistantText: "current-looking summary" };
+      return { chatMode: true, generating: false, streamStatus: "COMPLETE", latestMessageRole: "assistant", latestAssistantText: "current-looking summary" };
     },
     reportedAt: "2026-09-05T01:00:00.000Z",
     minimumReportSettleMs: 400,
@@ -107,6 +107,16 @@ assert.equal(typeof moduleUnderTest?.probeClassicConversationPagePort, "function
 }
 
 const ports = moduleUnderTest.defaultMainDebugPorts();
+{
+  let now = 1000;
+  const boundary = await moduleUnderTest.waitForVisibleReportBoundary({
+    inspect: async () => ({chatMode:true, generating:false, streamStatus:'COMPLETE',
+      latestMessageRole:'user', latestAssistantText:'An answer to the PREVIOUS user request'}),
+    reportedAt:new Date(0).toISOString(), timeoutMs:10, pollMs:1,
+    now:() => now, sleep:async () => { now += 2; },
+  });
+  assert.equal(boundary.ok, false, 'an old assistant answer cannot complete a newer user turn');
+}
 assert.equal(ports[0], 9721);
 assert.equal(ports[1], 9732);
 assert.equal(ports.at(-1), 9762);
@@ -124,16 +134,15 @@ const bridge = new moduleUnderTest.ClassicGoalHostBridge({
     return { ok: true, committed: true };
   },
   ports: [9732, 9733],
-  async probePort(port) {
+  async probeRelayPort(port, conversationId) {
     probeCalls.push(port);
     if (port === 9732) {
       return [
-        { runtimePort: 9732, runtimeLabel: "Main-02", targetId: "work-target", goalId: "goal_target", chatMode: false, pageWebSocketDebuggerUrl: "ws://page-work" },
+        { runtimePort: 9732, runtimeLabel: "Main-02", targetId: "work-target", pageTargetId: "page-work", conversationId, chatMode: false, webSocketDebuggerUrl: "ws://relay-work" },
       ];
     }
     return [
-      { runtimePort: 9733, runtimeLabel: "Main-03", targetId: "other-goal", goalId: "goal_other", chatMode: true, pageWebSocketDebuggerUrl: "ws://page-chat" },
-      { runtimePort: 9733, runtimeLabel: "Main-03", targetId: "chat-target", goalId: "goal_target", chatMode: true, pageWebSocketDebuggerUrl: "ws://page-chat" },
+      { runtimePort: 9733, runtimeLabel: "Main-03", targetId: "chat-target", pageTargetId: "page-chat-target", conversationId, chatMode: true, webSocketDebuggerUrl: "ws://relay-chat", title: "DevSpace Goal Relay" },
     ];
   },
   async sendRaw(candidate, payload) {
@@ -149,6 +158,9 @@ const result = await bridge.dispatch({
   round: 2,
   prompt: "hidden continuation prompt",
   reportedAt: "2026-09-05T01:00:00.000Z",
+  conversationId: "conversation_target",
+  runtimePort: 9733,
+  expectedPageTargetId: "page-chat-target",
 });
 assert.equal(result.ok, true);
 assert.equal(beforeDispatchCalls, 1);
@@ -160,24 +172,90 @@ assert.equal(result.transport, "classic-raw-host-rpc");
 assert.equal(result.runtimeLabel, "Main-03");
 assert.equal(result.runtimePort, 9733);
 assert.equal(result.targetId, "chat-target");
-assert.deepEqual(probeCalls, [9732, 9733]);
+assert.deepEqual(probeCalls, [9733]);
 assert.equal(rawCalls.length, 1);
 assert.equal(rawCalls[0].payload.prompt, "hidden continuation prompt");
 assert.ok(visibleBoundaryCalls[0].payload.prompt.includes("hidden continuation prompt"));
 assert.equal(rawCalls[0].payload.scrollToBottom, false);
 
+let normalHiddenInspections = 0;
+const normalHiddenBridge = new moduleUnderTest.ClassicGoalHostBridge({
+  ports: [9733],
+  async waitForVisibleReport() { return { ok: true, committed: true }; },
+  async probeRelayPort(_port, conversationId) {
+    return [{ runtimePort: 9733, runtimeLabel: "Main-03", targetId: "normal-hidden-relay",
+      pageTargetId: "normal-hidden-page", conversationId, chatMode: true,
+      webSocketDebuggerUrl: "ws://normal-hidden-relay", pageWebSocketDebuggerUrl: "ws://normal-hidden-page" }];
+  },
+  async inspectComposer() { return { ok: true, state: "empty", exactOwnedPayload: false }; },
+  async sendRaw() { return { ok: true, dispatchCommitted: true, backgroundAccepted: true }; },
+  async inspectVisibleReport() {
+    normalHiddenInspections += 1;
+    return { nativeContinuation: { resolved: true, sourceUserFound: true,
+      baselineAssistantFound: true, latestUserMessageId: "normal-source-user",
+      newUserAfterBaselineMessageId: null,
+      newAssistantAfterBaselineMessageId: "normal-hidden-assistant" } };
+  },
+  hiddenConfirmTimeoutMs: 1000,
+  hiddenConfirmPollMs: 50,
+  sleep: async () => {},
+});
+const normalHidden = await normalHiddenBridge.dispatch({
+  goalId: "goal_normal_hidden", continuationId: "continuation_normal_hidden",
+  leaseId: "lease_normal_hidden", round: 4, prompt: "hidden continuation prompt",
+  reportedAt: "2026-09-05T01:00:00.000Z", conversationId: "conversation_normal_hidden",
+  runtimePort: 9733, expectedPageTargetId: "normal-hidden-page",
+  sourceUserId: "normal-source-user", assistantMessageId: "normal-visible-final",
+});
+assert.equal(normalHidden.ok, true);
+assert.equal(normalHidden.transport, "classic-hidden-continuation-native-confirmed");
+assert.equal(normalHidden.nativeBranchReconciled, true);
+assert.equal(normalHiddenInspections, 1);
+
+const supersededHiddenBridge = new moduleUnderTest.ClassicGoalHostBridge({
+  ports: [9733],
+  async waitForVisibleReport() { return { ok: true, committed: true }; },
+  async probeRelayPort(_port, conversationId) {
+    return [{ runtimePort: 9733, runtimeLabel: "Main-03", targetId: "superseded-hidden-relay",
+      pageTargetId: "superseded-hidden-page", conversationId, chatMode: true,
+      webSocketDebuggerUrl: "ws://superseded-hidden-relay", pageWebSocketDebuggerUrl: "ws://superseded-hidden-page" }];
+  },
+  async inspectComposer() { return { ok: true, state: "empty", exactOwnedPayload: false }; },
+  async sendRaw() { return { ok: true, dispatchCommitted: true, backgroundAccepted: true }; },
+  async inspectVisibleReport() {
+    return { nativeContinuation: { resolved: true, sourceUserFound: true,
+      baselineAssistantFound: true, latestUserMessageId: "new-human-user",
+      newUserAfterBaselineMessageId: "new-human-user",
+      newAssistantAfterBaselineMessageId: null } };
+  },
+  hiddenConfirmTimeoutMs: 1000,
+  hiddenConfirmPollMs: 50,
+  sleep: async () => {},
+});
+const supersededHidden = await supersededHiddenBridge.dispatch({
+  goalId: "goal_superseded_hidden", continuationId: "continuation_superseded_hidden",
+  leaseId: "lease_superseded_hidden", round: 4, prompt: "hidden continuation prompt",
+  reportedAt: "2026-09-05T01:00:00.000Z", conversationId: "conversation_superseded_hidden",
+  runtimePort: 9733, expectedPageTargetId: "superseded-hidden-page",
+  sourceUserId: "old-source-user", assistantMessageId: "visible-final-before-new-human",
+});
+assert.equal(supersededHidden.ok, false);
+assert.equal(supersededHidden.dispatchCommitted, true);
+assert.equal(supersededHidden.state, "new-user-before-hidden-assistant");
+
 const defaultBoundaryInspections = [];
 const defaultBoundaryRawCalls = [];
 const defaultBoundaryBridge = new moduleUnderTest.ClassicGoalHostBridge({
   ports: [9732],
-  async probePort() {
+  async probeRelayPort(_port, conversationId) {
     return [{
       runtimePort: 9732,
       runtimeLabel: "Main-02",
       targetId: "chat-target-default",
-      goalId: "goal_default_boundary",
+      pageTargetId: "page-default-boundary",
+      conversationId,
       chatMode: true,
-      pageWebSocketDebuggerUrl: "ws://page-default",
+      webSocketDebuggerUrl: "ws://relay-default",
     }];
   },
   async inspectVisibleReport(candidate, payload) {
@@ -187,6 +265,7 @@ const defaultBoundaryBridge = new moduleUnderTest.ClassicGoalHostBridge({
       generating: false,
       streamStatus: "COMPLETE",
       latestAssistantText: "ROUND DEFAULT — visible report committed",
+      latestMessageRole: "assistant",
       conversationId: "conversation_default",
     };
   },
@@ -205,180 +284,159 @@ const defaultBoundary = await defaultBoundaryBridge.dispatch({
   round: 1,
   prompt: "default boundary prompt",
   reportedAt: "2026-09-05T01:00:00.000Z",
+  conversationId: "conversation_default",
+  runtimePort: 9732,
+  expectedPageTargetId: "page-default-boundary",
 });
 assert.equal(defaultBoundary.ok, true);
 assert.equal(defaultBoundaryInspections.length, 1, "production default must inspect the visible report boundary");
 assert.equal(defaultBoundaryRawCalls.length, 1);
 
-const recoveryComposerCalls = [];
-let recoveryBeforeDispatchCalls = 0;
+let hiddenRecoveryProbes = 0;
+let hiddenRecoverySends = 0;
+let hiddenRecoveryBeforeDispatchCalls = 0;
 const recoveryBridge = new moduleUnderTest.ClassicGoalHostBridge({
-  ports: [9732],
-  async beforeDispatch() { recoveryBeforeDispatchCalls += 1; },
-  async probeConversationPage(port, conversationId) {
+  ports: [9721, 9732],
+  async beforeDispatch() { hiddenRecoveryBeforeDispatchCalls += 1; },
+  async probeRelayPort(port, conversationId) {
+    hiddenRecoveryProbes += 1;
     if (port !== 9732 || conversationId !== "conversation_recovery") return [];
-    return [{
-      runtimePort: 9732,
-      runtimeLabel: "Main-02",
-      pageTargetId: "recovery-page",
-      pageWebSocketDebuggerUrl: "ws://page-recovery",
-      pageUrl: "https://chatgpt.com/c/conversation_recovery",
-      conversationId,
-      chatMode: true,
-      directPage: true,
-    }];
+    return [{ runtimePort: 9732, runtimeLabel: "Main-02", targetId: "hidden-recovery-relay",
+      pageTargetId: "recovery-page", conversationId, chatMode: true,
+      webSocketDebuggerUrl: "ws://hidden-recovery-relay", pageWebSocketDebuggerUrl: "ws://hidden-recovery-page" }];
+  },
+  async inspectComposer() { return { ok: true, state: "empty", exactOwnedPayload: false }; },
+  async sendRaw(_candidate, payload) {
+    hiddenRecoverySends += 1;
+    assert.match(payload.prompt, /^\[DEVSPACE_GOAL_ROUND_RECOVERY\]/);
+    return { ok: true, dispatchCommitted: true, backgroundAccepted: true };
   },
   async inspectVisibleReport() {
-    return { chatMode: true, generating: false, streamStatus: "COMPLETE", latestAssistantText: "premature final", conversationId: "conversation_recovery" };
+    return { nativeContinuation: { resolved: true, sourceUserFound: true,
+      baselineAssistantFound: true, latestUserMessageId: "user-hidden-recovery",
+      newUserAfterBaselineMessageId: null,
+      newAssistantAfterBaselineMessageId: "assistant-hidden-recovery" } };
   },
-  async sendRecovery(payload) {
-    recoveryComposerCalls.push(payload);
-    return { ok: true, transport: "classic-exact-page-composer", foregroundActivation: false, pageNavigation: false };
-  },
+  hiddenConfirmTimeoutMs: 1000,
+  hiddenConfirmPollMs: 50,
+  sleep: async () => {},
 });
-const workingSnapshot = await recoveryBridge.inspectWorkingRound({
-  id: "goal_recovery",
-  conversationId: "conversation_recovery",
-});
-assert.equal(workingSnapshot.chatMode, true);
-assert.equal(workingSnapshot.generating, false);
-assert.equal(workingSnapshot.streamStatus, "COMPLETE");
-assert.equal(workingSnapshot.conversationId, "conversation_recovery");
-const recoveryDispatch = await recoveryBridge.dispatchRoundRecovery({
+const hiddenRecovery = await recoveryBridge.dispatchRoundRecovery({
   goalId: "goal_recovery",
   conversationId: "conversation_recovery",
   round: 2,
   recoveryId: "recovery_aaaaaaaaaaaaaaaa",
   attempt: 1,
   expectedPageTargetId: "recovery-page",
+  sourceUserMessageId: "user-hidden-recovery",
+  baselineAssistantMessageId: "assistant-before-hidden-recovery",
   prompt: "[DEVSPACE_GOAL_ROUND_RECOVERY] continue same round",
 });
-assert.equal(recoveryDispatch.ok, true);
-assert.equal(recoveryDispatch.transport, "classic-exact-page-composer");
-assert.equal(recoveryDispatch.foregroundActivation, false);
-assert.equal(recoveryDispatch.pageNavigation, false);
-assert.equal(recoveryDispatch.pageTargetId, "recovery-page");
-assert.equal(recoveryComposerCalls.length, 1);
-assert.match(recoveryComposerCalls[0].prompt, /GOAL_ROUND_RECOVERY/);
-assert.equal(recoveryComposerCalls[0].round, 2);
-assert.equal(recoveryComposerCalls[0].recoveryId, "recovery_aaaaaaaaaaaaaaaa");
-assert.equal(recoveryComposerCalls[0].expectedPageTargetId, "recovery-page");
-assert.equal(recoveryBeforeDispatchCalls, 0,
-  "Goal Recovery must not run Primary debug repair or another foreground-affecting pre-dispatch hook");
+assert.equal(hiddenRecovery.ok, true);
+assert.equal(hiddenRecovery.transport, "classic-hidden-round-recovery");
+assert.equal(hiddenRecovery.backgroundAccepted, true);
+assert.equal(hiddenRecovery.visibleUserMessage, false);
+assert.equal(hiddenRecovery.composerMutation, false);
+assert.equal(hiddenRecoverySends, 1);
+assert.ok(hiddenRecoveryProbes >= 1);
+assert.equal(hiddenRecoveryBeforeDispatchCalls, 0,
+  "same-round hidden recovery must never run Primary debug or foreground repair");
 
-const directPageFallbackCalls = [];
-const relayFallbackBridge = new moduleUnderTest.ClassicGoalHostBridge({
-  ports: [9732, 9733],
-  async probeConversationPage(port, conversationId) {
-    if (port !== 9733 || conversationId !== "conversation_bound_recovery") return [];
-    return [{
-      runtimePort: 9733,
-      runtimeLabel: "Main-03",
-      pageTargetId: "direct-bound-recovery-page",
-      chatMode: true,
-      conversationId,
-      pageWebSocketDebuggerUrl: "ws://page-bound-recovery",
-      pageUrl: "https://chatgpt.com/c/conversation_bound_recovery",
-      directPage: true,
-    }];
-  },
-  async inspectVisibleReport(candidate) {
-    return {
-      chatMode: true,
-      generating: false,
-      streamStatus: "COMPLETE",
-      latestAssistantText: "",
-      conversationId: candidate.conversationId,
-      deliveryTimeoutVisible: true,
-      retryVisible: true,
-      safetyCheckVisible: false,
-    };
-  },
-  async sendRecovery(payload) {
-    directPageFallbackCalls.push(payload);
-    return { ok: true, transport: "classic-exact-page-composer" };
-  },
+const invalidHiddenRecovery = await recoveryBridge.dispatchRoundRecovery({
+  goalId: "goal_recovery",
+  conversationId: "conversation_recovery",
+  prompt: "arbitrary stale caller payload",
 });
-const relaySnapshot = await relayFallbackBridge.inspectWorkingRound({
-  id: "goal_bound_recovery",
-  conversationId: "conversation_bound_recovery",
+assert.deepEqual(invalidHiddenRecovery, {
+  ok: false,
+  definiteFailure: true,
+  dispatchCommitted: false,
+  state: "invalid-hidden-goal-recovery-boundary",
 });
-assert.equal(relaySnapshot.chatMode, true, "conversation-bound recovery must inspect the exact page even when every Goal app iframe disappeared");
-assert.equal(relaySnapshot.conversationId, "conversation_bound_recovery");
-assert.equal(relaySnapshot.relayFallback, false);
-assert.equal(relaySnapshot.directPage, true);
-const relayRecovery = await relayFallbackBridge.dispatchRoundRecovery({
-  goalId: "goal_bound_recovery",
-  conversationId: "conversation_bound_recovery",
-  round: 5,
-  recoveryId: "recovery_bound_recovery",
-  expectedPageTargetId: "direct-bound-recovery-page",
-  prompt: "[DEVSPACE_GOAL_ROUND_RECOVERY] continue durable run",
-});
-assert.equal(relayRecovery.ok, true);
-assert.equal(relayRecovery.transport, "classic-exact-page-composer");
-assert.equal(relayRecovery.relayFallback, false);
-assert.equal(directPageFallbackCalls.length, 1);
-assert.equal(directPageFallbackCalls[0].goalId, "goal_bound_recovery");
-assert.equal(directPageFallbackCalls[0].expectedPageTargetId, "direct-bound-recovery-page");
 
-let duplicateRecoverySends = 0;
-const duplicateRecoveryBridge = new moduleUnderTest.ClassicGoalHostBridge({
-  ports: [9721, 9732],
-  async probeConversationPage(port, conversationId) {
-    return [{
-      runtimePort: port,
-      runtimeLabel: port === 9721 ? "Main-01" : "Main-02",
-      pageTargetId: `duplicate-recovery-${port}`,
-      pageWebSocketDebuggerUrl: `ws://duplicate-recovery-${port}`,
-      pageUrl: `https://chatgpt.com/c/${conversationId}`,
-      conversationId,
-      chatMode: true,
-      directPage: true,
-    }];
-  },
-  async sendRecovery() { duplicateRecoverySends += 1; return { ok: true }; },
-});
-const duplicateRecovery = await duplicateRecoveryBridge.dispatchRoundRecovery({
-  goalId: "goal_duplicate_recovery",
-  conversationId: "conversation_duplicate_recovery",
-  round: 4,
-  recoveryId: "recovery_duplicate_recovery",
-  prompt: "[DEVSPACE_GOAL_ROUND_RECOVERY] duplicate must fail closed",
-});
-assert.equal(duplicateRecovery.ok, false);
-assert.equal(duplicateRecovery.ambiguous, true);
-assert.equal(duplicateRecovery.matchCount, 2);
-assert.equal(duplicateRecoverySends, 0);
-
-let changedTargetSends = 0;
-const changedTargetBridge = new moduleUnderTest.ClassicGoalHostBridge({
+let blockedRecoverySends = 0;
+const blockedRecoveryBridge = new moduleUnderTest.ClassicGoalHostBridge({
   ports: [9732],
-  async probeConversationPage(_port, conversationId) {
-    return [{
-      runtimePort: 9732,
-      runtimeLabel: "Main-02",
-      pageTargetId: "new-page-target",
-      pageWebSocketDebuggerUrl: "ws://new-page-target",
-      pageUrl: `https://chatgpt.com/c/${conversationId}`,
-      conversationId,
-      chatMode: true,
-      directPage: true,
-    }];
+  async probeRelayPort(_port, conversationId) {
+    return [{ runtimePort: 9732, runtimeLabel: "Main-02", targetId: "blocked-relay",
+      pageTargetId: "blocked-page", conversationId, chatMode: true,
+      webSocketDebuggerUrl: "ws://blocked-relay", pageWebSocketDebuggerUrl: "ws://blocked-page" }];
   },
-  async sendRecovery() { changedTargetSends += 1; return { ok: true }; },
+  async inspectComposer() { return { ok: true, state: "non-empty", exactOwnedPayload: false }; },
+  async sendRaw() { blockedRecoverySends += 1; return { ok: true }; },
 });
-const changedTargetRecovery = await changedTargetBridge.dispatchRoundRecovery({
-  goalId: "goal_changed_target",
-  conversationId: "conversation_changed_target",
-  round: 2,
-  recoveryId: "recovery_changed_target",
-  expectedPageTargetId: "old-page-target",
-  prompt: "[DEVSPACE_GOAL_ROUND_RECOVERY] target changed",
+const blockedRecovery = await blockedRecoveryBridge.dispatchRoundRecovery({
+  goalId: "goal_blocked_recovery", conversationId: "conversation_blocked_recovery",
+  round: 2, recoveryId: "recovery_blocked_recovery", attempt: 1,
+  expectedPageTargetId: "blocked-page",
+  sourceUserMessageId: "user-blocked-recovery",
+  baselineAssistantMessageId: "assistant-before-blocked-recovery",
+  prompt: "[DEVSPACE_GOAL_ROUND_RECOVERY] must not overwrite a user draft",
 });
-assert.equal(changedTargetRecovery.ok, false);
-assert.match(changedTargetRecovery.error, /target changed/i);
-assert.equal(changedTargetSends, 0);
+assert.equal(blockedRecovery.ok, false);
+assert.equal(blockedRecovery.state, "non-empty");
+assert.equal(blockedRecoverySends, 0);
+
+const exposedChecks = [{ ok: true, state: "empty", exactOwnedPayload: false },
+  { ok: true, state: "non-empty", exactOwnedPayload: true }];
+let exposedCleanup = 0;
+const exposedRecoveryBridge = new moduleUnderTest.ClassicGoalHostBridge({
+  ports: [9732],
+  async probeRelayPort(_port, conversationId) {
+    return [{ runtimePort: 9732, runtimeLabel: "Main-02", targetId: "exposed-relay",
+      pageTargetId: "exposed-page", conversationId, chatMode: true,
+      webSocketDebuggerUrl: "ws://exposed-relay", pageWebSocketDebuggerUrl: "ws://exposed-page" }];
+  },
+  async inspectComposer() { return exposedChecks.shift(); },
+  async clearOwnedComposer() { exposedCleanup += 1; return { ok: true }; },
+  async sendRaw() { return { ok: false, dispatchCommitted: true, definiteFailure: false }; },
+});
+const exposedRecovery = await exposedRecoveryBridge.dispatchRoundRecovery({
+  goalId: "goal_exposed_recovery", conversationId: "conversation_exposed_recovery",
+  round: 2, recoveryId: "recovery_exposed_recovery", attempt: 1,
+  expectedPageTargetId: "exposed-page",
+  sourceUserMessageId: "user-exposed-recovery",
+  baselineAssistantMessageId: "assistant-before-exposed-recovery",
+  prompt: "[DEVSPACE_GOAL_ROUND_RECOVERY] exact owned payload",
+});
+assert.equal(exposedRecovery.state, "hidden-goal-recovery-composer-exposure-cleared");
+assert.equal(exposedRecovery.dispatchCommitted, true);
+assert.equal(exposedRecovery.composerCleanupVerified, true);
+assert.equal(exposedCleanup, 1);
+
+const uncertainRecoveryBridge = new moduleUnderTest.ClassicGoalHostBridge({
+  ports: [9732],
+  async probeRelayPort(_port, conversationId) {
+    return [{ runtimePort: 9732, runtimeLabel: "Main-02", targetId: "uncertain-recovery-relay",
+      pageTargetId: "uncertain-recovery-page", conversationId, chatMode: true,
+      webSocketDebuggerUrl: "ws://uncertain-recovery-relay", pageWebSocketDebuggerUrl: "ws://uncertain-recovery-page" }];
+  },
+  async inspectComposer() { return { ok: true, state: "empty", exactOwnedPayload: false }; },
+  async sendRaw() {
+    return { ok: false, definiteFailure: false, dispatchCommitted: true,
+      state: "raw-host-acknowledgement-lost" };
+  },
+  async inspectVisibleReport() {
+    return { nativeContinuation: { resolved: true, sourceUserFound: true,
+      baselineAssistantFound: true, latestUserMessageId: "user-recovery-boundary",
+      newUserAfterBaselineMessageId: null,
+      newAssistantAfterBaselineMessageId: "assistant-hidden-recovery" } };
+  },
+  hiddenConfirmTimeoutMs: 1000,
+  hiddenConfirmPollMs: 50,
+  sleep: async () => {},
+});
+const uncertainRecoveryResult = await uncertainRecoveryBridge.dispatchRoundRecovery({
+  goalId: "goal_uncertain_recovery", conversationId: "conversation_uncertain_recovery",
+  round: 2, recoveryId: "recovery_uncertain_recovery", attempt: 1,
+  expectedPageTargetId: "uncertain-recovery-page",
+  sourceUserMessageId: "user-recovery-boundary",
+  baselineAssistantMessageId: "assistant-visible-before-recovery",
+  prompt: "[DEVSPACE_GOAL_ROUND_RECOVERY] reconcile hidden acknowledgement loss",
+});
+assert.equal(uncertainRecoveryResult.ok, true);
+assert.equal(uncertainRecoveryResult.nativeBranchReconciled, true);
+assert.equal(uncertainRecoveryResult.transport, "classic-hidden-round-recovery-native-reconciled");
 
 const livenessFollowUps = [];
 const livenessBridge = new moduleUnderTest.ClassicGoalHostBridge({
@@ -389,6 +447,7 @@ const livenessBridge = new moduleUnderTest.ClassicGoalHostBridge({
       runtimePort: 9732,
       runtimeLabel: "Main-02",
       targetId: "liveness-relay",
+      pageTargetId: "liveness-page",
       chatMode: true,
       conversationId,
       webSocketDebuggerUrl: "ws://relay-liveness",
@@ -420,6 +479,7 @@ const ambiguousLivenessBridge = new moduleUnderTest.ClassicGoalHostBridge({
       runtimePort: port,
       runtimeLabel: port === 9721 ? "Main-01" : "Main-02",
       targetId: `duplicate-${port}`,
+      pageTargetId: `duplicate-page-${port}`,
       chatMode: true,
       conversationId,
       webSocketDebuggerUrl: `ws://duplicate-${port}`,
@@ -469,18 +529,40 @@ const conversationSafeBridge = new moduleUnderTest.ClassicGoalHostBridge({
       directPage: true,
     }];
   },
-  async inspectVisibleReport(candidate) {
+  async probeRelayPort(port, conversationId) {
+    if (port !== 9733 || conversationId !== "conversation_authoritative") return [];
+    return [{
+      runtimePort: 9733,
+      runtimeLabel: "Main-03",
+      targetId: "authoritative-hidden-relay",
+      pageTargetId: "authoritative-conversation-page",
+      chatMode: true,
+      conversationId,
+      webSocketDebuggerUrl: "ws://authoritative-hidden-relay",
+      title: "DevSpace Goal Relay",
+    }];
+  },
+  async inspectVisibleReport(candidate, payload = {}) {
     return {
       chatMode: true,
       generating: false,
       streamStatus: "COMPLETE",
       latestAssistantText: "",
       conversationId: candidate.conversationId,
+      ...(payload.includeNativeBranch === true ? { nativeContinuation: {
+        resolved: true,
+        sourceUserFound: true,
+        baselineAssistantFound: true,
+        latestUserMessageId: "user-authoritative-recovery",
+        newUserAfterBaselineMessageId: null,
+        newAssistantAfterBaselineMessageId: "assistant-authoritative-hidden-recovery",
+      } } : {}),
     };
   },
-  async sendRecovery(payload) {
-    exactConversationDispatches.push(payload);
-    return { ok: true, transport: "classic-exact-page-composer" };
+  async inspectComposer() { return { ok: true, state: "empty", exactOwnedPayload: false }; },
+  async sendRaw(candidate, payload) {
+    exactConversationDispatches.push({ candidate, payload });
+    return { ok: true, dispatchCommitted: true, backgroundAccepted: true };
   },
 });
 const conversationSafeSnapshot = await conversationSafeBridge.inspectWorkingRound({
@@ -497,20 +579,23 @@ const conversationSafeDispatch = await conversationSafeBridge.dispatchRoundRecov
   round: 3,
   recoveryId: "recovery_conversation_safe",
   expectedPageTargetId: "authoritative-conversation-page",
+  sourceUserMessageId: "user-authoritative-recovery",
+  baselineAssistantMessageId: "assistant-before-authoritative-recovery",
   prompt: "[DEVSPACE_GOAL_ROUND_RECOVERY] stay on authoritative conversation",
 });
 assert.equal(conversationSafeDispatch.ok, true);
-assert.equal(conversationSafeDispatch.runtimePort, 9733);
-assert.equal(conversationSafeDispatch.pageTargetId, "authoritative-conversation-page");
-assert.equal(exactConversationDispatches.length, 1);
-assert.equal(exactConversationDispatches[0].expectedPageTargetId, "authoritative-conversation-page");
-assert.notEqual(exactConversationDispatches[0].expectedPageTargetId, "stale-goal-widget");
+assert.equal(conversationSafeDispatch.transport, "classic-hidden-round-recovery");
+assert.equal(conversationSafeDispatch.visibleUserMessage, false);
+assert.equal(conversationSafeDispatch.composerMutation, false);
+assert.equal(exactConversationDispatches.length, 1,
+  "the exact authoritative page may receive one hidden same-round recovery without composer automation");
+assert.equal(exactConversationDispatches[0].candidate.pageTargetId, "authoritative-conversation-page");
 
 const rolloverHookCalls = [];
 const rolloverBridge = new moduleUnderTest.ClassicGoalHostBridge({
   ports: [9721],
-  async probePort() {
-    return [{ runtimePort: 9721, runtimeLabel: "Main-01", targetId: "goal-rollover", goalId: "goal_rollover", chatMode: true, pageWebSocketDebuggerUrl: "ws://page-rollover" }];
+  async probeRelayPort(_port, conversationId) {
+    return [{ runtimePort: 9721, runtimeLabel: "Main-01", targetId: "goal-rollover", pageTargetId: "page-rollover", conversationId, chatMode: true, webSocketDebuggerUrl: "ws://relay-rollover" }];
   },
   async waitForVisibleReport() { return { ok: true, committed: true }; },
   async beforeRawDispatch(candidate, payload) {
@@ -526,6 +611,9 @@ const rolloverDispatch = await rolloverBridge.dispatch({
   round: 2,
   prompt: "goal continuation carried into fresh chat",
   reportedAt: "2026-09-05T01:00:00.000Z",
+  conversationId: "conversation_rollover",
+  runtimePort: 9721,
+  expectedPageTargetId: "page-rollover",
 });
 assert.equal(rolloverDispatch.ok, true);
 assert.equal(rolloverDispatch.transport, "classic-hidden-rollover");
@@ -535,8 +623,8 @@ assert.equal(rolloverHookCalls[0].payload.goalId, "goal_rollover");
 
 const boundaryFailBridge = new moduleUnderTest.ClassicGoalHostBridge({
   ports: [9732],
-  async probePort() {
-    return [{ runtimePort: 9732, runtimeLabel: "Main-02", targetId: "chat-target", goalId: "goal_boundary", chatMode: true }];
+  async probeRelayPort(_port, conversationId) {
+    return [{ runtimePort: 9732, runtimeLabel: "Main-02", targetId: "chat-target", pageTargetId: "page-boundary", conversationId, chatMode: true, webSocketDebuggerUrl: "ws://relay-boundary" }];
   },
   async waitForVisibleReport() {
     return { ok: false, definiteFailure: false, error: "visible report not committed" };
@@ -551,6 +639,9 @@ const boundaryFail = await boundaryFailBridge.dispatch({
   leaseId: "lease_boundary",
   round: 2,
   prompt: "prompt",
+  conversationId: "conversation_boundary",
+  runtimePort: 9732,
+  expectedPageTargetId: "page-boundary",
 });
 assert.equal(boundaryFail.ok, false);
 assert.equal(boundaryFail.definiteFailure, false);
@@ -558,9 +649,7 @@ assert.match(boundaryFail.error, /visible report/i);
 
 const missingBridge = new moduleUnderTest.ClassicGoalHostBridge({
   ports: [9732],
-  async probePort() {
-    return [{ runtimePort: 9732, runtimeLabel: "Main-02", targetId: "wrong", goalId: "goal_wrong", chatMode: true }];
-  },
+  async probeRelayPort() { return []; },
   async sendRaw() {
     throw new Error("must not send");
   },
@@ -572,10 +661,12 @@ const missing = await missingBridge.dispatch({
   leaseId: "lease_missing",
   round: 1,
   prompt: "prompt",
+  conversationId: "conversation_missing",
+  runtimePort: 9732,
 });
 assert.equal(missing.ok, false);
 assert.equal(missing.definiteFailure, true);
-assert.match(missing.error, /matching Chat-mode Goal widget/i);
+assert.match(missing.error, /matching Chat-mode DevSpace relay|No exact Chat-mode relay/i);
 
 await assert.rejects(
   () => bridge.dispatch({ goalId: "", prompt: "prompt" }),
@@ -594,7 +685,10 @@ console.log(JSON.stringify({
   main32: ports.at(-1),
   chatModeOnly: true,
   singleRawDispatch: true,
-  exactPageComposerRecovery: true,
+  hiddenHostRecovery: true,
+  visibleSameRoundRecoveryRetired: true,
+  visibleComposerRecovery: false,
+  composerExposureDetectedAndCleared: true,
   recoveryForegroundActivation: false,
   recoveryPageNavigation: false,
 }));

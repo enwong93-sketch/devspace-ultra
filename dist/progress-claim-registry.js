@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { cleanOpenaiIdentity, OPENAI_CONVERSATION_PAGE_SOURCE } from './openai-conversation-binding.js';
 
 const DEFAULT_TTL_MS = 2 * 60_000;
 const DEFAULT_MAX_CLAIMS = 128;
@@ -37,13 +38,34 @@ function publicClaim(record) {
   };
 }
 
-function verifiedAuthority(value) {
+function cleanRequestBinding(value) {
+  const sessionFingerprint = cleanFingerprint(value?.sessionFingerprint);
+  const traceCorrelationFingerprints = [...new Set((Array.isArray(value?.traceCorrelationFingerprints)
+    ? value.traceCorrelationFingerprints : []).slice(0, 8).map(cleanFingerprint).filter(Boolean))];
+  return sessionFingerprint || cleanOpenaiIdentity(value?.openaiIdentity) ? { sessionFingerprint, traceCorrelationFingerprints,
+    callFingerprint: cleanFingerprint(value?.callFingerprint),
+    ...(cleanOpenaiIdentity(value?.openaiIdentity) ? { openaiIdentity: cleanOpenaiIdentity(value.openaiIdentity) } : {}) } : null;
+}
+
+function verifiedAuthority(value, expectedClaimId = null) {
   const conversationId = cleanConversationId(value?.conversationId);
   const runtimeKey = cleanRuntimeKey(value?.runtimeKey);
   const callFingerprint = cleanFingerprint(value?.callFingerprint);
   const invocationFingerprint = cleanFingerprint(value?.invocationFingerprint);
   const source = cleanText(value?.source, 240);
   const observedAt = cleanObservedAt(value?.observedAt);
+  const claimId = cleanText(value?.claimId, 200);
+  if (
+    conversationId
+    && runtimeKey
+    && ["classic-exact-page-progress-claim-cdp-page-verified", OPENAI_CONVERSATION_PAGE_SOURCE].includes(source)
+    && observedAt
+    && value?.pageVerified === true
+    && expectedClaimId
+    && claimId === expectedClaimId
+  ) {
+    return { conversationId, runtimeKey, claimId, source, observedAt, pageVerified: true };
+  }
   if (
     !conversationId
     || !runtimeKey
@@ -60,6 +82,7 @@ function verifiedAuthority(value) {
     ...(invocationFingerprint ? { invocationFingerprint } : {}),
     source,
     observedAt,
+    pageVerified: true,
   };
 }
 
@@ -90,7 +113,7 @@ export class ProgressClaimRegistry {
     this.rejected = 0;
   }
 
-  create({ message, kind = "progress" } = {}) {
+  create({ message, kind = "progress", requestBinding = null } = {}) {
     this.prune();
     const text = cleanText(message, 1_600);
     const normalizedKind = cleanText(kind, 80);
@@ -108,6 +131,8 @@ export class ProgressClaimRegistry {
       state: "pending",
       message: text,
       kind: normalizedKind,
+      requestBinding: cleanRequestBinding(requestBinding),
+      providerIdentity: cleanOpenaiIdentity(requestBinding?.openaiIdentity),
       owner: null,
       completionPromise: null,
       result: null,
@@ -123,7 +148,7 @@ export class ProgressClaimRegistry {
     const id = cleanText(claimId, 200);
     const record = id ? this.records.get(id) : null;
     if (!record) throw new Error("Progress claim is unavailable or expired.");
-    const owner = verifiedAuthority(authority);
+    const owner = verifiedAuthority(authority, record.claimId);
     if (!owner) {
       this.rejected += 1;
       throw new Error("Progress claim requires exact page-verified conversation authority.");
@@ -131,7 +156,6 @@ export class ProgressClaimRegistry {
     if (typeof complete !== "function") throw new Error("Progress claim completion callback is required.");
     if (record.owner && (
       record.owner.conversationId !== owner.conversationId
-      || record.owner.runtimeKey !== owner.runtimeKey
     )) {
       this.rejected += 1;
       throw new Error("Progress claim is already owned by another conversation page.");
@@ -149,6 +173,7 @@ export class ProgressClaimRegistry {
         message: record.message,
         kind: record.kind,
         authority: structuredClone(owner),
+        requestBinding: record.requestBinding ? structuredClone(record.requestBinding) : null,
       }))
       .then((result) => {
         const publicResult = {
@@ -164,6 +189,7 @@ export class ProgressClaimRegistry {
         record.completionPromise = null;
         // The message is no longer needed after the authoritative write.
         record.message = null;
+        record.requestBinding = null;
         this.completed += 1;
         return structuredClone(publicResult);
       })
@@ -186,6 +212,31 @@ export class ProgressClaimRegistry {
     this.#enforceCap();
   }
 
+  pendingClaims({ limit = 8 } = {}) {
+    this.prune();
+    const capped = Math.max(1, Math.min(32, Number(limit) || 8));
+    return [...this.records.values()]
+      .filter((row) => row.state === "pending")
+      .sort((left, right) => Number(left.createdAtMs) - Number(right.createdAtMs))
+      .slice(0, capped)
+      .map((row) => publicClaim(row));
+  }
+
+  requestIdentity(claimId) {
+    this.prune();
+    const record = this.records.get(claimId);
+    return record?.state === 'pending' ? cleanOpenaiIdentity(record.requestBinding?.openaiIdentity) : null;
+  }
+  requestFingerprint(claimId) {
+    this.prune();
+    const record = this.records.get(claimId);
+    return record?.state === 'pending' ? cleanFingerprint(record.requestBinding?.callFingerprint) : null;
+  }
+  claimIdentity(claimId) {
+    this.prune();
+    return cleanOpenaiIdentity(this.records.get(claimId)?.providerIdentity);
+  }
+
   diagnostics() {
     this.prune();
     const rows = [...this.records.values()];
@@ -201,6 +252,7 @@ export class ProgressClaimRegistry {
       maxClaims: this.maxClaims,
       rawMessagesExposed: false,
       durableConversationOwners: 0,
+      rawRequestBindingsExposed: false,
     };
   }
 
@@ -224,5 +276,6 @@ export const progressClaimRegistryInternals = {
   cleanRuntimeKey,
   cleanText,
   publicClaim,
+  cleanRequestBinding,
   verifiedAuthority,
 };

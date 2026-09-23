@@ -35,8 +35,8 @@ export function shouldRecoverWorkingRound(goal, snapshot, {
   minimumRoundSettleMs = DEFAULT_ROUND_SETTLE_MS,
 } = {}) {
   if (!goal || goal.status !== "active" || goal.roundState !== "working") return false;
-  if (!Number.isInteger(goal.round) || goal.round < 2) return false;
-  if (!goal.lastConsumedContinuationId || !goal.roundBeganAt) return false;
+  if (!Number.isInteger(goal.round) || goal.round < 1) return false;
+  if (!goal.roundBeganAt) return false;
   const beganAt = Date.parse(String(goal.roundBeganAt));
   if (!Number.isFinite(beganAt) || nowMs - beganAt < minimumRoundSettleMs) return false;
   if (snapshot?.chatMode !== true || snapshot?.recoverySessionEligible === false) return false;
@@ -118,6 +118,10 @@ export class ClassicGoalRoundCompletionGuard {
     this.timer = null;
     this.polling = null;
     this.closed = false;
+    this.lastError = null;
+    this.lastPollAt = null;
+    this.lastRecovered = 0;
+    this.lastResults = [];
   }
 
   observeRecoverySession(goal, snapshot) {
@@ -149,6 +153,8 @@ export class ClassicGoalRoundCompletionGuard {
     const routeEnteredAtMs = timestamp(snapshot?.routeEnteredAt);
     const roundBeganAtMs = timestamp(goal?.roundBeganAt);
     const requestObservedAtMs = timestamp(snapshot?.turnRequestObservedAt);
+    const finishedObservedAtMs = timestamp(snapshot?.turnFinishedObservedAt);
+    let currentRoundTransportFinished = false;
     if (routeEnteredAtMs != null && requestObservedAtMs != null) {
       const roundLowerBound = roundBeganAtMs == null
         ? routeEnteredAtMs
@@ -156,6 +162,9 @@ export class ClassicGoalRoundCompletionGuard {
       const lowerBound = Math.max(routeEnteredAtMs, roundLowerBound);
       if (requestObservedAtMs >= lowerBound && requestObservedAtMs <= this.now() + 60_000) {
         session.sawCurrentRouteRequest = true;
+        currentRoundTransportFinished = finishedObservedAtMs != null
+          && finishedObservedAtMs >= requestObservedAtMs
+          && finishedObservedAtMs >= lowerBound;
       }
     }
 
@@ -171,6 +180,12 @@ export class ClassicGoalRoundCompletionGuard {
       && (
         assistantMessageChanged
         || snapshot?.generating === true
+        // After a Core/guard restart the first observation may already be the
+        // committed final, so there is no in-memory "assistant changed" edge.
+        // Persisted exact request+finished evidence for this route/round is the
+        // restart-safe authority; an old request from a later route still fails
+        // the lower-bound check above.
+        || currentRoundTransportFinished
       )
     ) {
       session.sawCurrentRoundAssistant = true;
@@ -215,8 +230,54 @@ export class ClassicGoalRoundCompletionGuard {
   async pollOnce() {
     if (this.closed) return { ok: true, skipped: "closed", recovered: 0, results: [] };
     if (this.polling) return this.polling;
-    this.polling = this.#pollOnceImpl().finally(() => { this.polling = null; });
+    this.polling = this.#pollOnceImpl()
+      .then((result) => {
+        this.lastError = null;
+        this.lastPollAt = new Date(this.now()).toISOString();
+        this.lastRecovered = Math.max(0, Number(result?.recovered || 0));
+        this.lastResults = (Array.isArray(result?.results) ? result.results : [])
+          .slice(-16)
+          .map((row) => ({
+            goalId: String(row?.goalId || "").slice(0, 200) || null,
+            round: Number.isInteger(row?.round) ? row.round : null,
+            recovered: row?.recovered === true,
+            reason: /^[A-Za-z0-9_.:-]{1,160}$/.test(String(row?.reason || ""))
+              ? String(row.reason)
+              : null,
+            attempt: Number.isInteger(row?.attempt) ? row.attempt : null,
+            transport: /^[A-Za-z0-9_.:-]{1,160}$/.test(String(row?.transport || ""))
+              ? String(row.transport)
+              : null,
+            errorObserved: Boolean(row?.error),
+          }));
+        return result;
+      }, (error) => {
+        this.lastError = error instanceof Error ? error.message.slice(0, 300) : String(error).slice(0, 300);
+        this.lastPollAt = new Date(this.now()).toISOString();
+        this.lastRecovered = 0;
+        this.lastResults = [];
+        throw error;
+      })
+      .finally(() => { this.polling = null; });
     return this.polling;
+  }
+
+  status() {
+    return {
+      enabled: this.closed !== true,
+      running: Boolean(this.timer),
+      closed: this.closed === true,
+      polling: Boolean(this.polling),
+      pollMs: this.pollMs,
+      trackedRecoverySessions: this.recoverySessions.size,
+      trackedNativeCompletions: this.nativeCompleteSince.size,
+      lastError: this.lastError,
+      lastPollAt: this.lastPollAt,
+      lastRecovered: this.lastRecovered,
+      lastResults: this.lastResults.map((row) => ({ ...row })),
+      rawPromptReturned: false,
+      rawConversationContentReturned: false,
+    };
   }
 
   async #pollOnceImpl() {

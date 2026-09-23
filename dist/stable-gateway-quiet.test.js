@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { assessVerifiedHandoverReadiness } from "./verified-handover-policy.js";
 
 let moduleUnderTest = null;
 try {
@@ -27,6 +28,34 @@ assert.equal(typeof moduleUnderTest?.waitForStableGatewayQuiet, "function", "wai
   assert.equal(result.ok, true);
   assert.equal(result.quietSamples, 2);
   assert.equal(calls, 5, "a busy sample must reset the consecutive quiet counter");
+}
+
+{
+  const busyHealthy = assessVerifiedHandoverReadiness({
+    quiet: { ok: false, state: "cancelled" },
+    status: {
+      ok: true,
+      fatal: false,
+      handoverInProgress: false,
+      coreRecoveryInProgress: false,
+      admission: { closed: false, activeRequests: 4 },
+      sessions: { totalNonStreamActiveRequests: 4, sessions: [{ publicSessionId: "live" }] },
+    },
+  });
+  assert.equal(busyHealthy.ok, true);
+  assert.equal(busyHealthy.mode, "controller-admission-drain",
+    "continuous Multi-Main traffic must fall through to the controller's close-admission drain instead of starving forever");
+  const unhealthy = assessVerifiedHandoverReadiness({
+    quiet: { ok: false, state: "cancelled" },
+    status: { ok: false, fatal: true, admission: { closed: false }, sessions: { sessions: [] } },
+  });
+  assert.equal(unhealthy.ok, false);
+  assert.equal(unhealthy.mode, "refused");
+  const alreadyQuiet = assessVerifiedHandoverReadiness({
+    quiet: { ok: true, state: "quiet" },
+    status: { admission: { activeRequests: 0 }, sessions: { totalNonStreamActiveRequests: 0 } },
+  });
+  assert.equal(alreadyQuiet.mode, "pre-quiet");
 }
 
 {
@@ -75,4 +104,5 @@ console.log(JSON.stringify({
   wallClockTimeoutRemoved: true,
   replayableEventStreamsDoNotBlock: true,
   nonStreamRequestsStillBlock: true,
+  busyMultiMainFallsThroughToControllerDrain: true,
 }));

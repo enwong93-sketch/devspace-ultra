@@ -261,7 +261,10 @@ try {
     name: "devspace_goal_mount",
     arguments: { goalId: goal1.id },
   });
-  assert.deepEqual(goalFrom(mountedResult), terminal);
+  const authoritativeTerminal = goalFrom(mountedResult);
+  assert.deepEqual({ ...authoritativeTerminal, recentReports: authoritativeTerminal.recentReports.filter(r => JSON.stringify(r) !== JSON.stringify(authoritativeTerminal.lastRoundReport)) }, terminal,
+    'acknowledgement differs only by omitting the exactly duplicated latest report');
+  assert.equal(authoritativeTerminal.recentReports.length, 3, 'full Goal history remains in explicit read results');
 
   await closeStack(first);
   first = null;
@@ -272,7 +275,7 @@ try {
     arguments: { goalId: goal1.id },
   });
   const restored = goalFrom(restoredResult);
-  assert.deepEqual(restored, terminal);
+  assert.deepEqual(restored, authoritativeTerminal, 'restart must recover the full, not projected, authoritative history');
 
   console.log(JSON.stringify({
     ok: true,

@@ -1,8 +1,20 @@
 import { createHash } from "node:crypto";
+import { readComposerDraft } from './classic-composer-draft.js';
+import { runtimePortsForClassicKey } from './classic-main-debug-ports.js';
 
 export const INTERRUPTED_TURN_RESCUE_TEXT = "- 繼續";
+const TURN_ERROR_PATTERN_SOURCE = "something went wrong|error generating|network error|thinking failed|thought failed|thinking interrupted|thought interrupted|發生錯誤|出現問題|網絡錯誤|思考失敗|思考失败|已中斷思考|已中断思考|再試一次";
+
+export function isClassicTurnErrorText(value) {
+  return new RegExp(TURN_ERROR_PATTERN_SOURCE, "i").test(String(value || ""));
+}
 
 function cleanConversationId(value) {
+  const text = String(value ?? "").trim();
+  return text && /^[A-Za-z0-9_-]{8,200}$/.test(text) ? text : null;
+}
+
+function cleanMessageId(value) {
   const text = String(value ?? "").trim();
   return text && /^[A-Za-z0-9_-]{8,200}$/.test(text) ? text : null;
 }
@@ -13,12 +25,11 @@ function cleanRuntimeKey(value) {
 }
 
 function runtimePort(runtimeKey) {
-  const key = cleanRuntimeKey(runtimeKey);
-  if (!key) return null;
-  const number = Number(key.slice(-2));
-  if (number === 1) return 9721;
-  if (number >= 2 && number <= 32) return 9730 + number;
-  return null;
+  return runtimePortsForClassicKey(runtimeKey)[0] ?? null;
+}
+
+function runtimePorts(runtimeKey) {
+  return runtimePortsForClassicKey(runtimeKey);
 }
 
 function markerFor(conversationId, attempt) {
@@ -43,14 +54,16 @@ function localMinute(value = Date.now()) {
 
 function conversationIdFromUrl(url) {
   try {
-    return new URL(String(url || "")).pathname.match(/\/c\/([^/?#]+)/)?.[1] || null;
+    const parsed = new URL(String(url || ''));
+    if (parsed.protocol !== 'https:' || parsed.hostname !== 'chatgpt.com') return null;
+    return parsed.pathname.match(/\/c\/([^/?#]+)/)?.[1] || null;
   } catch {
     return null;
   }
 }
 
 async function targetsForPort(port) {
-  const response = await fetch(`http://127.0.0.1:${port}/json/list`, { cache: "no-store" });
+  const response = await fetch(`http://127.0.0.1:${port}/json/list`, { cache: "no-store", signal: AbortSignal.timeout(1500) });
   if (!response.ok) throw new Error(`CDP target list ${port} returned HTTP ${response.status}.`);
   return await response.json();
 }
@@ -136,18 +149,39 @@ function exactConversationExpression(conversationId) {
       ? String(editor instanceof HTMLTextAreaElement ? editor.value : editor.innerText || editor.textContent || '').replace(/\\u2060/g, '').trim()
       : null;
     const messageNodes = [...document.querySelectorAll('[data-message-author-role]')].filter(visible);
-    const latestMessage = messageNodes.at(-1) || null;
+    const turnSections = [...document.querySelectorAll('section[data-testid^="conversation-turn-"]')].filter(visible);
+    // Failed assistant turns often contain no data-message-author-role node at
+    // all. The last visible turn section is therefore the authoritative UI
+    // boundary; fall back to the latest role-bearing message only for older UI.
+    const latestTurnContainer = turnSections.at(-1)
+      || messageNodes.at(-1)?.closest('article')
+      || messageNodes.at(-1)
+      || null;
+    const latestTurnMessages = latestTurnContainer
+      ? [...latestTurnContainer.querySelectorAll('[data-message-author-role]')].filter(visible)
+      : [];
+    const latestMessage = latestTurnMessages.at(-1) || messageNodes.at(-1) || null;
     const latestMessageRole = latestMessage?.getAttribute('data-message-author-role') || null;
     const latestMessageText = String(latestMessage?.innerText || latestMessage?.textContent || '').trim();
-    const latestTurnContainer = latestMessage?.closest('article') || latestMessage;
+    const userMessages = messageNodes.filter((node) => node.getAttribute('data-message-author-role') === 'user');
+    const latestUserMessageId = userMessages.at(-1)?.getAttribute('data-message-id') || null;
+    const previousUserMessageId = userMessages.at(-2)?.getAttribute('data-message-id') || null;
+    // Current ChatGPT failure UI (for example the Cantonese Thinking-failed
+    // button) is a role-less sibling inside the turn SECTION. Scope to only
+    // that last turn rather than scanning older errors elsewhere on the page.
     const errorNodes = latestTurnContainer
-      ? [...latestTurnContainer.querySelectorAll('[role="alert"],[data-testid*="error" i],[data-testid*="retry" i]')].filter(visible)
+      ? [...latestTurnContainer.querySelectorAll('button,[role="alert"],[data-testid*="error" i],[data-testid*="retry" i]')].filter(visible)
       : [];
-    const hasTurnError = errorNodes.some((node) => /something went wrong|error generating|network error|發生錯誤|出現問題|網絡錯誤|再試一次/i.test(String(node.innerText || node.textContent || '')))
+    const turnErrorPattern = new RegExp(${JSON.stringify(TURN_ERROR_PATTERN_SOURCE)}, 'i');
+    const rolelessTurnError = latestTurnMessages.length === 0
+      && latestTurnContainer
+      && turnErrorPattern.test(String(latestTurnContainer.innerText || latestTurnContainer.textContent || ''));
+    const hasTurnError = rolelessTurnError
+      || errorNodes.some((node) => turnErrorPattern.test(String(node.innerText || node.textContent || '')))
       || buttons.some((button) => (
         /retry|try again|重試|再試/i.test(String(button.getAttribute('aria-label') || button.title || button.textContent || ''))
         && latestTurnContainer
-        && (button.closest('article') || button.parentElement)?.contains(latestTurnContainer)
+        && latestTurnContainer.contains(button)
       ));
     const root = document.getElementById('devspace-progress-narration-root');
     return {
@@ -157,6 +191,8 @@ function exactConversationExpression(conversationId) {
       generating,
       latestMessageRole,
       latestMessageTextLength: latestMessageText.length,
+      latestUserMessageId,
+      previousUserMessageId,
       hasTurnError,
       normalCompletion: !generating && latestMessageRole === 'assistant' && latestMessageText.length > 0 && !hasTurnError,
       incompleteUserTurn: !generating && latestMessageRole === 'user',
@@ -166,6 +202,44 @@ function exactConversationExpression(conversationId) {
       progressCardMounted: Boolean(root),
       progressConversationId: root?.dataset?.conversationId || actual,
       url: location.href,
+    };
+  })()`;
+}
+
+// Bounded fallback for very large/partially failed ChatGPT pages. It reads
+// only the current route, composer, stop control and final turn section. This
+// is sufficient to preserve interrupted-turn evidence without walking every
+// visible message node. The fallback is never used to select another page or
+// another conversation and is clearly marked in the returned diagnostics.
+function lightweightExactConversationExpression(conversationId) {
+  return `(() => {
+    const expected=${JSON.stringify(conversationId)};
+    const actual=location.pathname.match(/\\/c\\/([^/?#]+)/)?.[1]||null;
+    const editor=document.querySelector('#prompt-textarea, textarea, div.ProseMirror[contenteditable="true"], [data-lexical-editor="true"][contenteditable="true"], [contenteditable="true"][role="textbox"]');
+    const composerText=editor?String(editor instanceof HTMLTextAreaElement?editor.value:editor.innerText||editor.textContent||'').replace(/\\u2060/g,'').trim():null;
+    const generating=Boolean(document.querySelector('[data-testid="stop-button"]'));
+    const turns=[...document.querySelectorAll('section[data-testid^="conversation-turn-"]')];
+    const lastTurn=turns.at(-1)||null;
+    const roleNodes=lastTurn?[...lastTurn.querySelectorAll('[data-message-author-role]')]:[];
+    const fallbackRoles=[...document.querySelectorAll('[data-message-author-role]')];
+    const latestMessage=roleNodes.at(-1)||fallbackRoles.at(-1)||null;
+    const latestMessageRole=latestMessage?.getAttribute('data-message-author-role')||null;
+    const latestMessageText=String(latestMessage?.innerText||latestMessage?.textContent||'').trim();
+    const users=fallbackRoles.filter(node=>node.getAttribute('data-message-author-role')==='user');
+    const lastTurnText=String(lastTurn?.innerText||lastTurn?.textContent||'');
+    const errorPattern=new RegExp(${JSON.stringify(TURN_ERROR_PATTERN_SOURCE)},'i');
+    const hasTurnError=Boolean(lastTurn&&errorPattern.test(lastTurnText));
+    const root=document.getElementById('devspace-progress-narration-root');
+    return {
+      exact:actual===expected,conversationId:actual,hydrated:document.readyState==='complete'&&Boolean(editor),
+      generating,latestMessageRole,latestMessageTextLength:latestMessageText.length,
+      latestUserMessageId:users.at(-1)?.getAttribute('data-message-id')||null,
+      previousUserMessageId:users.at(-2)?.getAttribute('data-message-id')||null,
+      hasTurnError,normalCompletion:!generating&&latestMessageRole==='assistant'&&latestMessageText.length>0&&!hasTurnError,
+      incompleteUserTurn:!generating&&latestMessageRole==='user',composerFound:Boolean(editor),composerEmpty:composerText==='',
+      composerLength:composerText==null?null:composerText.length,progressCardMounted:Boolean(root),
+      progressConversationId:root?.dataset?.conversationId||actual,url:location.href,
+      inspectionFallback:'latest-turn-bounded'
     };
   })()`;
 }
@@ -190,25 +264,61 @@ export class ConversationProgressLivenessCdpAdapter {
     if (!id) return { exact: false, state: "invalid-conversation" };
     const matches = [];
     for (const runtimeKey of this.runtimeKeys) {
-      const port = runtimePort(runtimeKey);
-      try {
-        const targets = await this.listTargets(port);
-        for (const target of targets) {
-          if (target?.type !== "page" || !target?.webSocketDebuggerUrl) continue;
-          if (conversationIdFromUrl(target.url) !== id) continue;
-          matches.push({ runtimeKey, port, target });
+      for (const port of runtimePorts(runtimeKey)) {
+        try {
+          const targets = await this.listTargets(port);
+          for (const target of Array.isArray(targets) ? targets : []) {
+            if (target?.type !== "page" || !target?.webSocketDebuggerUrl) continue;
+            if (conversationIdFromUrl(target.url) !== id) continue;
+            matches.push({ runtimeKey, port, target });
+          }
+        } catch {
+          // An offline canonical/fallback port cannot invalidate the same
+          // runtime discovered on its observed launch port or another Main.
         }
-      } catch {
-        // One offline Runtime cannot invalidate a conversation found elsewhere.
       }
     }
-    if (matches.length !== 1) {
+    if (matches.length > 1) {
+      // The same exact conversation may be open in more than one Classic
+      // window. Runtime is only a locator, so resolve the duplicate safely
+      // when exactly one copy proves it is the active/interrupted turn and all
+      // other copies can be inspected as inactive. Two active/unknown copies
+      // remain ambiguous and fail closed.
+      const inspected = [];
+      for (const match of matches) {
+        try { inspected.push(await this.#inspectMatch(match, id)); } catch {}
+      }
+      const active = inspected.filter((page) => page?.exact
+        && page?.hydrated
+        && page?.composerFound
+        && page?.composerEmpty
+        && (page?.generating === true || page?.hasTurnError === true || page?.incompleteUserTurn === true));
+      if (inspected.length === matches.length && active.length === 1) {
+        return {
+          ...active[0],
+          duplicatePageObserved: true,
+          duplicateMatchCount: matches.length,
+          duplicateResolvedByUniqueActivePage: true,
+        };
+      }
       return {
         exact: false,
-        ambiguous: matches.length > 1,
-        state: matches.length > 1 ? "duplicate-conversation-pages" : "conversation-page-not-open",
+        ambiguous: true,
+        state: inspected.length !== matches.length
+          ? "duplicate-conversation-page-inspection-incomplete"
+          : "duplicate-conversation-pages",
         conversationId: id,
         matchCount: matches.length,
+        activeMatchCount: active.length,
+      };
+    }
+    if (matches.length === 0) {
+      return {
+        exact: false,
+        ambiguous: false,
+        state: "conversation-page-not-open",
+        conversationId: id,
+        matchCount: 0,
       };
     }
     return await this.#inspectMatch(matches[0], id);
@@ -218,35 +328,50 @@ export class ConversationProgressLivenessCdpAdapter {
     const id = cleanConversationId(conversationId);
     const key = cleanRuntimeKey(runtimeKey);
     if (!id || !key) return { exact: false, state: "invalid-conversation-or-runtime" };
-    const port = runtimePort(key);
-    try {
-      const targets = await this.listTargets(port);
-      const matches = (Array.isArray(targets) ? targets : []).filter((target) => (
-        target?.type === "page"
-        && target?.webSocketDebuggerUrl
-        && conversationIdFromUrl(target.url) === id
-      ));
-      if (matches.length !== 1) {
-        return {
-          exact: false,
-          ambiguous: matches.length > 1,
-          state: matches.length > 1 ? "duplicate-conversation-pages-in-runtime" : "conversation-not-in-runtime",
-          conversationId: id,
-          runtimeKey: key,
-          port,
-          matchCount: matches.length,
-          locatorOnly: true,
-          runtimeBinding: false,
-        };
-      }
-      return await this.#inspectMatch({ runtimeKey: key, port, target: matches[0] }, id);
-    } catch {
+    const matches = [];
+    const attemptedPorts = runtimePorts(key);
+    const onlinePorts = [];
+    for (const port of attemptedPorts) {
+      try {
+        const targets = await this.listTargets(port);
+        onlinePorts.push(port);
+        for (const target of Array.isArray(targets) ? targets : []) {
+          if (target?.type !== "page" || !target?.webSocketDebuggerUrl) continue;
+          if (conversationIdFromUrl(target.url) !== id) continue;
+          matches.push({ runtimeKey: key, port, target });
+        }
+      } catch {}
+    }
+    if (matches.length !== 1) {
       return {
         exact: false,
-        state: "runtime-unavailable",
+        ambiguous: matches.length > 1,
+        state: matches.length > 1
+          ? "duplicate-conversation-pages-in-runtime"
+          : onlinePorts.length
+            ? "conversation-not-in-runtime"
+            : "runtime-unavailable",
         conversationId: id,
         runtimeKey: key,
-        port,
+        port: attemptedPorts[0] ?? null,
+        attemptedPorts,
+        onlinePorts,
+        matchCount: matches.length,
+        locatorOnly: true,
+        runtimeBinding: false,
+      };
+    }
+    try {
+      return await this.#inspectMatch(matches[0], id);
+    } catch (error) {
+      return {
+        exact: false,
+        state: "runtime-page-inspection-failed",
+        errorName: error instanceof Error ? error.name : "Error",
+        conversationId: id,
+        runtimeKey: key,
+        port: matches[0].port,
+        attemptedPorts,
         locatorOnly: true,
         runtimeBinding: false,
       };
@@ -260,27 +385,28 @@ export class ConversationProgressLivenessCdpAdapter {
   } = {}) {
     const candidates = [];
     for (const runtimeKey of this.runtimeKeys) {
-      const port = runtimePort(runtimeKey);
-      try {
-        const targets = await this.listTargets(port);
-        for (const target of Array.isArray(targets) ? targets : []) {
-          if (target?.type !== "page" || !target?.webSocketDebuggerUrl) continue;
-          const conversationId = cleanConversationId(conversationIdFromUrl(target.url));
-          if (!conversationId) continue;
-          const inspected = await this.#inspectMatch({ runtimeKey, port, target }, conversationId);
-          if (!inspected?.exact || !inspected?.hydrated || !inspected?.composerFound || !inspected?.composerEmpty) continue;
-          if (requireProgressCard && (
-            inspected.progressCardMounted !== true
-            || inspected.progressConversationId !== conversationId
-          )) continue;
-          const active = inspected.generating === true
-            || (allowIncompleteUserTurn && inspected.incompleteUserTurn === true);
-          if (requireGenerating && !active) continue;
-          candidates.push(inspected);
+      for (const port of runtimePorts(runtimeKey)) {
+        try {
+          const targets = await this.listTargets(port);
+          for (const target of Array.isArray(targets) ? targets : []) {
+            if (target?.type !== "page" || !target?.webSocketDebuggerUrl) continue;
+            const conversationId = cleanConversationId(conversationIdFromUrl(target.url));
+            if (!conversationId) continue;
+            const inspected = await this.#inspectMatch({ runtimeKey, port, target }, conversationId);
+            if (!inspected?.exact || !inspected?.hydrated || !inspected?.composerFound || !inspected?.composerEmpty) continue;
+            if (requireProgressCard && (
+              inspected.progressCardMounted !== true
+              || inspected.progressConversationId !== conversationId
+            )) continue;
+            const active = inspected.generating === true
+              || (allowIncompleteUserTurn && inspected.incompleteUserTurn === true);
+            if (requireGenerating && !active) continue;
+            candidates.push(inspected);
+          }
+        } catch {
+          // Offline runtimes and transient CDP failures are ignored. A fallback
+          // is valid only when exactly one remaining page proves itself active.
         }
-      } catch {
-        // Offline runtimes and transient CDP failures are ignored. A fallback
-        // is valid only when exactly one remaining page proves itself active.
       }
     }
     if (candidates.length !== 1) {
@@ -365,9 +491,11 @@ export class ConversationProgressLivenessCdpAdapter {
     }
   }
 
-  async sendContinue({ conversationId, target = null, attempt = 1 } = {}) {
+  async sendContinue({ conversationId, target = null, attempt = 1, sourceUserMessageId = null } = {}) {
     const resolved = await this.#resolveExactTarget(conversationId, target);
     if (!resolved.ok) return resolved;
+    const sourceId = cleanMessageId(sourceUserMessageId);
+    if (!sourceId) return { ok: false, definiteFailure: true, dispatchCommitted: false, state: 'rescue-source-user-required' };
     const text = INTERRUPTED_TURN_RESCUE_TEXT;
     return await this.#sendConversationMessage({
       resolved,
@@ -377,28 +505,35 @@ export class ConversationProgressLivenessCdpAdapter {
       attempt,
       allowNormalCompletion: false,
       requireInterruptionEvidence: true,
+      rescueBoundary: { sourceUserMessageId: sourceId },
     });
   }
 
   async sendGoalRecovery({ conversationId, target = null, prompt, attempt = 1 } = {}) {
-    const text = String(prompt || "").trim();
-    if (!text.startsWith("[DEVSPACE_GOAL_ROUND_RECOVERY]")) {
-      return { ok: false, state: "invalid-goal-recovery-prompt" };
-    }
-    const resolved = await this.#resolveExactTarget(conversationId, target);
-    if (!resolved.ok) return resolved;
-    return await this.#sendConversationMessage({
-      resolved,
-      text,
-      expectedPrefix: "[DEVSPACE_GOAL_ROUND_RECOVERY]",
-      purpose: "goal-round-recovery",
-      attempt,
-      // The Goal guard independently proves that a working round terminated
-      // without devspace_goal_turn_report. A visible assistant message is
-      // therefore expected and must not block the exact recovery turn.
-      allowNormalCompletion: true,
-      requireInterruptionEvidence: false,
-    });
+    void conversationId; void target; void prompt; void attempt;
+    // Goal continuation and same-round Goal recovery are host-owned hidden
+    // assistant continuations. They must never type policy/control text into
+    // the user's composer or create a visible synthetic user message. Keep a
+    // hard fail-closed compatibility method so a stale caller cannot silently
+    // revive the retired page-composer transport.
+    return {
+      ok: false,
+      definiteFailure: true,
+      dispatchCommitted: false,
+      visibilityVerified: false,
+      state: "visible-goal-recovery-transport-retired",
+    };
+  }
+
+  async sendGoalContinuation({ conversationId, target, sourceUserId, assistantMessageId } = {}) {
+    void conversationId; void target; void sourceUserId; void assistantMessageId;
+    return {
+      ok: false,
+      definiteFailure: true,
+      dispatchCommitted: false,
+      visibilityVerified: false,
+      state: "visible-goal-continuation-transport-retired",
+    };
   }
 
   async #sendConversationMessage({
@@ -409,16 +544,22 @@ export class ConversationProgressLivenessCdpAdapter {
     attempt,
     allowNormalCompletion = false,
     requireInterruptionEvidence = true,
+    goalBoundary = null,
+    rescueBoundary = null,
   }) {
     const page = await this.connect(resolved.target);
     const marker = markerFor(resolved.conversationId, `${purpose}:${attempt}`);
+    let submissionAttempted = false;
     try {
       const preflight = await page.evaluate(`(() => {
         const expected = ${JSON.stringify(resolved.conversationId)};
         const expectedText = ${JSON.stringify(text)};
         const allowNormalCompletion = ${allowNormalCompletion === true};
         const requireInterruptionEvidence = ${requireInterruptionEvidence !== false};
+        const goalBoundary = ${JSON.stringify(goalBoundary)};
+        const rescueBoundary = ${JSON.stringify(rescueBoundary)};
         const actual = location.pathname.match(/\\/c\\/([^/?#]+)/)?.[1] || null;
+        const draftText = ${readComposerDraft.toString()};
         const visible = (element) => {
           if (!(element instanceof HTMLElement)) return false;
           const rect = element.getBoundingClientRect();
@@ -431,23 +572,49 @@ export class ConversationProgressLivenessCdpAdapter {
           return { ok:false, state:'still-generating' };
         }
         const messageNodes = [...document.querySelectorAll('[data-message-author-role]')].filter(visible);
-        const latestMessage = messageNodes.at(-1) || null;
+        const turnSections = [...document.querySelectorAll('section[data-testid^="conversation-turn-"]')].filter(visible);
+        const latestTurnContainer = turnSections.at(-1)
+          || messageNodes.at(-1)?.closest('article')
+          || messageNodes.at(-1)
+          || null;
+        const latestTurnMessages = latestTurnContainer
+          ? [...latestTurnContainer.querySelectorAll('[data-message-author-role]')].filter(visible)
+          : [];
+        const latestMessage = latestTurnMessages.at(-1) || messageNodes.at(-1) || null;
         const latestMessageRole = latestMessage?.getAttribute('data-message-author-role') || null;
         const latestMessageText = String(latestMessage?.innerText || latestMessage?.textContent || '').trim();
         const latestUser = [...messageNodes].reverse().find((node) => node.getAttribute('data-message-author-role') === 'user') || null;
         const latestUserText = String(latestUser?.innerText || latestUser?.textContent || '').trim();
-        if (latestUserText === expectedText) {
+        const userMessages = messageNodes.filter((node) => node.getAttribute('data-message-author-role') === 'user');
+        const latestUserId = userMessages.at(-1)?.getAttribute('data-message-id') || null;
+        const previousUserId = userMessages.at(-2)?.getAttribute('data-message-id') || null;
+        if (goalBoundary && (latestUser?.getAttribute('data-message-id') !== goalBoundary.sourceUserId
+          || latestMessageRole !== 'assistant'
+          || latestMessage?.getAttribute('data-message-id') !== goalBoundary.assistantMessageId)) {
+          return { ok:false, state:'goal-source-turn-changed' };
+        }
+        if (rescueBoundary && latestUserId !== rescueBoundary.sourceUserMessageId) {
+          if (latestUserText === expectedText && previousUserId === rescueBoundary.sourceUserMessageId) {
+            return { ok:true, state:'already-visible', alreadyVisible:true };
+          }
+          return { ok:false, state:'rescue-source-turn-changed' };
+        }
+        if (!goalBoundary && !rescueBoundary && latestUserText === expectedText) {
           return { ok:true, state:'already-visible', alreadyVisible:true };
         }
-        const latestTurnContainer = latestMessage?.closest('article') || latestMessage;
         const errorNodes = latestTurnContainer
-          ? [...latestTurnContainer.querySelectorAll('[role="alert"],[data-testid*="error" i],[data-testid*="retry" i]')].filter(visible)
+          ? [...latestTurnContainer.querySelectorAll('button,[role="alert"],[data-testid*="error" i],[data-testid*="retry" i]')].filter(visible)
           : [];
-        const hasTurnError = errorNodes.some((node) => /something went wrong|error generating|network error|發生錯誤|出現問題|網絡錯誤|再試一次/i.test(String(node.innerText || node.textContent || '')))
+        const turnErrorPattern = new RegExp(${JSON.stringify(TURN_ERROR_PATTERN_SOURCE)}, 'i');
+        const rolelessTurnError = latestTurnMessages.length === 0
+          && latestTurnContainer
+          && turnErrorPattern.test(String(latestTurnContainer.innerText || latestTurnContainer.textContent || ''));
+        const hasTurnError = rolelessTurnError
+          || errorNodes.some((node) => turnErrorPattern.test(String(node.innerText || node.textContent || '')))
           || buttons.some((button) => (
             /retry|try again|重試|再試/i.test(String(button.getAttribute('aria-label') || button.title || button.textContent || ''))
             && latestTurnContainer
-            && (button.closest('article') || button.parentElement)?.contains(latestTurnContainer)
+            && latestTurnContainer.contains(button)
           ));
         if (!allowNormalCompletion && latestMessageRole === 'assistant' && latestMessageText.length > 0 && !hasTurnError) {
           return { ok:false, state:'normal-completion-observed' };
@@ -458,10 +625,15 @@ export class ConversationProgressLivenessCdpAdapter {
         const editors = [...document.querySelectorAll('#prompt-textarea,textarea,div.ProseMirror[contenteditable="true"],[data-lexical-editor="true"][contenteditable="true"],[contenteditable="true"][role="textbox"]')].filter(visible);
         const editor = editors.find((node) => node.closest('form')) || editors.at(-1);
         if (!editor) return { ok:false, state:'composer-missing' };
-        const existing = String(editor instanceof HTMLTextAreaElement ? editor.value : editor.innerText || editor.textContent || '').replace(/\\u2060/g, '').trim();
-        if (existing) return { ok:false, state:'composer-not-empty' };
+        const existing = draftText(editor);
+        if (existing !== '') return { ok:false, state:'composer-not-empty' };
         editor.setAttribute('data-devspace-liveness-send', ${JSON.stringify(marker)});
         editor.focus();
+        if (!(editor instanceof HTMLTextAreaElement)) {
+          const selection = getSelection(); const range = document.createRange();
+          range.selectNodeContents(editor); range.collapse(false);
+          selection.removeAllRanges(); selection.addRange(range);
+        }
         return { ok:true };
       })()`);
       const committedResult = (extra = {}) => ({
@@ -488,8 +660,42 @@ export class ConversationProgressLivenessCdpAdapter {
       }
       await page.call("Input.insertText", { text });
       await this.sleep(350);
+      submissionAttempted = true; // a lost CDP acknowledgement may follow a successful click
+      const cleanupUnsentDraft = async () => {
+        try {
+          return await page.evaluate(`(() => {
+            const marker = ${JSON.stringify(marker)};
+            const expectedText = ${JSON.stringify(text)};
+            const draftText = ${readComposerDraft.toString()};
+            const editor = document.querySelector('[data-devspace-liveness-send="' + marker + '"]');
+            if (!editor || draftText(editor) !== expectedText) return { cleaned:false, state:'ownership-lost' };
+            if (editor instanceof HTMLTextAreaElement) editor.value = '';
+            else editor.textContent = '';
+            editor.removeAttribute('data-devspace-liveness-send');
+            editor.dispatchEvent(new InputEvent('input', { bubbles:true, inputType:'deleteContentBackward', data:null }));
+            return { cleaned:draftText(editor) === '', state:'unsent-draft-cleaned' };
+          })()`);
+        } catch { return { cleaned:false, state:'cleanup-unavailable' }; }
+      };
       const submitted = await page.evaluate(`(() => {
         const marker = ${JSON.stringify(marker)};
+        const expectedConversation = ${JSON.stringify(resolved.conversationId)};
+        const expectedText = ${JSON.stringify(text)};
+        const draftText = ${readComposerDraft.toString()};
+        const goalBoundary = ${JSON.stringify(goalBoundary)};
+        const rescueBoundary = ${JSON.stringify(rescueBoundary)};
+        if (location.pathname.match(/\\/c\\/([^/?#]+)/)?.[1] !== expectedConversation) return {ok:false,state:'route-changed-before-send'};
+        if (document.querySelector('button[data-testid="stop-button"]')) return {ok:false,state:'turn-started-before-send'};
+        const nodes = [...document.querySelectorAll('[data-message-author-role]')];
+        if (goalBoundary) {
+          const user = [...nodes].reverse().find(n => n.getAttribute('data-message-author-role') === 'user');
+          const last = nodes.at(-1);
+          if (user?.getAttribute('data-message-id') !== goalBoundary.sourceUserId || last?.getAttribute('data-message-id') !== goalBoundary.assistantMessageId) return {ok:false,state:'goal-source-turn-changed'};
+        }
+        if (rescueBoundary) {
+          const users = nodes.filter(n => n.getAttribute('data-message-author-role') === 'user');
+          if (users.at(-1)?.getAttribute('data-message-id') !== rescueBoundary.sourceUserMessageId) return {ok:false,state:'rescue-source-turn-changed'};
+        }
         const visible = (element) => {
           if (!(element instanceof HTMLElement)) return false;
           const rect = element.getBoundingClientRect();
@@ -498,8 +704,8 @@ export class ConversationProgressLivenessCdpAdapter {
         };
         const editor = document.querySelector('[data-devspace-liveness-send="' + marker + '"]');
         if (!editor) return { ok:false, state:'composer-lost' };
-        const inserted = String(editor instanceof HTMLTextAreaElement ? editor.value : editor.innerText || editor.textContent || '').trim();
-        if (!inserted) return { ok:false, state:'text-not-inserted' };
+        const inserted = draftText(editor);
+        if (inserted !== expectedText) return { ok:false, state:'composer-text-changed' };
         const buttons = [...document.querySelectorAll('button')].filter(visible);
         const send = buttons.find((button) => button.matches('[data-testid="send-button"]'))
           || buttons.find((button) => /send|傳送|发送|送出/i.test(String(button.getAttribute('aria-label') || button.title || '')));
@@ -509,6 +715,8 @@ export class ConversationProgressLivenessCdpAdapter {
         return { ok:true };
       })()`);
       if (!submitted?.ok) {
+        const cleanup = await cleanupUnsentDraft();
+        if (cleanup?.cleaned === true) submissionAttempted = false;
         return { ...submitted, definiteFailure: true, dispatchCommitted: false };
       }
 
@@ -520,12 +728,21 @@ export class ConversationProgressLivenessCdpAdapter {
             const expected = ${JSON.stringify(resolved.conversationId)};
             const expectedPrefix = ${JSON.stringify(expectedPrefix)};
             const expectedText = ${JSON.stringify(text)};
+            const strictGoalBoundary = ${Boolean(goalBoundary)};
+            const rescueBoundary = ${JSON.stringify(rescueBoundary)};
             const actual = location.pathname.match(/\\/c\\/([^/?#]+)/)?.[1] || null;
             if (actual !== expected) return { ok:false, state:'route-changed-after-send' };
             const users = [...document.querySelectorAll('[data-message-author-role="user"]')];
-            const latest = String(users.at(-1)?.innerText || users.at(-1)?.textContent || '').trim();
+            const latestUser = users.at(-1) || null;
+            const previousUser = users.at(-2) || null;
+            const latest = String(latestUser?.innerText || latestUser?.textContent || '').trim();
+            const normalized = latest.replace(/^DevSpace Local Gateway\\s*/, '').trim();
+            const rescueSequence = !rescueBoundary || (
+              latestUser?.getAttribute('data-message-id') !== rescueBoundary.sourceUserMessageId
+              && previousUser?.getAttribute('data-message-id') === rescueBoundary.sourceUserMessageId
+            );
             return {
-              ok: latest === expectedText || latest.startsWith(expectedPrefix),
+              ok: rescueSequence && (normalized === expectedText || (!strictGoalBoundary && !rescueBoundary && normalized.startsWith(expectedPrefix))),
               state: latest ? 'visible' : 'missing',
             };
           })()`);
@@ -556,6 +773,28 @@ export class ConversationProgressLivenessCdpAdapter {
             purpose,
             attempt,
           };
+    } catch (error) {
+      if (submissionAttempted) {
+        try {
+          const cleanup = await page.evaluate(`(() => {
+            const marker = ${JSON.stringify(marker)};
+            const expectedText = ${JSON.stringify(text)};
+            const draftText = ${readComposerDraft.toString()};
+            const editor = document.querySelector('[data-devspace-liveness-send="' + marker + '"]');
+            if (!editor || draftText(editor) !== expectedText) return { cleaned:false };
+            if (editor instanceof HTMLTextAreaElement) editor.value = '';
+            else editor.textContent = '';
+            editor.removeAttribute('data-devspace-liveness-send');
+            editor.dispatchEvent(new InputEvent('input', { bubbles:true, inputType:'deleteContentBackward', data:null }));
+            return { cleaned:draftText(editor) === '' };
+          })()`);
+          if (cleanup?.cleaned === true) submissionAttempted = false;
+        } catch {}
+      }
+      return { ok: false, state: 'transport-acknowledgement-uncertain',
+        error: error instanceof Error ? error.message : String(error),
+        dispatchCommitted: submissionAttempted, definiteFailure: !submissionAttempted,
+        visibilityVerified: false };
     } finally {
       page.close();
     }
@@ -564,11 +803,24 @@ export class ConversationProgressLivenessCdpAdapter {
   async close() {}
 
   async #inspectMatch(match, conversationId) {
-    const page = await this.connect(match.target);
+    let page = null;
+    let result;
+    let fallbackError = null;
     try {
-      const result = await page.evaluate(exactConversationExpression(conversationId));
+      try {
+        page = await this.connect(match.target);
+        result = await page.evaluate(exactConversationExpression(conversationId));
+      } catch (error) {
+        fallbackError = error instanceof Error ? error.name : 'Error';
+        page?.close?.();
+        page = null;
+        await this.sleep(50);
+        page = await this.connect(match.target);
+        result = await page.evaluate(lightweightExactConversationExpression(conversationId));
+      }
       return {
         ...result,
+        ...(fallbackError ? { primaryInspectionErrorName: fallbackError, boundedInspectionFallback: true } : {}),
         // Runtime identifies only the physical window where this exact
         // conversation is currently open.  It is never persisted or used as
         // narration ownership.  Keep the legacy aliases for callers that
@@ -589,7 +841,7 @@ export class ConversationProgressLivenessCdpAdapter {
         },
       };
     } finally {
-      page.close();
+      page?.close?.();
     }
   }
 
@@ -600,7 +852,7 @@ export class ConversationProgressLivenessCdpAdapter {
     if (supplied?.exact === true && supplied?.conversationId === id && supplied?.target?.webSocketDebuggerUrl) {
       const runtimeKey = cleanRuntimeKey(supplied.target.runtimeKey || supplied.runtimeKey);
       const port = Number(supplied.target.port || supplied.port);
-      if (runtimeKey && runtimePort(runtimeKey) === port && conversationIdFromUrl(supplied.target.url) === id) {
+      if (runtimeKey && runtimePorts(runtimeKey).includes(port) && conversationIdFromUrl(supplied.target.url) === id) {
         try {
           const targets = await this.listTargets(port);
           const exact = targets.filter((target) => (
@@ -642,7 +894,11 @@ export class ConversationProgressLivenessCdpAdapter {
 
 export const _test = {
   runtimePort,
+  runtimePorts,
   markerFor,
   localMinute,
   conversationIdFromUrl,
+  exactConversationExpression,
+  lightweightExactConversationExpression,
+  TURN_ERROR_PATTERN_SOURCE,
 };
