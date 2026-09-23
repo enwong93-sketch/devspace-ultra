@@ -25,12 +25,22 @@ assert.match(coreSlot, /applyDevspaceRuntimePriority\("core",\s*\{ pid: child\.p
   "Core children must be returned to Normal priority after inheriting the Gateway control-plane priority");
 assert.match(coreSlot, /createCandidateSnapshot/, "Core slot helper must build an isolated candidate snapshot");
 assert.match(coreSlot, /devspace\.sqlite/, "candidate snapshot must handle SQLite separately from ordinary file copying");
+assert.match(coreSlot, /isTransientAtomicPath[\s\S]*copyCandidateState/,
+  "candidate snapshots must ignore and retry bounded atomic-writer temp-file races");
+assert.match(coreSlot, /DEVSPACE_CORE_IDENTITY_MISMATCH[\s\S]*completeCoreStartup[\s\S]*stopSpawnedCoreProcess/,
+  "a foreign healthy listener must reject and terminate the newly spawned handle instead of creating a duplicate Core");
 assert.match(coreSlot, /candidate[\s\S]*DEVSPACE_CONTEXT_GUARDIAN/i, "candidate Core must disable Context Guardian background work");
 assert.match(coreSlot, /candidate[\s\S]*DEVSPACE_CLASSIC_HOST_OVERLAY/i, "candidate Core must disable Host Overlay background work");
 assert.match(coreSlot, /candidate[\s\S]*DEVSPACE_CLASSIC_STREAM_RECOVERY/i, "candidate Core must disable Stream Recovery background work");
 
 assert.match(gatewayController, /StableGatewaySessionRegistry/, "Gateway controller must own the public MCP session registry");
 assert.match(gatewayController, /readCoreSchemaFingerprint/, "handover baseline must use a fresh active-Core MCP schema session");
+assert.match(gatewayController, /readCoreRuntimeIdentity/,
+  "Gateway recovery must compare controller ownership with the PID exposed by the exact private Core listener");
+assert.match(gatewayController, /knownHandles[\s\S]*reconcileActiveCoreIdentity[\s\S]*foreign-core-listener/,
+  "fatal handover recovery may adopt only a live same-slot handle spawned by this Gateway and must fail closed on unknown listeners");
+assert.match(gatewayController, /replaySessionsToCore[\s\S]*Core identity reconciled/,
+  "listener/handle reconciliation must replay public sessions before clearing fatal controller state");
 assert.doesNotMatch(gatewayController, /baseline\.backendSessionId[\s\S]*read.*SchemaFingerprint/i, "handover schema gate must not depend on a previously issued backend MCP session id");
 assert.match(gatewayController, /createStableGatewayProxy/, "Gateway controller must own the stable public proxy");
 assert.match(stableGateway, /stableGatewayPublicBaseUrl[\s\S]*edgePublicBaseUrl/, "Stable Gateway must prefer generic production public identity config while retaining legacy edge fallback");
@@ -42,6 +52,8 @@ assert.match(stableGateway, /applyDevspaceRuntimePriority\("gateway"\)/,
   "Gateway control-plane work must request AboveNormal scheduling during CPU saturation");
 assert.match(coreSlot, /candidate[\s\S]*DEVSPACE_CLASSIC_UI_OWNER_PRIORITY:\s*"0"/i, "candidate Core must never compete for the Classic UI owner lease");
 assert.match(stableGateway, /readCoreSchemaFingerprint/, "runtime wiring must probe active-Core schema through a fresh ephemeral MCP session instead of trusting a stale backend session id");
+assert.match(stableGateway, /readCoreRuntimeIdentity/,
+  "runtime wiring must provide exact private-listener PID identity to the controller reconciler");
 assert.match(stableGateway, /probeCandidate/, "runtime wiring must provide candidate compatibility probing");
 assert.match(stableGateway, /__devspace\/gateway\/handover/, "Gateway must expose a private handover control endpoint");
 assert.match(stableGateway, /timingSafeEqual/, "Gateway handover control endpoint must authenticate its local caller");

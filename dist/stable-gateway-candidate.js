@@ -75,6 +75,28 @@ async function fetchJson(url, options = {}) {
   return { response, body };
 }
 
+export async function readCoreRuntimeIdentity({ coreBaseUrl, timeoutMs = 3_000 } = {}) {
+  const coreBase = requireLoopbackBase(coreBaseUrl);
+  const timeout = Math.max(500, Math.min(30_000, Number(timeoutMs) || 3_000));
+  const options = { signal: AbortSignal.timeout(timeout) };
+  const health = await fetchJson(`${coreBase}/healthz`, options);
+  if (!health.response.ok || health.body?.ok !== true) {
+    return { ok: false, baseUrl: coreBase, pid: null, stage: "health", status: health.response.status };
+  }
+  const memory = await fetchJson(`${coreBase}/__devspace/memory/status`, options);
+  const pid = Number(memory.body?.pid);
+  if (!memory.response.ok || !Number.isInteger(pid) || pid < 1) {
+    return { ok: false, baseUrl: coreBase, pid: null, stage: "identity", status: memory.response.status };
+  }
+  return {
+    ok: true,
+    baseUrl: coreBase,
+    pid,
+    passiveCore: memory.body?.features?.passiveCore === true,
+    autoCompactEnabled: memory.body?.features?.autoCompactEnabled === true,
+  };
+}
+
 function parseMcpPayload(text) {
   const raw = String(text ?? "").trim();
   if (!raw) return null;

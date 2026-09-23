@@ -14,7 +14,7 @@ import { createStableGatewayHumanProgress, handleStableGatewayHumanProgressReque
 import { migrateAgentAuthoredProgressState } from "../dist/agent-authored-progress-state.js";
 import { GoalProgressNarrator } from "../dist/agent-authored-progress-journal.js";
 import { createLogRetentionSupervisor } from "../dist/log-retention.js";
-import { probeCandidate, readCoreSchemaFingerprint } from "../dist/stable-gateway-candidate.js";
+import { probeCandidate, readCoreRuntimeIdentity, readCoreSchemaFingerprint } from "../dist/stable-gateway-candidate.js";
 import { loadDevspaceFiles } from "../dist/user-config.js";
 import { nodeArgsForCoreHeapProfile } from "../dist/core-node-options.js";
 import { createCandidateSnapshot, startCoreSlot, stopCoreSlot } from "./devspace-core-slot.mjs";
@@ -294,6 +294,7 @@ export function stableGatewayOptionsFromEnvironment(env = process.env) {
         }),
         stopCoreSlot,
         probeCandidate,
+        readCoreRuntimeIdentity,
         readCoreSchemaFingerprint,
       },
     },
