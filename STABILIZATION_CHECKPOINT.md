@@ -727,3 +727,55 @@ product static gate and 500-rotation continuation stress both passed.
 `verify:classic-safety` also passed after their static gates were updated to
 inspect the extracted authority-transaction module rather than requiring the
 implementation to remain inline in `server.js`.
+
+## Round 10 v0.5.8 maintenance release and V0.6 integration — 2026-09-23
+
+Round 10 was opened by the backend-owned hidden Goal continuation from reported
+Round 9. No user message or composer draft was created. This is the live
+acceptance for the repaired post-report path: the continuation was redeemed as
+Round 10 / Working before a fresh turn Plan was created.
+
+The four audited production fixes were merged through PR #22:
+
+- `1c9e106`: enforce current-round Plan completion and Goal report closure as a
+  backend product gate rather than a model-memory convention.
+- `8e34af3`: reconstruct a missing continuation-driver journal from a reported
+  pending Goal using exact conversation evidence.
+- `7dfe0ac`: preserve Rescue authority when a localized terminal failure is the
+  latest turn even if the host omits the usual role attribute.
+- `113ddfc`: require spawned Core PID identity and reconcile Stable Gateway
+  controller/listener state after failed handover or rollback.
+
+PR #22 passed V0.5 release-gate run `35907897510` and the complete
+Linux/macOS/Windows Node 22/24/26 CI matrix in run `35907897595`. It merged to
+`main` as `65449f7c220c55de92d8fb2a86bba117abd5bd5c`; merged-main release-gate run
+`35910776090` and CI run `35910776368` also passed.
+
+The semantic version remains `0.5.8`. The immutable `v0.5.8` tag remains at
+`7a8f9c77b3f2cd50432ee8fda64955c1cd41361b` and was not force-moved. The same
+GitHub Release was refreshed from the exact merge commit. The archive is
+4,210,667 bytes with SHA-256
+`47e9668caf15509fdc0726ec10cf3e916f3c8fc4c2808fe25e6a5e1c7635154d`;
+`SHA256SUMS.txt` has SHA-256
+`09fb1935848cf14722368cd397b6bb29f737db92fbe42a6bec245ad3030ebff9`.
+All five program assets were downloaded again from the public Release URLs and
+matched their staged byte counts and hashes. The retained video still hashes to
+`4fe9ebcfb5ba992958891d535983132c1a4d105db189b4ebabb80d6ef4aa7162`.
+An isolated updater check classified the previous v0.5.8 archive digest as
+`repair` and the refreshed digest as `current`. Durable release evidence is in
+`C:\Users\enwong\.devspace-tailscale-bootstrap\logs\releases\v0.5.8-published-65449f7c.json`
+and `v0.5.8-maintenance-65449f7c` under the same directory.
+
+The isolated V0.6 branch first committed the pending post-authority
+finalization recovery as `7c81e78`. That repair keeps a durable `committing`
+row when journal clear or capsule metadata finalization fails, blocks re-arming,
+and performs bounded same-Core idempotent reconciliation instead of requiring a
+restart. The branch then merged current `main` without conflicts as
+`b2ce33ed2cf615e4ab13fe184c639caf0f65d1ed`.
+
+Post-merge verification passed Auto Compact's 39 tests and 500-rotation stress,
+Goal's 61 tests, Rescue/progress liveness, Stable Gateway, and Classic safety.
+Clean full audit `75dfeb1d-0fc0-4ab1-88e0-934cb7d103a4` passed 181 named gates,
+exit code 0, with an empty tracked diff. Production was not reloaded from V0.6;
+Production Auto Compact remained OFF, and no ChatGPT Main or Blender process was
+restarted or navigated.
