@@ -28,6 +28,7 @@ function makeHarness({
   descriptorError = null,
   armResult = { armed: true, mode: "user-turn" },
   onVerifiedRollover = async () => true,
+  stateStore = null,
 } = {}) {
   const calls = {
     status: 0,
@@ -143,6 +144,7 @@ function makeHarness({
     continuityRuntime,
     goalRuntime,
     planRuntime,
+    stateStore,
     onVerifiedRollover: async (event) => {
       calls.verified.push(event);
       return await onVerifiedRollover(event);
@@ -150,6 +152,28 @@ function makeHarness({
     pollMs: 0,
   });
   return { coordinator, calls, goal, plan, sourceDescriptor };
+}
+
+function memoryStateStore({ replace } = {}) {
+  return {
+    ready: Promise.resolve(),
+    state: { prepared: [], descriptorFailures: [], compactFailures: [] },
+    snapshot() {
+      return {
+        ok: true,
+        blocked: false,
+        loadError: null,
+        prepared: this.state.prepared.length,
+        committing: this.state.prepared.filter((row) => row.status === "committing").length,
+      };
+    },
+    async replace(value) {
+      if (replace) return await replace.call(this, value);
+      this.state = structuredClone(value);
+      return this.snapshot();
+    },
+    async close() {},
+  };
 }
 
 {
@@ -416,6 +440,85 @@ for (const invalidTarget of ["same-id", "fingerprint"]) {
 }
 
 {
+  let releaseCommitPersist;
+  let announceCommitPersist;
+  const commitPersistStarted = new Promise((resolve) => { announceCommitPersist = resolve; });
+  const commitPersistPending = new Promise((resolve) => { releaseCommitPersist = resolve; });
+  const store = memoryStateStore({
+    async replace(value) {
+      if (value.prepared?.[0]?.status === "committing") {
+        announceCommitPersist();
+        await commitPersistPending;
+      }
+      this.state = structuredClone(value);
+      return this.snapshot();
+    },
+  });
+  const { coordinator, calls } = makeHarness({ stage: "rollover", stateStore: store });
+  await coordinator.pollOnce();
+  const event = validContinuationEvent(calls.arms[0].input);
+  const first = coordinator.noteUserTurnRollover(event);
+  await commitPersistStarted;
+  assert.equal(await coordinator.noteUserTurnRollover(event), false,
+    "the runtime commit lock must reject duplicates before the durability write resolves");
+  const poll = await coordinator.pollOnce();
+  assert.equal(poll.results[0].action, "compact-commit-in-progress");
+  releaseCommitPersist();
+  assert.equal(await first, true);
+  assert.equal(calls.verified.length, 1);
+  await coordinator.close();
+}
+
+{
+  let failedCommitPersist = false;
+  const store = memoryStateStore({
+    async replace(value) {
+      if (value.prepared?.[0]?.status === "committing" && !failedCommitPersist) {
+        failedCommitPersist = true;
+        throw new Error("injected committing journal failure");
+      }
+      this.state = structuredClone(value);
+      return this.snapshot();
+    },
+  });
+  const { coordinator, calls } = makeHarness({ stage: "rollover", stateStore: store });
+  await coordinator.pollOnce();
+  const event = validContinuationEvent(calls.arms[0].input);
+  await assert.rejects(() => coordinator.noteUserTurnRollover(event), /injected committing journal failure/);
+  assert.equal(coordinator.committing.size, 0, "a failed phase write must release runtime ownership");
+  assert.equal(coordinator.prepared.get("main-02")?.durableStatus, "prepared");
+  assert.equal(store.state.prepared[0]?.status, "prepared",
+    "the recoverable persistence queue must restore the durable prepared phase");
+  assert.equal(await coordinator.noteUserTurnRollover(event), true,
+    "a successfully persisted rollback must allow one later clean retry");
+  assert.equal(calls.verified.length, 1);
+  await coordinator.close();
+}
+
+{
+  let failCommitAndRollback = false;
+  const store = memoryStateStore({
+    async replace(value) {
+      if (failCommitAndRollback) {
+        throw new Error("injected disk remains unavailable");
+      }
+      this.state = structuredClone(value);
+      return this.snapshot();
+    },
+  });
+  const { coordinator, calls } = makeHarness({ stage: "rollover", stateStore: store });
+  await coordinator.pollOnce();
+  const event = validContinuationEvent(calls.arms.at(-1).input);
+  failCommitAndRollback = true;
+  await assert.rejects(() => coordinator.noteUserTurnRollover(event), /injected disk remains unavailable/);
+  assert.equal(coordinator.committing.size, 0);
+  assert.equal(coordinator.status().durabilityBlocked, true,
+    "failure to persist both the committing phase and its rollback must fail closed");
+  assert.equal(await coordinator.noteUserTurnRollover(event), false);
+  await coordinator.close();
+}
+
+{
   const snapshot = stableSnapshot();
   const { coordinator, calls } = makeHarness({ stage: "rollover", snapshot });
   await coordinator.pollOnce();
@@ -479,6 +582,9 @@ console.log(JSON.stringify({
   descriptorCooldownAllowsBoundedRetry: true,
   targetDescriptorIdentityRequired: true,
   concurrentDuplicateMigrationRejected: true,
+  commitOwnershipPrecedesDurabilityWrite: true,
+  commitPersistFailureRollsBackPreparedPhase: true,
+  doublePersistFailureBlocksDurability: true,
   pollDuringCommitDoesNotRearm: true,
   failureCircuitSurvivesRouteRoundTrip: true,
   latePreCommitPollRejected: true,

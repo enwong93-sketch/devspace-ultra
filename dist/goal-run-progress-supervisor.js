@@ -237,6 +237,8 @@ export class GoalRunProgressSupervisor {
     const runtime = clip(runtimeKey, 80);
     if (!prior || !next || prior === next) throw new Error("Progress conversation rebind requires distinct old and new conversation ids.");
     let changed = 0;
+    let changedInFlight = 0;
+    let activeChanged = false;
     for (const row of this.runs.values()) {
       const matchesGoal = requestedGoalId && row.goalId === requestedGoalId;
       const matchesPlan = requestedPlanId && (row.planId === requestedPlanId || row.goalId === `plan:${requestedPlanId}`);
@@ -256,16 +258,30 @@ export class GoalRunProgressSupervisor {
       if (!matchesGoal && !matchesPlan && (requestedGoalId || requestedPlanId)) continue;
       operation.conversationId = next;
       if (runtime) operation.runtimeKey = runtime;
+      changedInFlight += 1;
     }
     if (this.state.active?.conversationId === prior) {
       const activeMatches = (!requestedGoalId && !requestedPlanId)
         || this.state.active.goalId === requestedGoalId
         || this.state.active.planId === requestedPlanId
         || this.state.active.goalId === `plan:${requestedPlanId}`;
-      if (activeMatches) this.state.active.conversationId = next;
+      if (activeMatches) {
+        this.state.active.conversationId = next;
+        activeChanged = true;
+      }
     }
     if (changed > 0) await this.publish(this.state.active?.goalId ? this.runs.get(key(this.state.active)) || this.state.active : null);
-    return { ...this.snapshot(), rebind: { oldConversationId: prior, newConversationId: next, changedRuns: changed } };
+    return {
+      ...this.snapshot(),
+      rebind: {
+        oldConversationId: prior,
+        newConversationId: next,
+        changedRuns: changed,
+        changedInFlight,
+        activeChanged,
+        alreadyApplied: changed === 0 && changedInFlight === 0 && activeChanged === false,
+      },
+    };
   }
 
   async noteToolBoundary({ operationId, success = null, durationMs = null, conversationId = null } = {}) {

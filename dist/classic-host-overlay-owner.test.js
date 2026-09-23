@@ -77,6 +77,13 @@ const transferred = await manager.noteVerifiedRollover({
   newConversationId: "conversation-new",
 });
 assert.equal(transferred, true, "a verified same-runtime rollover must transfer ownership to the fresh conversation");
+const replayedTransfer = await manager.noteVerifiedRollover({
+  goalId: goal.id,
+  runtimeKey: "main-02",
+  oldConversationId: "conversation-old",
+  newConversationId: "conversation-new",
+});
+assert.equal(replayedTransfer, true, "process-restart reconciliation must accept an already-moved exact owner idempotently");
 
 await manager.syncOnce();
 assert.deepEqual(owners.at(-1), {

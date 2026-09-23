@@ -12,6 +12,7 @@ const [
   goalRuntime,
   planRuntime,
   authority,
+  authorityTransaction,
   narrator,
   overlay,
   manifest,
@@ -25,6 +26,7 @@ const [
   readFile(new URL("../dist/goal-runtime.js", import.meta.url), "utf8"),
   readFile(new URL("../dist/plan-runtime.js", import.meta.url), "utf8"),
   readFile(new URL("../dist/classic-exact-usage-authority.js", import.meta.url), "utf8"),
+  readFile(new URL("../dist/auto-compact-authority-transaction.js", import.meta.url), "utf8"),
   readFile(new URL("../dist/goal-progress-narrator.js", import.meta.url), "utf8"),
   readFile(new URL("../dist/classic-progress-narration-overlay.js", import.meta.url), "utf8"),
   readFile(new URL("../capabilities/devspace-auto-compact/devspace-plugin.json", import.meta.url), "utf8"),
@@ -35,12 +37,15 @@ assert.match(server, /ClassicExactUsageAuthority/);
 assert.match(server, /BUILTIN_AUTO_COMPACT|devspace-auto-compact/i);
 assert.match(server, /exactUsageAuthority/);
 assert.match(server, /new ContextGuardianRolloverCoordinator/);
-assert.match(server, /conversationAuthority\.acceptVerifiedRollover/);
-assert.match(server, /planRuntime\.rebindConversation/);
-assert.match(server, /goalRuntime\.rebindConversation/);
-assert.match(server, /goalRunProgress\.rebindConversation/);
-assert.match(server, /hostOverlayProjection\.noteVerifiedRollover/);
+assert.match(server, /applyVerifiedAutoCompactRollover/);
 assert.match(server, /selective hidden-capsule continuation|selective-hidden-capsule-continuation/i);
+
+assert.match(authorityTransaction, /conversationAuthority\.acceptVerifiedRollover/);
+assert.match(authorityTransaction, /planRuntime\.rebindConversation/);
+assert.match(authorityTransaction, /goalRuntime\.rebindConversation/);
+assert.match(authorityTransaction, /goalRunProgress\.rebindConversation/);
+assert.match(authorityTransaction, /hostOverlayProjection\?\.noteVerifiedRollover/);
+assert.match(authorityTransaction, /auto-compact-rollback/);
 
 assert.match(contract, /attachAutoCompactContract/);
 assert.match(contract, /validateAutoCompactContinuation/);

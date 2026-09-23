@@ -64,6 +64,7 @@ import { ConversationProgressLivenessCdpAdapter } from "./conversation-progress-
 import { ContextGuardianRuntime, registerContextGuardianTools } from "./context-guardian.js";
 import { ClassicContextMetadataCdpAdapter } from "./context-guardian-cdp.js";
 import { ContextGuardianRolloverCoordinator } from "./context-guardian-rollover.js";
+import { applyVerifiedAutoCompactRollover } from "./auto-compact-authority-transaction.js";
 import { ClassicConversationAuthorityRegistry, sessionFingerprintFromClassicRequest, turnTraceFingerprintFromClassicRequest } from "./classic-conversation-authority.js";
 import { ClassicActiveTurnRegistry, ClassicMcpCallCorrelator, fingerprintMcpToolCall } from "./classic-mcp-call-correlation.js";
 import { requestTraceCorrelationFingerprints } from "./request-trace-correlation.js";
@@ -2898,72 +2899,22 @@ export function createServer(config = loadConfig(), options = {}) {
         continuityRuntime: conversationContinuity,
         goalRuntime,
         planRuntime,
+        statePath: join(config.stateDir, "context-guardian-rollover-state.json"),
         resolveGoalRuntimeKey: async (goal) => {
             if (!goal?.id) return null;
             const candidate = await goalHostBridge.findMatchingCandidate(goal.id);
             return Number.isInteger(candidate?.runtimePort) ? runtimeKeyForPort(candidate.runtimePort) : null;
         },
         onVerifiedRollover: async (event) => {
-            const oldConversationId = String(event?.oldConversationId || "").trim();
-            const newConversationId = String(event?.newConversationId || "").trim();
-            const goalId = String(event?.goalId || "").trim() || null;
-            const planId = String(event?.planId || "").trim() || null;
-            const runtimeKey = String(event?.runtimeKey || "").trim();
-            if (!oldConversationId || !newConversationId || oldConversationId === newConversationId || !runtimeKey) {
-                throw new Error("Verified Auto Compact rollover is missing distinct conversation ids or runtime identity.");
-            }
             await conversationAuthorityReady;
-            const goalBefore = goalId ? await goalRuntime.status(goalId) : null;
-            const planBefore = planId ? await planRuntime.status(planId) : null;
-            if (goalBefore && goalBefore.conversationId !== oldConversationId) throw new Error(`Goal ${goalId} no longer matches Auto Compact source conversation.`);
-            if (planBefore && planBefore.conversationId !== oldConversationId) throw new Error(`Plan ${planId} no longer matches Auto Compact source conversation.`);
-            let authorityMoved = false;
-            let planMoved = false;
-            let goalMoved = false;
-            let progressMoved = false;
-            let overlayMoved = false;
-            try {
-                const authority = await conversationAuthority.acceptVerifiedRollover({
-                    oldConversationId,
-                    newConversationId,
-                    runtimeKey,
-                    observedAt: event?.rollover?.observedAt || new Date().toISOString(),
-                });
-                authorityMoved = true;
-                if (planBefore) {
-                    await planRuntime.rebindConversation({ planId, oldConversationId, newConversationId });
-                    planMoved = true;
-                }
-                if (goalBefore) {
-                    await goalRuntime.rebindConversation({ goalId, oldConversationId, newConversationId });
-                    goalMoved = true;
-                }
-                await goalRunProgress.rebindConversation({ goalId, planId, oldConversationId, newConversationId, runtimeKey });
-                progressMoved = true;
-                if (goalBefore) {
-                    overlayMoved = await hostOverlayProjection.noteVerifiedRollover({ goalId, runtimeKey, oldConversationId, newConversationId });
-                    if (!overlayMoved) throw new Error("Host Overlay owner could not move to the verified Auto Compact continuation.");
-                }
-                return {
-                    ok: true,
-                    oldConversationId,
-                    newConversationId,
-                    goalId,
-                    planId,
-                    runtimeKey,
-                    authoritySessionsMoved: authority.updatedSessions,
-                    progressMoved,
-                    overlayMoved: goalBefore ? overlayMoved : null,
-                };
-            }
-            catch (error) {
-                if (overlayMoved && goalBefore) await hostOverlayProjection.noteVerifiedRollover({ goalId, runtimeKey, oldConversationId: newConversationId, newConversationId: oldConversationId }).catch(() => false);
-                if (progressMoved) await goalRunProgress.rebindConversation({ goalId, planId, oldConversationId: newConversationId, newConversationId: oldConversationId, runtimeKey }).catch(() => {});
-                if (goalMoved) await goalRuntime.rebindConversation({ goalId, oldConversationId: newConversationId, newConversationId: oldConversationId, reason: "auto-compact-rollback" }).catch(() => {});
-                if (planMoved) await planRuntime.rebindConversation({ planId, oldConversationId: newConversationId, newConversationId: oldConversationId, reason: "auto-compact-rollback" }).catch(() => {});
-                if (authorityMoved) await conversationAuthority.acceptVerifiedRollover({ oldConversationId: newConversationId, newConversationId: oldConversationId, runtimeKey }).catch(() => {});
-                throw error;
-            }
+            return await applyVerifiedAutoCompactRollover({
+                event,
+                conversationAuthority,
+                goalRuntime,
+                planRuntime,
+                goalRunProgress,
+                hostOverlayProjection,
+            });
         },
         pollMs: 5_000,
     });
@@ -3122,6 +3073,7 @@ export function createServer(config = loadConfig(), options = {}) {
             streamRecoveryAdapter,
             config,
         }), conversationCorrelation: mcpRequestCorrelationDiagnostics.diagnostics(), progressBootstrap: progressBootstrapAuthority.diagnostics(), conversationStartClaims: conversationStartClaimRegistry.diagnostics(), progressProjection: progressNarrationOverlay.status(),
+            contextRollover: contextRollover?.status?.() || null,
             goalContinuation: goalContinuationSupervisor.status(),
             ...durability,
             diagnosticGc });

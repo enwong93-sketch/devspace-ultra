@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 
-const [server, rollover, overlay] = await Promise.all([
+const [server, rollover, overlay, authorityTransaction] = await Promise.all([
   readFile(new URL("../dist/server.js", import.meta.url), "utf8"),
   readFile(new URL("../dist/context-guardian-rollover.js", import.meta.url), "utf8"),
   readFile(new URL("../dist/classic-host-overlay.js", import.meta.url), "utf8"),
+  readFile(new URL("../dist/auto-compact-authority-transaction.js", import.meta.url), "utf8"),
 ]);
 
 assert.match(server, /resolveOwner:\s*\(goal\)\s*=>\s*resolveClassicHostOverlayOwner/, "production Host Overlay must use the conservative initial-owner resolver");
@@ -16,15 +17,17 @@ assert.match(overlay, /snapshot\.visibleMessageCount/, "upgrade bootstrap must r
 assert.match(overlay, /!boundConversationId \|\| conversationId === boundConversationId/, "bound Goal owner discovery and hidden bootstrap must reject another conversation");
 assert.match(server, /onVerifiedRollover:\s*async \(event\)\s*=>/,
   "verified Context Guardian rollover must use the guarded authority-transfer callback");
-assert.match(server, /conversationAuthority\.acceptVerifiedRollover/,
+assert.match(server, /applyVerifiedAutoCompactRollover/,
+  "production rollover wiring must call the reviewed authority transaction");
+assert.match(authorityTransaction, /conversationAuthority\.acceptVerifiedRollover/,
   "verified rollover must rotate native MCP conversation authority");
-assert.match(server, /planRuntime\.rebindConversation/,
+assert.match(authorityTransaction, /planRuntime\.rebindConversation/,
   "verified rollover must transfer the active Plan to the continuation conversation");
-assert.match(server, /goalRuntime\.rebindConversation/,
+assert.match(authorityTransaction, /goalRuntime\.rebindConversation/,
   "verified rollover must transfer the active Goal to the continuation conversation");
-assert.match(server, /goalRunProgress\.rebindConversation/,
+assert.match(authorityTransaction, /goalRunProgress\.rebindConversation/,
   "verified rollover must preserve progress narration continuity");
-assert.match(server, /hostOverlayProjection\.noteVerifiedRollover/,
+assert.match(authorityTransaction, /hostOverlayProjection\?\.noteVerifiedRollover/,
   "verified rollover must transfer Host Overlay ownership to the continuation conversation");
 assert.match(rollover, /onVerifiedRollover/);
 assert.match(rollover, /oldConversationId/);

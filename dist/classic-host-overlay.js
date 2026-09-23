@@ -1092,7 +1092,9 @@ export class ClassicHostOverlayProjection {
     const priorConversationId = cleanProjectionText(oldConversationId, 180);
     const nextConversationId = cleanProjectionText(newConversationId, 180);
     if (!current || !nextGoalId || !nextRuntimeKey || !priorConversationId || !nextConversationId) return false;
-    if (current.goalId !== nextGoalId || current.runtimeKey !== nextRuntimeKey || current.conversationId !== priorConversationId) return false;
+    if (current.goalId !== nextGoalId || current.runtimeKey !== nextRuntimeKey) return false;
+    if (current.conversationId === nextConversationId) return true;
+    if (current.conversationId !== priorConversationId) return false;
     this.owner = { ...current, conversationId: nextConversationId };
     try { await this.ownerStore?.save(this.owner); } catch {}
     return true;

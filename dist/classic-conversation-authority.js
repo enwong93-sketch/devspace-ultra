@@ -178,7 +178,26 @@ export class ClassicConversationAuthorityRegistry {
       && (!runtime || entry.runtimeKeys.includes(runtime))
     ));
     const selected = matches.length ? matches : [...this.entries.values()].filter((entry) => entry.conversationIds.includes(prior));
-    if (!selected.length) throw new Error(`No Classic MCP session authority is bound to source conversation ${prior}.`);
+    if (!selected.length) {
+      const alreadyApplied = [...this.entries.values()].filter((entry) => (
+        entry.conversationIds.length === 1
+        && entry.conversationIds[0] === next
+        && (!runtime || entry.runtimeKeys.includes(runtime))
+        && Array.isArray(entry.continuity)
+        && entry.continuity.some((row) => row?.from === prior && row?.to === next)
+      ));
+      if (!alreadyApplied.length) throw new Error(`No Classic MCP session authority is bound to source conversation ${prior}.`);
+      return {
+        ok: true,
+        oldConversationId: prior,
+        newConversationId: next,
+        runtimeKey: runtime || null,
+        updatedSessions: 0,
+        matchedSessions: alreadyApplied.length,
+        alreadyApplied: true,
+        observedAt: at,
+      };
+    }
     for (const entry of selected) {
       entry.conversationIds = [next];
       if (runtime && !entry.runtimeKeys.includes(runtime)) entry.runtimeKeys.push(runtime);
@@ -197,6 +216,8 @@ export class ClassicConversationAuthorityRegistry {
       newConversationId: next,
       runtimeKey: runtime || null,
       updatedSessions: selected.length,
+      matchedSessions: selected.length,
+      alreadyApplied: false,
       observedAt: at,
     };
   }

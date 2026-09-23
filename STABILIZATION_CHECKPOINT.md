@@ -445,3 +445,46 @@ open beyond the two-minute claim TTL; then verify the Goal strip, Plan HUD and
 one ordinary narration-card readback. Do not remount Goal/Plan or emit another
 progress relay merely to manufacture the test condition, and do not navigate
 ChatGPT programmatically.
+
+## V0.6 isolated Auto Compact transaction durability — 2026-09-23
+
+This work remains isolated on branch `research/v0.6-stabilized-20260923`.
+Production Auto Compact stayed OFF and no Production Core, ChatGPT Main or
+Blender process was restarted or loaded from this branch.
+
+The simultaneous duplicate completion race was reproduced by
+`context-guardian-rollover-safety.test.js`: two callbacks could both pass
+`committing.has(runtimeKey)` because the coordinator awaited the durability
+write before adding the runtime to `committing`. Both callbacks could then run
+the verified authority transaction. The corrected order is now:
+
+1. Validate the exact prepared capsule and sanitize the completion event.
+2. Acquire the runtime commit ownership synchronously, before any `await`.
+3. Persist the bounded `committing` journal entry.
+4. Apply the idempotent MCP/Plan/Goal/progress/Host Overlay authority
+   transaction.
+5. Persist completion and release the runtime ownership.
+
+A failed committing-phase write occurs before any authority mutation. The
+coordinator restores the prior prepared phase and persists that rollback. If
+the rollback write succeeds, one later clean completion may retry. If both the
+committing write and rollback write fail, Auto Compact durability becomes
+blocked for the Core and all later arming/commit work fails closed. The state
+store now promotes `this.state` only after its atomic writer succeeds, so an
+undurable in-memory snapshot cannot be reported as the last durable state.
+
+Restart reconciliation remains idempotent: a durable `committing` row can
+converge an already-partially-moved authority transaction once, while prior
+committed Goal, Plan or MCP moves are not rolled back by a later unrelated
+failure. The durability file stores only bounded capsule references and
+sanitized target metadata; it contains no raw capsule text, transcript,
+credentials or arbitrary host error prose.
+
+Verification completed for `verify:auto-compact` with 36 tests, including the
+authority transaction, lock-before-persist duplicate rejection, persistence
+failure rollback, double-write fail-closed behavior and restart recovery. The
+product static gate and 500-rotation continuation stress both passed.
+`verify:context-guardian`, `verify:goal-progress`, `verify:host-overlay` and
+`verify:classic-safety` also passed after their static gates were updated to
+inspect the extracted authority-transaction module rather than requiring the
+implementation to remain inline in `server.js`.

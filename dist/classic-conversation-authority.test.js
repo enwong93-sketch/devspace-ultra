@@ -166,6 +166,16 @@ try {
   assert.equal(migrated.ambiguous, false);
   assert.equal(migrated.continuity.at(-1).from, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa");
   assert.equal(migrated.continuity.at(-1).to, "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb");
+  const replayed = await restored.acceptVerifiedRollover({
+    oldConversationId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+    newConversationId: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+    runtimeKey: "Main-02",
+    observedAt: "2026-09-06T03:52:30.000Z",
+  });
+  assert.equal(replayed.alreadyApplied, true, "restart reconciliation must accept only an exact prior-to-next continuity record");
+  assert.equal(replayed.updatedSessions, 0);
+  assert.equal(restored.snapshot().sessions.find((item) => item.fingerprint === fp).continuity.length, migrated.continuity.length,
+    "idempotent recovery cannot append a duplicate authority transition");
   await assert.rejects(
     () => restored.acceptVerifiedRollover({ oldConversationId: "missing-source", newConversationId: "new-target", runtimeKey: "Main-02" }),
     /No Classic MCP session authority/i,

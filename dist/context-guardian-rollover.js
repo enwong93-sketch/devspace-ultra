@@ -1,5 +1,6 @@
 import { attachAutoCompactContract, validateAutoCompactContinuation } from "./auto-compact-contract.js";
 import { estimateClassicInputTokens } from "./context-guardian-cdp.js";
+import { ContextGuardianRolloverStateStore, sanitizeRolloverCommitEvent } from "./context-guardian-rollover-state.js";
 
 const DEFAULT_POLL_MS = 5_000;
 const DEFAULT_ROUTE_SETTLE_MS = 3_000;
@@ -129,6 +130,9 @@ export class ContextGuardianRolloverCoordinator {
     onVerifiedRollover,
     pollMs = DEFAULT_POLL_MS,
     routeSettleMs = DEFAULT_ROUTE_SETTLE_MS,
+    statePath = null,
+    stateStore = null,
+    now = Date.now,
   } = {}) {
     if (!contextGuardian || !contextAdapter || !continuityRuntime || !goalRuntime || !planRuntime) {
       throw new Error("ContextGuardianRolloverCoordinator requires Context Guardian, CDP adapter, continuity, Goal, and Plan runtimes.");
@@ -142,6 +146,7 @@ export class ContextGuardianRolloverCoordinator {
     this.onVerifiedRollover = typeof onVerifiedRollover === "function" ? onVerifiedRollover : null;
     this.pollMs = Math.max(0, Number(pollMs) || 0);
     this.routeSettleMs = Math.max(0, Number(routeSettleMs) || 0);
+    this.now = now;
     this.timer = null;
     this.polling = null;
     this.closed = false;
@@ -151,9 +156,169 @@ export class ContextGuardianRolloverCoordinator {
     this.compactFailures = new Map();
     this.committing = new Set();
     this.preparationVersions = new Map();
+    this.durabilityStore = stateStore || (statePath ? new ContextGuardianRolloverStateStore({ statePath, now }) : null);
+    this.durabilityBlocked = false;
+    this.durabilityError = null;
+    this.recoveredCommitCount = 0;
+    this.ready = this.#initializeDurability();
+  }
+
+  async #initializeDurability() {
+    if (!this.durabilityStore) return;
+    await this.durabilityStore.ready;
+    const status = this.durabilityStore.snapshot();
+    if (status.blocked) {
+      this.durabilityBlocked = true;
+      this.durabilityError = status.loadError || "Auto Compact rollover durability state is unavailable.";
+      return;
+    }
+    await Promise.resolve(this.continuityRuntime.ready);
+    for (const row of this.durabilityStore.state.descriptorFailures || []) {
+      this.descriptorFailures.set(JSON.stringify([row.runtimeKey, row.conversationId]), { ...row });
+    }
+    for (const row of this.durabilityStore.state.compactFailures || []) {
+      this.compactFailures.set(JSON.stringify([row.runtimeKey, row.conversationId]), { ...row });
+    }
+    let changed = false;
+    for (const row of this.durabilityStore.state.prepared || []) {
+      try {
+        const record = await this.continuityRuntime.loadCapsule(row.capsuleId);
+        const capsule = record?.capsule;
+        if (!record?.id || !capsule?.continuity
+          || capsule.continuity.sourceConversationId !== row.conversationId
+          || capsule.continuity.runtimeKey !== row.runtimeKey
+          || capsule.continuity.uiContinuityKey !== row.uiContinuityKey) {
+          throw new Error("Persisted Auto Compact preparation does not match its capsule authority.");
+        }
+        this.preparationVersions.set(row.runtimeKey, row.preparationVersion || 0);
+        this.prepared.set(row.runtimeKey, {
+          conversationId: row.conversationId,
+          usedTokens: row.usedTokens,
+          preparedAt: row.preparedAt,
+          expiresAtMs: row.expiresAtMs,
+          mode: row.mode,
+          record: { ...record, capsuleId: record.id },
+          sourceDescriptor: null,
+          uiContinuityKey: row.uiContinuityKey,
+          durableStatus: row.status,
+          commitEvent: row.commitEvent || null,
+        });
+      } catch (error) {
+        changed = true;
+        if (row.status === "committing") {
+          this.durabilityBlocked = true;
+          this.durabilityError = error instanceof Error ? error.message : String(error);
+          return;
+        }
+        this.compactFailures.set(JSON.stringify([row.runtimeKey, row.conversationId]), {
+          runtimeKey: row.runtimeKey,
+          conversationId: row.conversationId,
+          reason: "restart-prepared-capsule-unavailable",
+          failedAtMs: Number(this.now()),
+          capsuleId: row.capsuleId,
+        });
+      }
+    }
+    if (changed) await this.#persistDurability();
+  }
+
+  #assertDurabilityAvailable() {
+    if (!this.durabilityBlocked) return;
+    const error = new Error(`Auto Compact durability is blocked: ${this.durabilityError || "unavailable"}`);
+    error.code = "AUTO_COMPACT_DURABILITY_BLOCKED";
+    throw error;
+  }
+
+  #durabilitySnapshot() {
+    const prepared = [...this.prepared.entries()].map(([runtimeKey, row]) => ({
+      runtimeKey,
+      conversationId: row.conversationId,
+      usedTokens: row.usedTokens,
+      preparedAt: row.preparedAt,
+      expiresAtMs: row.expiresAtMs,
+      mode: row.mode,
+      capsuleId: row.record?.capsuleId || row.record?.id || null,
+      uiContinuityKey: row.uiContinuityKey,
+      status: row.durableStatus === "committing" ? "committing" : "prepared",
+      preparationVersion: this.preparationVersions.get(runtimeKey) || 0,
+      ...(row.durableStatus === "committing" && row.commitEvent ? { commitEvent: row.commitEvent } : {}),
+    }));
+    return {
+      prepared,
+      descriptorFailures: [...this.descriptorFailures.values()],
+      compactFailures: [...this.compactFailures.values()],
+    };
+  }
+
+  async #persistDurability() {
+    if (!this.durabilityStore) return;
+    await this.durabilityStore.replace(this.#durabilitySnapshot());
+  }
+
+  async #pruneExpiredPrepared() {
+    const now = Number(this.now());
+    let changed = 0;
+    for (const [runtimeKey, prepared] of [...this.prepared.entries()]) {
+      if (prepared.durableStatus === "committing") continue;
+      if (!Number.isFinite(Number(prepared.expiresAtMs)) || Number(prepared.expiresAtMs) > now) continue;
+      this.prepared.delete(runtimeKey);
+      this.nativeSeedCache.delete(runtimeKey);
+      this.preparationVersions.set(runtimeKey, (this.preparationVersions.get(runtimeKey) || 0) + 1);
+      changed += 1;
+      if (typeof this.contextAdapter.cancelUserTurnRollover === "function") {
+        try { await this.contextAdapter.cancelUserTurnRollover(runtimeKey); } catch { /* Exact stale completion remains rejected by the missing prepared record. */ }
+      }
+    }
+    if (changed > 0) await this.#persistDurability();
+    return changed;
+  }
+
+  async #recoverPendingCommits() {
+    if (this.durabilityBlocked || this.continuityRuntime.enabled !== true) return;
+    for (const [runtimeKey, prepared] of [...this.prepared.entries()]) {
+      if (prepared.durableStatus !== "committing" || !prepared.commitEvent || this.committing.has(runtimeKey)) continue;
+      this.committing.add(runtimeKey);
+      try {
+        const event = prepared.commitEvent;
+        const capsuleId = String(event.capsuleId || "").trim();
+        const goalId = prepared.record.capsule?.continuity?.goalId || null;
+        const planId = prepared.record.capsule?.continuity?.planId || null;
+        const recovered = await this.#commitPreparedRollover({
+          event,
+          prepared,
+          runtimeKey,
+          oldConversationId: prepared.conversationId,
+          newConversationId: String(event.newConversationId || event.conversationId || "").trim(),
+          goalId,
+          planId,
+          capsuleId,
+        });
+        if (recovered === true) this.recoveredCommitCount += 1;
+      } finally {
+        this.committing.delete(runtimeKey);
+      }
+    }
+  }
+
+  status() {
+    return {
+      enabled: this.continuityRuntime.enabled === true,
+      running: !this.closed,
+      durabilityBlocked: this.durabilityBlocked,
+      durabilityError: this.durabilityError,
+      prepared: this.prepared.size,
+      committing: this.committing.size,
+      descriptorFailures: this.descriptorFailures.size,
+      compactFailures: this.compactFailures.size,
+      recoveredCommitCount: this.recoveredCommitCount,
+      durability: this.durabilityStore?.snapshot?.() || null,
+    };
   }
 
   async start({ schedule = true } = {}) {
+    await this.ready;
+    this.#assertDurabilityAvailable();
+    await this.#recoverPendingCommits();
     const first = await this.pollOnce();
     if (this.continuityRuntime.enabled !== true) return first;
     if (schedule && !this.closed && this.pollMs > 0 && !this.timer) {
@@ -198,7 +363,7 @@ export class ContextGuardianRolloverCoordinator {
     if (typeof this.contextAdapter.nativeConversationDescriptor !== "function") return null;
     const id = String(conversationId || "").trim();
     if (!id) return null;
-    const now = Date.now();
+    const now = Number(this.now());
     const failureKey = JSON.stringify([runtimeKey, id]);
     const failed = this.descriptorFailures.get(failureKey);
     if (failed?.conversationId === id && now < failed.retryAfterMs) {
@@ -206,7 +371,7 @@ export class ContextGuardianRolloverCoordinator {
       error.code = "NATIVE_DESCRIPTOR_CIRCUIT_OPEN";
       throw error;
     }
-    this.descriptorFailures.delete(failureKey);
+    const clearedFailure = this.descriptorFailures.delete(failureKey);
     const cached = this.nativeSeedCache.get(runtimeKey);
     if (!force && cached?.conversationId === id && now - cached.observedAtMs < NATIVE_STRUCTURAL_SEED_TTL_MS) {
       return cached.descriptor;
@@ -218,8 +383,9 @@ export class ContextGuardianRolloverCoordinator {
         throw new Error("Native structural descriptor does not match the current Context Guardian conversation.");
       }
     } catch (error) {
-      this.descriptorFailures.set(failureKey, { conversationId: id, retryAfterMs: Date.now() + DESCRIPTOR_FAILURE_COOLDOWN_MS });
+      this.descriptorFailures.set(failureKey, { runtimeKey, conversationId: id, retryAfterMs: Number(this.now()) + DESCRIPTOR_FAILURE_COOLDOWN_MS });
       while (this.descriptorFailures.size > MAX_FAILURE_CIRCUITS) this.descriptorFailures.delete(this.descriptorFailures.keys().next().value);
+      await this.#persistDurability();
       throw error;
     }
     this.nativeSeedCache.set(runtimeKey, {
@@ -227,6 +393,7 @@ export class ContextGuardianRolloverCoordinator {
       observedAtMs: now,
       descriptor,
     });
+    if (clearedFailure) await this.#persistDurability();
     return descriptor;
   }
 
@@ -270,7 +437,7 @@ export class ContextGuardianRolloverCoordinator {
     this.#assertPreparationCurrent(runtimeKey, preparationVersion);
     const used = Number(context?.pressure?.usedTokens ?? 0);
     const prior = this.prepared.get(runtimeKey);
-    const now = Date.now();
+    const now = Number(this.now());
     if (!force && prior && prior.conversationId === context?.conversationId && prior.mode === mode && now - prior.preparedAt < PREPARE_REUSE_MS && Math.abs(used - prior.usedTokens) < 4_096) {
       return prior.record;
     }
@@ -308,7 +475,11 @@ export class ContextGuardianRolloverCoordinator {
       record,
       sourceDescriptor,
       uiContinuityKey,
+      expiresAtMs: now + 10 * 60_000,
+      durableStatus: "prepared",
+      commitEvent: null,
     });
+    await this.#persistDurability();
     return record;
   }
 
@@ -340,10 +511,17 @@ export class ContextGuardianRolloverCoordinator {
   }
 
   async #abortCompact({ runtimeKey, oldConversationId, newConversationId, capsuleId, status, error }) {
-    this.compactFailures.set(JSON.stringify([runtimeKey, oldConversationId]), { conversationId: oldConversationId, reason: status });
+    this.compactFailures.set(JSON.stringify([runtimeKey, oldConversationId]), {
+      runtimeKey,
+      conversationId: oldConversationId,
+      reason: status,
+      failedAtMs: Number(this.now()),
+      capsuleId: capsuleId || null,
+    });
     while (this.compactFailures.size > MAX_FAILURE_CIRCUITS) this.compactFailures.delete(this.compactFailures.keys().next().value);
     this.prepared.delete(runtimeKey);
     this.nativeSeedCache.delete(runtimeKey);
+    await this.#persistDurability();
     if (typeof this.contextAdapter.cancelUserTurnRollover === "function") {
       try { await this.contextAdapter.cancelUserTurnRollover(runtimeKey); } catch { /* Remain blocked even if cancellation fails. */ }
     }
@@ -371,7 +549,12 @@ export class ContextGuardianRolloverCoordinator {
   }
 
   async pollOnce() {
+    await this.ready;
+    if (this.durabilityBlocked) {
+      return { ok: false, enabled: this.continuityRuntime.enabled === true, blocked: true, action: "auto-compact-durability-blocked", error: this.durabilityError };
+    }
     if (this.closed) return { ok: true, closed: true, results: [] };
+    await this.#pruneExpiredPrepared();
     if (this.continuityRuntime.enabled !== true) {
       return { ok: true, enabled: false, action: "auto-compact-disabled", results: [] };
     }
@@ -491,7 +674,10 @@ export class ContextGuardianRolloverCoordinator {
   }
 
   async noteUserTurnRollover(event = {}) {
+    await this.ready;
+    if (this.durabilityBlocked) return false;
     if (this.closed) return false;
+    await this.#pruneExpiredPrepared();
     const runtimeKey = String(event?.runtimeKey || "").trim();
     const oldConversationId = String(event?.oldConversationId || "").trim();
     const newConversationId = String(event?.newConversationId || event?.conversationId || "").trim();
@@ -503,11 +689,45 @@ export class ContextGuardianRolloverCoordinator {
     const goalId = prepared.record.capsule?.continuity?.goalId || null;
     const planId = prepared.record.capsule?.continuity?.planId || null;
     if ((event.goalId && event.goalId !== goalId) || (event.planId && event.planId !== planId)) return false;
-    if (this.committing.has(runtimeKey)) return false;
+    const commitEvent = sanitizeRolloverCommitEvent(event);
+    if (!commitEvent) return false;
+    if (this.committing.has(runtimeKey) || prepared.durableStatus === "committing") return false;
+
+    // JavaScript can switch to another completion callback at every await.
+    // Claim this runtime synchronously before the durability write so a second
+    // event cannot persist or migrate the same authority in parallel.
     this.committing.add(runtimeKey);
-    this.preparationVersions.set(runtimeKey, (this.preparationVersions.get(runtimeKey) || 0) + 1);
+    const priorPhase = {
+      durableStatus: prepared.durableStatus,
+      commitEvent: prepared.commitEvent,
+      expiresAtMs: prepared.expiresAtMs,
+      preparationVersion: this.preparationVersions.get(runtimeKey) || 0,
+    };
     try {
-      return await this.#commitPreparedRollover({ event, prepared, runtimeKey, oldConversationId, newConversationId, goalId, planId, capsuleId });
+      prepared.durableStatus = "committing";
+      prepared.commitEvent = commitEvent;
+      prepared.expiresAtMs = Number(this.now()) + 24 * 60 * 60_000;
+      this.preparationVersions.set(runtimeKey, priorPhase.preparationVersion + 1);
+      try {
+        await this.#persistDurability();
+      } catch (error) {
+        // No authority mutation has started. Restore the prepared phase and
+        // persist that rollback through the recoverable queue. If the rollback
+        // cannot be made durable either, stop all later Auto Compact work in
+        // this Core rather than guessing which phase survives a restart.
+        prepared.durableStatus = priorPhase.durableStatus;
+        prepared.commitEvent = priorPhase.commitEvent;
+        prepared.expiresAtMs = priorPhase.expiresAtMs;
+        this.preparationVersions.set(runtimeKey, priorPhase.preparationVersion);
+        try {
+          await this.#persistDurability();
+        } catch (rollbackError) {
+          this.durabilityBlocked = true;
+          this.durabilityError = `Auto Compact commit phase persistence failed and rollback could not be persisted: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`;
+        }
+        throw error;
+      }
+      return await this.#commitPreparedRollover({ event: commitEvent, prepared, runtimeKey, oldConversationId, newConversationId, goalId, planId, capsuleId });
     } finally {
       this.committing.delete(runtimeKey);
     }
@@ -567,10 +787,14 @@ export class ContextGuardianRolloverCoordinator {
         validation,
       });
     }
+    await this.#persistDurability();
     return true;
   }
 
   async beforeGoalContinuation({ runtimeKey, goalId, continuationPrompt } = {}) {
+    await this.ready;
+    if (this.durabilityBlocked) return { handled: false, blocked: true, reason: "auto-compact-durability-blocked" };
+    await this.#pruneExpiredPrepared();
     const preparationVersion = this.preparationVersions.get(runtimeKey) || 0;
     const prompt = String(continuationPrompt ?? "").trim();
     if (!runtimeKey || !goalId || !prompt) return { handled: false, reason: "missing-input" };
@@ -655,6 +879,7 @@ export class ContextGuardianRolloverCoordinator {
   }
 
   async close() {
+    await this.ready;
     this.closed = true;
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
@@ -663,5 +888,6 @@ export class ContextGuardianRolloverCoordinator {
     this.descriptorFailures.clear();
     this.compactFailures.clear();
     this.preparationVersions.clear();
+    await this.durabilityStore?.close?.();
   }
 }
