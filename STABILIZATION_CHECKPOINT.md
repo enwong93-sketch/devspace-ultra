@@ -1,5 +1,55 @@
 # DevSpace Ultra v0.5.8 stabilization — 2026-09-20
 
+## Explicit Thinking-failed Rescue and restart-native Goal final — 2026-09-23
+
+### Live incident evidence
+
+- The exact conversation `6aacf595-b3d0-83ee-a31f-043786b41e85` displayed the
+  localized `思考失敗` terminal surface. Its native branch ended at
+  `2026-09-23T11:43:26.515Z`; the user manually intervened at
+  `2026-09-23T11:55:26.333Z`, roughly twelve minutes later.
+- The old Rescue policy required twenty minutes for every interruption type,
+  so it correctly had not fired yet even though the UI already proved the turn
+  was terminal. This was the demonstrated product gap; it was not a missing
+  page, wrong conversation or exhausted Rescue episode.
+- The user's new message created a fresh native episode and superseded the old
+  failure. The old episode was therefore not retroactively rescued or counted
+  as a successful live canary.
+
+### Repairs and acceptance
+
+- Commit `3876a1d` adds an exact-terminal-failure fast path. Only the latest
+  exact turn's localized error surface qualifies. It waits at least thirty
+  seconds, requires a second exact-page confirmation, the same source user,
+  an empty composer and an unused episode, then emits one visible `- 繼續`.
+- Silent, ambiguous, merely incomplete, transport-only and potentially healthy
+  generating turns retain the original twenty-minute boundary. Fresh admitted
+  activity clears the fast timer; a changed source user fails closed.
+- Commits `58a71ed` and `6379523` add restart-safe same-round Goal recovery from
+  an exact native current-round final. DOM/native current message IDs, latest
+  user ID, end-turn state and user/assistant timestamps must agree with the
+  current Goal round. The expensive native branch proof is attempted only when
+  normal inspection returns `reentry-or-unobserved-turn`, with a five-minute
+  retry floor.
+- Targeted Goal, Rescue, progress-liveness, diagnostics and Classic safety
+  suites passed. Clean full audit `1290f1a9-9efe-4657-b7b5-b649a249a39c`
+  validated revision `688b98574303caeeadf548ab4e4ad9686f3eaef7`: 174 named
+  gates, exit 0 and an empty tracked diff.
+- Production source contains equivalent commits `3fdbba2`, `a1d0d32`,
+  `5066212` and `748eda5`. The replacement Core PID 56440 exposes
+  `explicitTerminalFailureFastRescue=true` and
+  `twentyMinuteSilentOrAmbiguousRescueOnly=true`; Gateway fatal=false and
+  admission is open. The old error remains visible in page history, but exact
+  latest-turn inspection returns `hasTurnError=false` for the user's fresh
+  episode, proving the new path does not rescue a historical error.
+- The first compatible handover correctly failed before replacement because a
+  server-instruction edit changed the MCP schema fingerprint. That edit was
+  removed. The second handover activated the new Core and feature diagnostics,
+  although its detached verifier lost the post-handover acknowledgement and
+  recorded a false-negative TypeError; this verifier reconciliation remains a
+  separate follow-up and is not evidence that the Rescue deployment failed.
+
+
 ## Stable-release closure: multi-Agent Goal endurance — 2026-09-23
 
 ### Incident and demonstrated causes
