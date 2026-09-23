@@ -306,8 +306,174 @@ const boundedPolicy = new ConversationProgressLivenessSupervisor({
 assert.equal(boundedPolicy.status().reportIntervalMs, 10 * 60_000,
   "configuration may request more frequent reporting but may not relax the ten-minute ceiling");
 assert.equal(boundedPolicy.status().continueMs, 20 * 60_000,
-  "rescue may never run earlier than twenty minutes");
+  "silent or ambiguous rescue must retain the twenty-minute boundary");
+assert.equal(boundedPolicy.status().explicitFailureRescueMs, 30_000,
+  "an exact terminal failure may use only the bounded fast-rescue floor");
+assert.equal(boundedPolicy.status().twentyMinuteInterruptedTurnRescueOnly, false);
+assert.equal(boundedPolicy.status().twentyMinuteSilentOrAmbiguousRescueOnly, true);
+assert.equal(boundedPolicy.status().explicitTerminalFailureFastRescue, true);
 await boundedPolicy.close();
+
+// A localized terminal error is already authoritative proof that the current
+// assistant turn cannot complete normally. It may use a shorter timer, but it
+// still needs the exact source user, an empty composer and a second page poll.
+const fastDir = await mkdtemp(join(tmpdir(), "devspace-liveness-fast-failure-"));
+const fastStatePath = join(fastDir, "liveness.json");
+const fastPlanStatePath = join(fastDir, "plans.json");
+const fastProgressStatePath = join(fastDir, "progress.json");
+await writeFile(fastPlanStatePath, JSON.stringify({ plans: {} }), "utf8");
+await writeFile(fastProgressStatePath, JSON.stringify({ messages: [] }), "utf8");
+let fastNow = Date.parse("2026-09-11T08:00:00.000Z");
+const fastCalls = [];
+const fastPages = new Map([
+  ["conversation-fast-failure", {
+    exact: true,
+    conversationId: "conversation-fast-failure",
+    runtimeKey: "main-02",
+    port: 9732,
+    hydrated: true,
+    generating: false,
+    composerEmpty: true,
+    latestMessageRole: "user",
+    latestUserMessageId: "user-fast-failure",
+    hasTurnError: true,
+    normalCompletion: false,
+    incompleteUserTurn: true,
+  }],
+  ["conversation-silent-incomplete", {
+    exact: true,
+    conversationId: "conversation-silent-incomplete",
+    runtimeKey: "main-03",
+    port: 9733,
+    hydrated: true,
+    generating: false,
+    composerEmpty: true,
+    latestMessageRole: "user",
+    latestUserMessageId: "user-silent-incomplete",
+    hasTurnError: false,
+    normalCompletion: false,
+    incompleteUserTurn: true,
+  }],
+  ["conversation-failure-activity", {
+    exact: true,
+    conversationId: "conversation-failure-activity",
+    runtimeKey: "main-04",
+    port: 9734,
+    hydrated: true,
+    generating: false,
+    composerEmpty: true,
+    latestMessageRole: "user",
+    latestUserMessageId: "user-failure-activity",
+    hasTurnError: true,
+    normalCompletion: false,
+    incompleteUserTurn: true,
+  }],
+  ["conversation-failure-mismatch", {
+    exact: true,
+    conversationId: "conversation-failure-mismatch",
+    runtimeKey: "main-05",
+    port: 19735,
+    hydrated: true,
+    generating: false,
+    composerEmpty: true,
+    latestMessageRole: "user",
+    latestUserMessageId: "user-different-turn",
+    hasTurnError: true,
+    normalCompletion: false,
+    incompleteUserTurn: true,
+  }],
+]);
+const fastAdapter = {
+  async find({ conversationId }) {
+    const page = fastPages.get(conversationId);
+    return page || { exact: false, state: "conversation-page-not-open", conversationId };
+  },
+  async clearReminder() { return { ok: true }; },
+  async sendContinue(input) {
+    fastCalls.push({
+      conversationId: input.conversationId,
+      sourceUserMessageId: input.sourceUserMessageId,
+      rescueEvidence: input.rescueEvidence,
+    });
+    return { ok: true };
+  },
+};
+const fastSupervisor = new ConversationProgressLivenessSupervisor({
+  statePath: fastStatePath,
+  planStatePath: fastPlanStatePath,
+  progressStatePath: fastProgressStatePath,
+  adapter: fastAdapter,
+  reportIntervalMs: 10 * 60_000,
+  continueMs: 20 * 60_000,
+  explicitFailureRescueMs: 30_000,
+  pollMs: 1_000,
+  now: () => fastNow,
+});
+await fastSupervisor.start({ schedule: false });
+for (const [conversationId, sourceUserMessageId] of [
+  ["conversation-fast-failure", "user-fast-failure"],
+  ["conversation-silent-incomplete", "user-silent-incomplete"],
+  ["conversation-failure-activity", "user-failure-activity"],
+  ["conversation-failure-mismatch", "user-original-turn"],
+]) {
+  await fastSupervisor.noteTurn({
+    kind: "started",
+    conversationId,
+    sourceUserMessageId,
+    observedAtMs: fastNow,
+  });
+}
+await fastSupervisor.tick();
+fastNow += 29_000;
+await fastSupervisor.tick();
+assert.equal(fastCalls.length, 0, "an explicit error still gets a bounded grace period");
+await fastSupervisor.noteActivity({
+  conversationId: "conversation-failure-activity",
+  sourceUserMessageId: "user-failure-activity",
+  observedAtMs: fastNow,
+});
+fastNow += 1_000;
+await fastSupervisor.tick();
+let fastFailure = fastSupervisor.status().records.find((row) => row.conversationId === "conversation-fast-failure");
+assert.equal(fastFailure.rescuePending, true);
+assert.equal(fastFailure.lastDispatchState, "interrupted-turn-idle-confirmation-armed");
+assert.equal(fastCalls.length, 0, "the first eligible exact-page observation only arms confirmation");
+let activityFailure = fastSupervisor.status().records.find((row) => row.conversationId === "conversation-failure-activity");
+assert.equal(activityFailure.rescuePending, false,
+  "fresh admitted work restarts the explicit-failure confirmation clock");
+assert.equal(fastCalls.some((row) => row.conversationId === "conversation-failure-activity"), false);
+fastPages.set("conversation-failure-activity", {
+  ...fastPages.get("conversation-failure-activity"),
+  hasTurnError: false,
+});
+fastNow += 2_000;
+await fastSupervisor.tick();
+assert.deepEqual(fastCalls, [{
+  conversationId: "conversation-fast-failure",
+  sourceUserMessageId: "user-fast-failure",
+  rescueEvidence: "visible-turn-error",
+}]);
+fastFailure = fastSupervisor.status().records.find((row) => row.conversationId === "conversation-fast-failure");
+assert.equal(fastFailure.turnState, "rescue-dispatched");
+assert.equal(fastFailure.continueAttempts, 1);
+
+fastNow += 60_000;
+await fastSupervisor.tick();
+assert.equal(fastCalls.length, 1,
+  "an incomplete turn without an exact error must not inherit the fast-rescue path");
+const silentIncomplete = fastSupervisor.status().records.find((row) => row.conversationId === "conversation-silent-incomplete");
+assert.equal(silentIncomplete.rescuePending, false);
+activityFailure = fastSupervisor.status().records.find((row) => row.conversationId === "conversation-failure-activity");
+assert.equal(activityFailure.rescuePending, false);
+assert.equal(fastCalls.some((row) => row.conversationId === "conversation-failure-activity"), false);
+
+const mismatchedFailure = fastSupervisor.status().records.find((row) => row.conversationId === "conversation-failure-mismatch");
+assert.equal(mismatchedFailure.rescuePending, false);
+assert.equal(mismatchedFailure.lastDispatchState, "rescue-source-turn-changed-awaiting-native-start");
+assert.equal(fastCalls.some((row) => row.conversationId === "conversation-failure-mismatch"), false,
+  "an error on a different user turn may never rescue the stored episode");
+await fastSupervisor.close();
+await rm(fastDir, { recursive: true, force: true });
 
 let oldRecord = supervisor.status().records.find((row) => row.conversationId === "conversation-old");
 assert.equal(oldRecord.armed, false);
@@ -317,7 +483,9 @@ assert.equal(supervisor.status().records.some((row) => row.conversationId === "c
 assert.equal(supervisor.status().tenMinuteAutomaticReminder, false);
 assert.equal(supervisor.status().tenMinuteSyntheticUserTurn, false);
 assert.equal(supervisor.status().tenMinuteAgentReportSloOnly, true);
-assert.equal(supervisor.status().twentyMinuteInterruptedTurnRescueOnly, true);
+assert.equal(supervisor.status().twentyMinuteInterruptedTurnRescueOnly, false);
+assert.equal(supervisor.status().twentyMinuteSilentOrAmbiguousRescueOnly, true);
+assert.equal(supervisor.status().explicitTerminalFailureFastRescue, true);
 assert.equal(supervisor.status().normalCompletionDisarms, true);
 assert.equal(supervisor.status().restartRestoresActiveEpisodeAsInterrupted, true);
 assert.equal(supervisor.status().stalledGeneratingSilenceRescue, true);
@@ -1004,7 +1172,10 @@ assert.equal(persisted.identityKey, "conversationId");
 assert.equal(persisted.runtimeBinding, false);
 assert.equal(persisted.tenMinuteAutomaticReminder, false);
 assert.equal(persisted.tenMinuteAgentReportSloOnly, true);
-assert.equal(persisted.twentyMinuteInterruptedTurnRescueOnly, true);
+assert.equal(persisted.twentyMinuteInterruptedTurnRescueOnly, false);
+assert.equal(persisted.twentyMinuteSilentOrAmbiguousRescueOnly, true);
+assert.equal(persisted.explicitTerminalFailureFastRescue, true);
+assert.equal(persisted.explicitFailureRescueMs, 30_000);
 assert.equal(persisted.normalCompletionDisarms, true);
 assert.equal(persisted.restartRestoresActiveEpisodeAsInterrupted, true);
 assert.equal(persisted.stalledGeneratingSilenceRescue, true);
@@ -1212,7 +1383,9 @@ console.log(JSON.stringify({
   tenMinuteAgentReportSloOnly: true,
   tenMinuteAutomaticReminder: false,
   tenMinuteSyntheticUserTurn: false,
-  twentyMinuteInterruptedTurnRescueOnly: true,
+  twentyMinuteInterruptedTurnRescueOnly: false,
+  twentyMinuteSilentOrAmbiguousRescueOnly: true,
+  explicitTerminalFailureFastRescue: true,
   normalCompletionDisarms: true,
   restartRestoresActiveEpisodeAsInterrupted: true,
   stalledGeneratingSilenceRescue: true,

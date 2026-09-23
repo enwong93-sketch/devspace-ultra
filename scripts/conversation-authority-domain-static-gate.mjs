@@ -190,7 +190,11 @@ assert.doesNotMatch(liveness, /adapter\?\.sendReminder|adapter\?\.projectReminde
 assert.doesNotMatch(livenessCdp, /async sendReminder\(|async projectReminder\(|purpose:\s*"progress-reminder"|進度旁白提醒/);
 assert.match(liveness, /tenMinuteAutomaticReminder:\s*false/);
 assert.match(liveness, /tenMinuteSyntheticUserTurn:\s*false/);
-assert.match(liveness, /twentyMinuteInterruptedTurnRescueOnly:\s*true/);
+assert.match(liveness, /twentyMinuteInterruptedTurnRescueOnly:\s*false/);
+assert.match(liveness, /twentyMinuteSilentOrAmbiguousRescueOnly:\s*true/);
+assert.match(liveness, /explicitTerminalFailureFastRescue:\s*true/);
+assert.match(liveness, /explicitFailureRescueMs/,
+  "an exact terminal failure must use a separately bounded rescue delay");
 assert.match(liveness, /normalCompletionDisarms:\s*true/);
 assert.match(liveness, /restart-interrupted/,
   "an active exact-conversation episode restored after Core replacement must carry restart interruption evidence");
@@ -237,7 +241,9 @@ console.log(JSON.stringify({
   narrationAuthorityKey: "conversationId",
   narrationRuntimeBinding: false,
   tenMinuteAutomaticReminder: false,
-  twentyMinuteInterruptedTurnRescueOnly: true,
+  twentyMinuteInterruptedTurnRescueOnly: false,
+  twentyMinuteSilentOrAmbiguousRescueOnly: true,
+  explicitTerminalFailureFastRescue: true,
   transportOnlyCompletionNonTerminal: true,
   staleGeneratingInterruptedTurnRecoverable: true,
   stalledGeneratingSilenceRecoverable: true,

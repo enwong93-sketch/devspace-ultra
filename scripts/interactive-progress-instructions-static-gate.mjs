@@ -55,9 +55,10 @@ assert.match(agents, /ten minutes is an Agent reporting ceiling only/i);
 assert.match(agents, /No timer, supervisor, overlay, or hidden relay may send a ten-minute reminder/i);
 assert.match(agents, /Before entering any long external wait, process watch, CI watch/i);
 assert.match(agents, /When that wait returns, report the material result before starting another long phase/i);
-assert.match(agents, /only after at least twenty minutes/i);
+assert.match(agents, /Silent, ambiguous, merely incomplete, transport-only, or still-generating turns retain the full twenty-minute/i);
+assert.match(agents, /Thinking failed.*思考失敗.*at least thirty seconds/i);
 assert.match(agents, /normally completed or explicitly cancelled turn must disarm rescue immediately/i);
-assert.match(agents, /only visible text emitted by a verified twenty-minute interrupted-turn rescue is exactly `- 繼續`/i);
+assert.match(agents, /only visible text emitted by any verified interrupted-turn rescue.*exactly `- 繼續`/i);
 assert.match(agents, /Write the update yourself in natural language/i);
 assert.match(agents, /This is a product gate, not only a prompt preference/i);
 assert.match(agents, /second substantive tool is rejected until the Agent reports/i);
@@ -103,7 +104,9 @@ console.log(JSON.stringify({
   tenMinuteAgentReportCeilingFromWorkspaceInstructions: true,
   longWaitBoundaryReportsRequired: true,
   tenMinuteAutomaticReminder: false,
-  twentyMinuteInterruptedTurnRescueOnly: true,
+  twentyMinuteInterruptedTurnRescueOnly: false,
+  twentyMinuteSilentOrAmbiguousRescueOnly: true,
+  explicitTerminalFailureFastRescue: true,
   interruptedTurnRescueText: "- 繼續",
   normalCompletionDisarms: true,
   rawToolNarration: false,
