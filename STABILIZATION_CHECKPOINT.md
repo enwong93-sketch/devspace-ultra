@@ -81,7 +81,7 @@ release body with the payload commit and audit, and verify remote asset digests.
 
 ### Incident evidence and recovery
 
-- Incident capture: `C:\Users\enwong\Desktop\devspace-recovery-20260923-053541`.
+- Incident capture: `%USERPROFILE%\Desktop\devspace-recovery-20260923-053541`.
   The captured process list contained no DevSpace fixed-backend launcher,
   Stable Gateway or Core, and ports 7678/7688/7689 had no listener. This was a
   complete backend-process loss, not merely a stale narration overlay.
