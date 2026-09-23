@@ -150,6 +150,7 @@ test('hidden acknowledgement loss reconciles from the native branch without a us
 test('a new user before hidden assistant confirmation redeems the pending round without resend', async t => {
   const h=await harness(t,{send:()=>({ok:false,dispatchCommitted:true,definiteFailure:false,state:'ack-lost'})});
   h.final(); await h.tick(); await h.tick(); assert.equal(h.sends(),1);
+  const observedAt=new Date(Date.parse(h.reported.lastRoundReport.reportedAt)+1_000).toISOString();
   h.setPages([{...h.page(),nativeContinuation:{
     resolved:true,
     sourceUserFound:true,
@@ -157,6 +158,7 @@ test('a new user before hidden assistant confirmation redeems the pending round 
     latestUserMessageId:'user-new',
     newUserAfterBaselineMessageId:'user-new',
     newUserAfterBaselineIndex:0,
+    newUserAfterBaselineCreatedAt:observedAt,
     newAssistantAfterBaselineMessageId:'assistant-too-late',
     newAssistantAfterBaselineIndex:1,
   }}]);
@@ -164,6 +166,7 @@ test('a new user before hidden assistant confirmation redeems the pending round 
   assert.equal(h.driver.status().records[0].state,'delivered');
   assert.equal(h.driver.status().records[0].reason,'human-user-turn-started-next-round');
   assert.equal((await h.runtime.status(h.g.id)).round,2);
+  assert.equal((await h.runtime.status(h.g.id)).roundBeganAt,observedAt);
   assert.equal(h.sends(),1);
 });
 
@@ -279,18 +282,53 @@ test('restart repairs a legacy cancelled continuation when an exact new user alr
   const row=h.driver.records.get(id);
   row.state='cancelled'; row.reason='new-user-turn-before-hidden-continuation';
   await h.driver.save(); await h.driver.close();
+  const observedAt=new Date(Date.parse(h.reported.lastRoundReport.reportedAt)+1_000).toISOString();
   h.setPages([{...h.page(),nativeContinuation:{
     resolved:true,sourceUserFound:true,baselineAssistantFound:true,
     latestUserMessageId:'user-after-restart',
     newUserAfterBaselineMessageId:'user-after-restart',newUserAfterBaselineIndex:0,
+    newUserAfterBaselineCreatedAt:observedAt,
     newAssistantAfterBaselineMessageId:null,newAssistantAfterBaselineIndex:-1,
   }}]);
   const restarted=new GoalContinuationSupervisor(h.config);
   await restarted.pollOnce();
   assert.equal((await h.runtime.status(h.g.id)).round,2);
+  assert.equal((await h.runtime.status(h.g.id)).roundBeganAt,observedAt);
   assert.equal(restarted.status().records[0].state,'delivered');
   assert.equal(restarted.status().records[0].reason,'human-user-turn-started-next-round');
   assert.equal(h.sends(),1,'legacy recovery must never replay the hidden continuation');
+  await restarted.close();
+});
+
+test('restart repairs the current human-started round boundary without replaying delivery', async t => {
+  const h=await harness(t,{send:()=>({ok:false,dispatchCommitted:true,definiteFailure:false,state:'ack-lost'})});
+  h.final(); await h.tick(); await h.tick(); assert.equal(h.sends(),1);
+  const id=h.reported.continuation.continuationId;
+  const row=h.driver.records.get(id);
+  const observedAt=new Date(Date.parse(h.reported.lastRoundReport.reportedAt)+1_000).toISOString();
+  // Simulate the pre-fix Core: it redeemed the real user turn at restart time
+  // but did not preserve that user's native create_time.
+  h.advanceTime(10_000);
+  await h.runtime.roundBegin({goalId:h.g.id,continuationId:id});
+  row.state='delivered'; row.reason='human-user-turn-started-next-round';
+  row.redeemed=true; row.deliveryMode='human-user-continuation';
+  row.manualUserMessageId='user-after-restart';
+  delete row.manualUserObservedAt;
+  await h.driver.save(); await h.driver.close();
+  h.setPages([{...h.page(),nativeContinuation:{
+    resolved:true,sourceUserFound:true,baselineAssistantFound:true,
+    latestUserMessageId:'user-after-restart',
+    newUserAfterBaselineMessageId:'user-after-restart',newUserAfterBaselineIndex:0,
+    newUserAfterBaselineCreatedAt:observedAt,
+    newAssistantAfterBaselineMessageId:null,newAssistantAfterBaselineIndex:-1,
+  }}]);
+  const restarted=new GoalContinuationSupervisor(h.config);
+  await restarted.pollOnce();
+  const repaired=await h.runtime.status(h.g.id);
+  assert.equal(repaired.round,2);
+  assert.equal(repaired.roundBeganAt,observedAt);
+  assert.equal(restarted.records.get(id).manualUserObservedAt,observedAt);
+  assert.equal(h.sends(),1,'round-boundary repair must not replay hidden delivery');
   await restarted.close();
 });
 

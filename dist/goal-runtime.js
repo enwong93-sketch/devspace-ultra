@@ -18,6 +18,7 @@ const MAX_BLOCKER_FINGERPRINT_CHARS = 500;
 const MAX_EVIDENCE_CHARS = 4_000;
 const MAX_CONVERSATION_ID_CHARS = 240;
 const REPORT_HISTORY_LIMIT = 32;
+const ROUND_BEGIN_TIMESTAMP_SLOP_MS = 5_000;
 const DEFAULT_DISPATCH_LEASE_MS = 45_000;
 const DEFAULT_DISPATCH_RECOVERY_MS = 120_000;
 const DEFAULT_ROUND_RECOVERY_RELEASE_MS = 5_000;
@@ -139,6 +140,20 @@ function normalizeBlockerFingerprint(value) {
   return cleanText(value, MAX_BLOCKER_FINGERPRINT_CHARS, "Blocker fingerprint")
     .toLowerCase()
     .replace(/\s+/g, " ");
+}
+
+function normalizeObservedRoundBeganAt(value, { reportedAt = null, nowMs = Date.now() } = {}) {
+  if (value === undefined || value === null || String(value).trim() === "") return null;
+  const parsed = Date.parse(String(value));
+  if (!Number.isFinite(parsed)) throw new Error("Observed Goal round start timestamp is invalid.");
+  const reportMs = Date.parse(String(reportedAt || ""));
+  if (Number.isFinite(reportMs) && parsed < reportMs - ROUND_BEGIN_TIMESTAMP_SLOP_MS) {
+    throw new Error("Observed Goal round start predates the reported continuation boundary.");
+  }
+  if (parsed > Number(nowMs) + 60_000) {
+    throw new Error("Observed Goal round start is implausibly in the future.");
+  }
+  return new Date(parsed).toISOString();
 }
 
 function normalizeSuccessCriteria(values) {
@@ -605,13 +620,32 @@ export class GoalRuntime {
     throw new Error(`Invalid Goal continuation action: ${command}`);
   }
 
-  async roundBegin({ goalId, continuationId }) {
+  async roundBegin({ goalId, continuationId, roundBeganAt = null }) {
     await this.ready;
     const goal = this.getGoal(goalId);
     const requestedContinuationId = String(continuationId ?? "");
     if (!requestedContinuationId) throw new Error("Goal round begin requires continuationId.");
 
+    const observedRoundBeganAt = normalizeObservedRoundBeganAt(roundBeganAt, {
+      reportedAt: goal.lastRoundReport?.reportedAt || null,
+      nowMs: this.now(),
+    });
+
     if (goal.lastConsumedContinuationId === requestedContinuationId) {
+      // A real user turn can supersede a hidden continuation while the host
+      // acknowledgement is lost. The driver may only learn the exact native
+      // user timestamp after restart. Correct the current round boundary
+      // backwards once, never forwards, so same-round recovery can correlate
+      // the already-running turn without reopening or replaying it.
+      const existingMs = Date.parse(String(goal.roundBeganAt || ""));
+      const observedMs = Date.parse(String(observedRoundBeganAt || ""));
+      if (observedRoundBeganAt && goal.status === "active" && goal.roundState === "working"
+        && goal.lastRoundReport?.round === goal.round - 1
+        && (!Number.isFinite(existingMs) || (Number.isFinite(observedMs) && observedMs < existingMs))) {
+        goal.roundBeganAt = observedRoundBeganAt;
+        this.touch(goal);
+        await this.save();
+      }
       return clone(goal);
     }
     if (goal.status !== "active") throw new Error(`Goal ${goal.id} cannot begin a new round from ${goal.status}.`);
@@ -628,7 +662,7 @@ export class GoalRuntime {
     goal.lastConsumedLeaseId = goal.continuation.leaseId ?? null;
     goal.round += 1;
     goal.roundState = "working";
-    goal.roundBeganAt = this.nowIso();
+    goal.roundBeganAt = observedRoundBeganAt || this.nowIso();
     goal.roundRecovery = idleRoundRecovery(goal.round);
     goal.continuation = idleContinuation();
     this.touch(goal);

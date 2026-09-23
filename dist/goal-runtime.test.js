@@ -329,6 +329,7 @@ try {
   });
   const raceClaim = await reloaded.continuation({ goalId: raceGoal.id, action: "claim" });
   const raceContinuationId = raceReported.continuation.continuationId;
+  advance(10_000);
 
   const raceRound2 = await reloaded.roundBegin({
     goalId: raceGoal.id,
@@ -355,7 +356,37 @@ try {
   assert.equal(duplicateRoundBegin.round, 2);
   assert.equal(duplicateRoundBegin.revision, raceRound2.revision);
 
-  assert.equal(typeof raceRound2.roundBeganAt, "string");
+  const observedHumanStart = new Date(
+    Date.parse(raceReported.lastRoundReport.reportedAt) + 1_000,
+  ).toISOString();
+  const correctedRoundBegin = await reloaded.roundBegin({
+    goalId: raceGoal.id,
+    continuationId: raceContinuationId,
+    roundBeganAt: observedHumanStart,
+  });
+  assert.equal(correctedRoundBegin.round, 2);
+  assert.equal(correctedRoundBegin.roundBeganAt, observedHumanStart,
+    "a later native branch observation may repair the current round boundary backwards");
+  assert.equal(correctedRoundBegin.revision, raceRound2.revision + 1);
+  const duplicateCorrection = await reloaded.roundBegin({
+    goalId: raceGoal.id,
+    continuationId: raceContinuationId,
+    roundBeganAt: observedHumanStart,
+  });
+  assert.equal(duplicateCorrection.revision, correctedRoundBegin.revision,
+    "replaying the same observed human boundary remains idempotent");
+  await assert.rejects(() => reloaded.roundBegin({
+    goalId: raceGoal.id,
+    continuationId: raceContinuationId,
+    roundBeganAt: new Date(Date.parse(raceReported.lastRoundReport.reportedAt) - 60_000).toISOString(),
+  }), /predates the reported continuation boundary/i);
+  await assert.rejects(() => reloaded.roundBegin({
+    goalId: raceGoal.id,
+    continuationId: raceContinuationId,
+    roundBeganAt: new Date(nowMs + 120_000).toISOString(),
+  }), /future/i);
+
+  assert.equal(typeof correctedRoundBegin.roundBeganAt, "string");
   assert.equal(raceRound2.roundRecovery?.state, "idle");
   const recoverable = await reloaded.recoverableWorkingRounds();
   assert.equal(recoverable.some((goal) => goal.id === raceGoal.id), true);

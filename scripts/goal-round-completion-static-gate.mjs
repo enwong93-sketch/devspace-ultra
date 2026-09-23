@@ -42,6 +42,8 @@ assert.match(rawHostBody, /awaitPromise:\s*false/,
   "hidden continuation host invocation must acknowledge synchronously instead of waiting for the whole assistant turn");
 assert.match(bridge, /classic-hidden-continuation-native-confirmed/,
   "normal Goal continuation must verify a native assistant branch before reporting acceptance");
+assert.match(bridge, /newUserAfterBaselineCreatedAt/,
+  "native continuation inspection must retain the bounded new-user timestamp needed to repair round recovery after restart");
 const recoveryStart = bridge.indexOf("async dispatchRoundRecovery");
 const recoveryEnd = bridge.indexOf("setBeforeRawDispatch", recoveryStart);
 const recoveryBody = bridge.slice(recoveryStart, recoveryEnd);
@@ -73,6 +75,11 @@ assert.match(guard, /currentRoundTransportFinished/,
 assert.match(continuation, /redeemHumanContinuation/);
 assert.match(continuation, /human-user-turn-started-next-round/,
   "a real new user turn must redeem the pending Goal round instead of leaving Active\/Reported stuck forever");
+assert.match(continuation, /manualUserObservedAt/,
+  "human continuation must persist its exact native start time for restart-safe same-round recovery");
+assert.match(runtime, /normalizeObservedRoundBeganAt/);
+assert.match(runtime, /roundBeganAt:\s*observedAt|roundBeganAt\s*=\s*observedRoundBeganAt/,
+  "GoalRuntime must accept only the internal verified observed start boundary; the public round-begin tool schema remains unchanged");
 assert.match(runtime, /priorAttempts >= MAX_ROUND_RECOVERY_ATTEMPTS/,
   "transient failed recovery attempts must become eligible again after their cooldown");
 assert.match(server, /ClassicTurnDeliveryEvidenceStore/);

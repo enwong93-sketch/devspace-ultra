@@ -148,6 +148,14 @@ export class GoalContinuationSupervisor {
         continue;
       }
       if (row.state === 'delivered' && row.redeemed === true
+        && row.deliveryMode === 'human-user-continuation'
+        && !row.manualUserObservedAt
+        && (row.manualTimestampRetryAt || 0) <= this.now()) {
+        try { await this.repairHumanRoundBoundary(row); }
+        catch (error) { cycleError = error.message; }
+        continue;
+      }
+      if (row.state === 'delivered' && row.redeemed === true
         && row.deliveryMode === 'hidden-assistant-continuation'
         && row.hiddenEpisodeNotified !== true) {
         try { await this.notifyHiddenContinuationStarted(row); }
@@ -229,13 +237,26 @@ export class GoalContinuationSupervisor {
     row.sourceUserId=changed[0].latestUserMessageId;
     return {pages:changed};
   }
-  async redeemHumanContinuation(row, { userMessageId = null, reason = 'human-user-turn-started-next-round' } = {}) {
+  async redeemHumanContinuation(row, {
+    userMessageId = null,
+    observedAt = null,
+    reason = 'human-user-turn-started-next-round',
+  } = {}) {
     const goal = await this.goalRuntime.status(row.goalId).catch(() => null);
     if (!goal || goal.status !== 'active') return false;
     if (goal.lastConsumedContinuationId === row.continuationId) {
+      if (observedAt) {
+        await this.goalRuntime.roundBegin({
+          goalId:row.goalId,
+          continuationId:row.continuationId,
+          roundBeganAt:observedAt,
+        });
+      }
       row.state='delivered'; row.redeemed=true; row.reason=reason;
       row.deliveryMode='human-user-continuation';
       row.manualUserMessageId=userMessageId||row.manualUserMessageId||null;
+      row.manualUserObservedAt=observedAt||row.manualUserObservedAt||null;
+      row.manualTimestampRetryAt=null;
       row.hiddenEpisodeNotified=true;
       row.hiddenEpisodeSkipReason='human-user-turn-started-next-round';
       await this.save();
@@ -243,33 +264,29 @@ export class GoalContinuationSupervisor {
     }
     if (!redeemable(goal) || goal.round !== row.round
       || goal.continuation?.continuationId !== row.continuationId) return false;
-    await this.goalRuntime.roundBegin({goalId:row.goalId,continuationId:row.continuationId});
+    await this.goalRuntime.roundBegin({
+      goalId:row.goalId,
+      continuationId:row.continuationId,
+      roundBeganAt:observedAt,
+    });
     if (row.leaseId) {
       await this.goalRuntime.continuation({goalId:row.goalId,action:'ack',leaseId:row.leaseId}).catch(() => {});
     }
     row.state='delivered'; row.redeemed=true; row.reason=reason;
     row.deliveryMode='human-user-continuation';
     row.manualUserMessageId=userMessageId||null;
+    row.manualUserObservedAt=observedAt||null;
+    row.manualTimestampRetryAt=observedAt?null:this.now()+5_000;
     row.hiddenEpisodeNotified=true;
     row.hiddenEpisodeSkipReason='human-user-turn-started-next-round';
     await this.save();
     return true;
   }
-  async reconcileHumanSupersession(row) {
-    const goal = await this.goalRuntime.status(row.goalId).catch(() => null);
-    if (!goal || goal.status !== 'active') return false;
-    if (goal.lastConsumedContinuationId === row.continuationId) {
-      return await this.redeemHumanContinuation(row, {
-        userMessageId: row.manualUserMessageId || null,
-        reason: 'human-user-turn-started-next-round',
-      });
-    }
-    if (!redeemable(goal) || goal.round !== row.round
-      || goal.continuation?.continuationId !== row.continuationId) return false;
+  async humanSupersessionProof(row, goal) {
     const baselineIds=row.finalAssistantId
       ? [row.finalAssistantId]
       : [...new Set((Array.isArray(row.baseline)?row.baseline:[]).map(item=>item?.id).filter(Boolean))];
-    if (baselineIds.length !== 1) return false;
+    if (baselineIds.length !== 1) return null;
     const pages = await this.pages(goal, {
       runtimeKey: row.dispatchRuntimeKey || row.sourceRuntimeKey || null,
       pageTargetId: row.dispatchPageTargetId || null,
@@ -278,15 +295,55 @@ export class GoalContinuationSupervisor {
       sourceUserMessageId: row.sourceUserId,
       baselineAssistantMessageId: baselineIds[0],
     });
-    if (!pages || pages.length !== 1) return false;
+    if (!pages || pages.length !== 1) return null;
     const proof=pages[0].nativeContinuation;
-    if (!proof?.resolved || proof.sourceUserFound !== true || proof.baselineAssistantFound !== true) return false;
+    if (!proof?.resolved || proof.sourceUserFound !== true || proof.baselineAssistantFound !== true) return null;
     const userIndex=Number(proof.newUserAfterBaselineIndex);
     const assistantIndex=Number(proof.newAssistantAfterBaselineIndex);
     const userFirst=userIndex>=0 && (assistantIndex<0 || userIndex<assistantIndex);
-    if (!userFirst || !proof.newUserAfterBaselineMessageId) return false;
-    return await this.redeemHumanContinuation(row, {
+    if (!userFirst || !proof.newUserAfterBaselineMessageId) return null;
+    return {
       userMessageId: proof.newUserAfterBaselineMessageId,
+      observedAt: proof.newUserAfterBaselineCreatedAt || null,
+    };
+  }
+  async repairHumanRoundBoundary(row) {
+    const goal = await this.goalRuntime.status(row.goalId).catch(() => null);
+    if (!goal || goal.status !== 'active'
+      || goal.lastConsumedContinuationId !== row.continuationId
+      || goal.round !== Number(row.round || 0) + 1
+      || goal.roundState !== 'working') {
+      row.manualTimestampResolution='superseded';
+      row.manualTimestampRetryAt=null;
+      await this.save();
+      return false;
+    }
+    const proof=await this.humanSupersessionProof(row,goal);
+    if (!proof?.observedAt) {
+      row.manualTimestampRetryAt=this.now()+30_000;
+      row.manualTimestampAttempts=Number(row.manualTimestampAttempts||0)+1;
+      await this.save();
+      return false;
+    }
+    return await this.redeemHumanContinuation(row, {
+      ...proof,
+      reason:'human-user-turn-started-next-round',
+    });
+  }
+  async reconcileHumanSupersession(row) {
+    const goal = await this.goalRuntime.status(row.goalId).catch(() => null);
+    if (!goal || goal.status !== 'active') return false;
+    const alreadyConsumed=goal.lastConsumedContinuationId === row.continuationId;
+    if (!alreadyConsumed && (
+      !redeemable(goal)
+      || goal.round !== row.round
+      || goal.continuation?.continuationId !== row.continuationId
+    )) return false;
+    const proof=await this.humanSupersessionProof(row,goal);
+    if (!proof && !alreadyConsumed) return false;
+    return await this.redeemHumanContinuation(row, {
+      userMessageId: proof?.userMessageId || row.manualUserMessageId || null,
+      observedAt: proof?.observedAt || row.manualUserObservedAt || null,
       reason: 'human-user-turn-started-next-round',
     });
   }
@@ -319,6 +376,7 @@ export class GoalContinuationSupervisor {
         if (userIndex >= 0) {
           const redeemed=await this.redeemHumanContinuation(row, {
             userMessageId: proof.newUserAfterBaselineMessageId || null,
+            observedAt: proof.newUserAfterBaselineCreatedAt || null,
             reason: 'human-user-turn-started-next-round',
           });
           if (!redeemed) {
@@ -465,6 +523,10 @@ export class GoalContinuationSupervisor {
       persistRecoveryCount: Number(this.persistRecoveryCount || 0),
       records: [...this.records.values()].map(r => ({ goalId: r.goalId, round: r.round, state: r.state,
         reason: r.reason, attempts: r.attempts, redeemed: r.redeemed === true,
+        deliveryMode: r.deliveryMode || null,
+        manualUserObservedAt: r.manualUserObservedAt || null,
+        manualTimestampResolution: r.manualTimestampResolution || null,
+        manualTimestampAttempts: Number(r.manualTimestampAttempts || 0),
         hiddenEpisodeNotified: r.hiddenEpisodeNotified === true,
         hiddenEpisodeSkipReason: r.hiddenEpisodeSkipReason || null })) };
   }

@@ -375,6 +375,9 @@ export async function inspectVisibleReportCommit(candidate, options = {}) {
                     role: String(node.message.author?.role || '').trim().toLowerCase() || null,
                     status: String(node.message.status || '').trim() || null,
                     endTurn: node.message.end_turn === true,
+                    createTime: Number.isFinite(Number(node.message.create_time))
+                      ? Number(node.message.create_time)
+                      : null,
                   });
                 }
                 nodeId = node.parent;
@@ -407,6 +410,9 @@ export async function inspectVisibleReportCommit(candidate, options = {}) {
                 latestAssistantMessageId: latestAssistant?.id || null,
                 newUserAfterBaselineMessageId: newUser?.id || null,
                 newUserAfterBaselineIndex: newUserIndex,
+                newUserAfterBaselineCreatedAt: newUser?.createTime
+                  ? new Date(newUser.createTime * 1000).toISOString()
+                  : null,
                 newAssistantAfterBaselineMessageId: newAssistant?.id || null,
                 newAssistantAfterBaselineIndex: newAssistantIndex,
               };
