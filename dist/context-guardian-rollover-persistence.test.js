@@ -61,10 +61,11 @@ function durableCapsule() {
   });
 }
 
-function continuityHarness() {
+function continuityHarness({ failMetaCount = 0 } = {}) {
   const records = new Map();
   const updates = [];
   let sequence = 0;
+  let remainingMetaFailures = Math.max(0, Number(failMetaCount) || 0);
   return {
     runtime: {
       enabled: true,
@@ -81,6 +82,10 @@ function continuityHarness() {
         return structuredClone(record);
       },
       async updateCapsuleMeta(id, patch) {
+        if (remainingMetaFailures > 0) {
+          remainingMetaFailures -= 1;
+          throw new Error("injected capsule metadata failure");
+        }
         updates.push({ id, patch: structuredClone(patch) });
       },
     },
@@ -91,6 +96,7 @@ function continuityHarness() {
 
 function coordinatorHarness({
   statePath,
+  stateStore,
   continuity,
   onVerifiedRollover,
   runtimes = [{ runtimeKey, port: 9736 }],
@@ -150,6 +156,7 @@ function coordinatorHarness({
     },
     planRuntime: { async activePlans() { return [plan]; } },
     statePath,
+    stateStore,
     now,
     onVerifiedRollover: async (event) => {
       calls.verified += 1;
@@ -158,6 +165,31 @@ function coordinatorHarness({
     pollMs: 0,
   });
   return { coordinator, calls };
+}
+
+function controlledStateStore({ failReplace } = {}) {
+  return {
+    ready: Promise.resolve(),
+    state: { prepared: [], descriptorFailures: [], compactFailures: [] },
+    writes: 0,
+    snapshot() {
+      return {
+        ok: true,
+        blocked: false,
+        loadError: null,
+        prepared: this.state.prepared.length,
+        committing: this.state.prepared.filter((row) => row.status === "committing").length,
+      };
+    },
+    async replace(value) {
+      this.writes += 1;
+      const next = structuredClone(value);
+      if (await failReplace?.(next, this.writes)) throw new Error("injected final journal clear failure");
+      this.state = next;
+      return this.snapshot();
+    },
+    async close() {},
+  };
 }
 
 function completionEvent(capsuleId, capsule) {
@@ -257,6 +289,118 @@ test("committing journal is reconciled once after process restart and then clear
   }
 });
 
+test("post-authority journal-clear failure retains committing state for same-Core reconciliation", async () => {
+  let failClearOnce = true;
+  const stateStore = controlledStateStore({
+    failReplace(value) {
+      if (failClearOnce && value.prepared.length === 0) {
+        failClearOnce = false;
+        return true;
+      }
+      return false;
+    },
+  });
+  const continuity = continuityHarness();
+  const runtimes = [{ runtimeKey, port: 9736 }];
+  const harness = coordinatorHarness({ stateStore, continuity, runtimes });
+  const prepared = await harness.coordinator.pollOnce();
+  assert.equal(prepared.results[0].action, "armed-user-turn-auto-compact");
+  const persisted = stateStore.state.prepared[0];
+  const capsule = continuity.records.get(persisted.capsuleId).capsule;
+  await assert.rejects(
+    () => harness.coordinator.noteUserTurnRollover(completionEvent(persisted.capsuleId, capsule)),
+    /injected final journal clear failure/,
+  );
+  assert.equal(harness.calls.verified, 1, "authority migration happened before the final journal clear failed");
+  assert.equal(harness.coordinator.status().prepared, 1,
+    "the in-memory committing row must remain available for same-Core reconciliation");
+  assert.equal(stateStore.snapshot().committing, 1,
+    "the last durable truth must remain the committing journal");
+  runtimes.length = 0;
+  await harness.coordinator.pollOnce();
+  assert.equal(harness.calls.verified, 2, "same-Core reconciliation may replay only the idempotent authority transaction");
+  assert.equal(harness.coordinator.status().recoveredCommitCount, 1);
+  assert.equal(harness.coordinator.status().prepared, 0);
+  assert.equal(stateStore.state.prepared.length, 0);
+  await harness.coordinator.close();
+});
+
+test("post-authority capsule metadata failure blocks re-arming and recovers in the same Core", async () => {
+  let clock = nowMs;
+  const stateStore = controlledStateStore();
+  const continuity = continuityHarness({ failMetaCount: 2 });
+  const runtimes = [{ runtimeKey, port: 9736 }];
+  const harness = coordinatorHarness({ stateStore, continuity, runtimes, now: () => clock });
+  const prepared = await harness.coordinator.pollOnce();
+  assert.equal(prepared.results[0].action, "armed-user-turn-auto-compact");
+  const persisted = stateStore.state.prepared[0];
+  const capsule = continuity.records.get(persisted.capsuleId).capsule;
+  await assert.rejects(
+    () => harness.coordinator.noteUserTurnRollover(completionEvent(persisted.capsuleId, capsule)),
+    /injected capsule metadata failure/,
+  );
+  assert.equal(harness.calls.verified, 1);
+  assert.equal(harness.coordinator.status().pendingCommitRecoveries, 1);
+  const retrying = await harness.coordinator.pollOnce();
+  assert.equal(harness.calls.verified, 2, "the first same-Core recovery retries the idempotent authority transaction");
+  assert.equal(retrying.results[0].action, "compact-finalization-pending");
+  assert.equal(harness.calls.arms, 1, "pending finalization must block a fresh source arm");
+  const beforeRetry = await harness.coordinator.pollOnce();
+  assert.equal(harness.calls.verified, 2, "the bounded retry floor must suppress an immediate third transaction replay");
+  assert.equal(beforeRetry.results[0].action, "compact-finalization-pending");
+  clock += 5_001;
+  runtimes.length = 0;
+  await harness.coordinator.pollOnce();
+  assert.equal(harness.calls.verified, 3);
+  assert.equal(harness.coordinator.status().recoveredCommitCount, 1);
+  assert.equal(harness.coordinator.status().pendingCommitRecoveries, 0);
+  assert.equal(stateStore.state.prepared.length, 0);
+  assert.equal(continuity.updates.length, 1);
+  await harness.coordinator.close();
+});
+
+test("abort finalization persistence failure restores the committing row and failure map", async () => {
+  let failAbortClearOnce = true;
+  const stateStore = controlledStateStore({
+    failReplace(value) {
+      if (failAbortClearOnce && value.prepared.length === 0 && value.compactFailures.length === 1) {
+        failAbortClearOnce = false;
+        return true;
+      }
+      return false;
+    },
+  });
+  const continuity = continuityHarness();
+  const runtimes = [{ runtimeKey, port: 9736 }];
+  const harness = coordinatorHarness({ stateStore, continuity, runtimes });
+  const prepared = await harness.coordinator.pollOnce();
+  assert.equal(prepared.results[0].action, "armed-user-turn-auto-compact");
+  const persisted = stateStore.state.prepared[0];
+  const capsule = continuity.records.get(persisted.capsuleId).capsule;
+  const failedEvent = {
+    ...completionEvent(persisted.capsuleId, capsule),
+    ok: false,
+    state: "target-verification-failed",
+  };
+  await assert.rejects(
+    () => harness.coordinator.noteUserTurnRollover(failedEvent),
+    /injected final journal clear failure/,
+  );
+  assert.equal(harness.calls.verified, 0);
+  assert.equal(harness.coordinator.status().prepared, 1);
+  assert.equal(harness.coordinator.status().compactFailures, 0,
+    "an undurable failure circuit must not remain promoted in memory");
+  assert.equal(stateStore.snapshot().committing, 1);
+  runtimes.length = 0;
+  await harness.coordinator.pollOnce();
+  assert.equal(harness.coordinator.status().prepared, 0);
+  assert.equal(harness.coordinator.status().compactFailures, 1);
+  assert.equal(stateStore.state.prepared.length, 0);
+  assert.equal(stateStore.state.compactFailures.length, 1);
+  assert.equal(continuity.updates.at(-1)?.patch?.status, "source-preserved-abort");
+  await harness.coordinator.close();
+});
+
 test("corrupt durability state blocks all arming before page or capsule work", async () => {
   const root = await mkdtemp(join(tmpdir(), "devspace-rollover-blocked-restart-"));
   const statePath = join(root, "rollover.json");
@@ -301,6 +445,10 @@ console.log(JSON.stringify({
   gate: "context-guardian-rollover-persistence",
   preparedReferenceSurvivesRestart: true,
   committingStateReconciledOnce: true,
+  postAuthorityClearFailureReconciledSameCore: true,
+  postAuthorityMetadataFailureReconciledSameCore: true,
+  pendingFinalizationBlocksRearm: true,
+  abortClearFailureRestoresCommittingTruth: true,
   duplicateRestartReplay: false,
   corruptedStateFailsClosed: true,
   expiredPreparedCompletionRejected: true,

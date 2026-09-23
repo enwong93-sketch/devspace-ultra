@@ -7,6 +7,7 @@ const DEFAULT_ROUTE_SETTLE_MS = 3_000;
 const PREPARE_REUSE_MS = 30_000;
 const NATIVE_STRUCTURAL_SEED_TTL_MS = 60_000;
 const DESCRIPTOR_FAILURE_COOLDOWN_MS = 60_000;
+const COMMIT_RECOVERY_RETRY_MS = 5_000;
 const MAX_FAILURE_CIRCUITS = 64;
 
 function clip(value, max = 2_400) {
@@ -160,6 +161,8 @@ export class ContextGuardianRolloverCoordinator {
     this.durabilityBlocked = false;
     this.durabilityError = null;
     this.recoveredCommitCount = 0;
+    this.commitRecoveryErrors = new Map();
+    this.commitRetryAt = new Map();
     this.ready = this.#initializeDurability();
   }
 
@@ -274,9 +277,16 @@ export class ContextGuardianRolloverCoordinator {
   }
 
   async #recoverPendingCommits() {
-    if (this.durabilityBlocked || this.continuityRuntime.enabled !== true) return;
+    const results = [];
+    if (this.durabilityBlocked || this.continuityRuntime.enabled !== true) return results;
+    const now = Number(this.now());
     for (const [runtimeKey, prepared] of [...this.prepared.entries()]) {
       if (prepared.durableStatus !== "committing" || !prepared.commitEvent || this.committing.has(runtimeKey)) continue;
+      const retryAt = Number(this.commitRetryAt.get(runtimeKey) || 0);
+      if (retryAt > now) {
+        results.push({ runtimeKey, recovered: false, pending: true, retryAt });
+        continue;
+      }
       this.committing.add(runtimeKey);
       try {
         const event = prepared.commitEvent;
@@ -293,11 +303,23 @@ export class ContextGuardianRolloverCoordinator {
           planId,
           capsuleId,
         });
+        const finalized = !this.prepared.has(runtimeKey);
+        if (finalized) {
+          this.commitRecoveryErrors.delete(runtimeKey);
+          this.commitRetryAt.delete(runtimeKey);
+        }
         if (recovered === true) this.recoveredCommitCount += 1;
+        results.push({ runtimeKey, recovered: recovered === true, finalized });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.commitRecoveryErrors.set(runtimeKey, message.slice(0, 500));
+        this.commitRetryAt.set(runtimeKey, now + COMMIT_RECOVERY_RETRY_MS);
+        results.push({ runtimeKey, recovered: false, pending: true, error: message.slice(0, 500) });
       } finally {
         this.committing.delete(runtimeKey);
       }
     }
+    return results;
   }
 
   status() {
@@ -311,6 +333,8 @@ export class ContextGuardianRolloverCoordinator {
       descriptorFailures: this.descriptorFailures.size,
       compactFailures: this.compactFailures.size,
       recoveredCommitCount: this.recoveredCommitCount,
+      pendingCommitRecoveries: [...this.prepared.values()].filter((row) => row.durableStatus === "committing").length,
+      commitRecoveryErrors: [...this.commitRecoveryErrors.entries()].map(([runtimeKey, error]) => ({ runtimeKey, error })),
       durability: this.durabilityStore?.snapshot?.() || null,
     };
   }
@@ -318,7 +342,6 @@ export class ContextGuardianRolloverCoordinator {
   async start({ schedule = true } = {}) {
     await this.ready;
     this.#assertDurabilityAvailable();
-    await this.#recoverPendingCommits();
     const first = await this.pollOnce();
     if (this.continuityRuntime.enabled !== true) return first;
     if (schedule && !this.closed && this.pollMs > 0 && !this.timer) {
@@ -511,17 +534,19 @@ export class ContextGuardianRolloverCoordinator {
   }
 
   async #abortCompact({ runtimeKey, oldConversationId, newConversationId, capsuleId, status, error }) {
-    this.compactFailures.set(JSON.stringify([runtimeKey, oldConversationId]), {
+    const compactFailure = {
       runtimeKey,
       conversationId: oldConversationId,
       reason: status,
       failedAtMs: Number(this.now()),
       capsuleId: capsuleId || null,
+    };
+    await this.#finalizePreparedDurability({
+      runtimeKey,
+      oldConversationId,
+      compactFailure,
+      clearSourceFailures: false,
     });
-    while (this.compactFailures.size > MAX_FAILURE_CIRCUITS) this.compactFailures.delete(this.compactFailures.keys().next().value);
-    this.prepared.delete(runtimeKey);
-    this.nativeSeedCache.delete(runtimeKey);
-    await this.#persistDurability();
     if (typeof this.contextAdapter.cancelUserTurnRollover === "function") {
       try { await this.contextAdapter.cancelUserTurnRollover(runtimeKey); } catch { /* Remain blocked even if cancellation fails. */ }
     }
@@ -539,6 +564,40 @@ export class ContextGuardianRolloverCoordinator {
     return false;
   }
 
+  async #finalizePreparedDurability({
+    runtimeKey,
+    oldConversationId,
+    compactFailure = null,
+    clearSourceFailures = false,
+  } = {}) {
+    const prepared = this.prepared.get(runtimeKey) || null;
+    const descriptorKey = JSON.stringify([runtimeKey, oldConversationId]);
+    const compactKey = JSON.stringify([runtimeKey, oldConversationId]);
+    const descriptorBefore = new Map(this.descriptorFailures);
+    const compactBefore = new Map(this.compactFailures);
+
+    this.prepared.delete(runtimeKey);
+    if (clearSourceFailures) {
+      this.descriptorFailures.delete(descriptorKey);
+      this.compactFailures.delete(compactKey);
+    } else if (compactFailure) {
+      this.compactFailures.set(compactKey, compactFailure);
+      while (this.compactFailures.size > MAX_FAILURE_CIRCUITS) this.compactFailures.delete(this.compactFailures.keys().next().value);
+    }
+
+    try {
+      await this.#persistDurability();
+    } catch (error) {
+      if (prepared) this.prepared.set(runtimeKey, prepared);
+      this.descriptorFailures.clear();
+      for (const [key, value] of descriptorBefore) this.descriptorFailures.set(key, value);
+      this.compactFailures.clear();
+      for (const [key, value] of compactBefore) this.compactFailures.set(key, value);
+      throw error;
+    }
+    this.nativeSeedCache.delete(runtimeKey);
+  }
+
   #assertPreparationCurrent(runtimeKey, version) {
     if (this.closed || this.continuityRuntime.enabled !== true || this.committing.has(runtimeKey)
       || (this.preparationVersions.get(runtimeKey) || 0) !== version) {
@@ -554,6 +613,7 @@ export class ContextGuardianRolloverCoordinator {
       return { ok: false, enabled: this.continuityRuntime.enabled === true, blocked: true, action: "auto-compact-durability-blocked", error: this.durabilityError };
     }
     if (this.closed) return { ok: true, closed: true, results: [] };
+    await this.#recoverPendingCommits();
     await this.#pruneExpiredPrepared();
     if (this.continuityRuntime.enabled !== true) {
       return { ok: true, enabled: false, action: "auto-compact-disabled", results: [] };
@@ -572,6 +632,15 @@ export class ContextGuardianRolloverCoordinator {
       try {
         if (this.committing.has(runtimeKey)) {
           results.push({ runtimeKey, action: "compact-commit-in-progress" });
+          continue;
+        }
+        if (this.prepared.get(runtimeKey)?.durableStatus === "committing") {
+          results.push({
+            runtimeKey,
+            action: "compact-finalization-pending",
+            error: this.commitRecoveryErrors.get(runtimeKey) || null,
+            retryAt: this.commitRetryAt.get(runtimeKey) || null,
+          });
           continue;
         }
         let snapshot = await this.#refresh(runtimeKey);
@@ -775,10 +844,6 @@ export class ContextGuardianRolloverCoordinator {
     if (rebound !== true) {
       return await this.#abortCompact({ runtimeKey, oldConversationId, newConversationId, capsuleId, status: "authority-rebind-failed", error: "Verified target authority migration was rejected." });
     }
-    this.prepared.delete(runtimeKey);
-    this.nativeSeedCache.delete(runtimeKey);
-    this.descriptorFailures.delete(JSON.stringify([runtimeKey, oldConversationId]));
-    this.compactFailures.delete(JSON.stringify([runtimeKey, oldConversationId]));
     if (capsuleId && typeof this.continuityRuntime.updateCapsuleMeta === "function") {
       await this.continuityRuntime.updateCapsuleMeta(capsuleId, {
         status: "verified-continuation",
@@ -787,7 +852,13 @@ export class ContextGuardianRolloverCoordinator {
         validation,
       });
     }
-    await this.#persistDurability();
+    await this.#finalizePreparedDurability({
+      runtimeKey,
+      oldConversationId,
+      clearSourceFailures: true,
+    });
+    this.commitRecoveryErrors.delete(runtimeKey);
+    this.commitRetryAt.delete(runtimeKey);
     return true;
   }
 
@@ -798,7 +869,9 @@ export class ContextGuardianRolloverCoordinator {
     const preparationVersion = this.preparationVersions.get(runtimeKey) || 0;
     const prompt = String(continuationPrompt ?? "").trim();
     if (!runtimeKey || !goalId || !prompt) return { handled: false, reason: "missing-input" };
-    if (this.closed || this.committing.has(runtimeKey)) return { handled: false, blocked: true, reason: "compact-commit-in-progress" };
+    if (this.closed || this.committing.has(runtimeKey) || this.prepared.get(runtimeKey)?.durableStatus === "committing") {
+      return { handled: false, blocked: true, reason: "compact-commit-in-progress" };
+    }
     if (this.continuityRuntime.enabled !== true) return { handled: false, reason: "auto-compact-disabled" };
     let snapshot = await this.#refresh(runtimeKey);
     this.#assertPreparationCurrent(runtimeKey, preparationVersion);
@@ -888,6 +961,8 @@ export class ContextGuardianRolloverCoordinator {
     this.descriptorFailures.clear();
     this.compactFailures.clear();
     this.preparationVersions.clear();
+    this.commitRecoveryErrors.clear();
+    this.commitRetryAt.clear();
     await this.durabilityStore?.close?.();
   }
 }
