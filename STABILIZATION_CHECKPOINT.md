@@ -1,5 +1,244 @@
 # DevSpace Ultra v0.5.8 stabilization — 2026-09-20
 
+## Round 6: Active Goal with stale stream status — 2026-09-23
+
+The Goal strip correctly showed `Active`: backend Goal
+`goal_9ddde493694349b9` was Round 6 / Working, the turn Plan was still active,
+and no report-gated next-round continuation existed. It was not a paused Goal
+or a display-only state.
+
+Exact native history proved the missing recovery window. The hidden
+continuation opened Round 6 at 13:06:39Z; the assistant committed a normal
+text final at 13:09:46Z without calling `devspace_goal_turn_report`; the next
+real user message did not arrive until 13:41:36Z. The same-round guard stayed
+on `same-route-active-turn-observed` instead of dispatching recovery.
+
+Root cause: the guard had already observed the active turn, so the earlier
+restart fallback was not eligible. ChatGPT could leave `/stream_status` at
+`IN_PROGRESS` after the exact assistant final had committed. The normal path
+therefore never accepted completion, while the native fallback was restricted
+to `reentry-or-unobserved-turn`.
+
+The maintenance fix makes an exact visible assistant final a candidate for one
+bounded native-branch inspection even after an active turn was observed and
+the stream endpoint remains stale. Recovery is authorized only when the native
+current node and DOM final share the same assistant ID, the latest user IDs
+match, native status is non-running, `end_turn=true`, and both message times
+belong to the current Goal round. The resulting proof remains bound to those
+exact user/assistant IDs; a later user message or branch cannot reuse it.
+Silent, generating, safety-check, delivery-timeout, cross-route and
+cross-conversation cases remain fail-closed.
+
+Regression coverage includes active-turn observation -> visible final -> stale
+`IN_PROGRESS` -> exact native proof -> one hidden same-round recovery, plus
+stale-proof rejection after user/assistant IDs change. Goal, Rescue,
+progress-liveness and Classic safety suites pass. Production Auto Compact
+remains OFF and no Main or Blender restart is part of this fix.
+
+## Explicit Thinking-failed Rescue and restart-native Goal final — 2026-09-23
+
+### Live incident evidence
+
+- The exact conversation `6aacf595-b3d0-83ee-a31f-043786b41e85` displayed the
+  localized `思考失敗` terminal surface. Its native branch ended at
+  `2026-09-23T11:43:26.515Z`; the user manually intervened at
+  `2026-09-23T11:55:26.333Z`, roughly twelve minutes later.
+- The old Rescue policy required twenty minutes for every interruption type,
+  so it correctly had not fired yet even though the UI already proved the turn
+  was terminal. This was the demonstrated product gap; it was not a missing
+  page, wrong conversation or exhausted Rescue episode.
+- The user's new message created a fresh native episode and superseded the old
+  failure. The old episode was therefore not retroactively rescued or counted
+  as a successful live canary.
+
+### Repairs and acceptance
+
+- Commit `3876a1d` adds an exact-terminal-failure fast path. Only the latest
+  exact turn's localized error surface qualifies. It waits at least thirty
+  seconds, requires a second exact-page confirmation, the same source user,
+  an empty composer and an unused episode, then emits one visible `- 繼續`.
+- Silent, ambiguous, merely incomplete, transport-only and potentially healthy
+  generating turns retain the original twenty-minute boundary. Fresh admitted
+  activity clears the fast timer; a changed source user fails closed.
+- Commits `58a71ed` and `6379523` add restart-safe same-round Goal recovery from
+  an exact native current-round final. DOM/native current message IDs, latest
+  user ID, end-turn state and user/assistant timestamps must agree with the
+  current Goal round. The expensive native branch proof is attempted only when
+  normal inspection returns `reentry-or-unobserved-turn`, with a five-minute
+  retry floor.
+- Targeted Goal, Rescue, progress-liveness, diagnostics and Classic safety
+  suites passed. Clean full audit `1290f1a9-9efe-4657-b7b5-b649a249a39c`
+  validated revision `688b98574303caeeadf548ab4e4ad9686f3eaef7`: 174 named
+  gates, exit 0 and an empty tracked diff.
+- Production source contains equivalent commits `3fdbba2`, `a1d0d32`,
+  `5066212` and `748eda5`. The replacement Core PID 56440 exposes
+  `explicitTerminalFailureFastRescue=true` and
+  `twentyMinuteSilentOrAmbiguousRescueOnly=true`; Gateway fatal=false and
+  admission is open. The old error remains visible in page history, but exact
+  latest-turn inspection returns `hasTurnError=false` for the user's fresh
+  episode, proving the new path does not rescue a historical error.
+- The first compatible handover correctly failed before replacement because a
+  server-instruction edit changed the MCP schema fingerprint. That edit was
+  removed. The second handover activated the new Core and feature diagnostics,
+  although its detached verifier lost the post-handover acknowledgement and
+  recorded a false-negative TypeError; this verifier reconciliation remains a
+  separate follow-up and is not evidence that the Rescue deployment failed.
+
+
+## Stable-release closure: multi-Agent Goal endurance — 2026-09-23
+
+### Incident and demonstrated causes
+
+Three user-facing Agents appeared to stop around 06:00 while their Goal strips
+still showed Active. This was not a hard three-round limit:
+
+- Main-03 had reached Goal round 14. Its hidden continuation was invoked but no
+  native assistant node appeared. A later real user turn was classified as
+  cancellation, leaving the Goal `reported/pending` instead of using that turn
+  as round 15. On restart the old implementation also stamped the round with
+  restart time, so the already-running turn could fail same-round recovery's
+  lower-bound check.
+- Main-04 had five nonterminal Goals bound to one conversation. Exact page plus
+  current Host Overlay authority proved `goal_31461729727138b6` was the owner;
+  four older, unprogressed duplicates were stopped by the reviewed collision
+  repair. No page navigation, composer mutation or runtime restart occurred.
+- Long conversation inspection and normal hidden Goal dispatch shared a 500ms
+  CDP budget, and hidden host invocation waited on the host promise for the
+  whole assistant turn. Both made valid long-running pages look unavailable or
+  acknowledgement-lost.
+
+### Repairs and endurance evidence
+
+Commits `8ecd0a3` and `d2a8b75` implement the release fix:
+
+- a real new user turn redeems the pending/dispatching continuation into the
+  next Goal round instead of cancelling the continuation and stranding Active /
+  Reported state;
+- the exact native user `create_time` is retained and used only by the internal
+  supervisor to set or safely repair `roundBeganAt` backwards. It must be near
+  or after the prior report and cannot be in the future; the public round-begin
+  tool has no caller-supplied timestamp field;
+- a legacy cancelled/delivered journal is repaired after Core restart from the
+  exact source-final-next-user native branch, without replaying hidden delivery;
+- hidden host RPC returns after synchronous invocation, never after the whole
+  assistant promise, and normal Goal continuation requires native assistant
+  branch confirmation before acceptance;
+- discovery, full page inspection, raw dispatch and composer operations now
+  have separate bounded budgets; long pages no longer inherit the 500ms port
+  discovery limit;
+- first-poll same-round recovery after Core restart may use exact persisted
+  request + finished timestamps for the same route and round; later-route or
+  pre-round evidence still fails closed.
+
+Executable evidence includes the existing 160-round exactly-once continuation
+test and 64-round same-round recovery test, plus a new three-Agent endurance
+run: 48 rounds per Agent (144 combined) with acknowledgement loss, a real user
+supersession every fourth round and driver restart every seventh round. Every
+Goal advanced exactly once. A separate integration test proves real-user
+continuation -> Core restart -> exactly-once same-round recovery. Goal, Rescue,
+progress-liveness and Classic safety suites all passed.
+
+Clean audit `0bbcfea2-d0d7-44a5-80e3-d8421cb5439d` validated revision
+`d2a8b75a2acbd8606e9c60ca0a8e8b587819aa59`: 174 named gates, exit 0,
+clean tracked diff. Compatible handover
+`215a8a36-a73d-4486-9bca-04290c6750c9` completed with schema unchanged,
+119 tools, active Core PID 14064, two sessions replayed, zero deferred/dropped,
+no rollback and temporary verifier tokens revoked.
+
+Live post-handover evidence: Main-03's historical round-14 cancellation was
+reconciled without resend, it completed/report-gated round 15 and automatically
+entered round 16. Its progress card updated at 09:06:07Z. Main-04 retained one
+authoritative Goal after collision repair and its recovered Agent/card updated
+at 09:06:39Z. These are live product observations, not fixture-only results.
+Auto Compact remained OFF, V0.6 worktree changes were not mixed, and Blender
+PID 17000 plus unrelated Main processes were not restarted.
+
+### Remaining release boundary
+
+Publish only this v0.5.8 line after the final public-package/release gates and
+remote CI succeed. The existing immutable `v0.5.8` tag predates this maintenance
+payload; do not silently force-move it. The supported same-version maintenance
+path is to merge the audited source to `main`, replace the v0.5.8 release
+archive/install/checksum assets from that exact merged revision, update the
+release body with the payload commit and audit, and verify remote asset digests.
+
+## Round 3: complete control-plane loss and survivability — 2026-09-23
+
+### Incident evidence and recovery
+
+- Incident capture: `%USERPROFILE%\Desktop\devspace-recovery-20260923-053541`.
+  The captured process list contained no DevSpace fixed-backend launcher,
+  Stable Gateway or Core, and ports 7678/7688/7689 had no listener. This was a
+  complete backend-process loss, not merely a stale narration overlay.
+- No Windows Resource-Exhaustion Event 2004 or Node heap/OOM crash was found in
+  the captured hour. A group of WER LiveKernelEvent 141 records appeared around
+  05:21 HKT, consistent with a GPU/display timeout, but DevSpace's prior Core
+  log stopped around 04:22. CPU/GPU pressure remains a plausible environment
+  stressor, NOT a proven cause of the earlier DevSpace disappearance.
+- The old whole-restart executable failed before any mutation because it
+  required breakaway permission even when ZERO Gateway/Core listeners existed.
+  It correctly stopped no process, but consequently could not cold-start a
+  fully dead backend.
+- The canonical `DevSpace-Stable-Gateway` Scheduled Task restored production at
+  05:44 HKT. Verified state: Gateway 7678/PID 64248, sole Core 7688/PID 804,
+  Gateway active PID 804, fatal=false, admission open, active/queued requests
+  0/0, retired 7676/7677 absent. No Main or Blender was stopped; Blender PID
+  17000 remained alive.
+
+### Demonstrated product defects and fixes
+
+1. **Dead-backend cold start.** Commit `2f6fd95` classifies an empty listener
+   topology before the Windows Job breakaway probe. `--preflight-only` now
+   proves a zero-mutation cold start; `--execute` starts the canonical Scheduled
+   Task and requires Gateway health plus exactly one Core whose listener PID
+   matches `/__devspace/memory/status`. Orphan-Core and invalid topologies still
+   fail closed. An isolated alternate-port preflight returned
+   `cold-start-preflight-verified`, breakawayRequired=false, stoppedPids=0 and
+   created no listener.
+2. **Launcher supervision.** The foreground fixed-backend launcher now treats
+   any disappeared Gateway as failure even when the child reports exit code 0,
+   allowing Task Scheduler restart. A real competing healthy Gateway is the
+   only accepted zero-exit race. The exit listener is installed immediately so
+   a fast child failure cannot be missed.
+3. **CPU-saturation scheduling.** The Task and launcher/Core are Normal; the
+   small Gateway control plane is AboveNormal. High and Realtime are prohibited.
+   The running processes were changed in place without a restart: launcher
+   65716 BelowNormal->Normal, Gateway 64248 BelowNormal->AboveNormal, Core 804
+   BelowNormal->Normal.
+4. **Persistent restart policy.** The main Task now has restartCount=999,
+   interval=PT1M, MultipleInstances=IgnoreNew, Priority=4, no execution limit.
+   Commit `4b36a38` adds a separate one-minute watchdog Task instead of
+   repeatedly triggering the healthy long-running Task. The watchdog only
+   starts the main Task when health is down and it is not already running; it
+   never stops a running process tree. Commit `b47b59f` also makes every healthy
+   watchdog pass reassert Gateway=AboveNormal and launcher/Core=Normal, covering
+   a Core restarted by the already-running pre-fix Gateway. A real watchdog run
+   returned 0 while Gateway/Core PIDs remained unchanged and health stayed true.
+
+### Acceptance
+
+- Focused Stable Gateway, Goal, Rescue/liveness and Classic safety suites pass.
+- Final clean-revision full audit `9e985ade-35d0-43a8-9671-77102713cee5` on
+  `b47b59f232122a1d3040afbd61f597aa32bad886` passed 174 named gates, exit 0,
+  with an empty tracked diff.
+- The exact conversation progress marker was persisted and read from the real
+  floating card (`cardAcceptancePassed=true`); all five observed Main runtimes
+  were connected/synced, including Main-05 on its observed port 19735.
+- Production remains package 0.5.8 and Auto Compact remains OFF. Goal/Plan,
+  Rescue, Context Guardian, Host Overlay and Stream Recovery state was retained.
+
+### Boundary
+
+The live production backend was recovered manually through the canonical Task
+before this source fix; production was not deliberately destroyed again. The
+new no-listener `--execute` branch was instead accepted with a temporary,
+isolated Scheduled Task and ports 17678/17688/17689. It returned
+`cold-start-ready`, stopped zero PIDs, started exactly one Gateway/Core pair,
+matched the Core listener to memory-status PID, left production 7678 healthy,
+then removed the canary Task, listeners and state. Do not state that CPU, OOM
+or LiveKernelEvent 141 definitely caused the outage without a future
+process-exit/resource event.
+
 ## Round 3: long-run Goal/Rescue compatibility — 2026-09-22
 
 ### Deployed revision and exact acceptance

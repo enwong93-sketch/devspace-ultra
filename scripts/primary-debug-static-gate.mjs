@@ -8,7 +8,8 @@ const script = await readFile(new URL("./chat-classic-primary-debug.ps1", import
 assert.match(server, /import \{ ClassicPrimaryDebugGuard \} from "\.\/primary-debug-guard\.js";/);
 assert.match(server, /const primaryDebugGuard = process\.platform === "win32"\s*\? new ClassicPrimaryDebugGuard\(\)\s*:\s*null;/,
   "Primary Debug Guard must exist only on its supported Windows runtime");
-assert.match(server, /const\s+classicCdpOptions\s*=\s*Array\.isArray\(config\.classicMainDebugPorts\)[\s\S]{0,180}ports:\s*config\.classicMainDebugPorts/, "Primary/Host Bridge lifecycle must use the bounded configured Classic port set");
+assert.match(server, /const configuredClassicPorts = Array\.isArray\(config\.classicMainDebugPorts\)[\s\S]{0,260}const classicCdpOptions = \{[\s\S]{0,220}configuredClassicPorts\.length[\s\S]{0,120}defaultMainDebugPorts\(\{ includeObserved: true, refresh: true \}\)/,
+  "Primary/Host Bridge lifecycle must use explicit ports or the bounded observed-process fallback set");
 assert.match(server, /new ClassicGoalHostBridge\(\{\s*\.\.\.classicCdpOptions,\s*beforeDispatch:\s*config\.passiveCore\s*\|\|\s*!primaryDebugGuard\s*\?\s*undefined\s*:\s*\(\) => primaryDebugGuard\.pollOnce\(\),?\s*\}\)/s);
 assert.doesNotMatch(server, /sendExactGoalRecovery|sendRecovery:\s*/,
   "same-round Goal Recovery must not wire a page-composer sender through Primary Debug Guard");

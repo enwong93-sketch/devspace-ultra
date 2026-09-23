@@ -21,14 +21,26 @@ const packageJson = JSON.parse(await read("package.json"));
 assert.match(coreSlot, /DEVSPACE_CONFIG_DIR/, "Core slot launcher must preserve explicit config ownership");
 assert.match(coreSlot, /DEVSPACE_STATE_DIR/, "Core slot launcher must select candidate/canonical state explicitly");
 assert.match(coreSlot, /DEVSPACE_PUBLIC_BASE_URL/, "Core slots must generate metadata for the stable public origin");
+assert.match(coreSlot, /applyDevspaceRuntimePriority\("core",\s*\{ pid: child\.pid \}\)/,
+  "Core children must be returned to Normal priority after inheriting the Gateway control-plane priority");
 assert.match(coreSlot, /createCandidateSnapshot/, "Core slot helper must build an isolated candidate snapshot");
 assert.match(coreSlot, /devspace\.sqlite/, "candidate snapshot must handle SQLite separately from ordinary file copying");
+assert.match(coreSlot, /isTransientAtomicPath[\s\S]*copyCandidateState/,
+  "candidate snapshots must ignore and retry bounded atomic-writer temp-file races");
+assert.match(coreSlot, /DEVSPACE_CORE_IDENTITY_MISMATCH[\s\S]*completeCoreStartup[\s\S]*stopSpawnedCoreProcess/,
+  "a foreign healthy listener must reject and terminate the newly spawned handle instead of creating a duplicate Core");
 assert.match(coreSlot, /candidate[\s\S]*DEVSPACE_CONTEXT_GUARDIAN/i, "candidate Core must disable Context Guardian background work");
 assert.match(coreSlot, /candidate[\s\S]*DEVSPACE_CLASSIC_HOST_OVERLAY/i, "candidate Core must disable Host Overlay background work");
 assert.match(coreSlot, /candidate[\s\S]*DEVSPACE_CLASSIC_STREAM_RECOVERY/i, "candidate Core must disable Stream Recovery background work");
 
 assert.match(gatewayController, /StableGatewaySessionRegistry/, "Gateway controller must own the public MCP session registry");
 assert.match(gatewayController, /readCoreSchemaFingerprint/, "handover baseline must use a fresh active-Core MCP schema session");
+assert.match(gatewayController, /readCoreRuntimeIdentity/,
+  "Gateway recovery must compare controller ownership with the PID exposed by the exact private Core listener");
+assert.match(gatewayController, /knownHandles[\s\S]*reconcileActiveCoreIdentity[\s\S]*foreign-core-listener/,
+  "fatal handover recovery may adopt only a live same-slot handle spawned by this Gateway and must fail closed on unknown listeners");
+assert.match(gatewayController, /replaySessionsToCore[\s\S]*Core identity reconciled/,
+  "listener/handle reconciliation must replay public sessions before clearing fatal controller state");
 assert.doesNotMatch(gatewayController, /baseline\.backendSessionId[\s\S]*read.*SchemaFingerprint/i, "handover schema gate must not depend on a previously issued backend MCP session id");
 assert.match(gatewayController, /createStableGatewayProxy/, "Gateway controller must own the stable public proxy");
 assert.match(stableGateway, /stableGatewayPublicBaseUrl[\s\S]*edgePublicBaseUrl/, "Stable Gateway must prefer generic production public identity config while retaining legacy edge fallback");
@@ -36,8 +48,12 @@ assert.match(stableGateway, /stableGatewayStateDir[\s\S]*edgeFixedStateDir/, "St
 assert.match(stableGateway, /stableGatewayPort[\s\S]*edgeBackendPort/, "Stable Gateway must prefer generic production listener config while retaining legacy edge fallback");
 assert.match(stableGateway, /stableGatewayCoreAPort[\s\S]*stableGatewayCoreBPort/, "Stable Gateway must allow explicit private Core A/B ports");
 assert.match(stableGateway, /DEVSPACE_CLASSIC_UI_OWNER_PRIORITY:\s*"100"/, "Stable Gateway active Core must outrank ordinary standalone Core UI projection");
+assert.match(stableGateway, /applyDevspaceRuntimePriority\("gateway"\)/,
+  "Gateway control-plane work must request AboveNormal scheduling during CPU saturation");
 assert.match(coreSlot, /candidate[\s\S]*DEVSPACE_CLASSIC_UI_OWNER_PRIORITY:\s*"0"/i, "candidate Core must never compete for the Classic UI owner lease");
 assert.match(stableGateway, /readCoreSchemaFingerprint/, "runtime wiring must probe active-Core schema through a fresh ephemeral MCP session instead of trusting a stale backend session id");
+assert.match(stableGateway, /readCoreRuntimeIdentity/,
+  "runtime wiring must provide exact private-listener PID identity to the controller reconciler");
 assert.match(stableGateway, /probeCandidate/, "runtime wiring must provide candidate compatibility probing");
 assert.match(stableGateway, /__devspace\/gateway\/handover/, "Gateway must expose a private handover control endpoint");
 assert.match(stableGateway, /timingSafeEqual/, "Gateway handover control endpoint must authenticate its local caller");
@@ -104,14 +120,32 @@ assert.match(fixedBackend, /stableGatewayPublicBaseUrl[\s\S]*edgePublicBaseUrl/,
 assert.match(fixedBackend, /stableGatewayStateDir[\s\S]*edgeFixedStateDir/, "fixed backend launcher must prefer generic Stable Gateway state before legacy edge fallback");
 assert.match(fixedBackend, /stableGatewayPort[\s\S]*edgeBackendPort/, "fixed backend launcher must prefer generic Stable Gateway port before legacy edge fallback");
 assert.match(fixedBackend, /devspace-stable-gateway\.mjs/, "fixed backend launcher must start the long-lived Gateway instead of a Core directly");
+assert.match(fixedBackend, /applyDevspaceRuntimePriority\("launcher"\)/,
+  "Scheduled Task launcher must repair an inherited BelowNormal priority before supervising Gateway");
+assert.match(fixedBackend, /classifySupervisedGatewayExit/,
+  "a disappeared Gateway must make the Scheduled Task fail and restart even when the child reported exit code zero");
+assert.match(fixedBackend, /peer-gateway-ready/,
+  "a real competing healthy Gateway may resolve a launcher race without causing a restart storm");
 assert.doesNotMatch(fixedBackend, /\["dist\/cli\.js",\s*"serve"\]/, "fixed backend launcher must not expose Core lifetime as the public listener lifetime");
 
-assert.match(stableGatewayStartup, /ValidateSet\("install",\s*"status",\s*"remove",\s*"start",\s*"restart"\)/, "Stable Gateway lifecycle must expose a bounded self-upgrade restart action");
+assert.match(stableGatewayStartup, /ValidateSet\("install",\s*"status",\s*"remove",\s*"start",\s*"restart",\s*"repair",\s*"watchdog"\)/, "Stable Gateway lifecycle must expose restart, in-place Task repair and a bounded health watchdog");
 assert.match(stableGatewayStartup, /DevSpace-Stable-Gateway/, "Stable Gateway startup must use an independent Scheduled Task identity");
 assert.match(stableGatewayStartup, /--foreground/, "Stable Gateway Scheduled Task must own the foreground Gateway lifetime");
 assert.match(stableGatewayStartup, /--config-dir/, "Stable Gateway Scheduled Task must bind to one explicit config directory");
 assert.match(stableGatewayStartup, /New-ScheduledTaskTrigger -AtLogOn|MSFT_TaskLogonTrigger/, "Stable Gateway must start automatically at logon");
 assert.match(stableGatewayStartup, /ExecutionTimeLimit[^\n]*(Seconds 0|TimeSpan::Zero)|New-TimeSpan -Seconds 0/, "Stable Gateway Scheduled Task must not have a short execution timeout");
+assert.match(stableGatewayStartup, /RestartCount 999/, "Stable Gateway Task must survive repeated process crashes rather than exhausting three retries");
+assert.match(stableGatewayStartup, /MultipleInstances IgnoreNew/, "watchdog triggers must never create duplicate Gateway trees");
+assert.match(stableGatewayStartup, /Priority 4/, "future Gateway launchers must run at Normal priority rather than BelowNormal");
+assert.match(stableGatewayStartup, /DevSpace-Stable-Gateway-Watchdog/);
+assert.match(stableGatewayStartup, /RepetitionInterval \(New-TimeSpan -Minutes 1\)/, "a separate periodic watchdog must recover a fully dead Task without repeatedly triggering the healthy long-running Task");
+assert.match(stableGatewayStartup, /State = if \(\$started\) \{ "recovery-started" \} else \{ "unhealthy-task-running" \}/,
+  "watchdog may start a stopped Task but must not kill or duplicate a running process tree");
+assert.match(stableGatewayStartup, /ProcessPriorityClass\]::AboveNormal/,
+  "watchdog must keep the small Gateway control plane above ordinary saturated workloads");
+assert.match(stableGatewayStartup, /ProcessPriorityClass\]::Normal/,
+  "watchdog must keep launcher and Core at Normal rather than allowing inherited AboveNormal work");
+assert.match(stableGatewayStartup, /Set-ScheduledTask[\s\S]*RunningInstancePreserved/, "Task hardening must be installable without restarting the current healthy Gateway");
 assert.doesNotMatch(stableGatewayStartup, /(?:Stop|Start|Unregister)-ScheduledTask[^\n]*(?:DevSpace-Fixed-Edge-Tunnel|DevSpace-Fixed-Backend)/i, "Stable Gateway startup must not mutate legacy edge tasks");
 assert.match(stableGatewayStartup, /Get-NetTCPConnection[\s\S]*7678|GatewayPort/, "restart must verify the dedicated Gateway/Core listeners rather than killing arbitrary Node processes");
 assert.match(stableGatewayStartup, /CommandLine[\s\S]*devspace|dist\\cli\.js/, "restart must verify DevSpace process identity before terminating orphan Core listeners");

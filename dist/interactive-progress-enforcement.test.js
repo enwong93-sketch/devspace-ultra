@@ -1,5 +1,10 @@
 import assert from "node:assert/strict";
-import { InteractiveProgressEnforcementGate, isPlanCompletionCall, isProgressSetupTool } from "./interactive-progress-enforcement.js";
+import {
+  InteractiveProgressEnforcementGate,
+  goalRoundClosureState,
+  isPlanCompletionCall,
+  isProgressSetupTool,
+} from "./interactive-progress-enforcement.js";
 
 let now = Date.parse("2026-09-16T11:00:00.000Z");
 const durable = new Map();
@@ -39,6 +44,11 @@ assert.equal(result.activityAccepted, false,
 const planStatus = await gate.beforeTool({ ...planned, toolName: "devspace_plan_status", activePlan });
 assert.equal(planStatus.ok, true);
 assert.equal(planStatus.activityAccepted, false, "progress/setup tools do not reset interrupted-turn rescue");
+const prematureRoundReport = await gate.beforeTool({ ...planned, toolName: "devspace_goal_turn_report", activePlan });
+assert.equal(prematureRoundReport.ok, false);
+assert.equal(prematureRoundReport.reason, "goal-round-plan-incomplete");
+assert.equal(prematureRoundReport.errorType, "devspace_goal_round_plan_incomplete");
+assert.match(prematureRoundReport.message, /update every Plan step to completed/i);
 
 durable.set(planned.conversationId, new Date(now + 500).toISOString());
 const admittedPlannedRead = await gate.beforeTool({ ...planned, toolName: "read", activePlan });
@@ -64,6 +74,74 @@ result = await gate.beforeTool({
 assert.equal(result.ok, false);
 assert.equal(result.reason, "final-progress-stale", "final Plan completion must not bypass the reporting ceiling");
 
+const roundBeganAt = new Date(now + 1_000).toISOString();
+const completedAt = new Date(now + 5_000).toISOString();
+const activeGoal = {
+  id: "goal_round_closure",
+  conversationId: planned.conversationId,
+  status: "active",
+  round: 8,
+  roundState: "working",
+  roundBeganAt,
+};
+const completedTurnPlan = {
+  id: "plan_round_closure",
+  conversationId: planned.conversationId,
+  status: "completed",
+  createdAt: new Date(now + 2_000).toISOString(),
+  completedAt,
+};
+const roundClosure = goalRoundClosureState({ activeGoal, latestPlan: completedTurnPlan });
+assert.deepEqual(roundClosure, {
+  goalId: activeGoal.id,
+  round: activeGoal.round,
+  planId: completedTurnPlan.id,
+  planCompletedAt: completedAt,
+});
+result = await gate.beforeTool({ ...planned, toolName: "exec_command", roundClosure });
+assert.equal(result.ok, false);
+assert.equal(result.reason, "goal-round-report-required");
+assert.equal(result.errorType, "devspace_goal_round_report_required");
+assert.equal(result.activityAccepted, false,
+  "a blocked post-Plan tool cannot postpone same-round recovery or rescue");
+assert.match(result.message, /devspace_goal_turn_report.*final tool/i);
+
+for (const allowedTool of [
+  "devspace_goal_turn_report",
+  "devspace_progress_report",
+  "devspace_goal_status",
+  "devspace_plan_status",
+  "devspace_goal_complete",
+  "devspace_goal_blocked",
+  "devspace_goal_control",
+  "devspace_goal_mount",
+  "devspace_plan_mount",
+  "devspace_plan_start",
+  "request_user_input",
+]) {
+  const allowed = await gate.beforeTool({ ...planned, toolName: allowedTool, roundClosure });
+  assert.equal(allowed.ok, true, `${allowedTool} must remain available at the round-closure boundary`);
+  assert.equal(allowed.activityAccepted, false);
+}
+
+assert.equal(goalRoundClosureState({
+  activeGoal,
+  activePlan: { id: "plan-new-active" },
+  latestPlan: completedTurnPlan,
+}), null, "a fresh active Plan proves that meaningful work remains in this round");
+assert.equal(goalRoundClosureState({
+  activeGoal,
+  latestPlan: {
+    ...completedTurnPlan,
+    createdAt: new Date(Date.parse(roundBeganAt) - 10_000).toISOString(),
+    completedAt: new Date(Date.parse(roundBeganAt) - 5_000).toISOString(),
+  },
+}), null, "a previous round's completed Plan cannot force the current round to report");
+assert.equal(goalRoundClosureState({
+  activeGoal: { ...activeGoal, roundState: "reported" },
+  latestPlan: completedTurnPlan,
+}), null);
+
 const worker = { conversationId: "conversation-worker", runtimeKey: "worker-01" };
 assert.equal((await gate.beforeTool({ ...worker, toolName: "exec_command" })).enforced, false, "backend-only workers never write the user-facing card");
 
@@ -87,9 +165,13 @@ console.log(JSON.stringify({
   atomicFirstToolException: true,
   secondSubstantiveToolBlockedUntilNarration: true,
   activePlanRequiresOpeningNarration: true,
+  incompletePlanBlocksGoalRoundReport: true,
   durableBridgeNarrationAccepted: true,
   tenMinuteCeilingEnforced: true,
   planCompletionRequiresFreshNarration: true,
+  completedPlanRequiresGoalRoundReport: true,
+  freshPlanCanReopenRoundWork: true,
+  priorRoundPlanIgnored: true,
   onlyAdmittedSubstantiveToolsCountAsActivity: true,
   main01Through05Covered: true,
   backendWorkersExcluded: true,

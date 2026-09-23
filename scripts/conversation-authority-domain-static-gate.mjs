@@ -87,6 +87,16 @@ assert.match(server, /mcpCallCorrelator\.waitForIdentity\([\s\S]{0,700}verifyCor
 assert.match(server, /progressLivenessAdapter\.find\(\{[\s\S]*conversationId:\s*candidate\.conversationId/);
 assert.match(server, /page\.runtimeKey !== candidateRuntimeKey/);
 assert.match(server, /page\.progressCardMounted === true && page\.progressConversationId !== candidate\.conversationId/);
+assert.match(server, /const activityPage = await progressLivenessAdapter\.find\(\{[\s\S]{0,180}conversationId:\s*gateConversationId/,
+  "substantive tool activity must re-read the globally exact live page before postponing Rescue");
+assert.match(server, /activityPage\.runtimeKey === gateRuntimeKey[\s\S]{0,180}activityPage\.generating === true[\s\S]{0,180}activityPage\.hasTurnError !== true/,
+  "idle, failed, duplicate or stale-session pages cannot refresh the Rescue clock");
+assert.match(server, /sourceUserMessageId:\s*activityPage\.latestUserMessageId/,
+  "accepted tool activity must be bound to the exact current source user message");
+assert.match(liveness, /substantive-tool-activity-source-mismatch-ignored/,
+  "older or cross-turn tool activity must fail closed instead of postponing Rescue");
+assert.match(liveness, /substantive-tool-activity-without-current-source-ignored/,
+  "unproved tool activity must not reset Rescue silence");
 assert.match(server, /const exactPageClaim = Boolean\(/);
 assert.match(server, /const exactRequest = Boolean\(/);
 assert.match(server, /ownershipProof,\s*ownershipSource:\s*resolved\.source/);
@@ -180,7 +190,11 @@ assert.doesNotMatch(liveness, /adapter\?\.sendReminder|adapter\?\.projectReminde
 assert.doesNotMatch(livenessCdp, /async sendReminder\(|async projectReminder\(|purpose:\s*"progress-reminder"|進度旁白提醒/);
 assert.match(liveness, /tenMinuteAutomaticReminder:\s*false/);
 assert.match(liveness, /tenMinuteSyntheticUserTurn:\s*false/);
-assert.match(liveness, /twentyMinuteInterruptedTurnRescueOnly:\s*true/);
+assert.match(liveness, /twentyMinuteInterruptedTurnRescueOnly:\s*false/);
+assert.match(liveness, /twentyMinuteSilentOrAmbiguousRescueOnly:\s*true/);
+assert.match(liveness, /explicitTerminalFailureFastRescue:\s*true/);
+assert.match(liveness, /explicitFailureRescueMs/,
+  "an exact terminal failure must use a separately bounded rescue delay");
 assert.match(liveness, /normalCompletionDisarms:\s*true/);
 assert.match(liveness, /restart-interrupted/,
   "an active exact-conversation episode restored after Core replacement must carry restart interruption evidence");
@@ -227,7 +241,9 @@ console.log(JSON.stringify({
   narrationAuthorityKey: "conversationId",
   narrationRuntimeBinding: false,
   tenMinuteAutomaticReminder: false,
-  twentyMinuteInterruptedTurnRescueOnly: true,
+  twentyMinuteInterruptedTurnRescueOnly: false,
+  twentyMinuteSilentOrAmbiguousRescueOnly: true,
+  explicitTerminalFailureFastRescue: true,
   transportOnlyCompletionNonTerminal: true,
   staleGeneratingInterruptedTurnRecoverable: true,
   stalledGeneratingSilenceRecoverable: true,

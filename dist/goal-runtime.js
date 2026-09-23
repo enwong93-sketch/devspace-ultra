@@ -18,6 +18,7 @@ const MAX_BLOCKER_FINGERPRINT_CHARS = 500;
 const MAX_EVIDENCE_CHARS = 4_000;
 const MAX_CONVERSATION_ID_CHARS = 240;
 const REPORT_HISTORY_LIMIT = 32;
+const ROUND_BEGIN_TIMESTAMP_SLOP_MS = 5_000;
 const DEFAULT_DISPATCH_LEASE_MS = 45_000;
 const DEFAULT_DISPATCH_RECOVERY_MS = 120_000;
 const DEFAULT_ROUND_RECOVERY_RELEASE_MS = 5_000;
@@ -139,6 +140,20 @@ function normalizeBlockerFingerprint(value) {
   return cleanText(value, MAX_BLOCKER_FINGERPRINT_CHARS, "Blocker fingerprint")
     .toLowerCase()
     .replace(/\s+/g, " ");
+}
+
+function normalizeObservedRoundBeganAt(value, { reportedAt = null, nowMs = Date.now() } = {}) {
+  if (value === undefined || value === null || String(value).trim() === "") return null;
+  const parsed = Date.parse(String(value));
+  if (!Number.isFinite(parsed)) throw new Error("Observed Goal round start timestamp is invalid.");
+  const reportMs = Date.parse(String(reportedAt || ""));
+  if (Number.isFinite(reportMs) && parsed < reportMs - ROUND_BEGIN_TIMESTAMP_SLOP_MS) {
+    throw new Error("Observed Goal round start predates the reported continuation boundary.");
+  }
+  if (parsed > Number(nowMs) + 60_000) {
+    throw new Error("Observed Goal round start is implausibly in the future.");
+  }
+  return new Date(parsed).toISOString();
 }
 
 function normalizeSuccessCriteria(values) {
@@ -605,13 +620,32 @@ export class GoalRuntime {
     throw new Error(`Invalid Goal continuation action: ${command}`);
   }
 
-  async roundBegin({ goalId, continuationId }) {
+  async roundBegin({ goalId, continuationId, roundBeganAt = null }) {
     await this.ready;
     const goal = this.getGoal(goalId);
     const requestedContinuationId = String(continuationId ?? "");
     if (!requestedContinuationId) throw new Error("Goal round begin requires continuationId.");
 
+    const observedRoundBeganAt = normalizeObservedRoundBeganAt(roundBeganAt, {
+      reportedAt: goal.lastRoundReport?.reportedAt || null,
+      nowMs: this.now(),
+    });
+
     if (goal.lastConsumedContinuationId === requestedContinuationId) {
+      // A real user turn can supersede a hidden continuation while the host
+      // acknowledgement is lost. The driver may only learn the exact native
+      // user timestamp after restart. Correct the current round boundary
+      // backwards once, never forwards, so same-round recovery can correlate
+      // the already-running turn without reopening or replaying it.
+      const existingMs = Date.parse(String(goal.roundBeganAt || ""));
+      const observedMs = Date.parse(String(observedRoundBeganAt || ""));
+      if (observedRoundBeganAt && goal.status === "active" && goal.roundState === "working"
+        && goal.lastRoundReport?.round === goal.round - 1
+        && (!Number.isFinite(existingMs) || (Number.isFinite(observedMs) && observedMs < existingMs))) {
+        goal.roundBeganAt = observedRoundBeganAt;
+        this.touch(goal);
+        await this.save();
+      }
       return clone(goal);
     }
     if (goal.status !== "active") throw new Error(`Goal ${goal.id} cannot begin a new round from ${goal.status}.`);
@@ -628,7 +662,7 @@ export class GoalRuntime {
     goal.lastConsumedLeaseId = goal.continuation.leaseId ?? null;
     goal.round += 1;
     goal.roundState = "working";
-    goal.roundBeganAt = this.nowIso();
+    goal.roundBeganAt = observedRoundBeganAt || this.nowIso();
     goal.roundRecovery = idleRoundRecovery(goal.round);
     goal.continuation = idleContinuation();
     this.touch(goal);
@@ -678,6 +712,51 @@ export class GoalRuntime {
       .sort((left, right) => right[1].length - left[1].length || left[0].localeCompare(right[0]))
       .slice(0, Math.max(1, Math.min(100, Number(limit) || 20)))
       .map(([conversationId, goals]) => ({ conversationId, goals: goals.map((goal) => ({ ...goal })) }));
+  }
+
+  async resolveConversationCollision({ conversationId, keepGoalId, reason = "verified-legacy-duplicate-repair" } = {}) {
+    await this.ready;
+    const expected = normalizeConversationId(conversationId);
+    const keepId = String(keepGoalId || "").trim();
+    const keep = this.getGoal(keepId);
+    if (!expected || keep.conversationId !== expected || !NONTERMINAL_GOAL_STATUSES.has(keep.status)) {
+      throw new Error("Collision repair requires the exact nonterminal Goal currently bound to the conversation.");
+    }
+    const group = nonterminalConversationGoals(this.state, expected);
+    if (group.length <= 1) return { kept: clone(keep), stopped: [], repaired: false };
+    if (!group.some((goal) => goal.id === keep.id)) {
+      throw new Error(`Goal ${keep.id} is not part of the current conversation collision.`);
+    }
+    const keepCreatedAt = Date.parse(String(keep.createdAt || ""));
+    const stale = group.filter((goal) => goal.id !== keep.id);
+    const unsafe = stale.filter((goal) => (
+      goal.round !== 1
+      || goal.roundState !== "working"
+      || goal.lastRoundReport != null
+      || (Array.isArray(goal.recentReports) && goal.recentReports.length > 0)
+      || goal.completionEvidence != null
+      || goal.continuation?.state !== "idle"
+      || !Number.isFinite(Date.parse(String(goal.createdAt || "")))
+      || !Number.isFinite(keepCreatedAt)
+      || Date.parse(String(goal.createdAt)) >= keepCreatedAt
+    ));
+    if (unsafe.length) {
+      throw new Error(`Collision repair refused: Goals ${unsafe.map((goal) => goal.id).join(", ")} contain progressed or non-older state.`);
+    }
+    const repairedAt = this.nowIso();
+    const normalizedReason = cleanText(reason, 240, "Collision repair reason");
+    for (const goal of stale) {
+      goal.status = "stopped";
+      goal.stoppedAt = repairedAt;
+      goal.continuation = idleContinuation();
+      goal.roundRecovery = idleRoundRecovery(goal.round);
+      goal.supersededByGoalId = keep.id;
+      goal.supersededAt = repairedAt;
+      goal.supersededReason = normalizedReason;
+      this.touch(goal);
+    }
+    await this.save();
+    return { kept: clone(keep), stopped: stale.map((goal) => clone(goal)), repaired: true };
   }
 
   async claimRoundRecovery({ goalId } = {}) {

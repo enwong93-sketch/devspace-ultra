@@ -39,6 +39,15 @@ export function classifyGatewayReplacementBoundary(snapshot) {
   return null;
 }
 
+export function classifyGatewayRestartTopology(owned = []) {
+  const gateways = owned.filter(entry => entry?.role === "gateway");
+  const cores = owned.filter(entry => entry?.role === "core");
+  if (gateways.length === 0 && cores.length === 0) return "cold-start";
+  if (gateways.length === 1) return "replacement";
+  if (gateways.length === 0 && cores.length > 0) return "orphan-core";
+  return "invalid";
+}
+
 function normalizePath(value) {
   return String(value || "").replaceAll("/", "\\").toLowerCase();
 }

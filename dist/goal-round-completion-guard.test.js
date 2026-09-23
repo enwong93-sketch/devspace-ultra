@@ -9,6 +9,7 @@ try {
 
 assert.equal(typeof moduleUnderTest?.ClassicGoalRoundCompletionGuard, "function", "ClassicGoalRoundCompletionGuard must exist");
 assert.equal(typeof moduleUnderTest?.shouldRecoverWorkingRound, "function", "shouldRecoverWorkingRound must exist");
+assert.equal(typeof moduleUnderTest?.provesNativeCurrentRoundFinal, "function", "native current-round final proof must exist");
 
 const baseGoal = {
   id: "goal_aaaaaaaaaaaaaaaa",
@@ -102,6 +103,42 @@ assert.equal(moduleUnderTest.shouldRecoverWorkingRound(baseGoal, {
   generating: false,
   streamStatus: "IN_PROGRESS",
 }, { nowMs: Date.parse("2026-09-05T03:00:05.000Z") }), false);
+assert.equal(moduleUnderTest.shouldRecoverWorkingRound(baseGoal, {
+  ...eligibleRoute,
+  chatMode: true,
+  generating: false,
+  streamStatus: "IN_PROGRESS",
+  safetyCheckVisible: false,
+  deliveryTimeoutVisible: false,
+  latestMessageRole: "assistant",
+  latestUserMessageId: "user-current-round",
+  latestAssistantMessageId: "assistant-current-round-native-final",
+  latestAssistantText: "The exact native branch proves this current Goal round has ended.",
+  recoverySession: {
+    sawNativeCurrentRoundFinal: true,
+    nativeFinalUserMessageId: "user-current-round",
+    nativeFinalAssistantMessageId: "assistant-current-round-native-final",
+  },
+}, { nowMs: Date.parse("2026-09-05T03:00:05.000Z") }), true,
+"an exact native current-round final must recover even when stream_status remains stale");
+assert.equal(moduleUnderTest.shouldRecoverWorkingRound(baseGoal, {
+  ...eligibleRoute,
+  chatMode: true,
+  generating: false,
+  streamStatus: "IN_PROGRESS",
+  safetyCheckVisible: false,
+  deliveryTimeoutVisible: false,
+  latestMessageRole: "assistant",
+  latestUserMessageId: "user-newer-turn",
+  latestAssistantMessageId: "assistant-newer-turn",
+  latestAssistantText: "A later turn must not inherit an older native-final proof.",
+  recoverySession: {
+    sawNativeCurrentRoundFinal: true,
+    nativeFinalUserMessageId: "user-current-round",
+    nativeFinalAssistantMessageId: "assistant-current-round-native-final",
+  },
+}, { nowMs: Date.parse("2026-09-05T03:00:05.000Z") }), false,
+"native-final authority must stay bound to the exact proved user and assistant IDs");
 assert.equal(moduleUnderTest.shouldRecoverWorkingRound(baseGoal, {
   chatMode: true,
   generating: false,
@@ -293,6 +330,178 @@ assert.equal(uncertainRuntimeCalls.release, 0,
   "a committed send may never be released for an automatic duplicate retry");
 assert.equal(uncertain.results[0].reason, "dispatch-committed-unverified-no-retry");
 
+let restartEvidenceClaims = 0;
+const restartEvidenceGuard = new moduleUnderTest.ClassicGoalRoundCompletionGuard({
+  goalRuntime: {
+    async recoverableWorkingRounds() { return [baseGoal]; },
+    async claimRoundRecovery() {
+      restartEvidenceClaims += 1;
+      return { claimed: true, claim: { goalId: baseGoal.id, round: 2,
+        recoveryId: "recovery_restart_evidence", prompt: "recover after restart" } };
+    },
+    async roundRecovery() {},
+  },
+  now: () => Date.parse("2026-09-05T03:00:12.000Z"),
+  inspect: async () => ({
+    ...stablePageRoute,
+    chatMode: true,
+    generating: false,
+    streamStatus: "COMPLETE",
+    latestMessageRole: "assistant",
+    latestAssistantMessageId: "assistant-current-round-final",
+    latestAssistantText: "Current round completed before the guard restarted.",
+    turnRequestObservedAt: "2026-09-05T03:00:01.000Z",
+    turnFinishedObservedAt: "2026-09-05T03:00:04.000Z",
+  }),
+  dispatch: async () => ({ ok: true, transport: "hidden-restart-recovery" }),
+  pollMs: 0,
+});
+const restartEvidence = await restartEvidenceGuard.pollOnce();
+assert.equal(restartEvidence.recovered, 1,
+  "persisted exact request/finished evidence must recover a completed round on the first poll after guard restart");
+assert.equal(restartEvidenceClaims, 1);
+
+const nativeFinalSnapshot = {
+  ...stablePageRoute,
+  routeEpoch: 3,
+  routeEnteredAt: "2026-09-05T03:00:06.000Z",
+  routeHydratedAt: "2026-09-05T03:00:07.000Z",
+  routeStableForMs: 5_000,
+  chatMode: true,
+  generating: false,
+  streamStatus: "COMPLETE",
+  latestMessageRole: "assistant",
+  latestUserMessageId: "user-current-round",
+  latestAssistantMessageId: "assistant-current-round-native-final",
+  latestAssistantText: "Current round completed before the replacement Core could observe it.",
+  nativeContinuation: {
+    resolved: true,
+    currentNodeId: "assistant-current-round-native-final",
+    currentMessageId: "assistant-current-round-native-final",
+    currentRole: "assistant",
+    currentStatus: "finished_successfully",
+    currentEndTurn: true,
+    currentCreatedAt: "2026-09-05T03:00:04.000Z",
+    latestUserMessageId: "user-current-round",
+    latestUserCreatedAt: "2026-09-05T03:00:00.100Z",
+    latestAssistantMessageId: "assistant-current-round-native-final",
+    latestAssistantCreatedAt: "2026-09-05T03:00:04.000Z",
+  },
+};
+assert.equal(moduleUnderTest.provesNativeCurrentRoundFinal(baseGoal, nativeFinalSnapshot, {
+  nowMs: Date.parse("2026-09-05T03:00:12.000Z"),
+}), true, "exact native branch timing and IDs must prove a current-round final after Core restart");
+assert.equal(moduleUnderTest.provesNativeCurrentRoundFinal(baseGoal, {
+  ...nativeFinalSnapshot,
+  streamStatus: "IN_PROGRESS",
+}, { nowMs: Date.parse("2026-09-05T03:00:12.000Z") }), true,
+"exact native end-turn evidence must remain authoritative when stream_status is stale");
+assert.equal(moduleUnderTest.provesNativeCurrentRoundFinal(baseGoal, {
+  ...nativeFinalSnapshot,
+  nativeContinuation: {
+    ...nativeFinalSnapshot.nativeContinuation,
+    currentCreatedAt: "2026-09-05T02:59:30.000Z",
+    latestAssistantCreatedAt: "2026-09-05T02:59:30.000Z",
+  },
+}, { nowMs: Date.parse("2026-09-05T03:00:12.000Z") }), false,
+"a completed assistant from before the Goal round began must remain blocked");
+assert.equal(moduleUnderTest.provesNativeCurrentRoundFinal(baseGoal, {
+  ...nativeFinalSnapshot,
+  nativeContinuation: {
+    ...nativeFinalSnapshot.nativeContinuation,
+    currentNodeId: "assistant-other-branch",
+    currentMessageId: "assistant-other-branch",
+  },
+}, { nowMs: Date.parse("2026-09-05T03:00:12.000Z") }), false,
+"a native branch whose current node does not match the exact DOM final must remain blocked");
+
+let nativeFallbackClaims = 0;
+const nativeFallbackInspections = [];
+const nativeFallbackGuard = new moduleUnderTest.ClassicGoalRoundCompletionGuard({
+  goalRuntime: {
+    async recoverableWorkingRounds() { return [baseGoal]; },
+    async claimRoundRecovery() {
+      nativeFallbackClaims += 1;
+      return { claimed: true, claim: { goalId: baseGoal.id, round: 2,
+        recoveryId: "recovery_native_final", prompt: "recover from exact native final" } };
+    },
+    async roundRecovery() {},
+  },
+  now: () => Date.parse("2026-09-05T03:00:12.000Z"),
+  inspect: async (_goal, options = {}) => {
+    nativeFallbackInspections.push(options.includeNativeBranch === true);
+    return options.includeNativeBranch === true
+      ? nativeFinalSnapshot
+      : ({ ...nativeFinalSnapshot, nativeContinuation: undefined });
+  },
+  dispatch: async () => ({ ok: true, transport: "hidden-native-final-recovery" }),
+  pollMs: 0,
+});
+const nativeFallback = await nativeFallbackGuard.pollOnce();
+assert.equal(nativeFallback.recovered, 1,
+  "the guard must perform one bounded exact-native inspection when its first post-restart view is already final");
+assert.deepEqual(nativeFallbackInspections, [false, true]);
+assert.equal(nativeFallbackClaims, 1);
+assert.equal(nativeFallback.results[0].transport, "hidden-native-final-recovery");
+
+let staleStreamNow = Date.parse("2026-09-05T03:00:02.500Z");
+let staleStreamPoll = 0;
+let staleStreamClaims = 0;
+const staleStreamInspections = [];
+const staleStreamNativeFinal = {
+  ...nativeFinalSnapshot,
+  ...stablePageRoute,
+  routeEpoch: 4,
+  streamStatus: "IN_PROGRESS",
+};
+const staleStreamGuard = new moduleUnderTest.ClassicGoalRoundCompletionGuard({
+  goalRuntime: {
+    async recoverableWorkingRounds() { return [baseGoal]; },
+    async claimRoundRecovery() {
+      staleStreamClaims += 1;
+      return { claimed: true, claim: { goalId: baseGoal.id, round: 2,
+        recoveryId: "recovery_stale_stream_native_final", prompt: "recover stale stream final" } };
+    },
+    async roundRecovery() {},
+  },
+  now: () => staleStreamNow,
+  inspect: async (_goal, options = {}) => {
+    staleStreamInspections.push(options.includeNativeBranch === true);
+    if (options.includeNativeBranch === true) return staleStreamNativeFinal;
+    staleStreamPoll += 1;
+    if (staleStreamPoll === 1) {
+      return {
+        ...stablePageRoute,
+        routeEpoch: 4,
+        chatMode: true,
+        generating: true,
+        streamStatus: "IN_PROGRESS",
+        latestMessageRole: "user",
+        latestUserMessageId: "user-current-round",
+        latestAssistantMessageId: "assistant-before-current-round",
+        latestAssistantText: "Earlier assistant response.",
+        turnRequestObservedAt: "2026-09-05T03:00:00.100Z",
+      };
+    }
+    return {
+      ...staleStreamNativeFinal,
+      nativeContinuation: undefined,
+    };
+  },
+  dispatch: async () => ({ ok: true, transport: "hidden-stale-stream-native-final-recovery" }),
+  pollMs: 0,
+});
+const staleStreamActive = await staleStreamGuard.pollOnce();
+assert.equal(staleStreamActive.recovered, 0,
+  "a genuinely active turn must remain untouched before the final appears");
+staleStreamNow = Date.parse("2026-09-05T03:00:12.000Z");
+const staleStreamRecovered = await staleStreamGuard.pollOnce();
+assert.equal(staleStreamRecovered.recovered, 1,
+  "a guard that already observed the active turn must fetch exact native proof when stream_status stays stale after the final");
+assert.deepEqual(staleStreamInspections, [false, false, true]);
+assert.equal(staleStreamClaims, 1);
+assert.equal(staleStreamRecovered.results[0].transport, "hidden-stale-stream-native-final-recovery");
+
 let reentryClaims = 0;
 const reentryGuard = new moduleUnderTest.ClassicGoalRoundCompletionGuard({
   goalRuntime: {
@@ -324,6 +533,9 @@ await guard.close();
 await prematureCompleteGuard.close();
 await failedGuard.close();
 await uncertainGuard.close();
+await restartEvidenceGuard.close();
+await nativeFallbackGuard.close();
+await staleStreamGuard.close();
 await reentryGuard.close();
 
 console.log(JSON.stringify({
@@ -334,4 +546,7 @@ console.log(JSON.stringify({
   sameRoundRecovery: true,
   failedDispatchReleased: true,
   committedDispatchNeverRetried: true,
+  restartFinishedEvidenceRecovers: true,
+  restartNativeFinalEvidenceRecovers: true,
+  staleStreamNativeFinalRecovers: true,
 }));

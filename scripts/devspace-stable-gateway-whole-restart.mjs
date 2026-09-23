@@ -10,6 +10,7 @@ import { loadDevspaceFiles } from "../dist/user-config.js";
 import { parseGatewayRestartArguments } from '../dist/gateway-restart-cli.js';
 import {
   buildRestartPowerShell,
+  classifyGatewayRestartTopology,
   parseNetstatListeners,
   queryListenerProcesses,
   validateDevspaceListeners,
@@ -82,6 +83,88 @@ const owned = validateDevspaceListeners({
 });
 const gateway = owned.find((entry) => entry.role === "gateway") ?? null;
 const corePids = owned.filter((entry) => entry.role === "core").map((entry) => entry.pid);
+const topology = classifyGatewayRestartTopology(owned);
+if (topology === "orphan-core") {
+  throw new Error("A DevSpace Core listener exists without the Stable Gateway; refusing an ambiguous cold start.");
+}
+if (topology === "invalid") {
+  throw new Error("DevSpace listener topology is invalid; no process was stopped.");
+}
+if (topology === "cold-start") {
+  const base = {
+    ok: true,
+    state: cli.mode === "preflight-only" ? "cold-start-preflight-verified" : "cold-start-scheduled",
+    topology,
+    taskName,
+    gatewayPort,
+    corePorts,
+    stoppedPids: [],
+    quietVerified: true,
+    breakawayRequired: false,
+    startedAt: new Date().toISOString(),
+    secretValuesLogged: false,
+  };
+  if (cli.mode === "preflight-only") {
+    await writeFile(resultPath, `${JSON.stringify({ ...base, completedAt: new Date().toISOString() })}\n`, { encoding: "utf8", mode: 0o600 });
+    console.log(JSON.stringify({ ...base, completedAt: new Date().toISOString(), resultPath }));
+    process.exit(0);
+  }
+  await execFileAsync("powershell.exe", [
+    "-NoProfile",
+    "-NonInteractive",
+    "-Command",
+    `Start-ScheduledTask -TaskName ${psQuote(taskName)} -ErrorAction Stop`,
+  ], { windowsHide: true, maxBuffer: 1024 * 1024 });
+  const deadline = Date.now() + 90_000;
+  let ready = null;
+  while (Date.now() < deadline) {
+    await new Promise(resolvePromise => setTimeout(resolvePromise, 500));
+    try {
+      const gatewayHealth = await fetch(`http://127.0.0.1:${gatewayPort}/__devspace/gateway/healthz`, {
+        signal: AbortSignal.timeout(2_500),
+        cache: "no-store",
+      });
+      const memoryResponse = await fetch(`http://127.0.0.1:${gatewayPort}/__devspace/memory/status`, {
+        signal: AbortSignal.timeout(2_500),
+        cache: "no-store",
+      });
+      const gatewayBody = gatewayHealth.ok ? await gatewayHealth.json() : null;
+      const memoryBody = memoryResponse.ok ? await memoryResponse.json() : null;
+      if (gatewayBody?.ok === true && Number(memoryBody?.pid) > 0) {
+        const currentNetstat = await execFileAsync("netstat.exe", ["-ano", "-p", "tcp"], {
+          windowsHide: true,
+          maxBuffer: 4 * 1024 * 1024,
+        });
+        const currentListeners = parseNetstatListeners(currentNetstat.stdout, [gatewayPort, ...corePorts]);
+        const currentProcesses = await queryListenerProcesses(currentListeners.map(listener => listener.pid));
+        const currentParents = await queryListenerProcesses(currentProcesses.map(process => process.parentProcessId));
+        const currentOwned = validateDevspaceListeners({
+          listeners: currentListeners,
+          processes: [...currentProcesses, ...currentParents],
+          packageRoot,
+          gatewayPort,
+          corePorts,
+        });
+        const currentGateways = currentOwned.filter(entry => entry.role === "gateway");
+        const currentCores = currentOwned.filter(entry => entry.role === "core");
+        if (currentGateways.length === 1 && currentCores.length === 1 && currentCores[0].pid === Number(memoryBody.pid)) {
+          ready = { gatewayPid: currentGateways[0].pid, corePid: currentCores[0].pid, corePort: currentCores[0].port };
+          break;
+        }
+      }
+    } catch {}
+  }
+  if (!ready) {
+    const failed = { ...base, ok: false, state: "cold-start-failed", completedAt: new Date().toISOString() };
+    await writeFile(resultPath, `${JSON.stringify(failed)}\n`, { encoding: "utf8", mode: 0o600 });
+    console.log(JSON.stringify({ ...failed, resultPath }));
+    process.exit(1);
+  }
+  const completed = { ...base, state: "cold-start-ready", ...ready, completedAt: new Date().toISOString() };
+  await writeFile(resultPath, `${JSON.stringify(completed)}\n`, { encoding: "utf8", mode: 0o600 });
+  console.log(JSON.stringify({ ...completed, resultPath }));
+  process.exit(0);
+}
 const jobProbe = await new Promise((resolveProbe, rejectProbe) => {
   // Match the actual detached helper's Job. execFile creates a short-lived
   // child Job and therefore measures the wrong containment boundary.

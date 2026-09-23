@@ -5,11 +5,12 @@ const source = await readFile(new URL("../dist/server.js", import.meta.url), "ut
 
 assert.match(source, /import \{ GoalRuntime \} from "\.\/goal-runtime\.js";/);
 assert.match(source, /import \{ registerGoalTools \} from "\.\/goal-tools\.js";/);
-assert.match(source, /import \{ ClassicGoalHostBridge \} from "\.\/goal-host-bridge\.js";/);
+assert.match(source, /import \{ ClassicGoalHostBridge, defaultMainDebugPorts, inspectGoalContinuationPages \} from "\.\/goal-host-bridge\.js";/);
 assert.match(source, /const GOAL_DOCK_URI = "ui:\/\/devspace\/goal-dock\.html";/);
 assert.match(source, /const GOAL_RELAY_URI = "ui:\/\/devspace\/goal-continuation-relay\.html";/);
 assert.match(source, /new GoalRuntime\(\{\s*stateDir: config\.stateDir,?\s*\}\)/s);
-assert.match(source, /const\s+classicCdpOptions\s*=\s*Array\.isArray\(config\.classicMainDebugPorts\)[\s\S]{0,180}ports:\s*config\.classicMainDebugPorts/, "Goal Host Bridge must share the configured bounded Classic port set");
+assert.match(source, /const configuredClassicPorts = Array\.isArray\(config\.classicMainDebugPorts\)[\s\S]{0,260}const classicCdpOptions = \{[\s\S]{0,220}configuredClassicPorts\.length[\s\S]{0,120}defaultMainDebugPorts\(\{ includeObserved: true, refresh: true \}\)/,
+  "Goal Host Bridge must share explicit ports or the observed-process plus canonical fallback set");
 assert.match(source, /new ClassicGoalHostBridge\(\{\s*\.\.\.classicCdpOptions,\s*beforeDispatch:\s*config\.passiveCore\s*\|\|\s*!primaryDebugGuard\s*\?\s*undefined\s*:\s*\(\) => primaryDebugGuard\.pollOnce\(\),?\s*\}\)/s);
 assert.doesNotMatch(source, /sendExactGoalRecovery|progressLivenessAdapter\.sendGoalRecovery|progressLivenessAdapter\.sendGoalContinuation/,
   "Goal continuation and same-round recovery must never be wired to the visible composer transport");
@@ -74,6 +75,12 @@ assert.match(source, /safeGoalDurabilityDiagnostics\(\{[\s\S]{0,180}goalRoundCom
   "loopback diagnostics must invoke the bounded fail-safe Goal durability wrapper instead of calling an unchecked method inline");
 assert.match(source, /goalRuntime\.conversationCollisions\(\{ limit: 20 \}\)/,
   "loopback diagnostics must expose bounded legacy multi-Goal collisions so automatic dispatch failures are diagnosable");
+assert.match(source, /app\.post\('\/__devspace\/goal\/repair-collision'/,
+  "legacy collision repair must use one explicit owner-authorized loopback endpoint rather than out-of-process state writes");
+assert.match(source, /assertGoalCollisionRepairAuthority\(\{[\s\S]{0,240}conversationId,[\s\S]{0,240}keepGoalId,[\s\S]{0,240}projection,[\s\S]{0,240}pageResolution/,
+  "collision repair requires both the current backend projection and one exact current ChatGPT page");
+assert.match(source, /goalRuntime\.resolveConversationCollision\(\{/,
+  "the active Core must serialize collision repair through its authoritative GoalRuntime");
 assert.match(source, /goalContinuation:\s*goalContinuationSupervisor\.status\(\),[\s\S]{0,80}\.\.\.durability/,
   "memory status must include the bounded Goal recovery and persistence diagnostics helper output");
 assert.match(source, /await goalRuntime\.close\(\)/);

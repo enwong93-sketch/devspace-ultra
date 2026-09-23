@@ -109,9 +109,19 @@ function postJson(baseUrl, body, headers = {}) {
   });
 }
 
-async function createHarness({ failActiveB = false, failCandidate = false, failReplacementProbe = false, schemaChanged = false, rejectedBaselineAuthorizations = [], admission } = {}) {
+async function createHarness({
+  failActiveB = false,
+  failCandidate = false,
+  failReplacementProbe = false,
+  failRollbackProbe = false,
+  schemaChanged = false,
+  rejectedBaselineAuthorizations = [],
+  runtimeIdentityResolver = null,
+  admission,
+} = {}) {
   const temp = await mkdtemp(join(tmpdir(), "stable-gateway-controller-test-"));
   const initial = await createFakeCore("core-a");
+  const handles = [initial];
   const starts = [];
   const stops = [];
   const baselineAuthorizations = [];
@@ -126,16 +136,22 @@ async function createHarness({ failActiveB = false, failCandidate = false, failR
     async startCoreSlot(options) {
       starts.push({ id: options.id, candidate: options.candidate });
       if (options.id === "core-b" && options.candidate) {
-        return createFakeCore("core-b-candidate", { tools: schemaChanged ? CHANGED_TOOLS : FAKE_TOOLS });
+        const handle = await createFakeCore("core-b-candidate", { tools: schemaChanged ? CHANGED_TOOLS : FAKE_TOOLS });
+        handles.push(handle);
+        return handle;
       }
       if (options.id === "core-b") {
         activeBStarted = true;
-        return createFakeCore("core-b", {
+        const handle = await createFakeCore("core-b", {
           failInitializeAt: failActiveB ? 1 : null,
           tools: schemaChanged ? CHANGED_TOOLS : FAKE_TOOLS,
         });
+        handles.push(handle);
+        return handle;
       }
-      return createFakeCore("core-a-restarted");
+      const handle = await createFakeCore("core-a-restarted");
+      handles.push(handle);
+      return handle;
     },
     async stopCoreSlot(handle) {
       stops.push(handle.id);
@@ -152,6 +168,9 @@ async function createHarness({ failActiveB = false, failCandidate = false, failR
       if (failCandidate) return { ok: false, stage: "schema" };
       if (failReplacementProbe && candidateProbes.length === 2) {
         return { ok: false, stage: "schema", schemaFingerprint: "c".repeat(64) };
+      }
+      if (failRollbackProbe && candidateProbes.length === 3) {
+        return { ok: false, stage: "schema", schemaFingerprint: "d".repeat(64) };
       }
       if (schemaChanged && input?.expectedSchemaFingerprint === "a".repeat(64)) {
         if (input?.allowSchemaChange === true) {
@@ -192,6 +211,15 @@ async function createHarness({ failActiveB = false, failCandidate = false, failR
       }
       return { schemaFingerprint: "a".repeat(64), toolCount: 2 };
     },
+    async readCoreRuntimeIdentity(input) {
+      if (typeof runtimeIdentityResolver === "function") {
+        return await runtimeIdentityResolver({ ...input, handles, starts, stops });
+      }
+      const handle = [...handles].reverse().find((item) => item.baseUrl === input?.coreBaseUrl && item.server?.listening);
+      return handle
+        ? { ok: true, baseUrl: input.coreBaseUrl, pid: handle.pid, passiveCore: false, autoCompactEnabled: false }
+        : { ok: false, baseUrl: input?.coreBaseUrl || null, pid: null, stage: "health", status: 503 };
+    },
   };
   const controller = createStableGatewayController({
     publicBaseUrl: PUBLIC_BASE,
@@ -209,7 +237,7 @@ async function createHarness({ failActiveB = false, failCandidate = false, failR
   const gatewayServer = createServer(controller.handlePublicRequest);
   const gatewayBaseUrl = await listen(gatewayServer);
   return {
-    temp, initial, starts, stops, dependencies, controller, gatewayServer, gatewayBaseUrl,
+    temp, initial, handles, starts, stops, dependencies, controller, gatewayServer, gatewayBaseUrl,
     baselineAuthorizations,
     candidateAuthorizations, candidateProbes,
     activeBStarted: () => activeBStarted,
@@ -537,6 +565,43 @@ async function testSchemaChangeReplacementMismatchRollsBackOldSurface() {
   }
 }
 
+async function testFatalRollbackAdoptsOnlyKnownLiveListenerHandle() {
+  const h = await createHarness({
+    failReplacementProbe: true,
+    failRollbackProbe: true,
+    runtimeIdentityResolver: ({ handles, coreBaseUrl }) => {
+      const rollbackHandle = [...handles].reverse().find((handle) => handle.id === "core-a-restarted" && handle.server?.listening);
+      return rollbackHandle
+        ? { ok: true, baseUrl: coreBaseUrl, pid: rollbackHandle.pid, passiveCore: false, autoCompactEnabled: false }
+        : { ok: false, baseUrl: coreBaseUrl, pid: null, stage: "health", status: 503 };
+    },
+  });
+  try {
+    const publicSessionId = await initializeSession(h);
+    await assert.rejects(
+      () => h.controller.handover(),
+      /handover failed.*rollback failed/i,
+      "a failed replacement and failed rollback verification must enter the fatal reconciliation path",
+    );
+    const reconciled = await h.controller.reconcileActiveCoreIdentity({ force: true });
+    assert.equal(reconciled.ok, true);
+    assert.equal(reconciled.state, "reconciled");
+    assert.equal(h.controller.status().fatal, false,
+      "an exact listener PID matching a live same-slot handle spawned by this Gateway must clear stale fatal state");
+    assert.equal(h.controller.status().activePid, reconciled.activePid);
+    assert.equal(h.controller.status().admission.closed, false);
+
+    const after = await postJson(h.gatewayBaseUrl, { jsonrpc: "2.0", id: 40, method: "tools/list", params: {} }, {
+      authorization: "Bearer replay-secret",
+      "mcp-session-id": publicSessionId,
+    });
+    assert.equal(after.status, 200);
+    assert.deepEqual(JSON.parse(after.body).result.tools, FAKE_TOOLS);
+  } finally {
+    await h.close();
+  }
+}
+
 await testClientCloseBeforeAdmissionContinuationDoesNotLeak();
 await testLongLivedEventStreamDoesNotBlockHandoverDrain();
 await testEventStreamWithoutAcceptHeaderDoesNotBlockHandoverDrain();
@@ -546,6 +611,7 @@ await testCandidateFailureNeverStopsA();
 await testSchemaChangeRequiresExplicitAuthorization();
 await testExplicitSchemaChangeDropsOldSessionsAndPromotesValidatedCore();
 await testSchemaChangeReplacementMismatchRollsBackOldSurface();
+await testFatalRollbackAdoptsOnlyKnownLiveListenerHandle();
 await testExpiredNewestAuthorizationFallsBackToLiveSession();
 
-console.log(JSON.stringify({ ok: true, gate: "stable-gateway-controller", clientDisconnectAdmissionLeakPrevented: true, schemaChangeOptIn: true, schemaChangeDropsOldSessions: true, replacementMatchesValidatedCandidate: true, schemaChangeMismatchRollsBack: true }));
+console.log(JSON.stringify({ ok: true, gate: "stable-gateway-controller", clientDisconnectAdmissionLeakPrevented: true, schemaChangeOptIn: true, schemaChangeDropsOldSessions: true, replacementMatchesValidatedCandidate: true, schemaChangeMismatchRollsBack: true, fatalRollbackIdentityReconciled: true }));

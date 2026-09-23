@@ -1,11 +1,11 @@
 import { ClassicCdpClient } from "./classic-cdp-client.js";
 import { readComposerDraft } from "./classic-composer-draft.js";
+import { classicMainDebugPorts, runtimeLabelForClassicPort } from './classic-main-debug-ports.js';
 
-const DEFAULT_PRIMARY_DEBUG_PORT = 9721;
-const DEFAULT_INTERACTIVE_DEBUG_BASE_PORT = 9730;
-const MIN_INTERACTIVE_MAIN = 2;
-const MAX_INTERACTIVE_MAIN = 32;
-const DEFAULT_PROBE_TIMEOUT_MS = 500;
+const DEFAULT_PROBE_TIMEOUT_MS = 2_000;
+const DEFAULT_PAGE_INSPECTION_TIMEOUT_MS = 12_000;
+const DEFAULT_RAW_DISPATCH_TIMEOUT_MS = 12_000;
+const DEFAULT_COMPOSER_TIMEOUT_MS = 5_000;
 const DEFAULT_CONTEXT_SETTLE_MS = 80;
 const DEFAULT_VISIBLE_REPORT_TIMEOUT_MS = 30_000;
 const DEFAULT_VISIBLE_REPORT_POLL_MS = 150;
@@ -22,12 +22,7 @@ function errorMessage(error) {
 }
 
 function runtimeLabelForPort(port) {
-  if (port === DEFAULT_PRIMARY_DEBUG_PORT) return "Main-01";
-  const number = port - DEFAULT_INTERACTIVE_DEBUG_BASE_PORT;
-  if (number >= MIN_INTERACTIVE_MAIN && number <= MAX_INTERACTIVE_MAIN) {
-    return `Main-${String(number).padStart(2, "0")}`;
-  }
-  return `Main@${port}`;
+  return runtimeLabelForClassicPort(port);
 }
 
 function conversationIdFromPageUrl(url) {
@@ -176,14 +171,8 @@ export async function waitForVisibleReportBoundary({
   };
 }
 
-export function defaultMainDebugPorts() {
-  return [
-    DEFAULT_PRIMARY_DEBUG_PORT,
-    ...Array.from(
-      { length: MAX_INTERACTIVE_MAIN - MIN_INTERACTIVE_MAIN + 1 },
-      (_, index) => DEFAULT_INTERACTIVE_DEBUG_BASE_PORT + MIN_INTERACTIVE_MAIN + index,
-    ),
-  ];
+export function defaultMainDebugPorts(options = {}) {
+  return classicMainDebugPorts(options);
 }
 
 class CdpClient extends ClassicCdpClient {
@@ -361,14 +350,14 @@ export async function inspectVisibleReportCommit(candidate, options = {}) {
             const sessionResponse = await fetch('/api/auth/session', {
               credentials: 'include',
               cache: 'no-store',
-              signal: AbortSignal.timeout(3000),
+              signal: AbortSignal.timeout(${Math.max(1_000, Number(options.nativeSessionTimeoutMs) || 5_000)}),
             });
             const session = sessionResponse.ok ? await sessionResponse.json() : null;
             const accessToken = session?.accessToken || session?.access_token || null;
             const conversationResponse = await fetch('/backend-api/conversation/' + encodeURIComponent(conversationId), {
               credentials: 'include',
               cache: 'no-store',
-              signal: AbortSignal.timeout(8000),
+              signal: AbortSignal.timeout(${Math.max(5_000, Number(options.nativeConversationTimeoutMs) || 30_000)}),
               headers: accessToken ? { authorization: 'Bearer ' + accessToken } : undefined,
             });
             if (conversationResponse.ok) {
@@ -386,6 +375,9 @@ export async function inspectVisibleReportCommit(candidate, options = {}) {
                     role: String(node.message.author?.role || '').trim().toLowerCase() || null,
                     status: String(node.message.status || '').trim() || null,
                     endTurn: node.message.end_turn === true,
+                    createTime: Number.isFinite(Number(node.message.create_time))
+                      ? Number(node.message.create_time)
+                      : null,
                   });
                 }
                 nodeId = node.parent;
@@ -404,20 +396,49 @@ export async function inspectVisibleReportCommit(candidate, options = {}) {
               const newAssistant = newAssistantIndex >= 0 ? afterBaseline[newAssistantIndex] : null;
               const latestUser = [...branch].reverse().find(row => row.role === 'user') || null;
               const latestAssistant = [...branch].reverse().find(row => row.role === 'assistant') || null;
+              const latestUserIndex = latestUser ? branch.lastIndexOf(latestUser) : -1;
+              const beforeLatestUser = latestUserIndex >= 0 ? branch.slice(0, latestUserIndex) : [];
+              const previousUser = [...beforeLatestUser].reverse().find(row => row.role === 'user') || null;
+              const assistantBeforeLatestUser = [...beforeLatestUser].reverse().find(row => row.role === 'assistant') || null;
               const current = branch.at(-1) || null;
               nativeContinuation = {
                 resolved: true,
                 currentNodeId,
+                currentMessageId: current?.id || null,
                 currentRole: current?.role || null,
                 currentStatus: current?.status || null,
                 currentEndTurn: current?.endTurn === true,
+                currentCreatedAt: current?.createTime != null
+                  ? new Date(current.createTime * 1000).toISOString()
+                  : null,
                 branchMessageCount: branch.length,
                 sourceUserFound: sourceIndex >= 0,
                 baselineAssistantFound: baselineIndex >= 0,
                 latestUserMessageId: latestUser?.id || null,
+                latestUserCreatedAt: latestUser?.createTime != null
+                  ? new Date(latestUser.createTime * 1000).toISOString()
+                  : null,
+                previousUserMessageId: previousUser?.id || null,
+                previousUserCreatedAt: previousUser?.createTime != null
+                  ? new Date(previousUser.createTime * 1000).toISOString()
+                  : null,
+                assistantBeforeLatestUserMessageId: assistantBeforeLatestUser?.id || null,
+                assistantBeforeLatestUserStatus: assistantBeforeLatestUser?.status || null,
+                assistantBeforeLatestUserEndTurn: assistantBeforeLatestUser?.endTurn === true,
+                assistantBeforeLatestUserCreatedAt: assistantBeforeLatestUser?.createTime != null
+                  ? new Date(assistantBeforeLatestUser.createTime * 1000).toISOString()
+                  : null,
                 latestAssistantMessageId: latestAssistant?.id || null,
+                latestAssistantStatus: latestAssistant?.status || null,
+                latestAssistantEndTurn: latestAssistant?.endTurn === true,
+                latestAssistantCreatedAt: latestAssistant?.createTime != null
+                  ? new Date(latestAssistant.createTime * 1000).toISOString()
+                  : null,
                 newUserAfterBaselineMessageId: newUser?.id || null,
                 newUserAfterBaselineIndex: newUserIndex,
+                newUserAfterBaselineCreatedAt: newUser?.createTime
+                  ? new Date(newUser.createTime * 1000).toISOString()
+                  : null,
                 newAssistantAfterBaselineMessageId: newAssistant?.id || null,
                 newAssistantAfterBaselineIndex: newAssistantIndex,
               };
@@ -643,7 +664,9 @@ export async function inspectGoalContinuationPages(goal, {
   if (!candidates.length || candidates.length > 4) return [];
   const snapshots = await Promise.all(candidates.map(async candidate => {
     const page = await inspectVisibleReportCommit(candidate, {
-      timeoutMs: includeNativeBranch ? 12000 : 3000,
+      timeoutMs: includeNativeBranch ? 45_000 : 3_000,
+      nativeSessionTimeoutMs: includeNativeBranch ? 5_000 : undefined,
+      nativeConversationTimeoutMs: includeNativeBranch ? 30_000 : undefined,
       skipNativeStatus,
       includeNativeBranch,
       sourceUserMessageId,
@@ -691,6 +714,7 @@ async function findRawHostObject(client, contextId) {
 export async function sendRawHostFollowUp(candidate, payload, options = {}) {
   const client = new CdpClient(candidate.webSocketDebuggerUrl, options);
   let dispatchCommitted = false;
+  let dispatchAttempted = false;
   await client.open();
   try {
     await client.call("Runtime.enable");
@@ -699,14 +723,23 @@ export async function sendRawHostFollowUp(candidate, payload, options = {}) {
     const context = chooseInnerContext(client, candidate.targetId);
     if (!context) throw new Error("Goal widget execution context is unavailable.");
     const rawHost = await findRawHostObject(client, context.id);
-    dispatchCommitted = true;
+    dispatchAttempted = true;
     let result;
     try {
       result = await client.call("Runtime.callFunctionOn", {
         objectId: rawHost.objectId,
-        functionDeclaration: "function(message){ return this.sendFollowUpMessage(message); }",
+        // Do not await the host promise. In current ChatGPT builds that promise
+        // can remain pending for the entire assistant turn, which is much
+        // longer than a safe CDP acknowledgement window. Successful return
+        // proves the host function was synchronously invoked; native branch
+        // confirmation remains the downstream authority for Goal advancement.
+        functionDeclaration: `function(message){
+          const pending=this.sendFollowUpMessage(message);
+          if(pending&&typeof pending.catch==='function')pending.catch(()=>{});
+          return {invoked:true,thenable:Boolean(pending&&typeof pending.then==='function')};
+        }`,
         arguments: [{ value: { prompt: payload.prompt, scrollToBottom: false } }],
-        awaitPromise: true,
+        awaitPromise: false,
         returnByValue: true,
         userGesture: false,
       });
@@ -734,14 +767,24 @@ export async function sendRawHostFollowUp(candidate, payload, options = {}) {
         error: result.exceptionDetails.text || "Raw ChatGPT Classic follow-up RPC failed.",
       };
     }
+    if (result?.result?.value?.invoked !== true) {
+      return {
+        ok: false,
+        definiteFailure: false,
+        dispatchCommitted: true,
+        backgroundAccepted: false,
+        state: "raw-host-invocation-unconfirmed",
+      };
+    }
+    dispatchCommitted = true;
     return { ok: true, dispatchCommitted: true, backgroundAccepted: true };
   } catch (error) {
     return {
       ok: false,
-      definiteFailure: dispatchCommitted !== true,
-      dispatchCommitted,
+      definiteFailure: dispatchAttempted !== true,
+      dispatchCommitted: dispatchAttempted,
       backgroundAccepted: false,
-      state: dispatchCommitted ? "raw-host-acknowledgement-lost" : "raw-host-preflight-failed",
+      state: dispatchAttempted ? "raw-host-acknowledgement-lost" : "raw-host-preflight-failed",
       error: errorMessage(error),
     };
   } finally {
@@ -770,19 +813,37 @@ export class ClassicGoalHostBridge {
     fetchImpl = globalThis.fetch,
     WebSocketImpl = globalThis.WebSocket,
     probeTimeoutMs = DEFAULT_PROBE_TIMEOUT_MS,
+    pageInspectionTimeoutMs = DEFAULT_PAGE_INSPECTION_TIMEOUT_MS,
+    rawDispatchTimeoutMs = DEFAULT_RAW_DISPATCH_TIMEOUT_MS,
+    composerTimeoutMs = DEFAULT_COMPOSER_TIMEOUT_MS,
     contextSettleMs = DEFAULT_CONTEXT_SETTLE_MS,
   } = {}) {
     this.ports = [...ports];
     this.options = { fetchImpl, WebSocketImpl, timeoutMs: probeTimeoutMs, contextSettleMs };
+    this.pageInspectionOptions = {
+      fetchImpl, WebSocketImpl,
+      timeoutMs: Math.max(DEFAULT_PROBE_TIMEOUT_MS, Number(pageInspectionTimeoutMs) || DEFAULT_PAGE_INSPECTION_TIMEOUT_MS),
+      contextSettleMs,
+    };
+    this.rawDispatchOptions = {
+      fetchImpl, WebSocketImpl,
+      timeoutMs: Math.max(DEFAULT_PROBE_TIMEOUT_MS, Number(rawDispatchTimeoutMs) || DEFAULT_RAW_DISPATCH_TIMEOUT_MS),
+      contextSettleMs,
+    };
+    this.composerOptions = {
+      fetchImpl, WebSocketImpl,
+      timeoutMs: Math.max(DEFAULT_PROBE_TIMEOUT_MS, Number(composerTimeoutMs) || DEFAULT_COMPOSER_TIMEOUT_MS),
+      contextSettleMs,
+    };
     this.probePort = probePort || ((port) => probeClassicMainPort(port, this.options));
     this.probeRelayPort = probeRelayPort || ((port, conversationId) => probeClassicRelayPort(port, conversationId, this.options));
     this.probeConversationPage = probeConversationPage || ((port, conversationId) => probeClassicConversationPagePort(port, conversationId, this.options));
-    this.sendRaw = sendRaw || ((candidate, payload) => sendRawHostFollowUp(candidate, payload, this.options));
+    this.sendRaw = sendRaw || ((candidate, payload) => sendRawHostFollowUp(candidate, payload, this.rawDispatchOptions));
     this.beforeDispatch = beforeDispatch;
     this.beforeRawDispatch = beforeRawDispatch;
-    this.inspectVisibleReport = inspectVisibleReport || ((candidate, payload = {}) => inspectVisibleReportCommit(candidate, { ...this.options, ...payload }));
-    this.inspectComposer = inspectComposer || ((candidate, expectedText) => inspectExactPageComposer(candidate, expectedText, this.options));
-    this.clearOwnedComposer = clearOwnedComposer || ((candidate, expectedText) => clearExactOwnedComposerPayload(candidate, expectedText, this.options));
+    this.inspectVisibleReport = inspectVisibleReport || ((candidate, payload = {}) => inspectVisibleReportCommit(candidate, { ...this.pageInspectionOptions, ...payload }));
+    this.inspectComposer = inspectComposer || ((candidate, expectedText) => inspectExactPageComposer(candidate, expectedText, this.composerOptions));
+    this.clearOwnedComposer = clearOwnedComposer || ((candidate, expectedText) => clearExactOwnedComposerPayload(candidate, expectedText, this.composerOptions));
     this.waitForVisibleReport = waitForVisibleReport || ((candidate, payload) => waitForVisibleReportBoundary({
       inspect: () => this.inspectVisibleReport(candidate, payload),
       reportedAt: payload?.reportedAt,
@@ -1061,7 +1122,7 @@ export class ClassicGoalHostBridge {
     return { candidate: relay, relayFallback: Boolean(relay) };
   }
 
-  async inspectWorkingRound(goalOrGoalId) {
+  async inspectWorkingRound(goalOrGoalId, { includeNativeBranch = false } = {}) {
     const goal = goalOrGoalId && typeof goalOrGoalId === "object" ? goalOrGoalId : null;
     const goalId = String(goal?.id ?? goalOrGoalId ?? "").trim();
     if (!goalId) throw new Error("Goal working-round inspection requires goalId.");
@@ -1087,7 +1148,16 @@ export class ClassicGoalHostBridge {
           : `No matching Chat-mode Goal widget was found for ${goalId}, and no authoritative conversation fallback is available.`,
       };
     }
-    const snapshot = await this.inspectVisibleReport(matching, { goalId, recovery: true });
+    const snapshot = await this.inspectVisibleReport(matching, {
+      goalId,
+      recovery: true,
+      includeNativeBranch: includeNativeBranch === true,
+      ...(includeNativeBranch === true ? {
+        timeoutMs: 45_000,
+        nativeSessionTimeoutMs: 5_000,
+        nativeConversationTimeoutMs: 30_000,
+      } : {}),
+    });
     return {
       ...snapshot,
       runtimePort: matching.runtimePort,
@@ -1270,7 +1340,9 @@ export class ClassicGoalHostBridge {
     this.beforeRawDispatch = typeof handler === "function" ? handler : null;
   }
 
-  async dispatch({ goalId, prompt, continuationId, leaseId, round, reportedAt, conversationId = null, runtimePort = null, expectedPageTargetId = null } = {}) {
+  async dispatch({ goalId, prompt, continuationId, leaseId, round, reportedAt,
+    conversationId = null, runtimePort = null, expectedPageTargetId = null,
+    sourceUserId = null, assistantMessageId = null } = {}) {
     if (typeof goalId !== "string" || !goalId.trim()) throw new Error("Goal host dispatch requires goalId.");
     if (typeof prompt !== "string" || !prompt.trim()) throw new Error("Goal host dispatch requires prompt.");
 
@@ -1362,6 +1434,48 @@ export class ClassicGoalHostBridge {
         leaseId,
         round,
       });
+      const sourceUser = String(sourceUserId || "").trim();
+      const baselineAssistant = String(assistantMessageId || "").trim();
+      if ((sent?.ok === true || sent?.dispatchCommitted === true)
+        && sourceUser && baselineAssistant) {
+        const confirmed = await this.waitForHiddenAssistant(matching, {
+          sourceUserMessageId: sourceUser,
+          baselineAssistantMessageId: baselineAssistant,
+          expectedControlText: prompt,
+        });
+        if (confirmed?.ok === true) {
+          return {
+            ok: true,
+            transport: sent?.ok === true
+              ? "classic-hidden-continuation-native-confirmed"
+              : "classic-hidden-continuation-native-reconciled",
+            runtimeLabel: matching.runtimeLabel,
+            runtimePort: matching.runtimePort,
+            targetId: matching.targetId,
+            pageTargetId: matching.pageTargetId,
+            relayFallback: true,
+            dispatchCommitted: true,
+            backgroundAccepted: true,
+            nativeBranchReconciled: true,
+            visibilityVerified: false,
+            visibleUserMessage: false,
+            composerMutation: false,
+            foregroundActivation: false,
+            pageNavigation: false,
+          };
+        }
+        return {
+          ok: false,
+          definiteFailure: sent?.dispatchCommitted !== true && sent?.ok !== true
+            && confirmed?.definiteFailure === true,
+          dispatchCommitted: sent?.dispatchCommitted === true || sent?.ok === true,
+          backgroundAccepted: false,
+          state: confirmed?.state || sent?.state || "hidden-continuation-native-confirmation-missing",
+          error: sent?.error || null,
+          composerMutation: confirmed?.composerMutation === true,
+          composerCleanupVerified: confirmed?.composerCleanupVerified === true,
+        };
+      }
       if (sent?.ok !== true) {
         return {
           ok: false,

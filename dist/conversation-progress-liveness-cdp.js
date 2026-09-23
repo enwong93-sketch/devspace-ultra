@@ -1,11 +1,16 @@
 import { createHash } from "node:crypto";
 import { readComposerDraft } from './classic-composer-draft.js';
+import { runtimePortsForClassicKey } from './classic-main-debug-ports.js';
 
 export const INTERRUPTED_TURN_RESCUE_TEXT = "- 繼續";
 const TURN_ERROR_PATTERN_SOURCE = "something went wrong|error generating|network error|thinking failed|thought failed|thinking interrupted|thought interrupted|發生錯誤|出現問題|網絡錯誤|思考失敗|思考失败|已中斷思考|已中断思考|再試一次";
 
 export function isClassicTurnErrorText(value) {
   return new RegExp(TURN_ERROR_PATTERN_SOURCE, "i").test(String(value || ""));
+}
+
+export function selectCurrentTurnMessage(currentTurnMessage, previousGlobalMessage, currentTurnSectionPresent) {
+  return currentTurnMessage || (!currentTurnSectionPresent ? previousGlobalMessage : null) || null;
 }
 
 function cleanConversationId(value) {
@@ -24,12 +29,11 @@ function cleanRuntimeKey(value) {
 }
 
 function runtimePort(runtimeKey) {
-  const key = cleanRuntimeKey(runtimeKey);
-  if (!key) return null;
-  const number = Number(key.slice(-2));
-  if (number === 1) return 9721;
-  if (number >= 2 && number <= 32) return 9730 + number;
-  return null;
+  return runtimePortsForClassicKey(runtimeKey)[0] ?? null;
+}
+
+function runtimePorts(runtimeKey) {
+  return runtimePortsForClassicKey(runtimeKey);
 }
 
 function markerFor(conversationId, attempt) {
@@ -123,6 +127,7 @@ async function connectTarget(target) {
 
 function exactConversationExpression(conversationId) {
   return `(() => {
+    const selectCurrentTurnMessage = ${selectCurrentTurnMessage.toString()};
     const expected = ${JSON.stringify(conversationId)};
     const match = location.pathname.match(/\\/c\\/([^/?#]+)/);
     const actual = match ? match[1] : null;
@@ -153,14 +158,24 @@ function exactConversationExpression(conversationId) {
     // Failed assistant turns often contain no data-message-author-role node at
     // all. The last visible turn section is therefore the authoritative UI
     // boundary; fall back to the latest role-bearing message only for older UI.
-    const latestTurnContainer = turnSections.at(-1)
+    const latestTurnSection = turnSections.at(-1) || null;
+    const latestTurnContainer = latestTurnSection
       || messageNodes.at(-1)?.closest('article')
       || messageNodes.at(-1)
       || null;
     const latestTurnMessages = latestTurnContainer
       ? [...latestTurnContainer.querySelectorAll('[data-message-author-role]')].filter(visible)
       : [];
-    const latestMessage = latestTurnMessages.at(-1) || messageNodes.at(-1) || null;
+    // When the current ChatGPT turn section is present but temporarily has no
+    // role-bearing message, do not borrow the previous turn's assistant node.
+    // That transition occurs immediately before a role-less Thinking-failed
+    // surface appears; treating the previous assistant as the current final
+    // would disarm Rescue before the error can be observed.
+    const latestMessage = selectCurrentTurnMessage(
+      latestTurnMessages.at(-1),
+      messageNodes.at(-1),
+      Boolean(latestTurnSection)
+    );
     const latestMessageRole = latestMessage?.getAttribute('data-message-author-role') || null;
     const latestMessageText = String(latestMessage?.innerText || latestMessage?.textContent || '').trim();
     const userMessages = messageNodes.filter((node) => node.getAttribute('data-message-author-role') === 'user');
@@ -173,8 +188,8 @@ function exactConversationExpression(conversationId) {
       ? [...latestTurnContainer.querySelectorAll('button,[role="alert"],[data-testid*="error" i],[data-testid*="retry" i]')].filter(visible)
       : [];
     const turnErrorPattern = new RegExp(${JSON.stringify(TURN_ERROR_PATTERN_SOURCE)}, 'i');
-    const rolelessTurnError = latestTurnMessages.length === 0
-      && latestTurnContainer
+    const rolelessTurnError = latestTurnSection
+      && latestTurnMessages.length === 0
       && turnErrorPattern.test(String(latestTurnContainer.innerText || latestTurnContainer.textContent || ''));
     const hasTurnError = rolelessTurnError
       || errorNodes.some((node) => turnErrorPattern.test(String(node.innerText || node.textContent || '')))
@@ -191,6 +206,8 @@ function exactConversationExpression(conversationId) {
       generating,
       latestMessageRole,
       latestMessageTextLength: latestMessageText.length,
+      latestTurnSectionPresent: Boolean(latestTurnSection),
+      latestTurnRoleless: Boolean(latestTurnSection && latestTurnMessages.length === 0),
       latestUserMessageId,
       previousUserMessageId,
       hasTurnError,
@@ -202,6 +219,48 @@ function exactConversationExpression(conversationId) {
       progressCardMounted: Boolean(root),
       progressConversationId: root?.dataset?.conversationId || actual,
       url: location.href,
+    };
+  })()`;
+}
+
+// Bounded fallback for very large/partially failed ChatGPT pages. It reads
+// only the current route, composer, stop control and final turn section. This
+// is sufficient to preserve interrupted-turn evidence without walking every
+// visible message node. The fallback is never used to select another page or
+// another conversation and is clearly marked in the returned diagnostics.
+function lightweightExactConversationExpression(conversationId) {
+  return `(() => {
+    const selectCurrentTurnMessage=${selectCurrentTurnMessage.toString()};
+    const expected=${JSON.stringify(conversationId)};
+    const actual=location.pathname.match(/\\/c\\/([^/?#]+)/)?.[1]||null;
+    const editor=document.querySelector('#prompt-textarea, textarea, div.ProseMirror[contenteditable="true"], [data-lexical-editor="true"][contenteditable="true"], [contenteditable="true"][role="textbox"]');
+    const composerText=editor?String(editor instanceof HTMLTextAreaElement?editor.value:editor.innerText||editor.textContent||'').replace(/\\u2060/g,'').trim():null;
+    const generating=Boolean(document.querySelector('[data-testid="stop-button"]'));
+    const turns=[...document.querySelectorAll('section[data-testid^="conversation-turn-"]')];
+    const lastTurn=turns.at(-1)||null;
+    const roleNodes=lastTurn?[...lastTurn.querySelectorAll('[data-message-author-role]')]:[];
+    const fallbackRoles=[...document.querySelectorAll('[data-message-author-role]')];
+    const latestMessage=selectCurrentTurnMessage(roleNodes.at(-1),fallbackRoles.at(-1),Boolean(lastTurn));
+    const latestMessageRole=latestMessage?.getAttribute('data-message-author-role')||null;
+    const latestMessageText=String(latestMessage?.innerText||latestMessage?.textContent||'').trim();
+    const users=fallbackRoles.filter(node=>node.getAttribute('data-message-author-role')==='user');
+    const lastTurnText=String(lastTurn?.innerText||lastTurn?.textContent||'');
+    const errorPattern=new RegExp(${JSON.stringify(TURN_ERROR_PATTERN_SOURCE)},'i');
+    const errorNodes=lastTurn?[...lastTurn.querySelectorAll('button,[role="alert"],[data-testid*="error" i],[data-testid*="retry" i]')]:[];
+    const rolelessTurnError=Boolean(lastTurn&&roleNodes.length===0&&errorPattern.test(lastTurnText));
+    const hasTurnError=rolelessTurnError||errorNodes.some(node=>errorPattern.test(String(node.innerText||node.textContent||'')));
+    const root=document.getElementById('devspace-progress-narration-root');
+    return {
+      exact:actual===expected,conversationId:actual,hydrated:document.readyState==='complete'&&Boolean(editor),
+      generating,latestMessageRole,latestMessageTextLength:latestMessageText.length,
+      latestTurnSectionPresent:Boolean(lastTurn),latestTurnRoleless:Boolean(lastTurn&&roleNodes.length===0),
+      latestUserMessageId:users.at(-1)?.getAttribute('data-message-id')||null,
+      previousUserMessageId:users.at(-2)?.getAttribute('data-message-id')||null,
+      hasTurnError,normalCompletion:!generating&&latestMessageRole==='assistant'&&latestMessageText.length>0&&!hasTurnError,
+      incompleteUserTurn:!generating&&latestMessageRole==='user',composerFound:Boolean(editor),composerEmpty:composerText==='',
+      composerLength:composerText==null?null:composerText.length,progressCardMounted:Boolean(root),
+      progressConversationId:root?.dataset?.conversationId||actual,url:location.href,
+      inspectionFallback:'latest-turn-bounded'
     };
   })()`;
 }
@@ -226,16 +285,18 @@ export class ConversationProgressLivenessCdpAdapter {
     if (!id) return { exact: false, state: "invalid-conversation" };
     const matches = [];
     for (const runtimeKey of this.runtimeKeys) {
-      const port = runtimePort(runtimeKey);
-      try {
-        const targets = await this.listTargets(port);
-        for (const target of targets) {
-          if (target?.type !== "page" || !target?.webSocketDebuggerUrl) continue;
-          if (conversationIdFromUrl(target.url) !== id) continue;
-          matches.push({ runtimeKey, port, target });
+      for (const port of runtimePorts(runtimeKey)) {
+        try {
+          const targets = await this.listTargets(port);
+          for (const target of Array.isArray(targets) ? targets : []) {
+            if (target?.type !== "page" || !target?.webSocketDebuggerUrl) continue;
+            if (conversationIdFromUrl(target.url) !== id) continue;
+            matches.push({ runtimeKey, port, target });
+          }
+        } catch {
+          // An offline canonical/fallback port cannot invalidate the same
+          // runtime discovered on its observed launch port or another Main.
         }
-      } catch {
-        // One offline Runtime cannot invalidate a conversation found elsewhere.
       }
     }
     if (matches.length > 1) {
@@ -288,35 +349,50 @@ export class ConversationProgressLivenessCdpAdapter {
     const id = cleanConversationId(conversationId);
     const key = cleanRuntimeKey(runtimeKey);
     if (!id || !key) return { exact: false, state: "invalid-conversation-or-runtime" };
-    const port = runtimePort(key);
-    try {
-      const targets = await this.listTargets(port);
-      const matches = (Array.isArray(targets) ? targets : []).filter((target) => (
-        target?.type === "page"
-        && target?.webSocketDebuggerUrl
-        && conversationIdFromUrl(target.url) === id
-      ));
-      if (matches.length !== 1) {
-        return {
-          exact: false,
-          ambiguous: matches.length > 1,
-          state: matches.length > 1 ? "duplicate-conversation-pages-in-runtime" : "conversation-not-in-runtime",
-          conversationId: id,
-          runtimeKey: key,
-          port,
-          matchCount: matches.length,
-          locatorOnly: true,
-          runtimeBinding: false,
-        };
-      }
-      return await this.#inspectMatch({ runtimeKey: key, port, target: matches[0] }, id);
-    } catch {
+    const matches = [];
+    const attemptedPorts = runtimePorts(key);
+    const onlinePorts = [];
+    for (const port of attemptedPorts) {
+      try {
+        const targets = await this.listTargets(port);
+        onlinePorts.push(port);
+        for (const target of Array.isArray(targets) ? targets : []) {
+          if (target?.type !== "page" || !target?.webSocketDebuggerUrl) continue;
+          if (conversationIdFromUrl(target.url) !== id) continue;
+          matches.push({ runtimeKey: key, port, target });
+        }
+      } catch {}
+    }
+    if (matches.length !== 1) {
       return {
         exact: false,
-        state: "runtime-unavailable",
+        ambiguous: matches.length > 1,
+        state: matches.length > 1
+          ? "duplicate-conversation-pages-in-runtime"
+          : onlinePorts.length
+            ? "conversation-not-in-runtime"
+            : "runtime-unavailable",
         conversationId: id,
         runtimeKey: key,
-        port,
+        port: attemptedPorts[0] ?? null,
+        attemptedPorts,
+        onlinePorts,
+        matchCount: matches.length,
+        locatorOnly: true,
+        runtimeBinding: false,
+      };
+    }
+    try {
+      return await this.#inspectMatch(matches[0], id);
+    } catch (error) {
+      return {
+        exact: false,
+        state: "runtime-page-inspection-failed",
+        errorName: error instanceof Error ? error.name : "Error",
+        conversationId: id,
+        runtimeKey: key,
+        port: matches[0].port,
+        attemptedPorts,
         locatorOnly: true,
         runtimeBinding: false,
       };
@@ -330,27 +406,28 @@ export class ConversationProgressLivenessCdpAdapter {
   } = {}) {
     const candidates = [];
     for (const runtimeKey of this.runtimeKeys) {
-      const port = runtimePort(runtimeKey);
-      try {
-        const targets = await this.listTargets(port);
-        for (const target of Array.isArray(targets) ? targets : []) {
-          if (target?.type !== "page" || !target?.webSocketDebuggerUrl) continue;
-          const conversationId = cleanConversationId(conversationIdFromUrl(target.url));
-          if (!conversationId) continue;
-          const inspected = await this.#inspectMatch({ runtimeKey, port, target }, conversationId);
-          if (!inspected?.exact || !inspected?.hydrated || !inspected?.composerFound || !inspected?.composerEmpty) continue;
-          if (requireProgressCard && (
-            inspected.progressCardMounted !== true
-            || inspected.progressConversationId !== conversationId
-          )) continue;
-          const active = inspected.generating === true
-            || (allowIncompleteUserTurn && inspected.incompleteUserTurn === true);
-          if (requireGenerating && !active) continue;
-          candidates.push(inspected);
+      for (const port of runtimePorts(runtimeKey)) {
+        try {
+          const targets = await this.listTargets(port);
+          for (const target of Array.isArray(targets) ? targets : []) {
+            if (target?.type !== "page" || !target?.webSocketDebuggerUrl) continue;
+            const conversationId = cleanConversationId(conversationIdFromUrl(target.url));
+            if (!conversationId) continue;
+            const inspected = await this.#inspectMatch({ runtimeKey, port, target }, conversationId);
+            if (!inspected?.exact || !inspected?.hydrated || !inspected?.composerFound || !inspected?.composerEmpty) continue;
+            if (requireProgressCard && (
+              inspected.progressCardMounted !== true
+              || inspected.progressConversationId !== conversationId
+            )) continue;
+            const active = inspected.generating === true
+              || (allowIncompleteUserTurn && inspected.incompleteUserTurn === true);
+            if (requireGenerating && !active) continue;
+            candidates.push(inspected);
+          }
+        } catch {
+          // Offline runtimes and transient CDP failures are ignored. A fallback
+          // is valid only when exactly one remaining page proves itself active.
         }
-      } catch {
-        // Offline runtimes and transient CDP failures are ignored. A fallback
-        // is valid only when exactly one remaining page proves itself active.
       }
     }
     if (candidates.length !== 1) {
@@ -747,11 +824,24 @@ export class ConversationProgressLivenessCdpAdapter {
   async close() {}
 
   async #inspectMatch(match, conversationId) {
-    const page = await this.connect(match.target);
+    let page = null;
+    let result;
+    let fallbackError = null;
     try {
-      const result = await page.evaluate(exactConversationExpression(conversationId));
+      try {
+        page = await this.connect(match.target);
+        result = await page.evaluate(exactConversationExpression(conversationId));
+      } catch (error) {
+        fallbackError = error instanceof Error ? error.name : 'Error';
+        page?.close?.();
+        page = null;
+        await this.sleep(50);
+        page = await this.connect(match.target);
+        result = await page.evaluate(lightweightExactConversationExpression(conversationId));
+      }
       return {
         ...result,
+        ...(fallbackError ? { primaryInspectionErrorName: fallbackError, boundedInspectionFallback: true } : {}),
         // Runtime identifies only the physical window where this exact
         // conversation is currently open.  It is never persisted or used as
         // narration ownership.  Keep the legacy aliases for callers that
@@ -772,7 +862,7 @@ export class ConversationProgressLivenessCdpAdapter {
         },
       };
     } finally {
-      page.close();
+      page?.close?.();
     }
   }
 
@@ -783,7 +873,7 @@ export class ConversationProgressLivenessCdpAdapter {
     if (supplied?.exact === true && supplied?.conversationId === id && supplied?.target?.webSocketDebuggerUrl) {
       const runtimeKey = cleanRuntimeKey(supplied.target.runtimeKey || supplied.runtimeKey);
       const port = Number(supplied.target.port || supplied.port);
-      if (runtimeKey && runtimePort(runtimeKey) === port && conversationIdFromUrl(supplied.target.url) === id) {
+      if (runtimeKey && runtimePorts(runtimeKey).includes(port) && conversationIdFromUrl(supplied.target.url) === id) {
         try {
           const targets = await this.listTargets(port);
           const exact = targets.filter((target) => (
@@ -825,9 +915,12 @@ export class ConversationProgressLivenessCdpAdapter {
 
 export const _test = {
   runtimePort,
+  runtimePorts,
   markerFor,
   localMinute,
   conversationIdFromUrl,
   exactConversationExpression,
+  lightweightExactConversationExpression,
+  selectCurrentTurnMessage,
   TURN_ERROR_PATTERN_SOURCE,
 };

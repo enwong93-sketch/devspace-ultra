@@ -92,6 +92,7 @@ export function registerPlanTools(server, planRuntime, {
   startClaimRegistry = null,
   claimRelayResourceUri = null,
   resolveStartClaimPage = null,
+  resolveActiveGoal = null,
 } = {}) {
   if (!resourceUri) throw new Error("registerPlanTools requires resourceUri.");
   const resolveConversationId = async (extra) => {
@@ -207,7 +208,23 @@ export function registerPlanTools(server, planRuntime, {
   }, async ({ planId, explanation, steps }) => {
     try {
       const plan = await planRuntime.update({ planId, explanation, steps });
-      return textResult(plan, `Updated plan ${plan.id} to revision ${plan.revision}.`);
+      let message = `Updated plan ${plan.id} to revision ${plan.revision}.`;
+      if (plan.status === "completed" && plan.conversationId && typeof resolveActiveGoal === "function") {
+        const goal = await resolveActiveGoal(plan.conversationId).catch(() => null);
+        const goalRoundBeganAt = Date.parse(String(goal?.roundBeganAt || ""));
+        const planCompletedAt = Date.parse(String(plan.completedAt || ""));
+        if (
+          goal?.status === "active"
+          && goal?.roundState === "working"
+          && Number.isInteger(goal?.round)
+          && Number.isFinite(goalRoundBeganAt)
+          && Number.isFinite(planCompletedAt)
+          && planCompletedAt >= goalRoundBeganAt - 1_000
+        ) {
+          message += ` Plan work is complete while Goal ${goal.id} round ${goal.round} remains working. If this round is finished, call devspace_goal_turn_report as the final tool now and then give one visible final report. If meaningful work remains, start a fresh devspace_plan_start before any other substantive tool.`;
+        }
+      }
+      return textResult(plan, message);
     } catch (error) {
       return errorResult(error);
     }

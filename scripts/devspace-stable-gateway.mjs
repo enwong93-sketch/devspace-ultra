@@ -14,10 +14,11 @@ import { createStableGatewayHumanProgress, handleStableGatewayHumanProgressReque
 import { migrateAgentAuthoredProgressState } from "../dist/agent-authored-progress-state.js";
 import { GoalProgressNarrator } from "../dist/agent-authored-progress-journal.js";
 import { createLogRetentionSupervisor } from "../dist/log-retention.js";
-import { probeCandidate, readCoreSchemaFingerprint } from "../dist/stable-gateway-candidate.js";
+import { probeCandidate, readCoreRuntimeIdentity, readCoreSchemaFingerprint } from "../dist/stable-gateway-candidate.js";
 import { loadDevspaceFiles } from "../dist/user-config.js";
 import { nodeArgsForCoreHeapProfile } from "../dist/core-node-options.js";
 import { createCandidateSnapshot, startCoreSlot, stopCoreSlot } from "./devspace-core-slot.mjs";
+import { applyDevspaceRuntimePriority } from "../dist/runtime-priority.js";
 
 const CONTROL_FILE_NAME = "stable-gateway-control.json";
 const DEFAULT_CORE_START_RETRY_MS = 2_000;
@@ -293,6 +294,7 @@ export function stableGatewayOptionsFromEnvironment(env = process.env) {
         }),
         stopCoreSlot,
         probeCandidate,
+        readCoreRuntimeIdentity,
         readCoreSchemaFingerprint,
       },
     },
@@ -305,6 +307,7 @@ async function isMainModule() {
 }
 
 if (await isMainModule()) {
+  const gatewayPriority = applyDevspaceRuntimePriority("gateway");
   const options = stableGatewayOptionsFromEnvironment();
   const activityJournal = createStableGatewayActivityJournal();
   const humanProgressStatePath = join(options.controllerOptions.stateDir, "devspace-live-progress.json");
@@ -346,6 +349,7 @@ if (await isMainModule()) {
     activeSlot: controller.status().activeSlot,
     activePid: controller.status().activePid,
     coreHeapProfile: options.stableGatewayCoreHeapProfile,
+    gatewayPriority,
     liveUiUrl: `http://127.0.0.1:${runtime.gatewayPort}/__devspace/live`,
     secretValuesLogged: false,
   }));

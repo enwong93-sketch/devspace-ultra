@@ -8,6 +8,7 @@ import Database from "better-sqlite3";
 import { validateCoreNodeArgs } from "../dist/core-node-options.js";
 import { resolveFreshWindowsProcessEnvironment } from "../dist/windows-process-path.js";
 import { boundedLogOptionsFromEnv, createBoundedLogWriter } from "../dist/bounded-log-files.js";
+import { applyDevspaceRuntimePriority } from "../dist/runtime-priority.js";
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const CORE_RUNTIME_ENV_KEYS = new Set([
@@ -34,6 +35,7 @@ const CORE_RUNTIME_ENV_KEYS = new Set([
 ]);
 
 const sleep = (ms) => new Promise((resolvePromise) => setTimeout(resolvePromise, ms));
+const SNAPSHOT_COPY_ATTEMPTS = 6;
 
 function requirePort(value, label) {
   const port = Number(value);
@@ -94,24 +96,54 @@ async function backupSqlite(sourcePath, destinationPath) {
   }
 }
 
-export async function createCandidateSnapshot({ sourceStateDir, tempRoot } = {}) {
+function isTransientAtomicPath(value) {
+  return /(?:^|[\\/])[^\\/]+\.tmp(?:$|[\\/])/i.test(String(value || ""));
+}
+
+async function copyCandidateState(source, destination, { cpImpl = cp, attempts = SNAPSHOT_COPY_ATTEMPTS } = {}) {
+  let lastError = null;
+  const maxAttempts = Math.max(1, Math.min(20, Number(attempts) || SNAPSHOT_COPY_ATTEMPTS));
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      await cpImpl(source, destination, {
+        recursive: true,
+        force: true,
+        filter: (sourcePath) => {
+          const name = basename(sourcePath);
+          if (["devspace.sqlite", "devspace.sqlite-wal", "devspace.sqlite-shm"].includes(name)) return false;
+          return !name.endsWith(".tmp") && !isTransientAtomicPath(sourcePath);
+        },
+      });
+      return { attempts: attempt };
+    } catch (error) {
+      lastError = error;
+      const transient = error?.code === "ENOENT" && isTransientAtomicPath(error?.path || error?.dest || error?.message);
+      if (!transient || attempt >= maxAttempts) throw error;
+      // Atomic JSON writers create and rename bounded *.tmp files. A directory
+      // walk can observe the name immediately before the rename and then fail
+      // lstat. Retry the isolated snapshot instead of turning a healthy live
+      // Core into a failed handover.
+      await sleep(25 * attempt);
+    }
+  }
+  throw lastError || new Error("Candidate state copy failed.");
+}
+
+export async function createCandidateSnapshot({ sourceStateDir, tempRoot, cpImpl = cp } = {}) {
   const source = requireDirectory(sourceStateDir, "sourceStateDir");
   const parent = tempRoot ? resolve(tempRoot) : tmpdir();
   mkdirSync(parent, { recursive: true });
   const stateDir = await mkdtemp(join(parent, "devspace-core-candidate-"));
   const sqliteName = "devspace.sqlite";
   try {
-    await cp(source, stateDir, {
-      recursive: true,
-      force: true,
-      filter: (sourcePath) => ![sqliteName, `${sqliteName}-wal`, `${sqliteName}-shm`].includes(basename(sourcePath)),
-    });
+    const copied = await copyCandidateState(source, stateDir, { cpImpl });
     const sqliteBackedUp = await backupSqlite(join(source, sqliteName), join(stateDir, sqliteName));
     const jsonFiles = await validateSnapshotJson(stateDir);
     return {
       stateDir,
       sqliteBackedUp,
       jsonFiles,
+      copyAttempts: copied.attempts,
       async cleanup() {
         await rm(stateDir, { recursive: true, force: true });
       },
@@ -159,7 +191,7 @@ export function buildCoreEnvironment({
   return environment;
 }
 
-async function fetchWhileCoreLives(url, options, child) {
+async function fetchWhileCoreLives(url, options, child, fetchImpl = fetch) {
   let onExit;
   const exited = new Promise((_, rejectPromise) => {
     onExit = (code, signal) => rejectPromise(new Error(`Core process exited before readiness${code != null ? ` (code ${code})` : signal ? ` (${signal})` : ""}.`));
@@ -170,7 +202,7 @@ async function fetchWhileCoreLives(url, options, child) {
   });
   try {
     return await Promise.race([
-      fetch(url, options),
+      fetchImpl(url, options),
       exited,
     ]);
   }
@@ -180,12 +212,12 @@ async function fetchWhileCoreLives(url, options, child) {
   }
 }
 
-async function waitForCoreIdentity({ baseUrl, publicBaseUrl, child }) {
+async function waitForCoreIdentity({ baseUrl, publicBaseUrl, child, fetchImpl = fetch }) {
   const expectedResource = `${publicBaseUrl}/mcp`;
   while (true) {
     if (child.exitCode !== null) throw new Error(`Core process exited before readiness (code ${child.exitCode}).`);
     try {
-      const health = await fetchWhileCoreLives(`${baseUrl}/healthz`, { cache: "no-store" }, child);
+      const health = await fetchWhileCoreLives(`${baseUrl}/healthz`, { cache: "no-store" }, child, fetchImpl);
       if (!health.ok) {
         await sleep(100);
         continue;
@@ -195,14 +227,56 @@ async function waitForCoreIdentity({ baseUrl, publicBaseUrl, child }) {
         await sleep(100);
         continue;
       }
-      const prm = await fetchWhileCoreLives(`${baseUrl}/.well-known/oauth-protected-resource/mcp`, { cache: "no-store" }, child);
+      const prm = await fetchWhileCoreLives(`${baseUrl}/.well-known/oauth-protected-resource/mcp`, { cache: "no-store" }, child, fetchImpl);
       const prmBody = await prm.json().catch(() => null);
-      if (prm.ok && prmBody?.resource === expectedResource) return;
+      if (prm.ok && prmBody?.resource === expectedResource) {
+        const identity = await fetchWhileCoreLives(`${baseUrl}/__devspace/memory/status`, { cache: "no-store" }, child, fetchImpl);
+        const identityBody = identity.ok ? await identity.json().catch(() => null) : null;
+        const observedPid = Number(identityBody?.pid);
+        if (identity.ok && Number.isInteger(observedPid) && observedPid > 0) {
+          if (observedPid !== Number(child.pid)) {
+            const error = new Error(`Core port ${baseUrl} is owned by PID ${observedPid}, not spawned PID ${child.pid}.`);
+            error.code = "DEVSPACE_CORE_IDENTITY_MISMATCH";
+            error.observedPid = observedPid;
+            error.expectedPid = Number(child.pid);
+            throw error;
+          }
+          return;
+        }
+      }
     } catch (error) {
-      if (child.exitCode !== null || /Core process exited before readiness/.test(error instanceof Error ? error.message : String(error)))
+      if (
+        error?.code === "DEVSPACE_CORE_IDENTITY_MISMATCH"
+        || child.exitCode !== null
+        || /Core process exited before readiness/.test(error instanceof Error ? error.message : String(error))
+      )
         throw error;
     }
     await sleep(100);
+  }
+}
+
+async function stopSpawnedCoreProcess(child) {
+  if (!child) return { stopped: false, reason: "missing-child" };
+  if (child.exitCode !== null) return { stopped: true, exitCode: child.exitCode };
+  const exit = new Promise((resolvePromise) => {
+    if (child.exitCode !== null) resolvePromise(child.exitCode);
+    else child.once("exit", (code) => resolvePromise(code));
+  });
+  try { child.kill("SIGTERM"); } catch {}
+  const exitCode = await exit;
+  return { stopped: true, forced: false, exitCode };
+}
+
+async function completeCoreStartup({ baseUrl, publicBaseUrl, child, fetchImpl = fetch }) {
+  try {
+    await waitForCoreIdentity({ baseUrl, publicBaseUrl, child, fetchImpl });
+  } catch (error) {
+    // A port may still be served by an older Core. Never return the newly
+    // spawned process as healthy merely because that foreign listener answers,
+    // and never leave the rejected child alive after the identity check fails.
+    await stopSpawnedCoreProcess(child).catch(() => {});
+    throw error;
   }
 }
 
@@ -249,12 +323,13 @@ export async function startCoreSlot({
     shell: false,
     stdio: ["ignore", "pipe", "pipe"],
   });
+  const runtimePriority = applyDevspaceRuntimePriority("core", { pid: child.pid });
   child.stdout.pipe(stdoutLog);
   child.stderr.pipe(stderrLog);
   stdoutLog.on("error", () => child.stdout?.resume());
   stderrLog.on("error", () => child.stderr?.resume());
   const baseUrl = `http://127.0.0.1:${corePort}`;
-  await waitForCoreIdentity({ baseUrl, publicBaseUrl: publicBase, child });
+  await completeCoreStartup({ baseUrl, publicBaseUrl: publicBase, child });
   return {
     id: coreId,
     port: corePort,
@@ -268,6 +343,7 @@ export async function startCoreSlot({
     nodeArgs: safeNodeArgs,
     pathSource: preparedEnvironment.pathSource,
     pathRefreshed: preparedEnvironment.refreshed,
+    runtimePriority,
     logPolicy: {
       maxBytes: logOptions.maxBytes,
       maxBackups: logOptions.maxBackups,
@@ -283,19 +359,17 @@ export async function startCoreSlot({
 
 export async function stopCoreSlot(handle) {
   if (!handle?.child) return { stopped: false, reason: "missing-handle" };
-  const child = handle.child;
-  if (child.exitCode !== null) return { stopped: true, exitCode: child.exitCode };
-  const exit = new Promise((resolvePromise) => {
-    if (child.exitCode !== null)
-      resolvePromise(child.exitCode);
-    else
-      child.once("exit", (code) => resolvePromise(code));
-  });
-  try { child.kill("SIGTERM"); } catch {}
-  const exitCode = await exit;
-  return { stopped: true, forced: false, exitCode };
+  return await stopSpawnedCoreProcess(handle.child);
 }
 
 export const coreSlotDefaults = Object.freeze({
   packageRoot,
+});
+
+export const coreSlotInternals = Object.freeze({
+  completeCoreStartup,
+  copyCandidateState,
+  isTransientAtomicPath,
+  stopSpawnedCoreProcess,
+  waitForCoreIdentity,
 });

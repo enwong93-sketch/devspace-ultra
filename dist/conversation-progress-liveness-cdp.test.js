@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { ConversationProgressLivenessCdpAdapter, isClassicTurnErrorText, _test } from "./conversation-progress-liveness-cdp.js";
+import { observedClassicMainPortEntries } from './classic-main-debug-ports.js';
 
 assert.equal(isClassicTurnErrorText("思考失敗"), true);
 assert.equal(isClassicTurnErrorText("思考失败"), true);
@@ -9,21 +10,35 @@ assert.equal(isClassicTurnErrorText("已中斷思考"), true);
 assert.equal(isClassicTurnErrorText("已中断思考"), true);
 assert.equal(isClassicTurnErrorText("Thinking interrupted"), true);
 assert.equal(isClassicTurnErrorText("正常完成"), false);
+const previousAssistant = { id: "assistant-previous-turn" };
+const currentAssistant = { id: "assistant-current-turn" };
+assert.equal(_test.selectCurrentTurnMessage(currentAssistant, previousAssistant, true), currentAssistant);
+assert.equal(_test.selectCurrentTurnMessage(null, previousAssistant, false), previousAssistant,
+  "older ChatGPT UI without turn sections may still use the latest global role-bearing message");
+assert.equal(_test.selectCurrentTurnMessage(null, previousAssistant, true), null,
+  "a present role-less current turn must remain nonterminal until its own error/final surface appears");
 const exactInspectionSource = _test.exactConversationExpression("conversation-error-scope");
 assert.match(exactInspectionSource, /section\[data-testid\^=\\?"conversation-turn-/,
   "failure detection must inspect the latest ChatGPT turn section, not only the message article");
-assert.match(exactInspectionSource, /const latestTurnContainer = turnSections\.at\(-1\)/,
+assert.match(exactInspectionSource, /const latestTurnSection = turnSections\.at\(-1\) \|\| null/,
   "a role-less failed assistant turn must remain visible as the last turn boundary");
-assert.match(exactInspectionSource, /latestTurnMessages\.at\(-1\) \|\| messageNodes\.at\(-1\)/,
-  "older role-bearing message metadata may be used only after selecting the current turn section");
+assert.match(exactInspectionSource, /selectCurrentTurnMessage\(/,
+  "current-turn role selection must use the tested fail-closed helper");
 assert.match(exactInspectionSource, /querySelectorAll\('button,/,
   "the unlabelled Thinking failed button must be included in scoped error candidates");
 assert.match(exactInspectionSource, /思考失敗/);
 assert.match(exactInspectionSource, /已中斷思考/);
 assert.match(exactInspectionSource, /latestTurnMessages\.length === 0/,
   "a role-less terminal turn section must be checked even when no error button exists");
+assert.match(exactInspectionSource, /latestTurnRoleless/,
+  "the page snapshot must retain diagnostics for a present role-less current turn boundary");
 assert.match(exactInspectionSource, /latestUserMessageId/,
   "the exact page snapshot must expose the source user message id for Rescue episode identity");
+const lightweightInspectionSource = _test.lightweightExactConversationExpression("conversation-error-scope");
+assert.match(lightweightInspectionSource, /selectCurrentTurnMessage\(roleNodes\.at\(-1\),fallbackRoles\.at\(-1\),Boolean\(lastTurn\)\)/,
+  "the bounded fallback must use the same tested current-turn role selection");
+assert.match(lightweightInspectionSource, /roleNodes\.length===0&&errorPattern\.test\(lastTurnText\)/,
+  "the bounded fallback may classify plain role-less Thinking-failed text without treating a user's quoted error text as failure");
 
 const targets = new Map([
   [9721, [{
@@ -236,6 +251,65 @@ assert.deepEqual(await rescueAdapter.sendContinue({
   target: rescueResolvedTarget,
 }), { ok: false, definiteFailure: true, dispatchCommitted: false, state: "rescue-source-user-required" });
 
+let fallbackConnections = 0;
+const fallbackAdapter = new ConversationProgressLivenessCdpAdapter({
+  runtimeKeys: ['main-02'],
+  listTargets: async port => port === 9732 ? [{
+    id: 'fallback-page', type: 'page', url: 'https://chatgpt.com/c/conversation-fallback',
+    webSocketDebuggerUrl: 'ws://fallback-page',
+  }] : [],
+  connect: async () => {
+    fallbackConnections += 1;
+    return {
+      async evaluate() {
+        if (fallbackConnections === 1) throw Object.assign(new Error('large DOM evaluation timed out'), { name: 'TimeoutError' });
+        return {
+          exact: true, conversationId: 'conversation-fallback', hydrated: true,
+          generating: true, latestMessageRole: 'user', latestMessageTextLength: 12,
+          latestUserMessageId: 'user-fallback-1234', previousUserMessageId: null,
+          hasTurnError: true, normalCompletion: false, incompleteUserTurn: false,
+          composerFound: true, composerEmpty: true, composerLength: 0,
+          progressCardMounted: true, progressConversationId: 'conversation-fallback',
+          url: 'https://chatgpt.com/c/conversation-fallback', inspectionFallback: 'latest-turn-bounded',
+        };
+      },
+      close() {},
+    };
+  },
+});
+const fallback = await fallbackAdapter.findAtRuntime({ conversationId: 'conversation-fallback', runtimeKey: 'main-02' });
+assert.equal(fallback.exact, true);
+assert.equal(fallback.hasTurnError, true);
+assert.equal(fallback.boundedInspectionFallback, true);
+assert.equal(fallback.primaryInspectionErrorName, 'TimeoutError');
+assert.equal(fallbackConnections, 2);
+
+observedClassicMainPortEntries({ rows: [{
+  port: 19735, mainNumber: 5,
+  commandLine: 'chatgpt-classic-main05.exe --remote-debugging-port=19735',
+}] });
+const driftAdapter = new ConversationProgressLivenessCdpAdapter({
+  runtimeKeys: ['main-05'],
+  listTargets: async port => port === 19735 ? [{
+    id: 'main05-drift-page', type: 'page', url: 'https://chatgpt.com/c/conversation-main05-drift',
+    webSocketDebuggerUrl: 'ws://main05-drift-page',
+    snapshot: {
+      exact: true, conversationId: 'conversation-main05-drift', hydrated: true,
+      generating: false, latestMessageRole: 'assistant', hasTurnError: false,
+      normalCompletion: true, incompleteUserTurn: false, composerFound: true,
+      composerEmpty: true, progressCardMounted: true,
+      progressConversationId: 'conversation-main05-drift',
+      url: 'https://chatgpt.com/c/conversation-main05-drift',
+    },
+  }] : [],
+  connect: async target => ({ async evaluate() { return structuredClone(target.snapshot); }, close() {} }),
+});
+const drift = await driftAdapter.findAtRuntime({ conversationId: 'conversation-main05-drift', runtimeKey: 'main-05' });
+assert.equal(drift.exact, true);
+assert.equal(drift.port, 19735);
+assert.deepEqual(drift.attemptedPorts, undefined, 'successful runtime inspection returns only authoritative located port');
+observedClassicMainPortEntries({ rows: [] });
+
 console.log(JSON.stringify({
   ok: true,
   gate: "conversation-progress-liveness-cdp",
@@ -246,8 +320,12 @@ console.log(JSON.stringify({
   incompleteUserTurnOptInOnly: true,
   thinkingFailedLocalized: true,
   latestTurnSectionScoped: true,
+  rolelessCurrentTurnDoesNotBorrowPreviousFinal: true,
+  quotedFailureTextDoesNotTriggerFallback: true,
   duplicateConversationUniqueActiveResolved: true,
   multipleActiveDuplicatesFailClosed: true,
   rescueEpisodeBoundaryRequired: true,
   oldContinueTextCannotSatisfyNewRescue: true,
+  boundedInspectionFallback: true,
+  observedDebugPortAuthority: true,
 }));

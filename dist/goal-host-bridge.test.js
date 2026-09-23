@@ -178,6 +178,71 @@ assert.equal(rawCalls[0].payload.prompt, "hidden continuation prompt");
 assert.ok(visibleBoundaryCalls[0].payload.prompt.includes("hidden continuation prompt"));
 assert.equal(rawCalls[0].payload.scrollToBottom, false);
 
+let normalHiddenInspections = 0;
+const normalHiddenBridge = new moduleUnderTest.ClassicGoalHostBridge({
+  ports: [9733],
+  async waitForVisibleReport() { return { ok: true, committed: true }; },
+  async probeRelayPort(_port, conversationId) {
+    return [{ runtimePort: 9733, runtimeLabel: "Main-03", targetId: "normal-hidden-relay",
+      pageTargetId: "normal-hidden-page", conversationId, chatMode: true,
+      webSocketDebuggerUrl: "ws://normal-hidden-relay", pageWebSocketDebuggerUrl: "ws://normal-hidden-page" }];
+  },
+  async inspectComposer() { return { ok: true, state: "empty", exactOwnedPayload: false }; },
+  async sendRaw() { return { ok: true, dispatchCommitted: true, backgroundAccepted: true }; },
+  async inspectVisibleReport() {
+    normalHiddenInspections += 1;
+    return { nativeContinuation: { resolved: true, sourceUserFound: true,
+      baselineAssistantFound: true, latestUserMessageId: "normal-source-user",
+      newUserAfterBaselineMessageId: null,
+      newAssistantAfterBaselineMessageId: "normal-hidden-assistant" } };
+  },
+  hiddenConfirmTimeoutMs: 1000,
+  hiddenConfirmPollMs: 50,
+  sleep: async () => {},
+});
+const normalHidden = await normalHiddenBridge.dispatch({
+  goalId: "goal_normal_hidden", continuationId: "continuation_normal_hidden",
+  leaseId: "lease_normal_hidden", round: 4, prompt: "hidden continuation prompt",
+  reportedAt: "2026-09-05T01:00:00.000Z", conversationId: "conversation_normal_hidden",
+  runtimePort: 9733, expectedPageTargetId: "normal-hidden-page",
+  sourceUserId: "normal-source-user", assistantMessageId: "normal-visible-final",
+});
+assert.equal(normalHidden.ok, true);
+assert.equal(normalHidden.transport, "classic-hidden-continuation-native-confirmed");
+assert.equal(normalHidden.nativeBranchReconciled, true);
+assert.equal(normalHiddenInspections, 1);
+
+const supersededHiddenBridge = new moduleUnderTest.ClassicGoalHostBridge({
+  ports: [9733],
+  async waitForVisibleReport() { return { ok: true, committed: true }; },
+  async probeRelayPort(_port, conversationId) {
+    return [{ runtimePort: 9733, runtimeLabel: "Main-03", targetId: "superseded-hidden-relay",
+      pageTargetId: "superseded-hidden-page", conversationId, chatMode: true,
+      webSocketDebuggerUrl: "ws://superseded-hidden-relay", pageWebSocketDebuggerUrl: "ws://superseded-hidden-page" }];
+  },
+  async inspectComposer() { return { ok: true, state: "empty", exactOwnedPayload: false }; },
+  async sendRaw() { return { ok: true, dispatchCommitted: true, backgroundAccepted: true }; },
+  async inspectVisibleReport() {
+    return { nativeContinuation: { resolved: true, sourceUserFound: true,
+      baselineAssistantFound: true, latestUserMessageId: "new-human-user",
+      newUserAfterBaselineMessageId: "new-human-user",
+      newAssistantAfterBaselineMessageId: null } };
+  },
+  hiddenConfirmTimeoutMs: 1000,
+  hiddenConfirmPollMs: 50,
+  sleep: async () => {},
+});
+const supersededHidden = await supersededHiddenBridge.dispatch({
+  goalId: "goal_superseded_hidden", continuationId: "continuation_superseded_hidden",
+  leaseId: "lease_superseded_hidden", round: 4, prompt: "hidden continuation prompt",
+  reportedAt: "2026-09-05T01:00:00.000Z", conversationId: "conversation_superseded_hidden",
+  runtimePort: 9733, expectedPageTargetId: "superseded-hidden-page",
+  sourceUserId: "old-source-user", assistantMessageId: "visible-final-before-new-human",
+});
+assert.equal(supersededHidden.ok, false);
+assert.equal(supersededHidden.dispatchCommitted, true);
+assert.equal(supersededHidden.state, "new-user-before-hidden-assistant");
+
 const defaultBoundaryInspections = [];
 const defaultBoundaryRawCalls = [];
 const defaultBoundaryBridge = new moduleUnderTest.ClassicGoalHostBridge({
@@ -436,6 +501,7 @@ assert.equal(ambiguousLiveness.matchCount, 2);
 assert.equal(ambiguousLivenessSends, 0, "a duplicated conversation route must never receive a follow-up on either Main");
 
 const exactConversationDispatches = [];
+const exactConversationInspections = [];
 const conversationSafeBridge = new moduleUnderTest.ClassicGoalHostBridge({
   ports: [9732, 9733],
   async probePort(port) {
@@ -478,6 +544,7 @@ const conversationSafeBridge = new moduleUnderTest.ClassicGoalHostBridge({
     }];
   },
   async inspectVisibleReport(candidate, payload = {}) {
+    exactConversationInspections.push({ candidate, payload });
     return {
       chatMode: true,
       generating: false,
@@ -508,6 +575,14 @@ assert.equal(conversationSafeSnapshot.conversationId, "conversation_authoritativ
 assert.equal(conversationSafeSnapshot.runtimePort, 9733);
 assert.equal(conversationSafeSnapshot.relayFallback, false, "a stale same-goal widget in another conversation must be ignored");
 assert.equal(conversationSafeSnapshot.directPage, true);
+assert.equal(exactConversationInspections.at(-1).payload.includeNativeBranch, false);
+const nativeConversationSafeSnapshot = await conversationSafeBridge.inspectWorkingRound({
+  id: "goal_conversation_safe",
+  conversationId: "conversation_authoritative",
+}, { includeNativeBranch: true });
+assert.equal(nativeConversationSafeSnapshot.nativeContinuation?.resolved, true,
+  "working-round inspection must support one exact native-branch proof on demand");
+assert.equal(exactConversationInspections.at(-1).payload.includeNativeBranch, true);
 const conversationSafeDispatch = await conversationSafeBridge.dispatchRoundRecovery({
   goalId: "goal_conversation_safe",
   conversationId: "conversation_authoritative",

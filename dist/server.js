@@ -47,12 +47,12 @@ import { PlanRuntime } from "./plan-runtime.js";
 import { registerPlanTools } from "./plan-tools.js";
 import { GoalRuntime } from "./goal-runtime.js";
 import { registerGoalTools } from "./goal-tools.js";
-import { ClassicGoalHostBridge } from "./goal-host-bridge.js";
-import { inspectGoalContinuationPages } from "./goal-host-bridge.js";
+import { ClassicGoalHostBridge, defaultMainDebugPorts, inspectGoalContinuationPages } from "./goal-host-bridge.js";
 import { GoalContinuationSupervisor } from './goal-continuation-supervisor.js';
 import { ClassicGoalRoundCompletionGuard } from "./goal-round-completion-guard.js";
 import { goalRecoveryRescueDecision } from "./goal-rescue-arbitration.js";
 import { safeGoalDurabilityDiagnostics } from "./goal-durability-diagnostics.js";
+import { assertGoalCollisionRepairAuthority } from "./goal-collision-repair-authority.js";
 import { ClassicPrimaryDebugGuard } from "./primary-debug-guard.js";
 import { ClassicStreamRecoveryGuard } from "./classic-stream-recovery-guard.js";
 import { ClassicStreamRecoveryCdpAdapter, runtimeKeyForPort } from "./classic-stream-recovery-cdp.js";
@@ -93,7 +93,7 @@ import { workspaceDiscoveryView } from './workspace-discovery-view.js';
 import { ProgressBootstrapAuthorityRegistry } from "./progress-bootstrap-authority.js";
 import { ConversationStartClaimRegistry } from "./conversation-start-claim-registry.js";
 import { ConversationStartClaimCdpResolver } from "./conversation-start-claim-cdp.js";
-import { InteractiveProgressEnforcementGate } from "./interactive-progress-enforcement.js";
+import { InteractiveProgressEnforcementGate, goalRoundClosureState } from "./interactive-progress-enforcement.js";
 // ChatGPT/OpenAI MCP clients may reconnect without sending DELETE. Core session
 // lifetime is therefore tied to the actual standalone SSE connection: when that
 // stream disconnects and no real tool request is still active, the transport is
@@ -1348,6 +1348,10 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
         startClaimRegistry: conversationStartClaimRegistry,
         claimRelayResourceUri: PROGRESS_CLAIM_RELAY_URI,
         resolveStartClaimPage,
+        resolveActiveGoal: async (conversationId) => {
+            const goals = await goalRuntime.activeGoals({ conversationId, limit: 2 });
+            return goals.length === 1 ? goals[0] : null;
+        },
     });
     registerGoalTools(server, goalRuntime, {
         resourceUri: GOAL_DOCK_URI,
@@ -2229,9 +2233,14 @@ export function createServer(config = loadConfig(), options = {}) {
             error: error instanceof Error ? error.message : String(error),
         });
     });
-    const classicCdpOptions = Array.isArray(config.classicMainDebugPorts)
-        ? { ports: config.classicMainDebugPorts }
-        : {};
+    const configuredClassicPorts = Array.isArray(config.classicMainDebugPorts)
+        ? config.classicMainDebugPorts.filter(Number.isInteger)
+        : [];
+    const classicCdpOptions = {
+        ports: configuredClassicPorts.length
+            ? configuredClassicPorts
+            : defaultMainDebugPorts({ includeObserved: true, refresh: true }),
+    };
     const primaryDebugGuard = process.platform === "win32"
         ? new ClassicPrimaryDebugGuard()
         : null;
@@ -2298,7 +2307,7 @@ export function createServer(config = loadConfig(), options = {}) {
     goalContinuationSupervisor.start();
     const goalRoundCompletionGuard = new ClassicGoalRoundCompletionGuard({
         goalRuntime,
-        inspect: async (goal) => {
+        inspect: async (goal, options = {}) => {
             let recoveryGoal = goal;
             if (!goal?.conversationId) {
                 try {
@@ -2317,7 +2326,9 @@ export function createServer(config = loadConfig(), options = {}) {
                     }
                 } catch {}
             }
-            const snapshot = await goalHostBridge.inspectWorkingRound(recoveryGoal);
+            const snapshot = await goalHostBridge.inspectWorkingRound(recoveryGoal, {
+                includeNativeBranch: options.includeNativeBranch === true,
+            });
             await turnDeliveryEvidenceReady;
             const runtimeKey = Number.isInteger(snapshot?.runtimePort) ? runtimeKeyForPort(snapshot.runtimePort) : null;
             const evidenceFilter = runtimeKey ? {
@@ -3078,6 +3089,50 @@ export function createServer(config = loadConfig(), options = {}) {
             ...durability,
             diagnosticGc });
     });
+    app.post('/__devspace/goal/repair-collision', express.json({ limit: '4kb' }), async (req, res) => {
+        if (config.passiveCore || !localBindingAuthorized(req, config.oauth.ownerToken) || req.headers['x-forwarded-for']) {
+            res.status(403).json({ ok: false, error: 'local-owner-authorization-required' });
+            return;
+        }
+        const conversationId = String(req.body?.conversationId || '').trim();
+        const keepGoalId = String(req.body?.keepGoalId || '').trim();
+        try {
+            await hostOverlayProjection.syncOnce();
+            const projection = hostOverlayProjection.status()?.conversationProjections?.[conversationId] || null;
+            const pageResolution = await goalHostBridge.findExactConversationPage(conversationId);
+            const authority = assertGoalCollisionRepairAuthority({
+                conversationId,
+                keepGoalId,
+                projection,
+                pageResolution,
+            });
+            const repaired = await goalRuntime.resolveConversationCollision({
+                conversationId,
+                keepGoalId,
+                reason: 'exact-page-overlay-selected-current-goal',
+            });
+            await hostOverlayProjection.syncOnce();
+            res.json({
+                ok: true,
+                repaired: repaired.repaired === true,
+                conversationId: authority.conversationId,
+                keepGoalId: authority.keepGoalId,
+                stoppedGoalIds: repaired.stopped.map((goal) => goal.id),
+                exactPageVerified: true,
+                backendProjectionVerified: true,
+                pageNavigation: false,
+                composerMutation: false,
+                runtimeRestart: false,
+                rawGoalContentReturned: false,
+            });
+        } catch (error) {
+            res.status(409).json({
+                ok: false,
+                error: error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500),
+                rawGoalContentReturned: false,
+            });
+        }
+    });
     app.post('/__devspace/conversation/bind-progress-claim', express.json({ limit: '4kb' }), async (req, res) => {
         if (config.passiveCore || !localBindingAuthorized(req, config.oauth.ownerToken) || req.headers['x-forwarded-for']) {
             res.status(403).json({ ok: false, error: 'Owner-authorized direct-loopback bootstrap required.' }); return;
@@ -3526,16 +3581,31 @@ export function createServer(config = loadConfig(), options = {}) {
                     ? gateAuthority.runtimeKeys[0]
                     : gateAuthority?.runtimeKey || null;
                 if (gateConversationId && /^main-\d{2}$/i.test(String(gateRuntimeKey || ""))) {
-                    const [activePlan] = await planRuntime.activePlans({
-                        conversationId: gateConversationId,
-                        limit: 1,
+                    const [activePlans, activeGoals, latestPlan] = await Promise.all([
+                        planRuntime.activePlans({
+                            conversationId: gateConversationId,
+                            limit: 2,
+                        }),
+                        goalRuntime.activeGoals({
+                            conversationId: gateConversationId,
+                            limit: 2,
+                        }),
+                        planRuntime.latestPlan({ conversationId: gateConversationId }),
+                    ]);
+                    const activePlan = activePlans.length === 1 ? activePlans[0] : null;
+                    const activeGoal = activeGoals.length === 1 ? activeGoals[0] : null;
+                    const roundClosure = goalRoundClosureState({
+                        activeGoal,
+                        activePlan,
+                        latestPlan,
                     });
                     const progressGate = await interactiveProgressGate.beforeTool({
                         conversationId: gateConversationId,
                         runtimeKey: gateRuntimeKey,
                         toolName: requestedToolName,
                         args: req?.body?.params?.arguments || {},
-                        activePlan: activePlan || null,
+                        activePlan,
+                        roundClosure,
                     });
                     if (progressGate?.ok === false && progressGate?.blocked === true) {
                         res.status(200).json({
@@ -3545,21 +3615,44 @@ export function createServer(config = loadConfig(), options = {}) {
                                 code: -32029,
                                 message: progressGate.message,
                                 data: {
-                                    type: "devspace_progress_preflight_required",
+                                    type: progressGate.errorType || "devspace_progress_preflight_required",
                                     reason: progressGate.reason,
                                     maxSilentMs: progressGate.maxSilentMs ?? null,
                                     reportAgeMs: progressGate.reportAgeMs ?? null,
                                     planId: progressGate.planId ?? activePlan?.id ?? null,
+                                    goalId: progressGate.goalId ?? activeGoal?.id ?? null,
+                                    round: progressGate.round ?? activeGoal?.round ?? null,
                                 },
                             },
                         });
                         return;
                     }
                     if (progressGate?.activityAccepted === true) {
-                        await conversationProgressLiveness?.noteActivity?.({
+                        // Session/provider authority may survive the browser
+                        // turn that originally established it. Before tool
+                        // activity postpones interrupted-turn Rescue, re-read
+                        // the globally exact page and bind the activity to the
+                        // same current source user message. Visible failure,
+                        // idle/completed pages, duplicate pages and stale
+                        // session mappings must never refresh the Rescue clock.
+                        const activityPage = await progressLivenessAdapter.find({
                             conversationId: gateConversationId,
-                            observedAtMs: Date.now(),
                         }).catch(() => null);
+                        if (
+                            activityPage?.exact === true
+                            && activityPage?.ambiguous !== true
+                            && activityPage.conversationId === gateConversationId
+                            && activityPage.runtimeKey === gateRuntimeKey
+                            && activityPage.generating === true
+                            && activityPage.hasTurnError !== true
+                            && activityPage.latestUserMessageId
+                        ) {
+                            await conversationProgressLiveness?.noteActivity?.({
+                                conversationId: gateConversationId,
+                                sourceUserMessageId: activityPage.latestUserMessageId,
+                                observedAtMs: Date.now(),
+                            }).catch(() => null);
+                        }
                     }
                 }
             }

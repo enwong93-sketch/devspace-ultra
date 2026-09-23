@@ -6,9 +6,12 @@ import { isProjectableProgressMessage } from "./progress-ownership-proof.js";
 // reminder, synthetic user turn, DOM banner, or tool-execution dependency.
 export const DEFAULT_PROGRESS_REPORT_INTERVAL_MS = 10 * 60_000;
 export const DEFAULT_PROGRESS_REMINDER_MS = DEFAULT_PROGRESS_REPORT_INTERVAL_MS; // compatibility alias
-// Rescue is a separate safety action and may run only after interruption
-// evidence plus at least twenty minutes without an Agent-authored report.
+// Rescue is a separate safety action. Silent/ambiguous stalls retain the
+// twenty-minute boundary, while an exact-page terminal failure (for example
+// the localized Thinking-failed surface) may use a shorter double-confirmed
+// boundary so an already-failed turn does not sit idle for twenty minutes.
 export const DEFAULT_PROGRESS_CONTINUE_MS = 20 * 60_000;
+export const DEFAULT_EXPLICIT_FAILURE_RESCUE_MS = 30_000;
 export const DEFAULT_PROGRESS_POLL_MS = 15_000;
 export const DEFAULT_PROGRESS_ARM_WINDOW_MS = 6 * 60 * 60_000;
 export const DEFAULT_PROGRESS_MAX_CONTINUES = 1;
@@ -129,6 +132,7 @@ function serializableRecord(record) {
     lastActivityAt: record.lastActivityAt || null,
     lastReportAt: record.lastReportAt || null,
     lastContinueAt: record.lastContinueAt || null,
+    explicitFailureObservedAt: record.explicitFailureObservedAt || null,
     restartObservedAt: record.restartObservedAt || null,
     generationResetAt: record.generationResetAt || null,
     continueAttempts: Number(record.continueAttempts || 0),
@@ -157,6 +161,7 @@ export class ConversationProgressLivenessSupervisor {
     reminderMs = DEFAULT_PROGRESS_REPORT_INTERVAL_MS,
     reportIntervalMs = reminderMs,
     continueMs = DEFAULT_PROGRESS_CONTINUE_MS,
+    explicitFailureRescueMs = DEFAULT_EXPLICIT_FAILURE_RESCUE_MS,
     pollMs = DEFAULT_PROGRESS_POLL_MS,
     armWindowMs = DEFAULT_PROGRESS_ARM_WINDOW_MS,
     maxContinueAttempts = DEFAULT_PROGRESS_MAX_CONTINUES,
@@ -178,6 +183,10 @@ export class ConversationProgressLivenessSupervisor {
       DEFAULT_PROGRESS_CONTINUE_MS,
       this.reportIntervalMs + 60_000,
       Number(continueMs) || DEFAULT_PROGRESS_CONTINUE_MS,
+    );
+    this.explicitFailureRescueMs = Math.max(
+      DEFAULT_EXPLICIT_FAILURE_RESCUE_MS,
+      Number(explicitFailureRescueMs) || DEFAULT_EXPLICIT_FAILURE_RESCUE_MS,
     );
     this.pollMs = Math.max(1_000, Number(pollMs) || DEFAULT_PROGRESS_POLL_MS);
     this.armWindowMs = Math.max(this.continueMs, Number(armWindowMs) || DEFAULT_PROGRESS_ARM_WINDOW_MS);
@@ -210,6 +219,9 @@ export class ConversationProgressLivenessSupervisor {
       record.lastGoalContinuationId = cleanMessageId(value?.lastGoalContinuationId);
       record.lastReportAt = value?.lastReportAt || null;
       record.lastContinueAt = value?.lastContinueAt || null;
+      record.explicitFailureObservedAt = finiteTime(value?.explicitFailureObservedAt)
+        ? new Date(finiteTime(value.explicitFailureObservedAt)).toISOString()
+        : null;
       record.restartObservedAt = finiteTime(value?.restartObservedAt) ? value.restartObservedAt : null;
       record.generationResetAt = finiteTime(value?.generationResetAt) ? value.generationResetAt : null;
       // Keep the episode identity monotonic across Core restarts even when the
@@ -328,6 +340,7 @@ export class ConversationProgressLivenessSupervisor {
       record.lastActivityAt = at;
       record.lastReportAt = null;
       record.lastContinueAt = null;
+      record.explicitFailureObservedAt = null;
       record.restartObservedAt = null;
       record.generationResetAt = null;
       record.generationResetPending = false;
@@ -354,6 +367,7 @@ export class ConversationProgressLivenessSupervisor {
       record.completedAt = null;
       record.lastReportAt = null;
       record.lastContinueAt = null;
+      record.explicitFailureObservedAt = null;
       record.restartObservedAt = null;
       record.generationResetAt = null;
       record.generationResetPending = false;
@@ -391,6 +405,7 @@ export class ConversationProgressLivenessSupervisor {
         record.turnState = "completion-pending";
         record.interruptedAt = at;
         record.completedAt = null;
+        record.explicitFailureObservedAt = null;
         record.idleObservedAt = null;
         record.rescuePending = false;
         record.rescueEvidence = null;
@@ -400,7 +415,7 @@ export class ConversationProgressLivenessSupervisor {
       }
     } else if (generatedResetCancellation) {
       // The rescue guard may deliberately click a stale Stop affordance after
-      // authoritative interruption evidence and the full twenty-minute gate.
+      // authoritative interruption evidence and the applicable bounded gate.
       // That click can surface as a native `canceled` event. It is not a new
       // user cancellation and must not disarm the already-proven interrupted
       // episode before the one-shot `- 繼續` send can run.
@@ -408,6 +423,7 @@ export class ConversationProgressLivenessSupervisor {
       record.turnState = "interrupted";
       record.interruptedAt ||= record.lastActivityAt || record.lastReportAt || record.startedAt || at;
       record.completedAt = null;
+      record.explicitFailureObservedAt ||= at;
       record.idleObservedAt = null;
       record.rescuePending = false;
       record.rescueEvidence ||= "transport-failure";
@@ -435,6 +451,7 @@ export class ConversationProgressLivenessSupervisor {
       record.idleObservedAt = null;
       record.rescuePending = false;
       record.rescueEvidence = null;
+      record.explicitFailureObservedAt = null;
       record.lastDispatchState = `turn-observer-${kind}`;
     }
 
@@ -453,6 +470,7 @@ export class ConversationProgressLivenessSupervisor {
     const record = this.#record(id);
     record.lastReportAt = new Date(atMs).toISOString();
     record.lastActivityAt = record.lastReportAt;
+    record.explicitFailureObservedAt = null;
     record.reportOverdue = false;
     if (record.armed) {
       record.rescuePending = false;
@@ -466,14 +484,33 @@ export class ConversationProgressLivenessSupervisor {
     return serializableRecord(record);
   }
 
-  async noteActivity({ conversationId, observedAtMs } = {}) {
+  async noteActivity({ conversationId, observedAtMs, sourceUserMessageId } = {}) {
     const id = cleanConversationId(conversationId);
     if (!id) return null;
     const record = this.#record(id);
     if (!record.armed) return serializableRecord(record);
+    const source = cleanMessageId(sourceUserMessageId);
+    if (!source) {
+      record.lastDispatchState = "substantive-tool-activity-without-current-source-ignored";
+      record.updatedAt = new Date(this.now()).toISOString();
+      await this.#persist();
+      return serializableRecord(record);
+    }
+    if (record.sourceUserMessageId && record.sourceUserMessageId !== source) {
+      // A reusable MCP/session identity can outlive the browser turn that
+      // created it. Never let work from another or older turn postpone this
+      // conversation's Rescue. The caller must re-read the exact live page and
+      // pass its current source user-message id for every accepted activity.
+      record.lastDispatchState = "substantive-tool-activity-source-mismatch-ignored";
+      record.updatedAt = new Date(this.now()).toISOString();
+      await this.#persist();
+      return serializableRecord(record);
+    }
+    if (!record.sourceUserMessageId) record.sourceUserMessageId = source;
     const atMs = finiteTime(observedAtMs) || this.now();
     const existingMs = finiteTime(record.lastActivityAt) || 0;
     if (atMs >= existingMs) record.lastActivityAt = new Date(atMs).toISOString();
+    record.explicitFailureObservedAt = null;
     record.rescuePending = false;
     record.idleObservedAt = null;
     record.lastDispatchState = "substantive-tool-activity-observed";
@@ -513,6 +550,7 @@ export class ConversationProgressLivenessSupervisor {
       const storedReportAtMs = finiteTime(record.lastReportAt) || 0;
       if (report?.atMs > storedReportAtMs) {
         record.lastReportAt = new Date(report.atMs).toISOString();
+        record.explicitFailureObservedAt = null;
         record.reportOverdue = false;
         record.rescuePending = false;
       }
@@ -538,7 +576,8 @@ export class ConversationProgressLivenessSupervisor {
       record.reportOverdue = reportSilenceMs >= this.reportIntervalMs;
       // No action is taken at ten minutes. This is diagnostics only.
       if (record.reportOverdue) record.lastDispatchState = "agent-progress-report-overdue-no-message";
-      record.rescuePending = rescueSilenceMs >= this.continueMs;
+      const longRescuePending = rescueSilenceMs >= this.continueMs;
+      record.rescuePending = longRescuePending;
       record.updatedAt = new Date(now).toISOString();
 
       const page = await this.adapter?.find?.({ conversationId }).catch(() => null);
@@ -562,13 +601,39 @@ export class ConversationProgressLivenessSupervisor {
         continue;
       }
 
+      const sourceTurnMatches = !record.sourceUserMessageId
+        || !page.latestUserMessageId
+        || record.sourceUserMessageId === page.latestUserMessageId;
+      if (!sourceTurnMatches) {
+        record.explicitFailureObservedAt = null;
+        record.rescuePending = false;
+        record.idleObservedAt = null;
+        record.lastDispatchState = "rescue-source-turn-changed-awaiting-native-start";
+        continue;
+      }
+
       const explicitInterruption = ["interrupted", "restart-interrupted"].includes(record.turnState);
       const pageInterruption = page.hasTurnError === true || page.incompleteUserTurn === true;
+      // The fast path is deliberately narrower than ordinary Rescue. Only an
+      // exact-page terminal error surface qualifies. Transport interruption,
+      // incomplete user turns and silent generating stalls retain the full
+      // twenty-minute boundary because they can still resolve normally.
+      const explicitTerminalFailure = page.hasTurnError === true;
+      if (explicitTerminalFailure) {
+        record.explicitFailureObservedAt ||= record.interruptedAt || new Date(now).toISOString();
+      } else {
+        record.explicitFailureObservedAt = null;
+      }
+      const explicitFailureAtMs = finiteTime(record.explicitFailureObservedAt);
+      const explicitFailurePending = explicitTerminalFailure
+        && explicitFailureAtMs != null
+        && now - explicitFailureAtMs >= this.explicitFailureRescueMs;
+      record.rescuePending = longRescuePending || explicitFailurePending;
       if (page.generating) {
         // A failed native transport or a visible page error is authoritative
         // interruption evidence even when ChatGPT leaves a stale Stop button
-        // behind. After the full twenty-minute rescue boundary and a second
-        // idle confirmation, reset that stale generating affordance once. The
+        // behind. After the applicable rescue boundary and a second exact-page
+        // confirmation, reset that stale generating affordance once. The
         // next tick performs the normal exact-page `- 繼續` send.
         const silentGeneratingInterruption = record.rescuePending
           && page.latestMessageRole === "user"
@@ -710,6 +775,7 @@ export class ConversationProgressLivenessSupervisor {
       reportIntervalMs: this.reportIntervalMs,
       reminderMs: this.reportIntervalMs,
       continueMs: this.continueMs,
+      explicitFailureRescueMs: this.explicitFailureRescueMs,
       pollMs: this.pollMs,
       maxContinueAttempts: this.maxContinueAttempts,
       records: [...this.records.values()].map(serializableRecord),
@@ -722,7 +788,9 @@ export class ConversationProgressLivenessSupervisor {
       tenMinuteAutomaticReminder: false,
       tenMinuteSyntheticUserTurn: false,
       tenMinuteAgentReportSloOnly: true,
-      twentyMinuteInterruptedTurnRescueOnly: true,
+      twentyMinuteInterruptedTurnRescueOnly: false,
+      twentyMinuteSilentOrAmbiguousRescueOnly: true,
+      explicitTerminalFailureFastRescue: true,
       normalCompletionDisarms: true,
       restartRestoresActiveEpisodeAsInterrupted: true,
       stalledGeneratingSilenceRescue: true,
@@ -758,6 +826,7 @@ export class ConversationProgressLivenessSupervisor {
       lastActivityAt: null,
       lastReportAt: null,
       lastContinueAt: null,
+      explicitFailureObservedAt: null,
       restartObservedAt: null,
       generationResetAt: null,
       generationResetPending: false,
@@ -787,6 +856,7 @@ export class ConversationProgressLivenessSupervisor {
     record.turnState = turnState;
     record.completedAt = at;
     record.lastActivityAt = at;
+    record.explicitFailureObservedAt = null;
     record.idleObservedAt = null;
     record.restartObservedAt = null;
     record.generationResetAt = null;
@@ -816,7 +886,6 @@ export class ConversationProgressLivenessSupervisor {
       runtimeBinding: false,
       tenMinuteAutomaticReminder: false,
       tenMinuteAgentReportSloOnly: true,
-      twentyMinuteInterruptedTurnRescueOnly: true,
       normalCompletionDisarms: true,
       restartRestoresActiveEpisodeAsInterrupted: true,
       stalledGeneratingSilenceRescue: true,
@@ -824,6 +893,10 @@ export class ConversationProgressLivenessSupervisor {
       updatedAt: new Date(this.now()).toISOString(),
       reportIntervalMs: this.reportIntervalMs,
       continueMs: this.continueMs,
+      explicitFailureRescueMs: this.explicitFailureRescueMs,
+      twentyMinuteInterruptedTurnRescueOnly: false,
+      twentyMinuteSilentOrAmbiguousRescueOnly: true,
+      explicitTerminalFailureFastRescue: true,
       records,
     });
   }
