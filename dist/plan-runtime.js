@@ -245,6 +245,19 @@ export class PlanRuntime {
       .map(clone);
   }
 
+  async latestPlan({ conversationId } = {}) {
+    await this.ready;
+    const hasConversationFilter = conversationId !== undefined;
+    const normalizedConversationId = normalizeConversationId(conversationId);
+    const latest = Object.values(this.state.plans)
+      .filter((plan) => !hasConversationFilter || plan.conversationId === normalizedConversationId)
+      .sort((a, b) => {
+        const created = String(b.createdAt || "").localeCompare(String(a.createdAt || ""));
+        return created || String(b.updatedAt || "").localeCompare(String(a.updatedAt || ""));
+      })[0];
+    return latest ? clone(latest) : null;
+  }
+
   async close() {
     await this.ready;
     await this.persistQueue;

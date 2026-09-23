@@ -29,12 +29,49 @@ async function harness(t, options = {}) {
       };
     }, ...options };
   const driver = new GoalContinuationSupervisor(config);
-  await driver.arm(reported);
+  if (options.skipArm !== true) await driver.arm(reported);
   t.after(async () => { await driver.close(); await runtime.close(); await rm(root, {recursive:true,force:true}); });
   return { root, driver, runtime, g, reported, config, sends: () => sends, sentPayloads,
     setPages: v => { pages = v; }, page: () => pages[0],
     final: () => { pages = pages.map(p => ({...p,generating:false,latestMessageRole:'assistant',latestAssistantMessageId:'assistant-new',latestAssistantText:'New final report'})); },
     tick: async () => { now += 100; return driver.pollOnce(); }, advanceTime: n => { now += n; } };
+}
+
+function nativePageForReported(h, overrides = {}) {
+  const reportedAtMs = Date.parse(h.reported.lastRoundReport.reportedAt);
+  const sourceUserCreatedAt = new Date(reportedAtMs - 2_000).toISOString();
+  const finalCreatedAt = new Date(reportedAtMs + 2_000).toISOString();
+  return {
+    ...h.page(),
+    generating: false,
+    streamStatus: 'COMPLETE',
+    latestMessageRole: 'assistant',
+    latestAssistantMessageId: 'assistant-missing-arm-final',
+    latestAssistantText: 'A visible final produced after the Goal report gate.',
+    assistantBeforeLatestUserMessageId: 'assistant-before-source-user',
+    nativeContinuation: {
+      resolved: true,
+      currentNodeId: 'assistant-missing-arm-final',
+      currentMessageId: 'assistant-missing-arm-final',
+      currentRole: 'assistant',
+      currentStatus: 'finished_successfully',
+      currentEndTurn: true,
+      currentCreatedAt: finalCreatedAt,
+      latestUserMessageId: 'user-a',
+      latestUserCreatedAt: sourceUserCreatedAt,
+      previousUserMessageId: 'user-before-source',
+      previousUserCreatedAt: new Date(reportedAtMs - 10_000).toISOString(),
+      assistantBeforeLatestUserMessageId: 'assistant-before-source-user',
+      assistantBeforeLatestUserStatus: 'finished_successfully',
+      assistantBeforeLatestUserEndTurn: true,
+      assistantBeforeLatestUserCreatedAt: new Date(reportedAtMs - 5_000).toISOString(),
+      latestAssistantMessageId: 'assistant-missing-arm-final',
+      latestAssistantStatus: 'finished_successfully',
+      latestAssistantEndTurn: true,
+      latestAssistantCreatedAt: finalCreatedAt,
+    },
+    ...overrides,
+  };
 }
 
 test('report alone never sends; final boundary delivers once and redeems next round', async t => {
@@ -52,6 +89,213 @@ test('report alone never sends; final boundary delivers once and redeems next ro
   const goal = await h.runtime.status(h.g.id);
   assert.equal(goal.round,2); assert.equal(goal.roundState,'working');
   await h.tick(); assert.equal(h.sends(),1);
+});
+
+test('a reported pending Goal with no journal row self-heals from the exact completed final', async t => {
+  const h = await harness(t, { skipArm: true });
+  assert.equal(h.driver.status().records.length, 0, 'simulate report-time source capture failing before a journal row exists');
+  h.setPages([nativePageForReported(h, { streamStatus: 'IN_PROGRESS' })]);
+  await h.tick();
+  assert.equal(h.sends(), 0, 'the recovered boundary is journaled before any hidden transport');
+  assert.equal(h.driver.status().records.length, 1);
+  assert.equal(h.driver.status().records[0].recoveredMissingArm, true);
+  assert.equal(h.driver.status().records[0].reason, 'recovered-missing-arm-current-final');
+  await h.tick();
+  assert.equal(h.sends(), 1);
+  const goal = await h.runtime.status(h.g.id);
+  assert.equal(goal.round, 2);
+  assert.equal(goal.roundState, 'working');
+  assert.equal(h.driver.status().recoveredMissingArmCount, 1);
+  await h.tick();
+  assert.equal(h.sends(), 1, 'the self-healed continuation remains exactly once');
+});
+
+test('a report-time source inspection failure is retried by the durable pending-Goal scan', async t => {
+  const h = await harness(t, { skipArm: true });
+  const originalInspect = h.driver.inspect;
+  let failArmInspection = true;
+  h.driver.inspect = async (...args) => {
+    if (failArmInspection) throw new Error('injected report-time CDP timeout');
+    return originalInspect(...args);
+  };
+  const arm = await h.driver.arm(h.reported);
+  assert.equal(arm.armed, false);
+  assert.equal(arm.reason, 'source-boundary-inspection-failed');
+  assert.match(h.driver.status().lastArmError, /injected report-time CDP timeout/);
+  assert.equal(h.driver.status().records.length, 0);
+
+  failArmInspection = false;
+  const reportedAtMs = Date.parse(h.reported.lastRoundReport.reportedAt);
+  const sourceCreatedAt = new Date(reportedAtMs - 2_000).toISOString();
+  h.setPages([{
+    ...h.page(),
+    nativeContinuation: {
+      resolved: true,
+      currentNodeId: 'assistant-partial',
+      currentMessageId: 'assistant-partial',
+      currentRole: 'assistant',
+      currentStatus: 'in_progress',
+      currentEndTurn: false,
+      currentCreatedAt: new Date(reportedAtMs + 1_000).toISOString(),
+      latestUserMessageId: 'user-a',
+      latestUserCreatedAt: sourceCreatedAt,
+      previousUserMessageId: 'user-before-source',
+      previousUserCreatedAt: new Date(reportedAtMs - 10_000).toISOString(),
+      assistantBeforeLatestUserMessageId: 'assistant-old',
+      assistantBeforeLatestUserStatus: 'finished_successfully',
+      assistantBeforeLatestUserEndTurn: true,
+      assistantBeforeLatestUserCreatedAt: new Date(reportedAtMs - 5_000).toISOString(),
+      latestAssistantMessageId: 'assistant-partial',
+      latestAssistantStatus: 'in_progress',
+      latestAssistantEndTurn: false,
+      latestAssistantCreatedAt: new Date(reportedAtMs + 1_000).toISOString(),
+    },
+  }]);
+  await h.tick();
+  assert.equal(h.driver.status().records[0].recoveredMissingArm, true);
+  assert.equal(h.driver.status().records[0].state, 'waiting');
+  assert.equal(h.driver.status().records[0].reason, 'awaiting-current-final');
+  h.setPages([nativePageForReported(h)]);
+  await h.tick();
+  await h.tick();
+  assert.equal(h.sends(), 1);
+  assert.equal((await h.runtime.status(h.g.id)).round, 2);
+});
+
+test('a replacement Core discovers a pending Goal whose arm journal was never created', async t => {
+  const h = await harness(t, { skipArm: true });
+  await h.driver.close();
+  h.setPages([nativePageForReported(h, { streamStatus: 'IN_PROGRESS' })]);
+  const restarted = new GoalContinuationSupervisor(h.config);
+  await restarted.pollOnce();
+  h.advanceTime(100);
+  await restarted.pollOnce();
+  assert.equal(h.sends(), 1);
+  assert.equal((await h.runtime.status(h.g.id)).round, 2);
+  assert.equal(restarted.status().records[0].recoveredMissingArm, true);
+  assert.equal(restarted.status().recoveredMissingArmCount, 1);
+  await restarted.close();
+});
+
+test('a new exact human turn redeems an unjournaled pending continuation without a hidden resend', async t => {
+  const h = await harness(t, { skipArm: true });
+  const reportedAtMs = Date.parse(h.reported.lastRoundReport.reportedAt);
+  const finalCreatedAt = new Date(reportedAtMs + 2_000).toISOString();
+  const userCreatedAt = new Date(reportedAtMs + 4_000).toISOString();
+  h.setPages([nativePageForReported(h, {
+    generating: true,
+    latestMessageRole: 'user',
+    latestUserMessageId: 'user-next-round',
+    previousUserMessageId: 'user-a',
+    latestAssistantMessageId: 'assistant-missing-arm-final',
+    assistantBeforeLatestUserMessageId: 'assistant-missing-arm-final',
+    nativeContinuation: {
+      resolved: true,
+      currentNodeId: 'user-next-round',
+      currentMessageId: 'user-next-round',
+      currentRole: 'user',
+      currentStatus: 'finished_successfully',
+      currentEndTurn: false,
+      currentCreatedAt: userCreatedAt,
+      latestUserMessageId: 'user-next-round',
+      latestUserCreatedAt: userCreatedAt,
+      previousUserMessageId: 'user-a',
+      previousUserCreatedAt: new Date(reportedAtMs - 2_000).toISOString(),
+      assistantBeforeLatestUserMessageId: 'assistant-missing-arm-final',
+      assistantBeforeLatestUserStatus: 'finished_successfully',
+      assistantBeforeLatestUserEndTurn: true,
+      assistantBeforeLatestUserCreatedAt: finalCreatedAt,
+      latestAssistantMessageId: 'assistant-missing-arm-final',
+      latestAssistantStatus: 'finished_successfully',
+      latestAssistantEndTurn: true,
+      latestAssistantCreatedAt: finalCreatedAt,
+    },
+  })]);
+  await h.tick();
+  assert.equal(h.sends(), 0);
+  const goal = await h.runtime.status(h.g.id);
+  assert.equal(goal.round, 2);
+  assert.equal(goal.roundBeganAt, userCreatedAt);
+  const record = h.driver.status().records[0];
+  assert.equal(record.reason, 'human-user-turn-started-next-round');
+  assert.equal(record.deliveryMode, 'human-user-continuation');
+  assert.equal(record.redeemed, true);
+  assert.equal(record.recoveredMissingArm, true);
+});
+
+test('a completed assistant response to a later human turn is never mistaken for the reported-round final', async t => {
+  const h = await harness(t, { skipArm: true });
+  const reportedAtMs = Date.parse(h.reported.lastRoundReport.reportedAt);
+  const reportFinalAt = new Date(reportedAtMs + 2_000).toISOString();
+  const newUserAt = new Date(reportedAtMs + 4_000).toISOString();
+  const laterAssistantAt = new Date(reportedAtMs + 6_000).toISOString();
+  h.setPages([nativePageForReported(h, {
+    latestUserMessageId: 'user-next-round-completed',
+    previousUserMessageId: 'user-a',
+    latestAssistantMessageId: 'assistant-human-response',
+    latestAssistantText: 'A later assistant response to the human continuation.',
+    assistantBeforeLatestUserMessageId: 'assistant-missing-arm-final',
+    nativeContinuation: {
+      resolved: true,
+      currentNodeId: 'assistant-human-response',
+      currentMessageId: 'assistant-human-response',
+      currentRole: 'assistant',
+      currentStatus: 'finished_successfully',
+      currentEndTurn: true,
+      currentCreatedAt: laterAssistantAt,
+      latestUserMessageId: 'user-next-round-completed',
+      latestUserCreatedAt: newUserAt,
+      previousUserMessageId: 'user-a',
+      previousUserCreatedAt: new Date(reportedAtMs - 2_000).toISOString(),
+      assistantBeforeLatestUserMessageId: 'assistant-missing-arm-final',
+      assistantBeforeLatestUserStatus: 'finished_successfully',
+      assistantBeforeLatestUserEndTurn: true,
+      assistantBeforeLatestUserCreatedAt: reportFinalAt,
+      latestAssistantMessageId: 'assistant-human-response',
+      latestAssistantStatus: 'finished_successfully',
+      latestAssistantEndTurn: true,
+      latestAssistantCreatedAt: laterAssistantAt,
+    },
+  })]);
+  await h.tick();
+  assert.equal(h.sends(), 0, 'the later assistant response must not trigger a hidden continuation');
+  const goal = await h.runtime.status(h.g.id);
+  assert.equal(goal.round, 2);
+  assert.equal(goal.roundBeganAt, newUserAt);
+  assert.equal(h.driver.status().records[0].deliveryMode, 'human-user-continuation');
+});
+
+test('an old final from before the report cannot self-heal a missing continuation journal', async t => {
+  const h = await harness(t, { skipArm: true });
+  const reportedAtMs = Date.parse(h.reported.lastRoundReport.reportedAt);
+  const staleCreatedAt = new Date(reportedAtMs - 30_000).toISOString();
+  const stale = nativePageForReported(h);
+  stale.nativeContinuation.currentCreatedAt = staleCreatedAt;
+  stale.nativeContinuation.latestAssistantCreatedAt = staleCreatedAt;
+  h.setPages([stale]);
+  await h.tick();
+  assert.equal(h.sends(), 0);
+  assert.equal(h.driver.status().records.length, 0);
+  assert.equal((await h.runtime.status(h.g.id)).roundState, 'reported');
+  assert.equal(h.driver.status().missingArmPending, 1);
+});
+
+test('divergent exact displays fail closed instead of choosing a missing-arm owner', async t => {
+  const h = await harness(t, { skipArm: true });
+  const first = nativePageForReported(h);
+  const second = nativePageForReported(h, {
+    pageTargetId: 'page-b',
+    latestUserMessageId: 'other-user',
+    nativeContinuation: {
+      ...first.nativeContinuation,
+      latestUserMessageId: 'other-user',
+    },
+  });
+  h.setPages([first, second]);
+  await h.tick();
+  assert.equal(h.sends(), 0);
+  assert.equal(h.driver.status().records.length, 0);
+  assert.equal((await h.runtime.status(h.g.id)).roundState, 'reported');
 });
 
 test('temporary page loss after a committed hidden send does not poison later notification', async t => {

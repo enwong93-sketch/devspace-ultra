@@ -4,6 +4,7 @@ import { StableGatewayAdmissionGate } from "./stable-gateway-admission.js";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const CORE_RECOVERY_RETRY_MS = 2_000;
+const CORE_IDENTITY_RECONCILE_MS = 2_000;
 
 function normalizePublicBaseUrl(value) {
   const parsed = new URL(String(value ?? "").trim());
@@ -78,6 +79,9 @@ export function createStableGatewayController({
   const createCandidateSnapshot = requireDependency(dependencies, "createCandidateSnapshot");
   const probeCandidate = requireDependency(dependencies, "probeCandidate");
   const readCoreSchemaFingerprint = requireDependency(dependencies, "readCoreSchemaFingerprint");
+  const readCoreRuntimeIdentity = typeof dependencies?.readCoreRuntimeIdentity === "function"
+    ? dependencies.readCoreRuntimeIdentity
+    : null;
   // Core recovery/handover events remain machine diagnostics only. User-visible
   // progress is authored explicitly by the active agent through
   // devspace_progress_report, never synthesized from controller state. Keep the
@@ -91,32 +95,47 @@ export function createStableGatewayController({
   let fatalCoreRecoveryError = null;
   let coreRecoveryPromise = null;
   let deferredCoreExit = null;
+  let reconcilePromise = null;
+  let reconcileTimer = null;
+  let runtimeIdentityMismatch = null;
   let closing = false;
+  const knownHandles = new Map();
+  const watchedHandles = new WeakSet();
 
   const slotId = (slot) => `core-${slot}`;
   const coreDescriptor = (handle) => ({ id: slotId(activeSlot) === handle.id ? handle.id : handle.id, baseUrl: handle.baseUrl });
 
-  const startActive = (slot) => startCoreSlot({
+  const rememberHandle = (handle, slot, role) => {
+    const pid = Number(handle?.pid);
+    if (Number.isInteger(pid) && pid > 0) knownHandles.set(pid, { handle, slot, role });
+    return handle;
+  };
+
+  if (activeHandle) rememberHandle(activeHandle, activeSlot, "active");
+
+  const startActive = async (slot) => rememberHandle(await startCoreSlot({
     id: slotId(slot),
     port: ports[slot],
     configDir: configPath,
     stateDir: statePath,
     publicBaseUrl: publicBase,
     candidate: false,
-  });
+  }), slot, "active");
 
-  const startCandidate = (slot, candidateStateDir) => startCoreSlot({
+  const startCandidate = async (slot, candidateStateDir) => rememberHandle(await startCoreSlot({
     id: slotId(slot),
     port: ports[slot],
     configDir: configPath,
     stateDir: candidateStateDir,
     publicBaseUrl: publicBase,
     candidate: true,
-  });
+  }), slot, "candidate");
 
   const ensureStopped = async (handle, label) => {
     const result = await stopCoreSlot(handle);
     if (result?.stopped !== true) throw new Error(`${label} did not stop safely.`);
+    const pid = Number(handle?.pid);
+    if (Number.isInteger(pid) && knownHandles.get(pid)?.handle === handle) knownHandles.delete(pid);
   };
 
   const baselineSessionCandidates = () => {
@@ -190,6 +209,118 @@ export function createStableGatewayController({
     try { activityJournal.noteSystem({ title, detail, state }); } catch {}
   };
 
+  const reconcileActiveCoreIdentity = async ({ force = false } = {}) => {
+    if (!readCoreRuntimeIdentity) return { ok: false, skipped: "identity-probe-unavailable" };
+    if (closing || !proxy || !activeHandle) return { ok: false, skipped: "gateway-not-ready" };
+    if (handoverInProgress || coreRecoveryPromise) return { ok: false, skipped: "controller-busy" };
+    if (!force && !fatalHandoverError && !fatalCoreRecoveryError && !runtimeIdentityMismatch) {
+      return { ok: true, skipped: "controller-consistent", activePid: activeHandle.pid ?? null };
+    }
+    if (reconcilePromise) return await reconcilePromise;
+
+    reconcilePromise = (async () => {
+      const expectedHandle = activeHandle;
+      const expectedSlot = activeSlot;
+      const identity = await readCoreRuntimeIdentity({ coreBaseUrl: expectedHandle.baseUrl });
+      if (!identity?.ok || !Number.isInteger(Number(identity.pid))) {
+        runtimeIdentityMismatch = `Core ${String(expectedSlot).toUpperCase()} runtime identity is unavailable at ${expectedHandle.baseUrl}.`;
+        return { ok: false, state: "identity-unavailable", activeSlot: expectedSlot };
+      }
+      if (closing || handoverInProgress || coreRecoveryPromise || activeSlot !== expectedSlot) {
+        return { ok: false, skipped: "controller-changed-during-probe" };
+      }
+
+      const observedPid = Number(identity.pid);
+      const expectedPid = Number(expectedHandle.pid);
+      let liveHandle = expectedHandle;
+      if (observedPid !== expectedPid) {
+        const known = knownHandles.get(observedPid);
+        const liveChild = known?.handle?.child;
+        if (
+          !known
+          || known.role !== "active"
+          || known.slot !== expectedSlot
+          || (liveChild && liveChild.exitCode !== null)
+        ) {
+          runtimeIdentityMismatch = `Core ${String(expectedSlot).toUpperCase()} listener PID ${observedPid} does not match controller PID ${expectedPid || "unknown"} and is not a live Core handle spawned by this Gateway.`;
+          fatalHandoverError = fatalHandoverError || runtimeIdentityMismatch;
+          return {
+            ok: false,
+            state: "foreign-core-listener",
+            activeSlot: expectedSlot,
+            expectedPid: Number.isInteger(expectedPid) ? expectedPid : null,
+            observedPid,
+          };
+        }
+        liveHandle = known.handle;
+      }
+
+      const needsRepair = (
+        liveHandle !== activeHandle
+        || Boolean(fatalHandoverError)
+        || Boolean(fatalCoreRecoveryError)
+        || Boolean(runtimeIdentityMismatch)
+      );
+      if (!needsRepair) {
+        runtimeIdentityMismatch = null;
+        return { ok: true, state: "already-consistent", activeSlot: expectedSlot, activePid: observedPid };
+      }
+
+      admission.closeAdmission();
+      registry.beginBarrier();
+      let reopened = false;
+      try {
+        await Promise.all([
+          admission.waitForDrain(),
+          registry.waitForDrain(),
+        ]);
+        if (closing || activeSlot !== expectedSlot) throw new Error("Gateway state changed before Core identity reconciliation committed.");
+
+        const replayed = await proxy.replaySessionsToCore({
+          id: slotId(expectedSlot),
+          baseUrl: liveHandle.baseUrl,
+        });
+        registry.commitMappings(replayed.mappings);
+        proxy.setActiveCore({ id: slotId(expectedSlot), baseUrl: liveHandle.baseUrl });
+
+        const staleHandle = activeHandle;
+        activeHandle = liveHandle;
+        watchActiveHandle(liveHandle, expectedSlot);
+        if (staleHandle && staleHandle !== liveHandle) {
+          await ensureStopped(staleHandle, "Stale controller Core handle");
+        }
+
+        fatalHandoverError = null;
+        fatalCoreRecoveryError = null;
+        runtimeIdentityMismatch = null;
+        noteActivity({
+          title: "Core identity reconciled",
+          detail: `Core ${String(expectedSlot).toUpperCase()} listener PID ${observedPid} is now the controller authority; replayed ${replayed.mappings.length}, deferred ${replayed.deferredPublicSessionIds.length}, removed ${replayed.droppedPublicSessionIds.length} incompatible session(s).`,
+        });
+        reopenAdmission();
+        reopened = true;
+        return {
+          ok: true,
+          state: "reconciled",
+          activeSlot: expectedSlot,
+          activePid: observedPid,
+          replayedSessions: replayed.mappings.length,
+          deferredSessions: replayed.deferredPublicSessionIds.length,
+          droppedSessions: replayed.droppedPublicSessionIds.length,
+          replayFailureReasons: replayed.failureReasonCounts,
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        fatalHandoverError = `Core identity reconciliation failed: ${message}`;
+        runtimeIdentityMismatch = runtimeIdentityMismatch || message;
+        return { ok: false, state: "reconciliation-failed", activeSlot: expectedSlot, observedPid, error: message };
+      } finally {
+        if (!reopened) reopenAdmission();
+      }
+    })().finally(() => { reconcilePromise = null; });
+    return await reconcilePromise;
+  };
+
   const recoverActiveCore = ({ handle, slot, code, signal }) => {
     if (closing || handle !== activeHandle || slot !== activeSlot || !proxy) return coreRecoveryPromise;
     if (handoverInProgress) {
@@ -220,6 +351,7 @@ export function createStableGatewayController({
           proxy.setActiveCore({ id: slotId(slot), baseUrl: replacement.baseUrl });
           activeHandle = replacement;
           watchActiveHandle(replacement, slot);
+          fatalHandoverError = null;
           fatalCoreRecoveryError = null;
           noteActivity({
             title: "Core recovery completed",
@@ -257,7 +389,11 @@ export function createStableGatewayController({
   const watchActiveHandle = (handle, slot) => {
     const child = handle?.child;
     if (!child || typeof child.once !== "function") return;
+    if (watchedHandles.has(handle)) return;
+    watchedHandles.add(handle);
     child.once("exit", (code, signal) => {
+      const pid = Number(handle?.pid);
+      if (Number.isInteger(pid) && knownHandles.get(pid)?.handle === handle) knownHandles.delete(pid);
       if (closing || handle !== activeHandle || slot !== activeSlot) return;
       void recoverActiveCore({ handle, slot, code, signal });
     });
@@ -273,6 +409,14 @@ export function createStableGatewayController({
       activityJournal,
     });
     watchActiveHandle(activeHandle, activeSlot);
+    if (readCoreRuntimeIdentity && !reconcileTimer) {
+      reconcileTimer = setInterval(() => {
+        if (fatalHandoverError || fatalCoreRecoveryError || runtimeIdentityMismatch) {
+          void reconcileActiveCoreIdentity({ force: true });
+        }
+      }, CORE_IDENTITY_RECONCILE_MS);
+      reconcileTimer.unref?.();
+    }
     return status();
   };
 
@@ -344,7 +488,12 @@ export function createStableGatewayController({
     if (!proxy || !activeHandle) throw new Error("Stable Gateway is not started.");
     if (handoverInProgress) throw new Error("Stable Gateway handover is already in progress.");
     if (coreRecoveryPromise) throw new Error("Stable Gateway Core recovery is in progress.");
-    if (fatalHandoverError) throw new Error(`Stable Gateway is blocked after fatal rollback failure: ${fatalHandoverError}`);
+    if (fatalHandoverError || runtimeIdentityMismatch) {
+      const reconciled = await reconcileActiveCoreIdentity({ force: true });
+      if (reconciled?.ok !== true) {
+        throw new Error(`Stable Gateway is blocked after fatal rollback failure: ${fatalHandoverError || runtimeIdentityMismatch}`);
+      }
+    }
     handoverInProgress = true;
     const oldSlot = activeSlot;
     const nextSlot = oldSlot === "a" ? "b" : "a";
@@ -476,12 +625,18 @@ export function createStableGatewayController({
       if (deferred && deferred.handle === activeHandle && deferred.slot === activeSlot && !closing) {
         void recoverActiveCore(deferred);
       }
+      if ((fatalHandoverError || runtimeIdentityMismatch) && !closing) {
+        void reconcileActiveCoreIdentity({ force: true });
+      }
     }
   };
 
   const close = async () => {
     closing = true;
+    if (reconcileTimer) clearInterval(reconcileTimer);
+    reconcileTimer = null;
     reopenAdmission();
+    if (reconcilePromise) await reconcilePromise.catch(() => {});
     if (activeHandle) await stopCoreSlot(activeHandle).catch(() => {});
     activeHandle = null;
     proxy = null;
@@ -493,9 +648,12 @@ export function createStableGatewayController({
       activeSlot,
       activePid: activeHandle?.pid ?? null,
       handoverInProgress,
+      coreIdentityReconciliationInProgress: Boolean(reconcilePromise),
       coreRecoveryInProgress: Boolean(coreRecoveryPromise),
-      fatal: Boolean(fatalHandoverError),
-      fatalCoreRecoveryError: null,
+      fatal: Boolean(fatalHandoverError || runtimeIdentityMismatch),
+      fatalHandoverError,
+      runtimeIdentityMismatch,
+      fatalCoreRecoveryError,
       coreRecoveryLastError: fatalCoreRecoveryError,
       admission: admission.snapshot(),
       sessions: registry.snapshotPublic(),
@@ -506,6 +664,7 @@ export function createStableGatewayController({
     start,
     close,
     handover,
+    reconcileActiveCoreIdentity,
     handlePublicRequest,
     status,
     registry,

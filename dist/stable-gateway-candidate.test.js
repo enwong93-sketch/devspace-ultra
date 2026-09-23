@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { MODEL_SURFACE_FINGERPRINT_VERSION, probeCandidate, readCoreSchemaFingerprint, readSessionSchemaFingerprint, schemaFingerprint } from "./stable-gateway-candidate.js";
+import { MODEL_SURFACE_FINGERPRINT_VERSION, probeCandidate, readCoreRuntimeIdentity, readCoreSchemaFingerprint, readSessionSchemaFingerprint, schemaFingerprint } from "./stable-gateway-candidate.js";
 
 const PUBLIC_BASE = "https://devspace-gateway.example.test";
 const EXPECTED_TOOLS = [
@@ -44,6 +44,7 @@ async function createCandidateCore({
   resource = `${PUBLIC_BASE}/mcp`,
   issuer = `${PUBLIC_BASE}/`,
   tools = EXPECTED_TOOLS,
+  pid = 45678,
 } = {}) {
   const observed = [];
   const server = createServer(async (req, res) => {
@@ -52,6 +53,15 @@ async function createCandidateCore({
       res.statusCode = healthOk ? 200 : 503;
       res.setHeader("content-type", "application/json");
       res.end(JSON.stringify({ ok: healthOk }));
+      return;
+    }
+    if (req.url === "/__devspace/memory/status") {
+      res.statusCode = 200;
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify({
+        pid,
+        features: { passiveCore: false, autoCompactEnabled: false },
+      }));
       return;
     }
     if (req.url === "/.well-known/oauth-protected-resource/mcp") {
@@ -160,6 +170,23 @@ async function testReadsBaselineSchemaFromExistingSession() {
     const request = core.observed.find((entry) => entry.url === "/mcp" && entry.sessionId === "existing-backend-session");
     assert.equal(request.authorization, "Bearer baseline-secret");
     assert.doesNotMatch(JSON.stringify(result), /baseline-secret|existing-backend-session/);
+  } finally {
+    await close(core.server);
+  }
+}
+
+async function testReadsExactCoreRuntimeIdentity() {
+  const core = await createCandidateCore({ pid: 54321 });
+  try {
+    const result = await readCoreRuntimeIdentity({ coreBaseUrl: core.baseUrl });
+    assert.deepEqual(result, {
+      ok: true,
+      baseUrl: core.baseUrl,
+      pid: 54321,
+      passiveCore: false,
+      autoCompactEnabled: false,
+    });
+    assert.equal(core.observed.some((entry) => entry.url === "/__devspace/memory/status"), true);
   } finally {
     await close(core.server);
   }
@@ -303,6 +330,7 @@ async function testExplicitSchemaChangeRejectsEmptyToolSurface() {
 }
 
 await testReadsBaselineSchemaFromExistingSession();
+await testReadsExactCoreRuntimeIdentity();
 await testReadsBaselineSchemaFromFreshEphemeralSession();
 await testCompatibleCandidatePasses();
 await testHealthMismatchFailsBeforeMcp();

@@ -92,7 +92,7 @@ import { workspaceDiscoveryView } from './workspace-discovery-view.js';
 import { ProgressBootstrapAuthorityRegistry } from "./progress-bootstrap-authority.js";
 import { ConversationStartClaimRegistry } from "./conversation-start-claim-registry.js";
 import { ConversationStartClaimCdpResolver } from "./conversation-start-claim-cdp.js";
-import { InteractiveProgressEnforcementGate } from "./interactive-progress-enforcement.js";
+import { InteractiveProgressEnforcementGate, goalRoundClosureState } from "./interactive-progress-enforcement.js";
 // ChatGPT/OpenAI MCP clients may reconnect without sending DELETE. Core session
 // lifetime is therefore tied to the actual standalone SSE connection: when that
 // stream disconnects and no real tool request is still active, the transport is
@@ -1347,6 +1347,10 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
         startClaimRegistry: conversationStartClaimRegistry,
         claimRelayResourceUri: PROGRESS_CLAIM_RELAY_URI,
         resolveStartClaimPage,
+        resolveActiveGoal: async (conversationId) => {
+            const goals = await goalRuntime.activeGoals({ conversationId, limit: 2 });
+            return goals.length === 1 ? goals[0] : null;
+        },
     });
     registerGoalTools(server, goalRuntime, {
         resourceUri: GOAL_DOCK_URI,
@@ -3625,16 +3629,31 @@ export function createServer(config = loadConfig(), options = {}) {
                     ? gateAuthority.runtimeKeys[0]
                     : gateAuthority?.runtimeKey || null;
                 if (gateConversationId && /^main-\d{2}$/i.test(String(gateRuntimeKey || ""))) {
-                    const [activePlan] = await planRuntime.activePlans({
-                        conversationId: gateConversationId,
-                        limit: 1,
+                    const [activePlans, activeGoals, latestPlan] = await Promise.all([
+                        planRuntime.activePlans({
+                            conversationId: gateConversationId,
+                            limit: 2,
+                        }),
+                        goalRuntime.activeGoals({
+                            conversationId: gateConversationId,
+                            limit: 2,
+                        }),
+                        planRuntime.latestPlan({ conversationId: gateConversationId }),
+                    ]);
+                    const activePlan = activePlans.length === 1 ? activePlans[0] : null;
+                    const activeGoal = activeGoals.length === 1 ? activeGoals[0] : null;
+                    const roundClosure = goalRoundClosureState({
+                        activeGoal,
+                        activePlan,
+                        latestPlan,
                     });
                     const progressGate = await interactiveProgressGate.beforeTool({
                         conversationId: gateConversationId,
                         runtimeKey: gateRuntimeKey,
                         toolName: requestedToolName,
                         args: req?.body?.params?.arguments || {},
-                        activePlan: activePlan || null,
+                        activePlan,
+                        roundClosure,
                     });
                     if (progressGate?.ok === false && progressGate?.blocked === true) {
                         res.status(200).json({
@@ -3644,11 +3663,13 @@ export function createServer(config = loadConfig(), options = {}) {
                                 code: -32029,
                                 message: progressGate.message,
                                 data: {
-                                    type: "devspace_progress_preflight_required",
+                                    type: progressGate.errorType || "devspace_progress_preflight_required",
                                     reason: progressGate.reason,
                                     maxSilentMs: progressGate.maxSilentMs ?? null,
                                     reportAgeMs: progressGate.reportAgeMs ?? null,
                                     planId: progressGate.planId ?? activePlan?.id ?? null,
+                                    goalId: progressGate.goalId ?? activeGoal?.id ?? null,
+                                    round: progressGate.round ?? activeGoal?.round ?? null,
                                 },
                             },
                         });
