@@ -1,5 +1,82 @@
 # DevSpace Ultra v0.5.8 stabilization — 2026-09-20
 
+## Stable-release closure: multi-Agent Goal endurance — 2026-09-23
+
+### Incident and demonstrated causes
+
+Three user-facing Agents appeared to stop around 06:00 while their Goal strips
+still showed Active. This was not a hard three-round limit:
+
+- Main-03 had reached Goal round 14. Its hidden continuation was invoked but no
+  native assistant node appeared. A later real user turn was classified as
+  cancellation, leaving the Goal `reported/pending` instead of using that turn
+  as round 15. On restart the old implementation also stamped the round with
+  restart time, so the already-running turn could fail same-round recovery's
+  lower-bound check.
+- Main-04 had five nonterminal Goals bound to one conversation. Exact page plus
+  current Host Overlay authority proved `goal_31461729727138b6` was the owner;
+  four older, unprogressed duplicates were stopped by the reviewed collision
+  repair. No page navigation, composer mutation or runtime restart occurred.
+- Long conversation inspection and normal hidden Goal dispatch shared a 500ms
+  CDP budget, and hidden host invocation waited on the host promise for the
+  whole assistant turn. Both made valid long-running pages look unavailable or
+  acknowledgement-lost.
+
+### Repairs and endurance evidence
+
+Commits `8ecd0a3` and `d2a8b75` implement the release fix:
+
+- a real new user turn redeems the pending/dispatching continuation into the
+  next Goal round instead of cancelling the continuation and stranding Active /
+  Reported state;
+- the exact native user `create_time` is retained and used only by the internal
+  supervisor to set or safely repair `roundBeganAt` backwards. It must be near
+  or after the prior report and cannot be in the future; the public round-begin
+  tool has no caller-supplied timestamp field;
+- a legacy cancelled/delivered journal is repaired after Core restart from the
+  exact source-final-next-user native branch, without replaying hidden delivery;
+- hidden host RPC returns after synchronous invocation, never after the whole
+  assistant promise, and normal Goal continuation requires native assistant
+  branch confirmation before acceptance;
+- discovery, full page inspection, raw dispatch and composer operations now
+  have separate bounded budgets; long pages no longer inherit the 500ms port
+  discovery limit;
+- first-poll same-round recovery after Core restart may use exact persisted
+  request + finished timestamps for the same route and round; later-route or
+  pre-round evidence still fails closed.
+
+Executable evidence includes the existing 160-round exactly-once continuation
+test and 64-round same-round recovery test, plus a new three-Agent endurance
+run: 48 rounds per Agent (144 combined) with acknowledgement loss, a real user
+supersession every fourth round and driver restart every seventh round. Every
+Goal advanced exactly once. A separate integration test proves real-user
+continuation -> Core restart -> exactly-once same-round recovery. Goal, Rescue,
+progress-liveness and Classic safety suites all passed.
+
+Clean audit `0bbcfea2-d0d7-44a5-80e3-d8421cb5439d` validated revision
+`d2a8b75a2acbd8606e9c60ca0a8e8b587819aa59`: 174 named gates, exit 0,
+clean tracked diff. Compatible handover
+`215a8a36-a73d-4486-9bca-04290c6750c9` completed with schema unchanged,
+119 tools, active Core PID 14064, two sessions replayed, zero deferred/dropped,
+no rollback and temporary verifier tokens revoked.
+
+Live post-handover evidence: Main-03's historical round-14 cancellation was
+reconciled without resend, it completed/report-gated round 15 and automatically
+entered round 16. Its progress card updated at 09:06:07Z. Main-04 retained one
+authoritative Goal after collision repair and its recovered Agent/card updated
+at 09:06:39Z. These are live product observations, not fixture-only results.
+Auto Compact remained OFF, V0.6 worktree changes were not mixed, and Blender
+PID 17000 plus unrelated Main processes were not restarted.
+
+### Remaining release boundary
+
+Publish only this v0.5.8 line after the final public-package/release gates and
+remote CI succeed. The existing immutable `v0.5.8` tag predates this maintenance
+payload; do not silently force-move it. The supported same-version maintenance
+path is to merge the audited source to `main`, replace the v0.5.8 release
+archive/install/checksum assets from that exact merged revision, update the
+release body with the payload commit and audit, and verify remote asset digests.
+
 ## Round 3: complete control-plane loss and survivability — 2026-09-23
 
 ### Incident evidence and recovery
