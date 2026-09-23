@@ -1,5 +1,40 @@
 # DevSpace Ultra v0.5.8 stabilization — 2026-09-20
 
+## Round 6: Active Goal with stale stream status — 2026-09-23
+
+The Goal strip correctly showed `Active`: backend Goal
+`goal_9ddde493694349b9` was Round 6 / Working, the turn Plan was still active,
+and no report-gated next-round continuation existed. It was not a paused Goal
+or a display-only state.
+
+Exact native history proved the missing recovery window. The hidden
+continuation opened Round 6 at 13:06:39Z; the assistant committed a normal
+text final at 13:09:46Z without calling `devspace_goal_turn_report`; the next
+real user message did not arrive until 13:41:36Z. The same-round guard stayed
+on `same-route-active-turn-observed` instead of dispatching recovery.
+
+Root cause: the guard had already observed the active turn, so the earlier
+restart fallback was not eligible. ChatGPT could leave `/stream_status` at
+`IN_PROGRESS` after the exact assistant final had committed. The normal path
+therefore never accepted completion, while the native fallback was restricted
+to `reentry-or-unobserved-turn`.
+
+The maintenance fix makes an exact visible assistant final a candidate for one
+bounded native-branch inspection even after an active turn was observed and
+the stream endpoint remains stale. Recovery is authorized only when the native
+current node and DOM final share the same assistant ID, the latest user IDs
+match, native status is non-running, `end_turn=true`, and both message times
+belong to the current Goal round. The resulting proof remains bound to those
+exact user/assistant IDs; a later user message or branch cannot reuse it.
+Silent, generating, safety-check, delivery-timeout, cross-route and
+cross-conversation cases remain fail-closed.
+
+Regression coverage includes active-turn observation -> visible final -> stale
+`IN_PROGRESS` -> exact native proof -> one hidden same-round recovery, plus
+stale-proof rejection after user/assistant IDs change. Goal, Rescue,
+progress-liveness and Classic safety suites pass. Production Auto Compact
+remains OFF and no Main or Blender restart is part of this fix.
+
 ## Explicit Thinking-failed Rescue and restart-native Goal final — 2026-09-23
 
 ### Live incident evidence

@@ -35,7 +35,6 @@ function recoveryPageIdentity(snapshot) {
 export function shouldInspectNativeCurrentRoundFinal(snapshot) {
   return snapshot?.chatMode === true
     && snapshot?.generating === false
-    && upper(snapshot?.streamStatus) === "COMPLETE"
     && snapshot?.safetyCheckVisible !== true
     && snapshot?.deliveryTimeoutVisible !== true
     && snapshot?.latestMessageRole === "assistant"
@@ -104,6 +103,21 @@ export function shouldRecoverWorkingRound(goal, snapshot, {
     && currentTurnTransportFinished
     && currentRoundAssistantCommitted
   );
+  const recoverySession = snapshot?.recoverySession;
+  const exactNativeCurrentRoundFinal = (
+    recoverySession?.sawNativeCurrentRoundFinal === true
+    && snapshot?.generating === false
+    && snapshot?.safetyCheckVisible !== true
+    && snapshot?.deliveryTimeoutVisible !== true
+    && snapshot?.latestMessageRole === "assistant"
+    && typeof snapshot?.latestAssistantText === "string"
+    && snapshot.latestAssistantText.trim().length > 0
+    && String(snapshot?.latestAssistantMessageId || "").trim()
+      === String(recoverySession?.nativeFinalAssistantMessageId || "").trim()
+    && String(snapshot?.latestUserMessageId || "").trim()
+      === String(recoverySession?.nativeFinalUserMessageId || "").trim()
+  );
+  if (exactNativeCurrentRoundFinal) return true;
   const nativeComplete = (
     upper(snapshot?.streamStatus) === "COMPLETE"
     && snapshot?.safetyCheckVisible !== true
@@ -188,6 +202,8 @@ export class ClassicGoalRoundCompletionGuard {
         baselineAssistantMessageId: String(snapshot?.latestAssistantMessageId || "").trim() || null,
         sawCurrentRoundAssistant: false,
         sawNativeCurrentRoundFinal: false,
+        nativeFinalAssistantMessageId: null,
+        nativeFinalUserMessageId: null,
       };
       this.recoverySessions.set(runKey, session);
     }
@@ -244,6 +260,8 @@ export class ClassicGoalRoundCompletionGuard {
     if (nativeCurrentRoundFinal) {
       session.sawCurrentRoundAssistant = true;
       session.sawNativeCurrentRoundFinal = true;
+      session.nativeFinalAssistantMessageId = String(snapshot?.latestAssistantMessageId || "").trim() || null;
+      session.nativeFinalUserMessageId = String(snapshot?.latestUserMessageId || "").trim() || null;
     }
 
     session.lastObservedAtMs = this.now();
@@ -270,6 +288,8 @@ export class ClassicGoalRoundCompletionGuard {
       sawCurrentRouteRequest: session.sawCurrentRouteRequest,
       sawCurrentRoundAssistant: session.sawCurrentRoundAssistant,
       sawNativeCurrentRoundFinal: session.sawNativeCurrentRoundFinal,
+      nativeFinalAssistantMessageId: session.nativeFinalAssistantMessageId,
+      nativeFinalUserMessageId: session.nativeFinalUserMessageId,
       reason: eligible
         ? session.sawNativeCurrentRoundFinal && !session.sawActiveTurn && !session.sawCurrentRouteRequest
           ? "restart-safe-native-current-round-final"
@@ -363,10 +383,19 @@ export class ClassicGoalRoundCompletionGuard {
         const key = `${goal.id}:${goal.round}`;
         let recoverySession = this.observeRecoverySession(goal, snapshot);
         if (recoverySession.reset) this.nativeCompleteSince.delete(key);
-        if (
-          recoverySession.eligible !== true
-          && recoverySession.reason === "reentry-or-unobserved-turn"
+        const ordinaryCurrentRoundFinal = (
+          recoverySession.eligible === true
+          && recoverySession.sawCurrentRoundAssistant === true
+          && upper(snapshot?.streamStatus) === "COMPLETE"
+        );
+        const nativeFinalInspectionNeeded = (
+          recoverySession.stableOpenRoute === true
+          && recoverySession.sawNativeCurrentRoundFinal !== true
           && shouldInspectNativeCurrentRoundFinal(snapshot)
+          && ordinaryCurrentRoundFinal !== true
+        );
+        if (
+          nativeFinalInspectionNeeded
           && Number(this.nativeFinalRetryAt.get(key) || 0) <= this.now()
         ) {
           this.nativeFinalRetryAt.set(key, this.now() + this.nativeFinalRetryMs);
