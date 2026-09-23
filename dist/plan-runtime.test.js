@@ -100,6 +100,8 @@ try {
   assert.match(completed.completedAt, /^\d{4}-\d{2}-\d{2}T/);
   assert.equal(completed.steps.every((step) => step.status === "completed"), true);
   assert.deepEqual(await runtime.activePlans(), []);
+  assert.equal((await runtime.latestPlan()).id, completed.id,
+    "the latest completed turn Plan must remain discoverable after it leaves activePlans");
 
   await assert.rejects(
     () => runtime.update({
@@ -171,6 +173,8 @@ try {
       assert.equal(planB.conversationId, "conversation-b");
       assert.deepEqual((await bound.activePlans({ conversationId: "conversation-a" })).map((plan) => plan.id), [planA.id]);
       assert.deepEqual((await bound.activePlans({ conversationId: "conversation-b" })).map((plan) => plan.id), [planB.id]);
+      assert.equal((await bound.latestPlan({ conversationId: "conversation-a" })).id, planA.id);
+      assert.equal(await bound.latestPlan({ conversationId: "conversation-missing" }), null);
       assert.equal((await bound.activePlans()).length, 3, "unfiltered legacy diagnostics may still see all active Plans");
 
       await assert.rejects(

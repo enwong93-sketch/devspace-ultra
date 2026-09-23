@@ -29,6 +29,8 @@ assert.match(source, /registerAppTool\(server, "devspace_progress_report"/);
 assert.match(source, /conversation-bound update to the floating DEV Space progress narration card in your own natural language/i);
 assert.match(source, /exact ChatGPT Classic page that received this result confirms a one-time claim/i);
 assert.match(source, /devspace_progress_preflight_required/);
+assert.match(source, /goalRoundClosureState/,
+  "the exact-conversation tool gate must derive Goal round closure from persisted Goal and Plan state");
 assert.match(source, /interactiveProgressGate\.beforeTool/);
 assert.match(source, /progressGate\?\.activityAccepted === true/,
   "rescue liveness may advance only after the Local Gateway admits a substantive tool request");
@@ -68,6 +70,12 @@ assert.match(enforcement, /second-substantive-tool-requires-progress/);
 assert.match(enforcement, /progress-preflight-required/);
 assert.match(enforcement, /final-progress-required/);
 assert.match(enforcement, /final-progress-stale/);
+assert.match(enforcement, /goal-round-plan-incomplete/);
+assert.match(enforcement, /goal-round-report-required/);
+assert.match(enforcement, /devspace_goal_round_report_required/,
+  "completed turn Plans must make Goal round closure a backend-enforced next action");
+assert.match(enforcement, /GOAL_ROUND_CLOSURE_ALLOWED_TOOLS/);
+assert.match(enforcement, /devspace_goal_turn_report as the final tool/);
 assert.match(enforcement, /maxSilentMs/);
 assert.match(enforcement, /activityAccepted:\s*false/,
   "blocked/setup calls must explicitly stay outside rescue-clock activity");

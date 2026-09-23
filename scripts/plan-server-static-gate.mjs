@@ -18,7 +18,9 @@ assert.match(source, /conversationAuthority\.resolveFingerprint\(sessionFingerpr
 assert.doesNotMatch(source, /resolveVerifiedDirectSession|persistVerifiedDirectSessionIdentity|conversationAuthority\.waitForFingerprint/, "Plan tools must not revive durable or cross-request session ownership");
 assert.match(source, /const resolveConversation = resolveCapabilityConversationAuthority;/, "Plan tools must receive the capability/control authority, never the progress-only authority");
 assert.doesNotMatch(source, /const resolveConversation = resolveProgressConversationAuthority;/, "a progress-card identity must never own Plan execution state");
-assert.match(source, /registerPlanTools\(server, planRuntime, \{\s*resourceUri: PLAN_CARD_URI,\s*resolveConversation,\s*resolveBootstrapConversation,\s*startClaimRegistry:\s*conversationStartClaimRegistry,\s*claimRelayResourceUri:\s*PROGRESS_CLAIM_RELAY_URI,\s*resolveStartClaimPage,?\s*\}\)/s, "Plan tools must receive native request authority plus short-lived exact-progress bootstrap and exact-page start recovery");
+assert.match(source, /registerPlanTools\(server, planRuntime, \{\s*resourceUri: PLAN_CARD_URI,\s*resolveConversation,\s*resolveBootstrapConversation,\s*startClaimRegistry:\s*conversationStartClaimRegistry,\s*claimRelayResourceUri:\s*PROGRESS_CLAIM_RELAY_URI,\s*resolveStartClaimPage,\s*resolveActiveGoal:[\s\S]*?\}\s*,?\s*\}\)/s, "Plan tools must receive native request authority, exact-page start recovery, and exact-conversation Goal round-closure authority");
+assert.match(source, /resolveActiveGoal:[\s\S]*goalRuntime\.activeGoals\(\{ conversationId, limit: 2 \}\)/,
+  "completed Plan results must derive round closure only from one exact-conversation active Goal");
 assert.match(source, /new ProgressBootstrapAuthorityRegistry\(\)/,
   "cached-schema Plan bootstrap must be derived from short-lived exact progress proof rather than durable session ownership");
 assert.match(source, /new ConversationStartClaimRegistry\(\)/,

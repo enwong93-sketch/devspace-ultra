@@ -119,8 +119,18 @@ try {
           observedAt: "2026-09-17T03:00:00.000Z",
           pageVerified: true,
         }),
+        resolveActiveGoal: async (conversationId) => conversationId === "conversation-tools-a"
+          ? {
+              id: "goal_plan_tools_round_closure",
+              status: "active",
+              round: 4,
+              roundState: "working",
+              roundBeganAt: "2000-01-01T00:00:00.000Z",
+            }
+          : null,
       });
       const boundStart = boundRegistered.get("devspace_plan_start");
+      const boundUpdate = boundRegistered.get("devspace_update_plan");
       const unresolved = await boundStart.handler({
         title: "Must not become global",
         steps: [
@@ -164,6 +174,22 @@ try {
         ],
       }, { conversationId: "conversation-tools-a" });
       assert.equal(startedA.structuredContent.plan.conversationId, "conversation-tools-a");
+      const advancedA = await boundUpdate.handler({
+        planId: startedA.structuredContent.plan.id,
+        steps: [
+          { ...startedA.structuredContent.plan.steps[0], status: "completed" },
+          { ...startedA.structuredContent.plan.steps[1], status: "in_progress" },
+        ],
+      });
+      const completedA = await boundUpdate.handler({
+        planId: startedA.structuredContent.plan.id,
+        steps: advancedA.structuredContent.plan.steps.map((step) => ({ ...step, status: "completed" })),
+      });
+      assert.equal(completedA.structuredContent.plan.status, "completed");
+      assert.match(completedA.content[0].text, /devspace_goal_turn_report.*final tool/i,
+        "Plan completion must tell the model how to close the active Goal round instead of ending the turn early");
+      assert.match(completedA.content[0].text, /fresh devspace_plan_start/i,
+        "the model may explicitly reopen execution only by starting a fresh turn Plan");
 
       const startedB = await boundStart.handler({
         title: "Conversation B tool plan",
