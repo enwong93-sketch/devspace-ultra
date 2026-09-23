@@ -196,7 +196,9 @@ assert.equal(snapshot.features.conversationProgressLivenessEnabled, true);
 assert.equal(snapshot.features.conversationProgressReportSeconds, 600);
 assert.equal(snapshot.features.conversationProgressRescueSeconds, 1200);
 assert.equal(snapshot.features.tenMinuteAutomaticReminder, false);
-assert.equal(snapshot.features.twentyMinuteInterruptedTurnRescueOnly, true);
+assert.equal(snapshot.features.twentyMinuteInterruptedTurnRescueOnly, false);
+assert.equal(snapshot.features.twentyMinuteSilentOrAmbiguousRescueOnly, true);
+assert.equal(snapshot.features.explicitTerminalFailureFastRescue, true);
 assert.equal(snapshot.features.autoCompactEnabled, false);
 
 const empty = createMemoryDiagnostics({

@@ -350,14 +350,14 @@ export async function inspectVisibleReportCommit(candidate, options = {}) {
             const sessionResponse = await fetch('/api/auth/session', {
               credentials: 'include',
               cache: 'no-store',
-              signal: AbortSignal.timeout(3000),
+              signal: AbortSignal.timeout(${Math.max(1_000, Number(options.nativeSessionTimeoutMs) || 5_000)}),
             });
             const session = sessionResponse.ok ? await sessionResponse.json() : null;
             const accessToken = session?.accessToken || session?.access_token || null;
             const conversationResponse = await fetch('/backend-api/conversation/' + encodeURIComponent(conversationId), {
               credentials: 'include',
               cache: 'no-store',
-              signal: AbortSignal.timeout(8000),
+              signal: AbortSignal.timeout(${Math.max(5_000, Number(options.nativeConversationTimeoutMs) || 30_000)}),
               headers: accessToken ? { authorization: 'Bearer ' + accessToken } : undefined,
             });
             if (conversationResponse.ok) {
@@ -400,14 +400,24 @@ export async function inspectVisibleReportCommit(candidate, options = {}) {
               nativeContinuation = {
                 resolved: true,
                 currentNodeId,
+                currentMessageId: current?.id || null,
                 currentRole: current?.role || null,
                 currentStatus: current?.status || null,
                 currentEndTurn: current?.endTurn === true,
+                currentCreatedAt: current?.createTime != null
+                  ? new Date(current.createTime * 1000).toISOString()
+                  : null,
                 branchMessageCount: branch.length,
                 sourceUserFound: sourceIndex >= 0,
                 baselineAssistantFound: baselineIndex >= 0,
                 latestUserMessageId: latestUser?.id || null,
+                latestUserCreatedAt: latestUser?.createTime != null
+                  ? new Date(latestUser.createTime * 1000).toISOString()
+                  : null,
                 latestAssistantMessageId: latestAssistant?.id || null,
+                latestAssistantCreatedAt: latestAssistant?.createTime != null
+                  ? new Date(latestAssistant.createTime * 1000).toISOString()
+                  : null,
                 newUserAfterBaselineMessageId: newUser?.id || null,
                 newUserAfterBaselineIndex: newUserIndex,
                 newUserAfterBaselineCreatedAt: newUser?.createTime
@@ -638,7 +648,9 @@ export async function inspectGoalContinuationPages(goal, {
   if (!candidates.length || candidates.length > 4) return [];
   const snapshots = await Promise.all(candidates.map(async candidate => {
     const page = await inspectVisibleReportCommit(candidate, {
-      timeoutMs: includeNativeBranch ? 12000 : 3000,
+      timeoutMs: includeNativeBranch ? 45_000 : 3_000,
+      nativeSessionTimeoutMs: includeNativeBranch ? 5_000 : undefined,
+      nativeConversationTimeoutMs: includeNativeBranch ? 30_000 : undefined,
       skipNativeStatus,
       includeNativeBranch,
       sourceUserMessageId,
@@ -1094,7 +1106,7 @@ export class ClassicGoalHostBridge {
     return { candidate: relay, relayFallback: Boolean(relay) };
   }
 
-  async inspectWorkingRound(goalOrGoalId) {
+  async inspectWorkingRound(goalOrGoalId, { includeNativeBranch = false } = {}) {
     const goal = goalOrGoalId && typeof goalOrGoalId === "object" ? goalOrGoalId : null;
     const goalId = String(goal?.id ?? goalOrGoalId ?? "").trim();
     if (!goalId) throw new Error("Goal working-round inspection requires goalId.");
@@ -1120,7 +1132,16 @@ export class ClassicGoalHostBridge {
           : `No matching Chat-mode Goal widget was found for ${goalId}, and no authoritative conversation fallback is available.`,
       };
     }
-    const snapshot = await this.inspectVisibleReport(matching, { goalId, recovery: true });
+    const snapshot = await this.inspectVisibleReport(matching, {
+      goalId,
+      recovery: true,
+      includeNativeBranch: includeNativeBranch === true,
+      ...(includeNativeBranch === true ? {
+        timeoutMs: 45_000,
+        nativeSessionTimeoutMs: 5_000,
+        nativeConversationTimeoutMs: 30_000,
+      } : {}),
+    });
     return {
       ...snapshot,
       runtimePort: matching.runtimePort,

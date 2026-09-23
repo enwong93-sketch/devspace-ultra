@@ -2302,7 +2302,7 @@ export function createServer(config = loadConfig(), options = {}) {
     goalContinuationSupervisor.start();
     const goalRoundCompletionGuard = new ClassicGoalRoundCompletionGuard({
         goalRuntime,
-        inspect: async (goal) => {
+        inspect: async (goal, options = {}) => {
             let recoveryGoal = goal;
             if (!goal?.conversationId) {
                 try {
@@ -2321,7 +2321,9 @@ export function createServer(config = loadConfig(), options = {}) {
                     }
                 } catch {}
             }
-            const snapshot = await goalHostBridge.inspectWorkingRound(recoveryGoal);
+            const snapshot = await goalHostBridge.inspectWorkingRound(recoveryGoal, {
+                includeNativeBranch: options.includeNativeBranch === true,
+            });
             await turnDeliveryEvidenceReady;
             const runtimeKey = Number.isInteger(snapshot?.runtimePort) ? runtimeKeyForPort(snapshot.runtimePort) : null;
             const evidenceFilter = runtimeKey ? {
