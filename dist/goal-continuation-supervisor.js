@@ -6,10 +6,17 @@ import { enqueueRecoverablePersist } from './recoverable-persist-queue.js';
 const digest = text => createHash('sha256').update(String(text || '')).digest('hex');
 const pending = goal => goal?.status === 'active' && goal.roundState === 'reported'
   && goal.continuation?.state === 'pending' && Boolean(goal.conversationId);
+const redeemable = goal => goal?.status === 'active' && goal.roundState === 'reported'
+  && goal.continuation?.state !== 'idle' && Boolean(goal.continuation?.continuationId)
+  && Boolean(goal.conversationId);
 const finalPage = page => page?.chatMode === true && page.generating === false
   && page.streamStatus === 'COMPLETE' && page.latestMessageRole === 'assistant'
   && Boolean(page.latestAssistantMessageId) && Boolean(page.latestAssistantText?.trim())
   && !page.safetyCheckVisible && !page.deliveryTimeoutVisible && !page.retryVisible;
+const HUMAN_SUPERSESSION_REASONS = new Set([
+  'new-user-turn-before-hidden-continuation',
+  'new-user-turn-takes-precedence',
+]);
 
 /** Backend owner of one report -> one continuation.
  * No UI App, timer-authored narration, runtime-only owner or optimistic retry.
@@ -135,6 +142,11 @@ export class GoalContinuationSupervisor {
     let cycleError = null;
     for (const row of this.records.values()) {
       if (this.closed) break;
+      if (row.state === 'cancelled' && HUMAN_SUPERSESSION_REASONS.has(row.reason)) {
+        try { await this.reconcileHumanSupersession(row); }
+        catch (error) { cycleError = error.message; }
+        continue;
+      }
       if (row.state === 'delivered' && row.redeemed === true
         && row.deliveryMode === 'hidden-assistant-continuation'
         && row.hiddenEpisodeNotified !== true) {
@@ -203,7 +215,8 @@ export class GoalContinuationSupervisor {
     const knownUsers=new Set(row.sourceCandidates.map(p=>p.userId));
     // Synchronizing a stale display to an already-captured user is harmless;
     // an actually NEW user in any display cancels this report's continuation.
-    if(all.some(p=>!knownUsers.has(p.latestUserMessageId)))return {pages:null,newUser:true};
+    const newUserPage=all.find(p=>!knownUsers.has(p.latestUserMessageId));
+    if(newUserPage)return {pages:null,newUser:true,newUserMessageId:newUserPage.latestUserMessageId||null};
     const changed=all.filter(p=>{
       const before=row.sourceCandidates.find(b=>b.pageTargetId===p.pageTargetId);
       return before?.awaitingAssistant===true && p.latestUserMessageId===before.userId && finalPage(p)
@@ -215,6 +228,67 @@ export class GoalContinuationSupervisor {
     // boundary, not a guess based on which Runtime happens to look active.
     row.sourceUserId=changed[0].latestUserMessageId;
     return {pages:changed};
+  }
+  async redeemHumanContinuation(row, { userMessageId = null, reason = 'human-user-turn-started-next-round' } = {}) {
+    const goal = await this.goalRuntime.status(row.goalId).catch(() => null);
+    if (!goal || goal.status !== 'active') return false;
+    if (goal.lastConsumedContinuationId === row.continuationId) {
+      row.state='delivered'; row.redeemed=true; row.reason=reason;
+      row.deliveryMode='human-user-continuation';
+      row.manualUserMessageId=userMessageId||row.manualUserMessageId||null;
+      row.hiddenEpisodeNotified=true;
+      row.hiddenEpisodeSkipReason='human-user-turn-started-next-round';
+      await this.save();
+      return true;
+    }
+    if (!redeemable(goal) || goal.round !== row.round
+      || goal.continuation?.continuationId !== row.continuationId) return false;
+    await this.goalRuntime.roundBegin({goalId:row.goalId,continuationId:row.continuationId});
+    if (row.leaseId) {
+      await this.goalRuntime.continuation({goalId:row.goalId,action:'ack',leaseId:row.leaseId}).catch(() => {});
+    }
+    row.state='delivered'; row.redeemed=true; row.reason=reason;
+    row.deliveryMode='human-user-continuation';
+    row.manualUserMessageId=userMessageId||null;
+    row.hiddenEpisodeNotified=true;
+    row.hiddenEpisodeSkipReason='human-user-turn-started-next-round';
+    await this.save();
+    return true;
+  }
+  async reconcileHumanSupersession(row) {
+    const goal = await this.goalRuntime.status(row.goalId).catch(() => null);
+    if (!goal || goal.status !== 'active') return false;
+    if (goal.lastConsumedContinuationId === row.continuationId) {
+      return await this.redeemHumanContinuation(row, {
+        userMessageId: row.manualUserMessageId || null,
+        reason: 'human-user-turn-started-next-round',
+      });
+    }
+    if (!redeemable(goal) || goal.round !== row.round
+      || goal.continuation?.continuationId !== row.continuationId) return false;
+    const baselineIds=row.finalAssistantId
+      ? [row.finalAssistantId]
+      : [...new Set((Array.isArray(row.baseline)?row.baseline:[]).map(item=>item?.id).filter(Boolean))];
+    if (baselineIds.length !== 1) return false;
+    const pages = await this.pages(goal, {
+      runtimeKey: row.dispatchRuntimeKey || row.sourceRuntimeKey || null,
+      pageTargetId: row.dispatchPageTargetId || null,
+      allowDivergent: true,
+      includeNativeBranch: true,
+      sourceUserMessageId: row.sourceUserId,
+      baselineAssistantMessageId: baselineIds[0],
+    });
+    if (!pages || pages.length !== 1) return false;
+    const proof=pages[0].nativeContinuation;
+    if (!proof?.resolved || proof.sourceUserFound !== true || proof.baselineAssistantFound !== true) return false;
+    const userIndex=Number(proof.newUserAfterBaselineIndex);
+    const assistantIndex=Number(proof.newAssistantAfterBaselineIndex);
+    const userFirst=userIndex>=0 && (assistantIndex<0 || userIndex<assistantIndex);
+    if (!userFirst || !proof.newUserAfterBaselineMessageId) return false;
+    return await this.redeemHumanContinuation(row, {
+      userMessageId: proof.newUserAfterBaselineMessageId,
+      reason: 'human-user-turn-started-next-round',
+    });
   }
   async reconcile(row) {
     const goal = await this.goalRuntime.status(row.goalId);
@@ -243,7 +317,13 @@ export class GoalContinuationSupervisor {
       const hiddenAssistantFirst = assistantIndex >= 0 && (userIndex < 0 || assistantIndex < userIndex);
       if (!hiddenAssistantFirst) {
         if (userIndex >= 0) {
-          row.state='cancelled'; row.reason='new-user-turn-before-hidden-continuation'; await this.save();
+          const redeemed=await this.redeemHumanContinuation(row, {
+            userMessageId: proof.newUserAfterBaselineMessageId || null,
+            reason: 'human-user-turn-started-next-round',
+          });
+          if (!redeemed) {
+            row.state='cancelled'; row.reason='new-user-turn-before-hidden-continuation'; await this.save();
+          }
         }
         return;
       }
@@ -278,11 +358,24 @@ export class GoalContinuationSupervisor {
       row.state = 'superseded'; row.reason = 'goal-stopped-paused-or-consumed'; await this.save(); return;
     }
     let selected = await this.finalCandidates(goal,row);
-    if(selected.newUser){row.state='cancelled';row.reason='new-user-turn-takes-precedence';await this.save();return;}
+    if(selected.newUser){
+      const redeemed=await this.redeemHumanContinuation(row, {
+        userMessageId:selected.newUserMessageId||null,
+        reason:'human-user-turn-started-next-round',
+      });
+      if(!redeemed){row.state='cancelled';row.reason='new-user-turn-takes-precedence';await this.save();}
+      return;
+    }
     let pages = selected.pages;
     if (!pages) { row.reason = 'exact-page-unavailable'; return; }
     if (pages.some(p => p.latestUserMessageId !== row.sourceUserId)) {
-      row.state = 'cancelled'; row.reason = 'new-user-turn-takes-precedence'; await this.save(); return;
+      const nextUser=pages.find(p=>p.latestUserMessageId!==row.sourceUserId)?.latestUserMessageId||null;
+      const redeemed=await this.redeemHumanContinuation(row, {
+        userMessageId:nextUser,
+        reason:'human-user-turn-started-next-round',
+      });
+      if(!redeemed){row.state = 'cancelled'; row.reason = 'new-user-turn-takes-precedence'; await this.save();}
+      return;
     }
     if (!this.matchesFinal(row, pages)) { row.reason = 'awaiting-current-final'; row.candidateKey = null; return; }
     const key = pages.map(p => `${p.pageTargetId}:${p.latestAssistantMessageId}:${digest(p.latestAssistantText)}`).join('|');

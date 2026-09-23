@@ -90,11 +90,14 @@ test('old assistant text, latest user, safety state and generation never authori
   await h.tick(); await h.tick(); assert.equal(h.sends(),0);
 });
 
-test('new human message supersedes automatic continuation instead of injecting into their turn', async t => {
+test('new human message supersedes hidden dispatch and starts the next Goal round', async t => {
   const h = await harness(t); h.final();
   h.setPages([{...h.page(), latestUserMessageId:'user-b'}]);
   await h.tick(); assert.equal(h.sends(),0);
-  assert.equal(h.driver.status().records[0].state,'cancelled');
+  assert.equal(h.driver.status().records[0].state,'delivered');
+  assert.equal(h.driver.status().records[0].reason,'human-user-turn-started-next-round');
+  assert.equal((await h.runtime.status(h.g.id)).round,2);
+  assert.equal((await h.runtime.status(h.g.id)).roundState,'working');
 });
 
 test('pause or stop wins before dispatch; no blanket restart is required', async t => {
@@ -144,7 +147,7 @@ test('hidden acknowledgement loss reconciles from the native branch without a us
   assert.equal(h.driver.status().records[0].reason,'uncertain-hidden-send-confirmed-by-native-branch');
 });
 
-test('a new user before hidden assistant confirmation cancels uncertain delivery', async t => {
+test('a new user before hidden assistant confirmation redeems the pending round without resend', async t => {
   const h=await harness(t,{send:()=>({ok:false,dispatchCommitted:true,definiteFailure:false,state:'ack-lost'})});
   h.final(); await h.tick(); await h.tick(); assert.equal(h.sends(),1);
   h.setPages([{...h.page(),nativeContinuation:{
@@ -158,7 +161,9 @@ test('a new user before hidden assistant confirmation cancels uncertain delivery
     newAssistantAfterBaselineIndex:1,
   }}]);
   await h.tick();
-  assert.equal(h.driver.status().records[0].state,'cancelled');
+  assert.equal(h.driver.status().records[0].state,'delivered');
+  assert.equal(h.driver.status().records[0].reason,'human-user-turn-started-next-round');
+  assert.equal((await h.runtime.status(h.g.id)).round,2);
   assert.equal(h.sends(),1);
 });
 
@@ -259,11 +264,34 @@ test('two unfinished branches cannot race to become the report owner',async t=>{
   await driver.pollOnce(); assert.equal(h.sends(),0);
 });
 
-test('new human input in either display cancels a waiting causal continuation',async t=>{
+test('new human input in either display starts the next round without hidden dispatch',async t=>{
   const h=await causalHarness(t);
   h.set([{...h.views()[0],latestUserMessageId:'brand-new-human-turn'},h.finish(h.views()[1])]);
   await h.tick();assert.equal(h.sends(),0);
-  assert.equal(h.driver.status().records[0].state,'cancelled');
+  assert.equal(h.driver.status().records[0].state,'delivered');
+  assert.equal((await h.runtime.status(h.g.id)).round,2);
+});
+
+test('restart repairs a legacy cancelled continuation when an exact new user already started', async t => {
+  const h=await harness(t,{send:()=>({ok:false,dispatchCommitted:true,definiteFailure:false,state:'ack-lost'})});
+  h.final(); await h.tick(); await h.tick(); assert.equal(h.sends(),1);
+  const id=h.reported.continuation.continuationId;
+  const row=h.driver.records.get(id);
+  row.state='cancelled'; row.reason='new-user-turn-before-hidden-continuation';
+  await h.driver.save(); await h.driver.close();
+  h.setPages([{...h.page(),nativeContinuation:{
+    resolved:true,sourceUserFound:true,baselineAssistantFound:true,
+    latestUserMessageId:'user-after-restart',
+    newUserAfterBaselineMessageId:'user-after-restart',newUserAfterBaselineIndex:0,
+    newAssistantAfterBaselineMessageId:null,newAssistantAfterBaselineIndex:-1,
+  }}]);
+  const restarted=new GoalContinuationSupervisor(h.config);
+  await restarted.pollOnce();
+  assert.equal((await h.runtime.status(h.g.id)).round,2);
+  assert.equal(restarted.status().records[0].state,'delivered');
+  assert.equal(restarted.status().records[0].reason,'human-user-turn-started-next-round');
+  assert.equal(h.sends(),1,'legacy recovery must never replay the hidden continuation');
+  await restarted.close();
 });
 
 test('stale display syncing to an already captured user does not masquerade as new input',async t=>{

@@ -5,6 +5,7 @@ const server = await readFile(new URL("../dist/server.js", import.meta.url), "ut
 const runtime = await readFile(new URL("../dist/goal-runtime.js", import.meta.url), "utf8");
 const bridge = await readFile(new URL("../dist/goal-host-bridge.js", import.meta.url), "utf8");
 const guard = await readFile(new URL("../dist/goal-round-completion-guard.js", import.meta.url), "utf8");
+const continuation = await readFile(new URL("../dist/goal-continuation-supervisor.js", import.meta.url), "utf8");
 
 assert.match(server, /ClassicGoalRoundCompletionGuard/,
   "same-round recovery state remains durable for existing persisted Goals");
@@ -32,6 +33,15 @@ assert.match(bridge, /hidden-goal-recovery-composer-exposure-cleared/);
 assert.match(bridge, /backgroundAccepted:\s*true/);
 assert.match(bridge, /visibleUserMessage:\s*false/);
 assert.match(bridge, /composerMutation:\s*false/);
+assert.match(bridge, /DEFAULT_PAGE_INSPECTION_TIMEOUT_MS\s*=\s*12_000/,
+  "large long-running conversations must not share the 500ms discovery budget for native page inspection");
+const rawHostStart = bridge.indexOf("export async function sendRawHostFollowUp");
+const rawHostEnd = bridge.indexOf("export class ClassicGoalHostBridge", rawHostStart);
+const rawHostBody = bridge.slice(rawHostStart, rawHostEnd);
+assert.match(rawHostBody, /awaitPromise:\s*false/,
+  "hidden continuation host invocation must acknowledge synchronously instead of waiting for the whole assistant turn");
+assert.match(bridge, /classic-hidden-continuation-native-confirmed/,
+  "normal Goal continuation must verify a native assistant branch before reporting acceptance");
 const recoveryStart = bridge.indexOf("async dispatchRoundRecovery");
 const recoveryEnd = bridge.indexOf("setBeforeRawDispatch", recoveryStart);
 const recoveryBody = bridge.slice(recoveryStart, recoveryEnd);
@@ -58,6 +68,11 @@ assert.match(guard, /currentTurnTransportFinished/,
   "normal recovery must not exhaust attempts while the current assistant turn is still visibly generating");
 assert.match(guard, /sawCurrentRoundAssistant/,
   "a stale GUI stop control needs current-round assistant proof before recovery");
+assert.match(guard, /currentRoundTransportFinished/,
+  "persisted exact request/finished evidence must restore same-round recovery after a Core restart");
+assert.match(continuation, /redeemHumanContinuation/);
+assert.match(continuation, /human-user-turn-started-next-round/,
+  "a real new user turn must redeem the pending Goal round instead of leaving Active\/Reported stuck forever");
 assert.match(runtime, /priorAttempts >= MAX_ROUND_RECOVERY_ATTEMPTS/,
   "transient failed recovery attempts must become eligible again after their cooldown");
 assert.match(server, /ClassicTurnDeliveryEvidenceStore/);

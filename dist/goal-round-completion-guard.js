@@ -153,6 +153,8 @@ export class ClassicGoalRoundCompletionGuard {
     const routeEnteredAtMs = timestamp(snapshot?.routeEnteredAt);
     const roundBeganAtMs = timestamp(goal?.roundBeganAt);
     const requestObservedAtMs = timestamp(snapshot?.turnRequestObservedAt);
+    const finishedObservedAtMs = timestamp(snapshot?.turnFinishedObservedAt);
+    let currentRoundTransportFinished = false;
     if (routeEnteredAtMs != null && requestObservedAtMs != null) {
       const roundLowerBound = roundBeganAtMs == null
         ? routeEnteredAtMs
@@ -160,6 +162,9 @@ export class ClassicGoalRoundCompletionGuard {
       const lowerBound = Math.max(routeEnteredAtMs, roundLowerBound);
       if (requestObservedAtMs >= lowerBound && requestObservedAtMs <= this.now() + 60_000) {
         session.sawCurrentRouteRequest = true;
+        currentRoundTransportFinished = finishedObservedAtMs != null
+          && finishedObservedAtMs >= requestObservedAtMs
+          && finishedObservedAtMs >= lowerBound;
       }
     }
 
@@ -175,6 +180,12 @@ export class ClassicGoalRoundCompletionGuard {
       && (
         assistantMessageChanged
         || snapshot?.generating === true
+        // After a Core/guard restart the first observation may already be the
+        // committed final, so there is no in-memory "assistant changed" edge.
+        // Persisted exact request+finished evidence for this route/round is the
+        // restart-safe authority; an old request from a later route still fails
+        // the lower-bound check above.
+        || currentRoundTransportFinished
       )
     ) {
       session.sawCurrentRoundAssistant = true;
