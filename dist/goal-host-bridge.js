@@ -396,6 +396,10 @@ export async function inspectVisibleReportCommit(candidate, options = {}) {
               const newAssistant = newAssistantIndex >= 0 ? afterBaseline[newAssistantIndex] : null;
               const latestUser = [...branch].reverse().find(row => row.role === 'user') || null;
               const latestAssistant = [...branch].reverse().find(row => row.role === 'assistant') || null;
+              const latestUserIndex = latestUser ? branch.lastIndexOf(latestUser) : -1;
+              const beforeLatestUser = latestUserIndex >= 0 ? branch.slice(0, latestUserIndex) : [];
+              const previousUser = [...beforeLatestUser].reverse().find(row => row.role === 'user') || null;
+              const assistantBeforeLatestUser = [...beforeLatestUser].reverse().find(row => row.role === 'assistant') || null;
               const current = branch.at(-1) || null;
               nativeContinuation = {
                 resolved: true,
@@ -414,7 +418,19 @@ export async function inspectVisibleReportCommit(candidate, options = {}) {
                 latestUserCreatedAt: latestUser?.createTime != null
                   ? new Date(latestUser.createTime * 1000).toISOString()
                   : null,
+                previousUserMessageId: previousUser?.id || null,
+                previousUserCreatedAt: previousUser?.createTime != null
+                  ? new Date(previousUser.createTime * 1000).toISOString()
+                  : null,
+                assistantBeforeLatestUserMessageId: assistantBeforeLatestUser?.id || null,
+                assistantBeforeLatestUserStatus: assistantBeforeLatestUser?.status || null,
+                assistantBeforeLatestUserEndTurn: assistantBeforeLatestUser?.endTurn === true,
+                assistantBeforeLatestUserCreatedAt: assistantBeforeLatestUser?.createTime != null
+                  ? new Date(assistantBeforeLatestUser.createTime * 1000).toISOString()
+                  : null,
                 latestAssistantMessageId: latestAssistant?.id || null,
+                latestAssistantStatus: latestAssistant?.status || null,
+                latestAssistantEndTurn: latestAssistant?.endTurn === true,
                 latestAssistantCreatedAt: latestAssistant?.createTime != null
                   ? new Date(latestAssistant.createTime * 1000).toISOString()
                   : null,

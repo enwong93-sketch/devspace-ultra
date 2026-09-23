@@ -17,6 +17,128 @@ const HUMAN_SUPERSESSION_REASONS = new Set([
   'new-user-turn-before-hidden-continuation',
   'new-user-turn-takes-precedence',
 ]);
+const UNARMED_RECOVERY_RETRY_MS = 5_000;
+const UNARMED_REPORT_TIME_SLOP_MS = 5_000;
+const SOURCE_USER_REPORT_SLOP_MS = 1_000;
+const NATIVE_RUNNING_STATES = new Set(['IN_PROGRESS', 'IS_STREAMING', 'STREAMING', 'RUNNING']);
+
+const timeMs = value => {
+  const parsed = Date.parse(String(value || ''));
+  return Number.isFinite(parsed) ? parsed : null;
+};
+const nativeStopped = status => {
+  const normalized = String(status || '').trim().toUpperCase();
+  return Boolean(normalized) && !NATIVE_RUNNING_STATES.has(normalized);
+};
+
+function exactMissingArmBoundary(goal, pages, nowMs = Date.now()) {
+  if (!pending(goal) || !Array.isArray(pages) || !pages.length || pages.length > 4) return null;
+  const reportedAtMs = timeMs(goal?.lastRoundReport?.reportedAt);
+  if (reportedAtMs == null) return null;
+  if (pages.some(page => page?.conversationId !== goal.conversationId || page?.chatMode !== true)) return null;
+  const userIds = new Set(pages.map(page => String(page?.latestUserMessageId || '').trim()).filter(Boolean));
+  if (userIds.size !== 1) return null;
+  const latestUserMessageId = [...userIds][0];
+  const proofs = pages.map(page => page?.nativeContinuation).filter(Boolean);
+  if (proofs.length !== pages.length || proofs.some(proof => proof?.resolved !== true)) return null;
+  if (proofs.some(proof => String(proof.latestUserMessageId || '').trim() !== latestUserMessageId)) return null;
+
+  const latestUserTimes = proofs.map(proof => timeMs(proof.latestUserCreatedAt));
+  if (latestUserTimes.some(value => value == null)) return null;
+  const latestUserAtMs = Math.max(...latestUserTimes);
+  if (latestUserTimes.some(value => Math.abs(value - latestUserAtMs) > 1_000)) return null;
+
+  const domAssistantIds = new Set(pages.map(page => String(page?.latestAssistantMessageId || '').trim()).filter(Boolean));
+  const nativeAssistantIds = new Set(proofs.map(proof => String(proof?.latestAssistantMessageId || '').trim()).filter(Boolean));
+  const currentAssistantIds = new Set(proofs.map(proof => String(proof?.currentMessageId || '').trim()).filter(Boolean));
+  const currentFinal = (
+    domAssistantIds.size === 1
+    && nativeAssistantIds.size === 1
+    && currentAssistantIds.size === 1
+    && [...domAssistantIds][0] === [...nativeAssistantIds][0]
+    && [...domAssistantIds][0] === [...currentAssistantIds][0]
+    && latestUserAtMs <= reportedAtMs + SOURCE_USER_REPORT_SLOP_MS
+    && pages.every(page => page?.generating !== true
+      && page?.latestMessageRole === 'assistant'
+      && Boolean(String(page?.latestAssistantText || '').trim())
+      && page?.safetyCheckVisible !== true
+      && page?.deliveryTimeoutVisible !== true
+      && page?.retryVisible !== true)
+    && proofs.every(proof => proof.currentRole === 'assistant'
+      && proof.currentEndTurn === true
+      && proof.latestAssistantEndTurn === true
+      && nativeStopped(proof.currentStatus)
+      && nativeStopped(proof.latestAssistantStatus))
+  );
+  if (currentFinal) {
+    const assistantTimes = proofs.map(proof => timeMs(proof.latestAssistantCreatedAt || proof.currentCreatedAt));
+    if (assistantTimes.some(value => value == null)) return null;
+    const assistantAtMs = Math.min(...assistantTimes);
+    if (assistantTimes.some(value => Math.abs(value - assistantAtMs) > 1_000)) return null;
+    if (assistantAtMs < reportedAtMs - UNARMED_REPORT_TIME_SLOP_MS
+      || assistantAtMs > nowMs + 60_000
+      || latestUserAtMs > assistantAtMs) return null;
+    return {
+      type: 'completed-final',
+      sourceUserId: latestUserMessageId,
+      finalAssistantId: [...domAssistantIds][0],
+      finalAssistantHash: digest(pages[0]?.latestAssistantText),
+      finalAssistantCreatedAt: new Date(assistantAtMs).toISOString(),
+    };
+  }
+
+  const priorAssistantIds = new Set(pages
+    .map(page => String(page?.assistantBeforeLatestUserMessageId || '').trim())
+    .filter(Boolean));
+  const nativePriorAssistantIds = new Set(proofs
+    .map(proof => String(proof?.assistantBeforeLatestUserMessageId || '').trim())
+    .filter(Boolean));
+  const previousUserIds = new Set(pages
+    .map(page => String(page?.previousUserMessageId || '').trim())
+    .filter(Boolean));
+  const nativePreviousUserIds = new Set(proofs
+    .map(proof => String(proof?.previousUserMessageId || '').trim())
+    .filter(Boolean));
+  const newHumanAfterFinal = (
+    priorAssistantIds.size === 1
+    && nativePriorAssistantIds.size === 1
+    && [...priorAssistantIds][0] === [...nativePriorAssistantIds][0]
+    && previousUserIds.size === 1
+    && nativePreviousUserIds.size === 1
+    && [...previousUserIds][0] === [...nativePreviousUserIds][0]
+    && proofs.every(proof => proof.assistantBeforeLatestUserEndTurn === true
+      && nativeStopped(proof.assistantBeforeLatestUserStatus))
+  );
+  if (newHumanAfterFinal) {
+    const priorAssistantTimes = proofs.map(proof => timeMs(proof.assistantBeforeLatestUserCreatedAt));
+    if (priorAssistantTimes.some(value => value == null)) return null;
+    const priorAssistantAtMs = Math.min(...priorAssistantTimes);
+    if (priorAssistantTimes.some(value => Math.abs(value - priorAssistantAtMs) > 1_000)) return null;
+    if (priorAssistantAtMs < reportedAtMs - UNARMED_REPORT_TIME_SLOP_MS
+      || latestUserAtMs <= priorAssistantAtMs
+      || latestUserAtMs > nowMs + 60_000) return null;
+    return {
+      type: 'human-user',
+      sourceUserId: [...previousUserIds][0],
+      finalAssistantId: [...priorAssistantIds][0],
+      finalAssistantCreatedAt: new Date(priorAssistantAtMs).toISOString(),
+      newUserMessageId: latestUserMessageId,
+      newUserObservedAt: new Date(latestUserAtMs).toISOString(),
+    };
+  }
+
+  const currentSourceTurn = latestUserAtMs <= reportedAtMs + SOURCE_USER_REPORT_SLOP_MS
+    && pages.every(page => page?.generating === true || page?.latestMessageRole === 'user');
+  if (!currentSourceTurn) return null;
+  return {
+    type: 'awaiting-final',
+    sourceUserId: latestUserMessageId,
+    baseline: pages.map(page => ({
+      id: page?.latestAssistantMessageId || null,
+      hash: digest(page?.latestAssistantText),
+    })),
+  };
+}
 
 /** Backend owner of one report -> one continuation.
  * No UI App, timer-authored narration, runtime-only owner or optimistic retry.
@@ -33,6 +155,11 @@ export class GoalContinuationSupervisor {
       ? onHiddenContinuationStarted : null;
     this.records = new Map(); this.timer = null; this.polling = null; this.closed = false;
     this.persistQueue = Promise.resolve(); this.lastError = null;
+    this.missingArmRetryAt = new Map();
+    this.missingArmAttempts = new Map();
+    this.missingArmErrors = new Map();
+    this.recoveredMissingArmCount = 0;
+    this.lastArmError = null;
     this.ready = this.load();
   }
   async load() {
@@ -85,10 +212,21 @@ export class GoalContinuationSupervisor {
       && reportAuthority?.conversationId === goal.conversationId
       && /^main-(0[1-9]|[12][0-9]|3[0-2])$/.test(reportAuthority?.runtimeKey || '')
       ? reportAuthority.runtimeKey : null;
-    const pages = await this.pages(goal, { sourceOnly: true, runtimeKey: sourceRuntimeKey, allowDivergent: true });
+    let pages;
+    try {
+      pages = await this.pages(goal, { sourceOnly: true, runtimeKey: sourceRuntimeKey, allowDivergent: true });
+      this.lastArmError = null;
+    } catch (error) {
+      this.lastArmError = error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500);
+      return { armed: false, reason: 'source-boundary-inspection-failed' };
+    }
     if (!pages) return { armed: false, reason: 'source-page-unresolved' };
     const current = await this.goalRuntime.status(goal.id);
     if (!pending(current) || current.continuation.continuationId !== id || this.closed) return { armed: false, reason: 'goal-changed' };
+    if (this.records.has(id)) {
+      const existing = this.records.get(id);
+      return { armed: existing.state === 'waiting', state: existing.state };
+    }
     if (this.records.size >= this.maxRecords) {
       for (const [key,row] of this.records) {
         if (['delivered','cancelled','superseded'].includes(row.state)) { this.records.delete(key); break; }
@@ -131,6 +269,167 @@ export class GoalContinuationSupervisor {
       this.timer.unref?.();
     }
   }
+  scheduleMissingArmRetry(continuationId, error) {
+    const attempts = Math.max(0, Number(this.missingArmAttempts.get(continuationId) || 0)) + 1;
+    const delayMs = Math.min(5 * 60_000, UNARMED_RECOVERY_RETRY_MS * (2 ** Math.min(6, attempts - 1)));
+    this.missingArmAttempts.set(continuationId, attempts);
+    this.missingArmRetryAt.set(continuationId, this.now() + delayMs);
+    this.missingArmErrors.set(continuationId, String(error || 'exact-boundary-unresolved').slice(0, 500));
+    return { attempts, delayMs };
+  }
+  clearMissingArmRetry(continuationId) {
+    this.missingArmRetryAt.delete(continuationId);
+    this.missingArmAttempts.delete(continuationId);
+    this.missingArmErrors.delete(continuationId);
+  }
+  async recoverMissingArms() {
+    if (typeof this.goalRuntime.activeGoals !== 'function' || this.closed || !this.enabled) return [];
+    const goals = await this.goalRuntime.activeGoals({ limit: 50 });
+    const activeContinuationIds = new Set(goals
+      .filter(goal => pending(goal))
+      .map(goal => goal.continuation?.continuationId)
+      .filter(Boolean));
+    for (const continuationId of this.missingArmRetryAt.keys()) {
+      if (!activeContinuationIds.has(continuationId)) this.missingArmRetryAt.delete(continuationId);
+    }
+    for (const continuationId of this.missingArmErrors.keys()) {
+      if (!activeContinuationIds.has(continuationId)) this.missingArmErrors.delete(continuationId);
+    }
+    for (const continuationId of this.missingArmAttempts.keys()) {
+      if (!activeContinuationIds.has(continuationId)) this.missingArmAttempts.delete(continuationId);
+    }
+
+    const results = [];
+    const candidates = goals.filter(goal => pending(goal)
+      && goal.continuation?.continuationId
+      && !this.records.has(goal.continuation.continuationId)).slice(0, 3);
+    for (const goal of candidates) {
+      if (!pending(goal)) continue;
+      const continuationId = goal.continuation?.continuationId;
+      if (!continuationId || this.records.has(continuationId)) continue;
+      const retryAt = Number(this.missingArmRetryAt.get(continuationId) || 0);
+      if (retryAt > this.now()) {
+        results.push({ goalId: goal.id, round: goal.round, recovered: false, reason: 'missing-arm-retry-floor' });
+        continue;
+      }
+      let pages;
+      try {
+        pages = await this.pages(goal, {
+          sourceOnly: true,
+          allowDivergent: true,
+          includeNativeBranch: true,
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.scheduleMissingArmRetry(continuationId, message);
+        results.push({ goalId: goal.id, round: goal.round, recovered: false, reason: 'missing-arm-inspection-failed' });
+        continue;
+      }
+      const proof = exactMissingArmBoundary(goal, pages, this.now());
+      if (!proof) {
+        this.scheduleMissingArmRetry(continuationId, 'exact-boundary-unresolved');
+        results.push({ goalId: goal.id, round: goal.round, recovered: false, reason: 'missing-arm-boundary-unresolved' });
+        continue;
+      }
+
+      const current = await this.goalRuntime.status(goal.id).catch(() => null);
+      if (!pending(current) || current.continuation?.continuationId !== continuationId || this.records.has(continuationId)) {
+        this.clearMissingArmRetry(continuationId);
+        results.push({ goalId: goal.id, round: goal.round, recovered: false, reason: 'missing-arm-race-superseded' });
+        continue;
+      }
+
+      if (proof.type === 'human-user') {
+        await this.goalRuntime.roundBegin({
+          goalId: goal.id,
+          continuationId,
+          roundBeganAt: proof.newUserObservedAt,
+        });
+        const row = {
+          goalId: goal.id,
+          continuationId,
+          conversationId: goal.conversationId,
+          round: goal.round,
+          reportedAt: goal.lastRoundReport?.reportedAt || null,
+          sourceUserId: proof.sourceUserId || proof.newUserMessageId,
+          sourceRuntimeKey: pages.length === 1 ? pages[0].runtimeKey || null : null,
+          causalDisplayProof: false,
+          sourceCandidates: null,
+          baseline: proof.finalAssistantId ? [{ id: proof.finalAssistantId, hash: null }] : [],
+          state: 'delivered',
+          reason: 'human-user-turn-started-next-round',
+          attempts: 0,
+          createdAt: this.now(),
+          finalAssistantId: proof.finalAssistantId || null,
+          redeemed: true,
+          deliveryMode: 'human-user-continuation',
+          manualUserMessageId: proof.newUserMessageId,
+          manualUserObservedAt: proof.newUserObservedAt,
+          manualTimestampRetryAt: null,
+          hiddenEpisodeNotified: true,
+          hiddenEpisodeSkipReason: 'human-user-turn-started-next-round',
+          recoveredMissingArm: true,
+        };
+        this.records.set(continuationId, row);
+        try { await this.save(); }
+        catch (error) {
+          // GoalRuntime consumption is the durable exactly-once authority. A
+          // lost diagnostic row must never roll the Goal back or replay it.
+          this.records.delete(continuationId);
+          throw error;
+        }
+        this.recoveredMissingArmCount += 1;
+        this.clearMissingArmRetry(continuationId);
+        results.push({ goalId: goal.id, round: goal.round, recovered: true, reason: 'missing-arm-human-user-redeemed' });
+        continue;
+      }
+
+      if (this.records.size >= this.maxRecords) {
+        for (const [key, row] of this.records) {
+          if (['delivered', 'cancelled', 'superseded'].includes(row.state)) { this.records.delete(key); break; }
+        }
+      }
+      if (this.records.size >= this.maxRecords) {
+        this.scheduleMissingArmRetry(continuationId, 'journal-capacity-protected');
+        results.push({ goalId: goal.id, round: goal.round, recovered: false, reason: 'journal-capacity-protected' });
+        continue;
+      }
+      const row = {
+        goalId: goal.id,
+        continuationId,
+        conversationId: goal.conversationId,
+        round: goal.round,
+        reportedAt: goal.lastRoundReport?.reportedAt || null,
+        sourceUserId: proof.sourceUserId,
+        sourceRuntimeKey: pages.length === 1 ? pages[0].runtimeKey || null : null,
+        causalDisplayProof: false,
+        sourceCandidates: null,
+        baseline: proof.type === 'completed-final'
+          ? []
+          : (Array.isArray(proof.baseline) ? proof.baseline : []),
+        state: 'waiting',
+        reason: proof.type === 'completed-final'
+          ? 'recovered-missing-arm-current-final'
+          : 'recovered-missing-arm-awaiting-final',
+        attempts: 0,
+        createdAt: this.now(),
+        recoveredMissingArm: true,
+        nativeFinalVerified: proof.type === 'completed-final',
+        finalAssistantId: proof.type === 'completed-final' ? proof.finalAssistantId : null,
+        finalAssistantHash: proof.type === 'completed-final' ? proof.finalAssistantHash : null,
+      };
+      this.records.set(continuationId, row);
+      try { await this.save(); }
+      catch (error) {
+        this.records.delete(continuationId);
+        throw error;
+      }
+      this.recoveredMissingArmCount += 1;
+      this.clearMissingArmRetry(continuationId);
+      results.push({ goalId: goal.id, round: goal.round, recovered: true, reason: row.reason });
+    }
+    return results;
+  }
   async pollOnce() {
     await this.ready;
     if (!this.enabled || this.closed) return { ok: true, skipped: true };
@@ -140,6 +439,8 @@ export class GoalContinuationSupervisor {
   }
   async poll() {
     let cycleError = null;
+    try { await this.recoverMissingArms(); }
+    catch (error) { cycleError = error instanceof Error ? error.message : String(error); }
     for (const row of this.records.values()) {
       if (this.closed) break;
       if (row.state === 'cancelled' && HUMAN_SUPERSESSION_REASONS.has(row.reason)) {
@@ -212,6 +513,23 @@ export class GoalContinuationSupervisor {
     return true;
   }
   matchesFinal(row, pages) {
+    const recoveredExactFinal = Boolean(
+      row?.recoveredMissingArm === true
+      && row?.nativeFinalVerified === true
+      && row?.finalAssistantId
+      && row?.finalAssistantHash
+      && pages?.length
+      && pages.every(p => p.latestUserMessageId === row.sourceUserId
+        && p.latestAssistantMessageId === row.finalAssistantId
+        && digest(p.latestAssistantText) === row.finalAssistantHash
+        && p.latestMessageRole === 'assistant'
+        && p.generating !== true
+        && Boolean(p.latestAssistantText?.trim())
+        && !p.safetyCheckVisible
+        && !p.deliveryTimeoutVisible
+        && !p.retryVisible)
+    );
+    if (recoveredExactFinal) return true;
     return pages && pages.every(p => p.latestUserMessageId === row.sourceUserId && finalPage(p))
       && new Set(pages.map(p => `${p.latestAssistantMessageId}:${digest(p.latestAssistantText)}`)).size === 1
       && !row.baseline.some(b => b.id === pages[0].latestAssistantMessageId && b.hash === digest(pages[0].latestAssistantText));
@@ -518,12 +836,22 @@ export class GoalContinuationSupervisor {
   }
   status() {
     return { enabled: this.enabled, running: Boolean(this.timer), lastError: this.lastError,
+      lastArmError: this.lastArmError,
       lastPersistError: this.lastPersistError || null,
       persistFailureCount: Number(this.persistFailureCount || 0),
       persistRecoveryCount: Number(this.persistRecoveryCount || 0),
+      recoveredMissingArmCount: this.recoveredMissingArmCount,
+      missingArmPending: this.missingArmErrors.size,
+      missingArmErrors: [...this.missingArmErrors.entries()].map(([continuationId, error]) => ({
+        continuationId,
+        error,
+        attempts: Number(this.missingArmAttempts.get(continuationId) || 0),
+        retryAt: this.missingArmRetryAt.get(continuationId) || null,
+      })),
       records: [...this.records.values()].map(r => ({ goalId: r.goalId, round: r.round, state: r.state,
         reason: r.reason, attempts: r.attempts, redeemed: r.redeemed === true,
         deliveryMode: r.deliveryMode || null,
+        recoveredMissingArm: r.recoveredMissingArm === true,
         manualUserObservedAt: r.manualUserObservedAt || null,
         manualTimestampResolution: r.manualTimestampResolution || null,
         manualTimestampAttempts: Number(r.manualTimestampAttempts || 0),
@@ -532,8 +860,16 @@ export class GoalContinuationSupervisor {
   }
   async close() {
     this.closed = true; clearInterval(this.timer); this.timer = null;
+    this.missingArmRetryAt.clear();
+    this.missingArmAttempts.clear();
+    this.missingArmErrors.clear();
     await this.polling?.catch(() => {}); await this.persistQueue.catch(() => {});
   }
 }
 
-export const goalContinuationSupervisorInternals = { finalPage, pending };
+export const goalContinuationSupervisorInternals = {
+  finalPage,
+  pending,
+  exactMissingArmBoundary,
+  nativeStopped,
+};
