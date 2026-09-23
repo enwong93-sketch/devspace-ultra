@@ -6,9 +6,9 @@ import { tmpdir } from 'node:os';
 import { GoalRuntime } from './goal-runtime.js';
 import { GoalContinuationSupervisor } from './goal-continuation-supervisor.js';
 
-async function fixture(t) {
+async function fixture(t, { now } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'devspace-goal-conversation-invariant-'));
-  const runtime = new GoalRuntime({ stateDir: root });
+  const runtime = new GoalRuntime({ stateDir: root, ...(now ? { now } : {}) });
   await runtime.ready;
   t.after(async () => { await runtime.close(); await rm(root, { recursive: true, force: true }); });
   const input = label => ({
@@ -95,8 +95,13 @@ test('legacy conversation collisions fail closed for automatic Goal continuation
 });
 
 test('verified legacy collision repair stops only older unprogressed duplicates', async t => {
-  const { runtime, input } = await fixture(t);
+  let nowMs = Date.parse('2026-09-23T00:00:00.000Z');
+  const { runtime, input } = await fixture(t, { now: () => nowMs });
   const stale = await runtime.start({ conversationId: 'conversation-stale-source', ...input('stale') });
+  // Collision repair deliberately fails closed when creation timestamps tie:
+  // a tie cannot prove which legacy Goal is older. Make the fixture's intended
+  // ordering explicit instead of depending on filesystem/runner speed.
+  nowMs += 1;
   const keep = await runtime.start({ conversationId: 'conversation-repair-target', ...input('keep') });
   runtime.state.goals[stale.id].conversationId = keep.conversationId;
   runtime.state.goals[stale.id].roundRecovery = {
