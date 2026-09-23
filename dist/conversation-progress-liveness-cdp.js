@@ -9,6 +9,10 @@ export function isClassicTurnErrorText(value) {
   return new RegExp(TURN_ERROR_PATTERN_SOURCE, "i").test(String(value || ""));
 }
 
+export function selectCurrentTurnMessage(currentTurnMessage, previousGlobalMessage, currentTurnSectionPresent) {
+  return currentTurnMessage || (!currentTurnSectionPresent ? previousGlobalMessage : null) || null;
+}
+
 function cleanConversationId(value) {
   const text = String(value ?? "").trim();
   return text && /^[A-Za-z0-9_-]{8,200}$/.test(text) ? text : null;
@@ -123,6 +127,7 @@ async function connectTarget(target) {
 
 function exactConversationExpression(conversationId) {
   return `(() => {
+    const selectCurrentTurnMessage = ${selectCurrentTurnMessage.toString()};
     const expected = ${JSON.stringify(conversationId)};
     const match = location.pathname.match(/\\/c\\/([^/?#]+)/);
     const actual = match ? match[1] : null;
@@ -153,14 +158,24 @@ function exactConversationExpression(conversationId) {
     // Failed assistant turns often contain no data-message-author-role node at
     // all. The last visible turn section is therefore the authoritative UI
     // boundary; fall back to the latest role-bearing message only for older UI.
-    const latestTurnContainer = turnSections.at(-1)
+    const latestTurnSection = turnSections.at(-1) || null;
+    const latestTurnContainer = latestTurnSection
       || messageNodes.at(-1)?.closest('article')
       || messageNodes.at(-1)
       || null;
     const latestTurnMessages = latestTurnContainer
       ? [...latestTurnContainer.querySelectorAll('[data-message-author-role]')].filter(visible)
       : [];
-    const latestMessage = latestTurnMessages.at(-1) || messageNodes.at(-1) || null;
+    // When the current ChatGPT turn section is present but temporarily has no
+    // role-bearing message, do not borrow the previous turn's assistant node.
+    // That transition occurs immediately before a role-less Thinking-failed
+    // surface appears; treating the previous assistant as the current final
+    // would disarm Rescue before the error can be observed.
+    const latestMessage = selectCurrentTurnMessage(
+      latestTurnMessages.at(-1),
+      messageNodes.at(-1),
+      Boolean(latestTurnSection)
+    );
     const latestMessageRole = latestMessage?.getAttribute('data-message-author-role') || null;
     const latestMessageText = String(latestMessage?.innerText || latestMessage?.textContent || '').trim();
     const userMessages = messageNodes.filter((node) => node.getAttribute('data-message-author-role') === 'user');
@@ -173,8 +188,8 @@ function exactConversationExpression(conversationId) {
       ? [...latestTurnContainer.querySelectorAll('button,[role="alert"],[data-testid*="error" i],[data-testid*="retry" i]')].filter(visible)
       : [];
     const turnErrorPattern = new RegExp(${JSON.stringify(TURN_ERROR_PATTERN_SOURCE)}, 'i');
-    const rolelessTurnError = latestTurnMessages.length === 0
-      && latestTurnContainer
+    const rolelessTurnError = latestTurnSection
+      && latestTurnMessages.length === 0
       && turnErrorPattern.test(String(latestTurnContainer.innerText || latestTurnContainer.textContent || ''));
     const hasTurnError = rolelessTurnError
       || errorNodes.some((node) => turnErrorPattern.test(String(node.innerText || node.textContent || '')))
@@ -191,6 +206,8 @@ function exactConversationExpression(conversationId) {
       generating,
       latestMessageRole,
       latestMessageTextLength: latestMessageText.length,
+      latestTurnSectionPresent: Boolean(latestTurnSection),
+      latestTurnRoleless: Boolean(latestTurnSection && latestTurnMessages.length === 0),
       latestUserMessageId,
       previousUserMessageId,
       hasTurnError,
@@ -213,6 +230,7 @@ function exactConversationExpression(conversationId) {
 // another conversation and is clearly marked in the returned diagnostics.
 function lightweightExactConversationExpression(conversationId) {
   return `(() => {
+    const selectCurrentTurnMessage=${selectCurrentTurnMessage.toString()};
     const expected=${JSON.stringify(conversationId)};
     const actual=location.pathname.match(/\\/c\\/([^/?#]+)/)?.[1]||null;
     const editor=document.querySelector('#prompt-textarea, textarea, div.ProseMirror[contenteditable="true"], [data-lexical-editor="true"][contenteditable="true"], [contenteditable="true"][role="textbox"]');
@@ -222,17 +240,20 @@ function lightweightExactConversationExpression(conversationId) {
     const lastTurn=turns.at(-1)||null;
     const roleNodes=lastTurn?[...lastTurn.querySelectorAll('[data-message-author-role]')]:[];
     const fallbackRoles=[...document.querySelectorAll('[data-message-author-role]')];
-    const latestMessage=roleNodes.at(-1)||fallbackRoles.at(-1)||null;
+    const latestMessage=selectCurrentTurnMessage(roleNodes.at(-1),fallbackRoles.at(-1),Boolean(lastTurn));
     const latestMessageRole=latestMessage?.getAttribute('data-message-author-role')||null;
     const latestMessageText=String(latestMessage?.innerText||latestMessage?.textContent||'').trim();
     const users=fallbackRoles.filter(node=>node.getAttribute('data-message-author-role')==='user');
     const lastTurnText=String(lastTurn?.innerText||lastTurn?.textContent||'');
     const errorPattern=new RegExp(${JSON.stringify(TURN_ERROR_PATTERN_SOURCE)},'i');
-    const hasTurnError=Boolean(lastTurn&&errorPattern.test(lastTurnText));
+    const errorNodes=lastTurn?[...lastTurn.querySelectorAll('button,[role="alert"],[data-testid*="error" i],[data-testid*="retry" i]')]:[];
+    const rolelessTurnError=Boolean(lastTurn&&roleNodes.length===0&&errorPattern.test(lastTurnText));
+    const hasTurnError=rolelessTurnError||errorNodes.some(node=>errorPattern.test(String(node.innerText||node.textContent||'')));
     const root=document.getElementById('devspace-progress-narration-root');
     return {
       exact:actual===expected,conversationId:actual,hydrated:document.readyState==='complete'&&Boolean(editor),
       generating,latestMessageRole,latestMessageTextLength:latestMessageText.length,
+      latestTurnSectionPresent:Boolean(lastTurn),latestTurnRoleless:Boolean(lastTurn&&roleNodes.length===0),
       latestUserMessageId:users.at(-1)?.getAttribute('data-message-id')||null,
       previousUserMessageId:users.at(-2)?.getAttribute('data-message-id')||null,
       hasTurnError,normalCompletion:!generating&&latestMessageRole==='assistant'&&latestMessageText.length>0&&!hasTurnError,
@@ -900,5 +921,6 @@ export const _test = {
   conversationIdFromUrl,
   exactConversationExpression,
   lightweightExactConversationExpression,
+  selectCurrentTurnMessage,
   TURN_ERROR_PATTERN_SOURCE,
 };
