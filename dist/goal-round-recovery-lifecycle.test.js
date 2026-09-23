@@ -60,6 +60,74 @@ function snapshot(overrides = {}) {
 }
 
 {
+  const nativeFinal = guard.observeRecoverySession({
+    ...goal,
+    id: "goal-native-final-after-restart",
+  }, snapshot({
+    pageTargetId: "page-native-final",
+    documentId: "document-native-final",
+    routeEpoch: 4,
+    routeEnteredAt: "2026-09-08T01:00:20.000Z",
+    latestMessageRole: "assistant",
+    latestUserMessageId: "user-native-current-round",
+    latestAssistantMessageId: "assistant-native-current-round",
+    latestAssistantText: "The current round completed before the replacement Core observed it.",
+    nativeContinuation: {
+      resolved: true,
+      currentNodeId: "assistant-native-current-round",
+      currentMessageId: "assistant-native-current-round",
+      currentRole: "assistant",
+      currentStatus: "finished_successfully",
+      currentEndTurn: true,
+      currentCreatedAt: "2026-09-08T01:00:15.000Z",
+      latestUserMessageId: "user-native-current-round",
+      latestUserCreatedAt: "2026-09-08T01:00:01.000Z",
+      latestAssistantMessageId: "assistant-native-current-round",
+      latestAssistantCreatedAt: "2026-09-08T01:00:15.000Z",
+    },
+  }));
+  assert.equal(nativeFinal.reset, true);
+  assert.equal(nativeFinal.sawActiveTurn, false);
+  assert.equal(nativeFinal.sawCurrentRouteRequest, false);
+  assert.equal(nativeFinal.sawNativeCurrentRoundFinal, true);
+  assert.equal(nativeFinal.sawCurrentRoundAssistant, true);
+  assert.equal(nativeFinal.eligible, true,
+    "exact native branch evidence may recover a current-round final first observed after Core restart");
+  assert.equal(nativeFinal.reason, "restart-safe-native-current-round-final");
+}
+
+{
+  const staleNativeFinal = guard.observeRecoverySession({
+    ...goal,
+    id: "goal-stale-native-final",
+  }, snapshot({
+    pageTargetId: "page-stale-native-final",
+    documentId: "document-stale-native-final",
+    routeEpoch: 6,
+    latestMessageRole: "assistant",
+    latestUserMessageId: "user-before-round",
+    latestAssistantMessageId: "assistant-before-round",
+    latestAssistantText: "This final predates the current Goal round.",
+    nativeContinuation: {
+      resolved: true,
+      currentNodeId: "assistant-before-round",
+      currentMessageId: "assistant-before-round",
+      currentRole: "assistant",
+      currentStatus: "finished_successfully",
+      currentEndTurn: true,
+      currentCreatedAt: "2026-09-08T00:59:20.000Z",
+      latestUserMessageId: "user-before-round",
+      latestUserCreatedAt: "2026-09-08T00:59:00.000Z",
+      latestAssistantMessageId: "assistant-before-round",
+      latestAssistantCreatedAt: "2026-09-08T00:59:20.000Z",
+    },
+  }));
+  assert.equal(staleNativeFinal.sawNativeCurrentRoundFinal, false);
+  assert.equal(staleNativeFinal.eligible, false,
+    "native branch evidence from before roundBeganAt must remain fail-closed");
+}
+
+{
   const working = guard.observeRecoverySession(goal, snapshot({
     documentId: "document-live",
     routeEpoch: 2,
@@ -156,5 +224,7 @@ console.log(JSON.stringify({
   fullReloadBlocked: true,
   observedOpenTurnRecoverable: true,
   currentRouteTransportEvidenceRecoverable: true,
+  restartNativeFinalRecoverable: true,
+  staleNativeFinalBlocked: true,
   crossConversationBlocked: true,
 }));

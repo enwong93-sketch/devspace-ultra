@@ -501,6 +501,7 @@ assert.equal(ambiguousLiveness.matchCount, 2);
 assert.equal(ambiguousLivenessSends, 0, "a duplicated conversation route must never receive a follow-up on either Main");
 
 const exactConversationDispatches = [];
+const exactConversationInspections = [];
 const conversationSafeBridge = new moduleUnderTest.ClassicGoalHostBridge({
   ports: [9732, 9733],
   async probePort(port) {
@@ -543,6 +544,7 @@ const conversationSafeBridge = new moduleUnderTest.ClassicGoalHostBridge({
     }];
   },
   async inspectVisibleReport(candidate, payload = {}) {
+    exactConversationInspections.push({ candidate, payload });
     return {
       chatMode: true,
       generating: false,
@@ -573,6 +575,14 @@ assert.equal(conversationSafeSnapshot.conversationId, "conversation_authoritativ
 assert.equal(conversationSafeSnapshot.runtimePort, 9733);
 assert.equal(conversationSafeSnapshot.relayFallback, false, "a stale same-goal widget in another conversation must be ignored");
 assert.equal(conversationSafeSnapshot.directPage, true);
+assert.equal(exactConversationInspections.at(-1).payload.includeNativeBranch, false);
+const nativeConversationSafeSnapshot = await conversationSafeBridge.inspectWorkingRound({
+  id: "goal_conversation_safe",
+  conversationId: "conversation_authoritative",
+}, { includeNativeBranch: true });
+assert.equal(nativeConversationSafeSnapshot.nativeContinuation?.resolved, true,
+  "working-round inspection must support one exact native-branch proof on demand");
+assert.equal(exactConversationInspections.at(-1).payload.includeNativeBranch, true);
 const conversationSafeDispatch = await conversationSafeBridge.dispatchRoundRecovery({
   goalId: "goal_conversation_safe",
   conversationId: "conversation_authoritative",
