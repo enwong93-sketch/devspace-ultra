@@ -177,10 +177,15 @@ function buildProductionConfig(canonical, publicBase) {
   };
 }
 
+const OAUTH_COUNT_TABLES = new Set(["oauth_clients", "oauth_access_tokens", "oauth_refresh_tokens", "workspace_sessions"]);
+
 function oauthCounts(stateDir) {
   const db = new Database(join(stateDir, "devspace.sqlite"), { readonly: true, fileMustExist: true });
   try {
-    const count = (table) => db.prepare(`select count(*) as n from ${table}`).get().n;
+    const count = (table) => {
+      if (!OAUTH_COUNT_TABLES.has(table)) throw new Error(`Unexpected table name: ${table}`);
+      return db.prepare(`select count(*) as n from ${table}`).get().n;
+    };
     return {
       clients: count("oauth_clients"),
       accessTokens: count("oauth_access_tokens"),
