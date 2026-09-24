@@ -11,6 +11,7 @@ const elicitationRequests = [];
 const overlayBegins = [];
 const overlayEnds = [];
 const overlayReleases = [];
+const nodeReplResets = [];
 let nextRiskLevel = "low";
 let failNextCall = false;
 const fakeBridge = {
@@ -59,6 +60,18 @@ const fakeBridge = {
       server: "node_repl",
       toolName: "js",
       result: { content: [{ type: "text", text: JSON.stringify(payload) }], isError: false },
+    };
+  },
+  async resetConnection(serverId, ownerConversationId) {
+    nodeReplResets.push({ serverId, ownerConversationId });
+    return {
+      ok: true,
+      source: "codex",
+      serverId,
+      ownerConversationId,
+      closedConnections: 1,
+      connectionState: "disconnected",
+      reconnectOnNextUse: true,
     };
   },
 };
@@ -166,6 +179,8 @@ assert.equal(finalObservation.structuredContent.nativeRuntimeEvidence.computerUs
 assert.equal(finalObservation.structuredContent.nativeRuntimeEvidence.computerUseOverlay.released, true);
 assert.equal(finalObservation.structuredContent.nativeRuntimeEvidence.computerUseOverlay.approvalGrantReleased, true);
 assert.equal(finalObservation.structuredContent.nativeRuntimeEvidence.computerUseOverlay.cleanup.state, "released");
+assert.equal(finalObservation.structuredContent.nativeRuntimeEvidence.nodeReplCleanup.ok, true);
+assert.deepEqual(nodeReplResets.at(-1), { serverId: "node_repl", ownerConversationId: "conversation-a" });
 assert.equal(overlayReleases.at(-1).conversationId, "conversation-a");
 assert.equal(overlayReleases.at(-1).operationId, "overlay-operation-a");
 
@@ -190,6 +205,8 @@ const failedObservation = await registrations[1].handler({
 assert.equal(failedObservation.isError, true);
 assert.match(failedObservation.content[0].text, /simulated Computer Use transport failure/);
 assert.equal(overlayReleases.at(-1).state, "failed", "failed Computer Use calls must immediately release the takeover state");
+assert.deepEqual(nodeReplResets.at(-1), { serverId: "node_repl", ownerConversationId: "conversation-a" },
+  "failed Computer Use calls must close the exact conversation-scoped node_repl transport");
 
 const rejectedSecondAction = await registrations[1].handler({
   action: "press_key",

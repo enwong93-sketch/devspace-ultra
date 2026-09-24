@@ -1,5 +1,55 @@
 # DevSpace Ultra v0.5.8 stabilization — 2026-09-20
 
+## Computer Use ownership release and Codex Desktop recovery — 2026-09-24
+
+### Live incident and exact ownership
+
+The user's real Codex Desktop conversation became non-sendable and showed that
+it was open in another application after a CTC diagnostic/Computer Use round.
+CTC's private journal was already settled (`0` active, `0` duplicate), so the
+lock was not an active model request. Process identity proved two obsolete
+conversation-scoped `node_repl` children still owned old CTC shim/app-server
+trees. Those helper trees held the native Codex thread even though the visible
+Computer Use takeover card had ended. The user's own Codex Desktop tree used the
+current shim/native engine and was left untouched.
+
+Immediate recovery terminated only the two obsolete helper process trees and
+disconnected the exact ChatGPT-conversation `node_repl` transport. Final
+readback showed no DevSpace-owned Codex/app-server child, no conversation-scoped
+Codex MCP connection, and the CTC pair restored to `configured` with no active
+or duplicate request. The remaining `node_repl` child belongs to Codex Desktop's
+own native runtime, not DevSpace.
+
+### Product repair
+
+Commit `2ad8e03` makes Computer Use ownership release structural rather than
+visual-only:
+
+- a final read-only observation with `input.release_control=true` now clears the
+  takeover overlay **and** resets the exact conversation-scoped linked
+  `node_repl` connection;
+- any Computer Use operation failure performs the same runtime reset before the
+  error returns;
+- an MCP result marked `isError` is no longer wrapped as a successful Computer
+  Use payload;
+- runtime cleanup is reported separately from overlay cleanup, and an explicit
+  release fails closed if the transport cannot be released;
+- intermediate observe/action calls keep the same runtime only until the
+  mandatory final observation, preserving normal Computer Use continuity.
+
+`verify:computer-use`, `verify:full-access`, and `verify:capabilities` pass,
+including exact-owner reset tests and static release-contract checks. Stable
+Gateway handover `cc93a07a-97ea-4af6-b6af-ef05ae4abcb8bbf` activated the fix
+with unchanged MCP schema, two sessions replayed, zero dropped/deferred session,
+and no Codex Desktop restart. The first handover attempt exposed a pre-existing
+startup typo in unfinished Goal/progress work; the rejected candidate never
+replaced the healthy Core. Removing the obsolete undefined export restored
+candidate startup before the successful handover.
+
+The standing safety boundary remains unchanged: Computer Use must not automate
+ChatGPT or Codex application UI. This repair only guarantees that permitted
+Computer Use work returns ownership when it ends or fails.
+
 ## Round 6: Active Goal with stale stream status — 2026-09-23
 
 The Goal strip correctly showed `Active`: backend Goal
