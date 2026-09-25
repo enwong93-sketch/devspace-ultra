@@ -16,24 +16,30 @@ $gatewayTaskName = "DevSpace-Stable-Gateway"
 $watchdogTaskName = "DevSpace-Stable-Gateway-Watchdog"
 $autoUpdateTaskName = "DevSpace-Ultra-Auto-Update"
 $releaseApi = "https://api.github.com/repos/enwong93-sketch/devspace-ultra/releases/latest"
+$knownGoodCommit = "06327d673db8e1f37cb4df7d6077ea347ad9b3d9"
+$knownGoodVersion = "0.5.8"
 $configPath = [IO.Path]::GetFullPath($ConfigDir)
 $stamp = (Get-Date).ToUniversalTime().ToString("yyyyMMdd-HHmmss")
 $evidenceRoot = Join-Path $configPath "logs\emergency-recovery-$stamp"
 $launcherRoot = Join-Path $env:LOCALAPPDATA "DevSpaceUltra\HiddenLaunchers"
 $resultPath = Join-Path $evidenceRoot "result.json"
 $downloadedUpdater = Join-Path $env:TEMP "devspace-ultra-stable-updater-$stamp.ps1"
+$sourceArchive = Join-Path $env:TEMP "devspace-ultra-known-good-$stamp.tar.gz"
+$sourceExtractRoot = Join-Path $env:TEMP "devspace-ultra-known-good-$stamp"
 
 New-Item -ItemType Directory -Path $evidenceRoot -Force | Out-Null
 New-Item -ItemType Directory -Path $launcherRoot -Force | Out-Null
+New-Item -ItemType Directory -Path $sourceExtractRoot -Force | Out-Null
 
 $result = [ordered]@{
-    schemaVersion = 1
+    schemaVersion = 2
     startedAt = (Get-Date).ToUniversalTime().ToString("o")
     state = "starting"
     configDir = $configPath
     evidenceRoot = $evidenceRoot
-    stableTag = $null
-    stableArchiveDigest = $null
+    targetVersion = $knownGoodVersion
+    knownGoodCommit = $knownGoodCommit
+    builtArchiveSha256 = $null
     packageRoot = $null
     localGatewayHealthy = $false
     gatewayPid = $null
@@ -156,44 +162,80 @@ try {
         Save-TaskEvidence -TaskName $name
     }
 
-    # Stop the two periodic interactive tasks before package repair. They are
-    # the only tasks expected to wake repeatedly while the user is working.
+    # Stop the periodic interactive tasks before package replacement. They are
+    # the recurring source most likely to flash console windows over the user.
     Stop-And-DisableTask -TaskName $watchdogTaskName
     Stop-And-DisableTask -TaskName $autoUpdateTaskName
 
     $headers = @{
-        "User-Agent" = "DevSpace-Ultra-Emergency-Recovery/1"
+        "User-Agent" = "DevSpace-Ultra-Emergency-Recovery/2"
         "Accept" = "application/vnd.github+json"
     }
+
+    # Use the latest published updater only as the transactional installer.
+    # The payload itself is rebuilt from the exact pre-regression commit below.
     $release = Invoke-RestMethod -Uri $releaseApi -Headers $headers -Method Get -UseBasicParsing
     if (-not $release -or $release.draft -eq $true -or $release.prerelease -eq $true) {
         throw "GitHub did not return a stable DevSpace Ultra release."
     }
-    if ([string]$release.tag_name -ne "v0.5.8") {
-        throw "Emergency recovery expected stable tag v0.5.8, got $($release.tag_name)."
-    }
     $updaterAsset = @($release.assets | Where-Object { [string]$_.name -eq "update.ps1" } | Select-Object -First 1)
-    $archiveAsset = @($release.assets | Where-Object { [string]$_.name -eq "devspace-ultra-0.5.8.tgz" } | Select-Object -First 1)
-    if ($updaterAsset.Count -ne 1 -or $archiveAsset.Count -ne 1) {
-        throw "The stable release is missing update.ps1 or the v0.5.8 package archive."
-    }
+    if ($updaterAsset.Count -ne 1) { throw "The stable release is missing update.ps1." }
     Invoke-WebRequest -Uri ([string]$updaterAsset[0].browser_download_url) -Headers $headers -OutFile $downloadedUpdater -UseBasicParsing
     $updaterDigest = [string]$updaterAsset[0].digest
     if ($updaterDigest -match '^sha256:([0-9a-fA-F]{64})$') {
-        $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $downloadedUpdater).Hash.ToLowerInvariant()
-        if ($actual -ne $Matches[1].ToLowerInvariant()) {
-            throw "Downloaded stable updater SHA-256 did not match the GitHub release digest."
+        $actualUpdaterSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $downloadedUpdater).Hash.ToLowerInvariant()
+        if ($actualUpdaterSha -ne $Matches[1].ToLowerInvariant()) {
+            throw "Downloaded updater SHA-256 did not match the GitHub release digest."
         }
     }
-    $result.stableTag = [string]$release.tag_name
-    $result.stableArchiveDigest = [string]$archiveAsset[0].digest
 
-    # Force a same-version repair so local experimental/uncommitted files are
-    # replaced by the exact published stable payload. The updater protects user
-    # config/auth and targets only known DevSpace runtime processes/tasks.
-    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $downloadedUpdater -Action apply -Force -NoAutoUpdateTask
+    # Build a package from the exact PR #21 merge commit. This deliberately
+    # excludes the later manual round-report hard gate while keeping the last
+    # broadly working v0.5.8 Goal/Rescue baseline.
+    $sourceUrl = "https://api.github.com/repos/enwong93-sketch/devspace-ultra/tarball/$knownGoodCommit"
+    Invoke-WebRequest -Uri $sourceUrl -Headers $headers -OutFile $sourceArchive -UseBasicParsing
+    $tar = Get-Command tar.exe -ErrorAction Stop
+    & $tar.Source -xf $sourceArchive -C $sourceExtractRoot
+    if ($LASTEXITCODE -ne 0) { throw "Known-good source extraction failed with code $LASTEXITCODE." }
+    $sourcePackageRoots = @(Get-ChildItem -LiteralPath $sourceExtractRoot -Directory -ErrorAction Stop)
+    if ($sourcePackageRoots.Count -ne 1) {
+        throw "Known-good source archive did not contain exactly one package root."
+    }
+    $sourcePackageRoot = $sourcePackageRoots[0].FullName
+    $sourceManifest = Get-Content -LiteralPath (Join-Path $sourcePackageRoot "package.json") -Raw | ConvertFrom-Json
+    if ([string]$sourceManifest.name -ne "devspace-ultra" -or [string]$sourceManifest.version -ne $knownGoodVersion) {
+        throw "Known-good source package identity/version mismatch."
+    }
+    $npm = Get-Command npm.cmd -ErrorAction SilentlyContinue
+    if (-not $npm) { $npm = Get-Command npm -ErrorAction Stop }
+    Push-Location $sourcePackageRoot
+    try {
+        $packOutput = @(& $npm.Source pack --ignore-scripts --pack-destination $sourceExtractRoot 2>&1)
+        $packExitCode = $LASTEXITCODE
+    }
+    finally { Pop-Location }
+    if ($packExitCode -ne 0) {
+        throw "Known-good npm pack failed with code $packExitCode: $($packOutput -join ' ')"
+    }
+    $builtArchives = @(Get-ChildItem -LiteralPath $sourceExtractRoot -File -Filter "*.tgz" | Sort-Object LastWriteTimeUtc -Descending)
+    if ($builtArchives.Count -ne 1) { throw "Known-good build did not produce exactly one npm archive." }
+    $builtArchive = $builtArchives[0].FullName
+    $builtArchiveSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $builtArchive).Hash.ToLowerInvariant()
+    $result.builtArchiveSha256 = $builtArchiveSha
+
+    # Force a same-version transactional repair from the known-good package.
+    # The updater protects config/auth and targets only known DevSpace tasks and
+    # package-root processes; it never stops ChatGPT Main or Blender.
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $downloadedUpdater `
+        -Action apply `
+        -PackageArchive $builtArchive `
+        -TargetVersion $knownGoodVersion `
+        -TargetTag "v0.5.8-known-good-06327d67" `
+        -ExpectedSha256 $builtArchiveSha `
+        -Force `
+        -NoAutoUpdateTask
     if ($LASTEXITCODE -ne 0) {
-        throw "Stable updater exited with code $LASTEXITCODE."
+        throw "Known-good transactional repair exited with code $LASTEXITCODE."
     }
 
     $packageRoot = Get-InstalledPackageRoot
@@ -203,14 +245,13 @@ try {
     $installedUpdater = Join-Path $packageRoot "update.ps1"
     foreach ($path in @($startup, $helper, $installedUpdater)) {
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
-            throw "Stable package is missing required file: $path"
+            throw "Known-good package is missing required file: $path"
         }
     }
 
-    # Restore canonical task definitions/settings first. This does not restart
-    # a healthy running Gateway. Then replace console-subsystem task actions by
-    # GUI-subsystem WScript launchers so periodic maintenance cannot flash a
-    # black console over the user's desktop.
+    # Restore canonical task settings, then replace every recurring console
+    # action with a GUI-subsystem WScript launcher. This prevents both node.exe
+    # and powershell.exe scheduled runs from flashing black windows.
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $startup -Action repair -ConfigDir $configPath
     if ($LASTEXITCODE -ne 0) { throw "Stable Gateway task repair failed with code $LASTEXITCODE." }
 
@@ -293,4 +334,6 @@ catch {
 }
 finally {
     Remove-Item -LiteralPath $downloadedUpdater -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $sourceArchive -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $sourceExtractRoot -Recurse -Force -ErrorAction SilentlyContinue
 }
