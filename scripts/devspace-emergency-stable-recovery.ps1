@@ -123,7 +123,7 @@ function Set-HiddenTaskAction {
         [Parameter(Mandatory)][string] $LauncherPath,
         [Parameter(Mandatory)][string] $WorkingDirectory
     )
-    $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop
+    $null = Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop
     $wscript = Join-Path $env:WINDIR "System32\wscript.exe"
     $action = New-ScheduledTaskAction -Execute $wscript -Argument ('"{0}"' -f $LauncherPath) -WorkingDirectory $WorkingDirectory
     Set-ScheduledTask -TaskName $TaskName -Action $action -ErrorAction Stop | Out-Null
@@ -263,15 +263,22 @@ try {
     $result.gatewayPid = [int]$gatewayListener[0].OwningProcess
     $result.corePid = [int]$coreListeners[0].OwningProcess
     $result.corePort = [int]$coreListeners[0].LocalPort
-    $result.tasks = @($gatewayTaskName, $watchdogTaskName, $autoUpdateTaskName | ForEach-Object {
-        $task = Get-ScheduledTask -TaskName $_ -ErrorAction SilentlyContinue
-        if (-not $task) { return }
-        [ordered]@{
-            name = $_
-            state = $task.State.ToString()
-            enabled = $task.Settings.Enabled
-            execute = [string]$task.Actions[0].Execute
-            arguments = [string]$task.Actions[0].Arguments
+    $result.tasks = @(@($gatewayTaskName, $watchdogTaskName, $autoUpdateTaskName) | ForEach-Object {
+        $taskName = [string]$_
+        $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+        if (-not $task) {
+            [ordered]@{ name = $taskName; present = $false }
+        }
+        else {
+            $action = @($task.Actions)[0]
+            [ordered]@{
+                name = $taskName
+                present = $true
+                state = $task.State.ToString()
+                enabled = ($task.State.ToString() -ne "Disabled")
+                execute = if ($action) { [string]$action.Execute } else { $null }
+                arguments = if ($action) { [string]$action.Arguments } else { $null }
+            }
         }
     })
     Write-AtomicJson -Path $resultPath -Value $result
