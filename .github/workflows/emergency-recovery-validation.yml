@@ -31,7 +31,7 @@ jobs:
           $source = Get-Content -LiteralPath $path -Raw
           $required = @(
             '06327d673db8e1f37cb4df7d6077ea347ad9b3d9',
-            '-PackageArchive $builtArchive',
+            '-PackageArchive $packageArchive',
             '-TargetVersion $knownGoodVersion',
             '-NoAutoUpdateTask',
             'wscript.exe',
