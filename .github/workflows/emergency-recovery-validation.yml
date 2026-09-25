@@ -1,0 +1,48 @@
+name: Emergency stable recovery validation
+
+on:
+  push:
+    branches:
+      - hotfix/v058-emergency-stable-recovery-20260925
+  pull_request:
+    paths:
+      - scripts/devspace-emergency-stable-recovery.ps1
+      - .github/workflows/emergency-recovery-validation.yml
+
+permissions:
+  contents: read
+
+jobs:
+  validate-powershell:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Parse and inspect recovery script
+        shell: powershell
+        run: |
+          $path = Join-Path $PWD 'scripts\devspace-emergency-stable-recovery.ps1'
+          $tokens = $null
+          $errors = $null
+          $null = [System.Management.Automation.Language.Parser]::ParseFile($path, [ref]$tokens, [ref]$errors)
+          if ($errors.Count -gt 0) {
+            $errors | Format-List | Out-String | Write-Error
+            exit 1
+          }
+          $source = Get-Content -LiteralPath $path -Raw
+          $required = @(
+            '-Action apply -Force -NoAutoUpdateTask',
+            'wscript.exe',
+            'DevSpace-Stable-Gateway-Watchdog',
+            'DevSpace-Ultra-Auto-Update',
+            'Expected exactly one Core listener',
+            'Core memory PID does not match'
+          )
+          foreach ($needle in $required) {
+            if (-not $source.Contains($needle)) {
+              throw "Missing required recovery invariant: $needle"
+            }
+          }
+          if ($source -match 'Stop-Process\s+-Name\s+node') {
+            throw 'Recovery script must never kill every node process.'
+          }
+          Write-Host 'Emergency recovery PowerShell parsed successfully and retained all safety invariants.'
