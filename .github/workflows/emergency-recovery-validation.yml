@@ -1,0 +1,88 @@
+name: Emergency stable recovery validation
+
+on:
+  push:
+    branches:
+      - hotfix/v058-emergency-stable-recovery-20260925
+  pull_request:
+    paths:
+      - scripts/devspace-emergency-stable-recovery.ps1
+      - .github/workflows/emergency-recovery-validation.yml
+
+permissions:
+  contents: read
+
+jobs:
+  validate-powershell:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Parse and inspect recovery script
+        shell: powershell
+        run: |
+          $path = Join-Path $PWD 'scripts\devspace-emergency-stable-recovery.ps1'
+          $tokens = $null
+          $errors = $null
+          $null = [System.Management.Automation.Language.Parser]::ParseFile($path, [ref]$tokens, [ref]$errors)
+          if ($errors.Count -gt 0) {
+            $errors | Format-List | Out-String | Write-Error
+            exit 1
+          }
+          $source = Get-Content -LiteralPath $path -Raw
+          $required = @(
+            '06327d673db8e1f37cb4df7d6077ea347ad9b3d9',
+            '-PackageArchive $packageArchive',
+            '-TargetVersion $knownGoodVersion',
+            '-NoAutoUpdateTask',
+            'wscript.exe',
+            'DevSpace-Stable-Gateway-Watchdog',
+            'DevSpace-Ultra-Auto-Update',
+            'Expected exactly one Core listener',
+            'Core memory PID does not match'
+          )
+          foreach ($needle in $required) {
+            if (-not $source.Contains($needle)) {
+              throw "Missing required recovery invariant: $needle"
+            }
+          }
+          if ($source -match 'Stop-Process\s+-Name\s+node') {
+            throw 'Recovery script must never kill every node process.'
+          }
+          Write-Host 'Emergency recovery PowerShell parsed successfully and retained all safety invariants.'
+      - name: Build exact pre-regression package
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $commit = '06327d673db8e1f37cb4df7d6077ea347ad9b3d9'
+          $root = Join-Path $env:RUNNER_TEMP 'devspace-known-good-validation'
+          $sourceArchive = Join-Path $root 'source.tar.gz'
+          $extractRoot = Join-Path $root 'extract'
+          New-Item -ItemType Directory -Path $extractRoot -Force | Out-Null
+          Invoke-WebRequest `
+            -Uri "https://api.github.com/repos/enwong93-sketch/devspace-ultra/tarball/$commit" `
+            -Headers @{ 'User-Agent' = 'DevSpace-Ultra-CI'; Accept = 'application/vnd.github+json' } `
+            -OutFile $sourceArchive `
+            -UseBasicParsing
+          & tar.exe -xf $sourceArchive -C $extractRoot
+          if ($LASTEXITCODE -ne 0) { throw 'Known-good source extraction failed.' }
+          $packageRoots = @(Get-ChildItem -LiteralPath $extractRoot -Directory)
+          if ($packageRoots.Count -ne 1) { throw 'Source archive must contain exactly one package root.' }
+          $sourceRoot = $packageRoots[0].FullName
+          $manifest = Get-Content -LiteralPath (Join-Path $sourceRoot 'package.json') -Raw | ConvertFrom-Json
+          if ($manifest.name -ne 'devspace-ultra' -or $manifest.version -ne '0.5.8') {
+            throw 'Known-good source identity/version mismatch.'
+          }
+          Push-Location $sourceRoot
+          try {
+            & npm.cmd pack --ignore-scripts --pack-destination $root
+            if ($LASTEXITCODE -ne 0) { throw 'npm pack failed.' }
+          }
+          finally { Pop-Location }
+          $archives = @(Get-ChildItem -LiteralPath $root -File -Filter '*.tgz')
+          if ($archives.Count -ne 1) { throw 'Expected exactly one packed archive.' }
+          $packedManifest = (& tar.exe -xOf $archives[0].FullName package/package.json) | ConvertFrom-Json
+          if ($packedManifest.name -ne 'devspace-ultra' -or $packedManifest.version -ne '0.5.8') {
+            throw 'Packed archive identity/version mismatch.'
+          }
+          $sha = (Get-FileHash -Algorithm SHA256 -LiteralPath $archives[0].FullName).Hash.ToLowerInvariant()
+          Write-Host "Known-good package built successfully: $($archives[0].Name) sha256=$sha"
