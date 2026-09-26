@@ -41,10 +41,10 @@ Assert-Equal $state.Caddy.Count 1 "Existing Caddy must be reusable"
 $caddyText = Get-Content -LiteralPath $scriptPath -Raw
 Assert-True ($caddyText -match 'bind \$LanIPv4') "Generated Caddyfile must bind the selected LAN IPv4"
 
-$testFile = New-TemporaryFile
+$testPath = [IO.Path]::GetTempFileName()
 try {
     $seed = @'
-devspace-enwong.duckdns.org {
+ctc.example.test {
     bind 192.168.0.83
     route {
         # BEGIN CTC shared infrastructure route - product backend stays separate
@@ -56,24 +56,24 @@ devspace-enwong.duckdns.org {
     }
 }
 '@
-    [IO.File]::WriteAllText($testFile.FullName, $seed, (New-Object Text.UTF8Encoding($false)))
-    Write-CaddyConfig -DomainName "devspace-enwong.duckdns.org" -UpstreamPort 7678 -LanIPv4 "192.168.0.84" -Path $testFile.FullName
-    $rebuilt = Get-Content -LiteralPath $testFile.FullName -Raw
+    [IO.File]::WriteAllText($testPath, $seed, (New-Object Text.UTF8Encoding($false)))
+    Write-CaddyConfig -DomainName "ctc.example.test" -UpstreamPort 7678 -LanIPv4 "192.168.0.84" -Path $testPath
+    $rebuilt = Get-Content -LiteralPath $testPath -Raw
     Assert-Equal ([regex]::Matches($rebuilt, '# BEGIN CTC shared infrastructure route')).Count 1 "CTC route must remain unique"
     Assert-Equal ([regex]::Matches($rebuilt, '# END CTC shared infrastructure route')).Count 1 "CTC route end must remain unique"
     Assert-True ($rebuilt.Contains('reverse_proxy 127.0.0.1:19150')) "CTC independent upstream must survive LAN rebinding"
     Assert-True ($rebuilt.Contains('reverse_proxy 127.0.0.1:7678')) "DevSpace upstream must survive LAN rebinding"
     Assert-True ($rebuilt.Contains('bind 192.168.0.84')) "New LAN binding must be applied"
     $ambiguous = $rebuilt + [Environment]::NewLine + "# BEGIN CTC shared infrastructure route - product backend stays separate"
-    [IO.File]::WriteAllText($testFile.FullName, $ambiguous, (New-Object Text.UTF8Encoding($false)))
+    [IO.File]::WriteAllText($testPath, $ambiguous, (New-Object Text.UTF8Encoding($false)))
     $rejected = $false
-    try { Write-CaddyConfig -DomainName "devspace-enwong.duckdns.org" -UpstreamPort 7678 -LanIPv4 "192.168.0.85" -Path $testFile.FullName }
+    try { Write-CaddyConfig -DomainName "ctc.example.test" -UpstreamPort 7678 -LanIPv4 "192.168.0.85" -Path $testPath }
     catch { $rejected = $true }
     Assert-True $rejected "Ambiguous CTC route markers must fail before rewriting the shared config"
-    Assert-Equal (Get-Content -LiteralPath $testFile.FullName -Raw) $ambiguous "Ambiguous shared config must remain byte-for-byte unchanged"
+    Assert-Equal (Get-Content -LiteralPath $testPath -Raw) $ambiguous "Ambiguous shared config must remain byte-for-byte unchanged"
 }
 finally {
-    Remove-Item -LiteralPath $testFile.FullName -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $testPath -Force -ErrorAction SilentlyContinue
 }
 
 [pscustomobject]@{ ok = $true; gate = "local-ingress-regression" } | ConvertTo-Json -Compress
