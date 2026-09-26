@@ -165,11 +165,20 @@ try {
     $npm = Get-Command npm.cmd -ErrorAction SilentlyContinue
     if (-not $npm) { $npm = Get-Command npm -ErrorAction Stop }
     Push-Location $sourceRoot
+    $previousErrorActionPreference = $ErrorActionPreference
     try {
+        # npm writes informational notices to stderr even when `npm pack`
+        # succeeds. Windows PowerShell 5 promotes native stderr records to
+        # terminating errors under the script-wide Stop policy, so keep this
+        # one native boundary non-terminating and trust the real exit code.
+        $ErrorActionPreference = "Continue"
         $packOutput = @(& $npm.Source pack --ignore-scripts --pack-destination $tempRoot 2>&1)
         $packExitCode = $LASTEXITCODE
     }
-    finally { Pop-Location }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+        Pop-Location
+    }
     if ($packExitCode -ne 0) {
         throw "Known-good npm pack failed with code ${packExitCode}: $($packOutput -join ' ')"
     }
