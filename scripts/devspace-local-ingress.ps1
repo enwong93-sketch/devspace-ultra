@@ -334,10 +334,31 @@ function Get-DuckDnsResponseFirstLine {
 function Write-CaddyConfig {
     param([string]$DomainName, [int]$UpstreamPort, [string]$LanIPv4, [string]$Path)
     if ([string]::IsNullOrWhiteSpace($LanIPv4)) { throw "LAN IPv4 is required for the Caddy bind." }
+    $ctcBlock = ""
+    if (Test-Path -LiteralPath $Path) {
+        $existing = Get-Content -LiteralPath $Path -Raw
+        $begin = "# BEGIN CTC shared infrastructure route - product backend stays separate"
+        $end = "# END CTC shared infrastructure route - product backend stays separate"
+        $beginCount = ([regex]::Matches($existing, [regex]::Escape($begin))).Count
+        $endCount = ([regex]::Matches($existing, [regex]::Escape($end))).Count
+        if ($beginCount -ne $endCount -or $beginCount -gt 1) {
+            throw "Shared Caddyfile has ambiguous CTC route markers; existing configuration was preserved."
+        }
+        if ($beginCount -eq 1) {
+            $pattern = '(?ms)^[ \t]*' + [regex]::Escape($begin) + '[ \t]*\r?\n.*?^[ \t]*' +
+                [regex]::Escape($end) + '[ \t]*'
+            $match = [regex]::Match($existing, $pattern)
+            if (-not $match.Success -or $match.Value -notmatch 'reverse_proxy 127\.0\.0\.1:19150') {
+                throw "Shared Caddyfile CTC route is not the expected bounded block; existing configuration was preserved."
+            }
+            $ctcBlock = $match.Value.TrimEnd() + "`r`n"
+        }
+    }
     $text = @"
 $DomainName {
     bind $LanIPv4
     route {
+$ctcBlock
         @public path /healthz /mcp /.well-known/oauth-protected-resource/mcp /.well-known/oauth-authorization-server /authorize /token /register /revoke /mcp-app-assets/*
 
         handle @public {
