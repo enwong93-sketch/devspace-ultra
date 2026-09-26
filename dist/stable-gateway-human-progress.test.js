@@ -43,9 +43,9 @@ try {
   });
   assert.equal(progress.snapshot().messages.length, 1, "dedupeKey must suppress restart/event replay duplicates");
 
-  await progress.update({ message: "第一個驗證已經通過。下一步我會將 Goal 同 Plan 真正綁落 conversation，而唔係 runtime。" });
-  await progress.update({ message: "我而家開始做 conversation-bound state migration；舊資料會保留，唔會假完成。" });
-  await progress.update({ message: "migration gate 已經完成，下一步係真實前端 A→B→A 切換驗收。" });
+  await progress.update({ message: "第一個驗證已經通過。下一步我會將 Goal 同 Plan 真正綁落 conversation，而唔係 runtime。", conversationId: "conversation-a" });
+  await progress.update({ message: "我而家開始做 conversation-bound state migration；舊資料會保留，唔會假完成。", conversationId: "conversation-a" });
+  await progress.update({ message: "migration gate 已經完成，下一步係真實前端 A→B→A 切換驗收。", conversationId: "conversation-a" });
   snapshot = progress.snapshot();
   assert.equal(snapshot.messages.length, 3, "natural-language message history must stay bounded");
   assert.match(snapshot.messages.at(-1).text, /migration gate 已經完成/);
@@ -55,6 +55,38 @@ try {
   assert.equal(restoredSnapshot.messages.length, 3, "natural-language messages must survive Gateway restart");
   assert.match(restoredSnapshot.messages.at(-1).text, /真實前端 A→B→A/);
   assert.equal(restoredSnapshot.messages.some((item) => item.dedupeKey === "goal-a:1:objective:step-a"), false, "bounded history may evict old metadata without corrupting later messages");
+
+  const isolatedPath = join(root, "per-conversation-retention.json");
+  const isolated = await createStableGatewayHumanProgress({ statePath: isolatedPath, limit: 3 });
+  for (const [conversationId, label, count] of [
+    ["conversation-isolated-a", "A", 4],
+    ["conversation-isolated-b", "B", 3],
+  ]) {
+    for (let index = 1; index <= count; index += 1) {
+      await isolated.update({
+        message: `${label}${index}`,
+        conversationId,
+        source: "goal-run-events",
+        kind: "milestone",
+        dedupeKey: `${conversationId}:${index}`,
+      });
+    }
+  }
+  const isolatedSnapshot = isolated.snapshot();
+  assert.equal(isolatedSnapshot.retentionPolicy, "per-conversation-v1");
+  assert.deepEqual(
+    isolatedSnapshot.messages.filter((item) => item.conversationId === "conversation-isolated-a").map((item) => item.text),
+    ["A2", "A3", "A4"],
+    "one busy conversation may evict only its own oldest narration",
+  );
+  assert.deepEqual(
+    isolatedSnapshot.messages.filter((item) => item.conversationId === "conversation-isolated-b").map((item) => item.text),
+    ["B1", "B2", "B3"],
+    "another conversation's narration must not be evicted by unrelated activity",
+  );
+  const isolatedReloaded = await createStableGatewayHumanProgress({ statePath: isolatedPath, limit: 3 });
+  assert.deepEqual(isolatedReloaded.snapshot().messages, isolatedSnapshot.messages,
+    "per-conversation narration history must survive Gateway/Core restart");
 
   await assert.rejects(() => restored.update({ message: "x".repeat(1601) }), /1600 characters/i);
   await assert.rejects(() => restored.update({ message: "Bearer secret-token-value" }), /sensitive/i);
@@ -103,8 +135,26 @@ try {
   assert.equal(defaultSnapshot.messages.length, 48, "default progress history must retain 48 bounded entries for scrolling");
   assert.match(defaultSnapshot.messages[0].text, /第 8 個已驗證步驟/);
   assert.match(defaultSnapshot.messages.at(-1).text, /第 55 個已驗證步驟/);
+
+  for (let index = 0; index < 55; index += 1) {
+    await defaultProgress.update({
+      message: `另一個 conversation 第 ${index + 1} 個已驗證步驟。`,
+      conversationId: "conversation-history-other",
+      goalId: "goal-history-other",
+      round: 1,
+      source: "goal-run-events",
+      kind: "milestone",
+      dedupeKey: `history-other:${index + 1}`,
+      toolStepCount: index + 1,
+    });
+  }
+  const twoConversationSnapshot = defaultProgress.snapshot();
+  assert.equal(twoConversationSnapshot.messages.length, 96,
+    "the default bound is 48 messages per conversation, not 48 shared by every conversation");
+  assert.equal(twoConversationSnapshot.messages.filter((item) => item.conversationId === "conversation-history").length, 48);
+  assert.equal(twoConversationSnapshot.messages.filter((item) => item.conversationId === "conversation-history-other").length, 48);
 } finally {
   await rm(root, { recursive: true, force: true });
 }
 
-console.log(JSON.stringify({ ok: true, gate: "stable-gateway-human-progress", durable: true, naturalLanguageStream: true, defaultHistoryLimit: 48, hardHistoryLimit: 64, legacyCompatible: true }));
+console.log(JSON.stringify({ ok: true, gate: "stable-gateway-human-progress", durable: true, naturalLanguageStream: true, perConversationHistoryLimit: 48, hardPerConversationLimit: 64, crossConversationEviction: false, legacyCompatible: true }));

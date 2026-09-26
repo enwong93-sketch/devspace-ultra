@@ -280,7 +280,6 @@ export class InteractiveProgressEnforcementGate {
 export const interactiveProgressEnforcementInternals = {
   DEFAULT_MAX_SILENT_MS,
   SETUP_TOOLS,
-  GOAL_ROUND_CLOSURE_ALLOWED_TOOLS,
   cleanConversationId,
   cleanRuntimeKey,
   timestampMs,

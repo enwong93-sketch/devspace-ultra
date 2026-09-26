@@ -116,6 +116,47 @@ assert.deepEqual(
   "automatic tool telemetry must never become visible narration",
 );
 
+const lifecycleMessages = [
+  ["conversation-goal-pending", "goal-pending", "Goal reported/pending後仍然保留conversation旁白。", "e"],
+  ["conversation-goal-paused", "goal-paused", "Goal paused後仍然保留conversation旁白。", "f"],
+  ["conversation-goal-completed", "goal-completed", "Goal completed後仍然保留conversation旁白。", "1"],
+].map(([conversationId, goalId, text, fingerprint], index) => ({
+  text,
+  at: new Date(now - (index + 1) * 1_000).toISOString(),
+  conversationId,
+  goalId,
+  source: "agent-progress-tool",
+  kind: "verification",
+  dedupeKey: `${conversationId}:history`,
+  ...ownership(`main-0${index + 5}`, fingerprint),
+}));
+const lifecycleMap = conversationProgressNarrationMap({
+  humanProgress: { messages: lifecycleMessages },
+  goalProgress: { active: null, runs: [] },
+  planState: {
+    plans: {
+      "plan-completed": {
+        id: "plan-completed",
+        conversationId: "conversation-goal-completed",
+        status: "completed",
+        steps: [{ id: "done", text: "done", status: "completed" }],
+      },
+    },
+  },
+  goalState: {
+    goals: {
+      "goal-pending": { id: "goal-pending", conversationId: "conversation-goal-pending", status: "active", round: 7, roundState: "reported", continuation: { state: "pending" } },
+      "goal-paused": { id: "goal-paused", conversationId: "conversation-goal-paused", status: "paused", round: 4, roundState: "working" },
+      "goal-completed": { id: "goal-completed", conversationId: "conversation-goal-completed", status: "completed", round: 9, roundState: "reported" },
+    },
+  },
+  nowMs: now,
+});
+for (const [conversationId] of lifecycleMessages.map((item) => [item.conversationId])) {
+  assert.equal(lifecycleMap[conversationId]?.messages.length, 1,
+    "Goal pending, paused or completed state must not clear conversation-bound narration history");
+}
+
 const script = buildProgressNarrationScript(map);
 {
   const shared = { source: 'agent-progress-tool', conversationId: 'conversation-normal-claim', ownershipRuntimeKey: 'main-02', ownershipObservedAt: new Date(now).toISOString() };

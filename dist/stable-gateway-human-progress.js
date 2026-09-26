@@ -7,6 +7,7 @@ const MAX_LEGACY_TEXT = 400;
 const MAX_MESSAGE_TEXT = 1600;
 const MAX_METADATA_TEXT = 200;
 const SENSITIVE = /(Bearer\s+\S+|(?:password|passwd|pwd|token|secret|api[_-]?key|access[_-]?key|client[_-]?secret)\s*[=:]\s*\S+)/i;
+const UNBOUND_CONVERSATION_BUCKET = "__devspace_unbound_progress__";
 
 function cleanText(value, label, maxLength) {
   if (value == null || value === "") return null;
@@ -91,6 +92,24 @@ function normalizePersistedMessage(item) {
   return message;
 }
 
+function conversationBucket(item) {
+  return cleanMetadataText(item?.conversationId) || UNBOUND_CONVERSATION_BUCKET;
+}
+
+function retainPerConversation(messages, limit) {
+  const maxItems = Math.max(1, Math.min(64, Number(limit) || DEFAULT_LIMIT));
+  const buckets = new Map();
+  for (let index = 0; index < messages.length; index += 1) {
+    const key = conversationBucket(messages[index]);
+    const bucket = buckets.get(key) || [];
+    bucket.push(index);
+    if (bucket.length > maxItems) bucket.splice(0, bucket.length - maxItems);
+    buckets.set(key, bucket);
+  }
+  const retained = new Set([...buckets.values()].flat());
+  return messages.filter((_item, index) => retained.has(index));
+}
+
 export async function createStableGatewayHumanProgress({ statePath, limit = DEFAULT_LIMIT, now = Date.now } = {}) {
   const path = String(statePath || "").trim();
   if (!path) throw new Error("statePath is required.");
@@ -98,12 +117,12 @@ export async function createStableGatewayHumanProgress({ statePath, limit = DEFA
   const persisted = await readState(path);
   const persistedMessages = (Array.isArray(persisted?.messages) ? persisted.messages : [])
     .map(normalizePersistedMessage)
-    .filter(Boolean)
-    .slice(-maxItems);
+    .filter(Boolean);
   let state = {
     version: 3,
-    messages: persistedMessages,
+    messages: retainPerConversation(persistedMessages, maxItems),
     ownershipPolicy: "exact-conversation-request-v1",
+    retentionPolicy: "per-conversation-v1",
     // Legacy fields remain for older writers/readers during migration only.
     current: persisted?.current?.text ? persisted.current : null,
     completed: Array.isArray(persisted?.completed) ? persisted.completed.slice(0, maxItems) : [],
@@ -165,10 +184,14 @@ export async function createStableGatewayHumanProgress({ statePath, limit = DEFA
       if (normalized?.source === "agent-progress-tool" && !normalizeProgressOwnershipProof(normalized)) {
         throw new Error("agent progress requires exact conversation ownership proof");
       }
+      const normalizedBucket = normalized ? conversationBucket(normalized) : null;
       const duplicate = normalized?.dedupeKey
-        && state.messages.some((item) => item?.dedupeKey === normalized.dedupeKey);
+        && state.messages.some((item) => (
+          conversationBucket(item) === normalizedBucket
+          && item?.dedupeKey === normalized.dedupeKey
+        ));
       if (normalized && !duplicate) state.messages.push(normalized);
-      if (state.messages.length > maxItems) state.messages.splice(0, state.messages.length - maxItems);
+      state.messages = retainPerConversation(state.messages, maxItems);
     }
     if (completedText) {
       state.completed.unshift({ text: completedText, at });
