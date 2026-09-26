@@ -229,6 +229,39 @@ function parseNodeReplPayload(response) {
   return { result, content, structured };
 }
 
+async function resetComputerUseNodeRepl(dependencies, reason) {
+  const bridge = dependencies?.codexMcpBridge;
+  const ownerConversationId = String(dependencies?.ownerConversationId || "").trim();
+  if (!bridge?.resetConnection || !ownerConversationId) {
+    return {
+      ok: false,
+      state: "node-repl-reset-unavailable",
+      reason,
+    };
+  }
+  try {
+    const receipt = await bridge.resetConnection("node_repl", ownerConversationId);
+    return {
+      ok: receipt?.ok === true,
+      state: receipt?.connectionState || "disconnected",
+      reason,
+      serverId: "node_repl",
+      ownerConversationId,
+      closedConnections: Number(receipt?.closedConnections || 0),
+      reconnectOnNextUse: receipt?.reconnectOnNextUse === true,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      state: "node-repl-reset-failed",
+      reason,
+      serverId: "node_repl",
+      ownerConversationId,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
 export function codexComputerUseActionInfo(action) {
   const normalized = String(action || "status").trim().toLowerCase();
   if (!ACTIONS.has(normalized)) throw new Error(`Unsupported Codex Computer Use action: ${normalized}`);
@@ -313,6 +346,8 @@ export async function callCodexComputerUse(dependencies, {
   let result = null;
   let overlayCleanup = null;
   let approvalGrantReleased = false;
+  let runtimeCleanup = null;
+  let operationError = null;
   try {
     const response = await callJsReplCompatibility(dependencies, {
       code,
@@ -320,6 +355,12 @@ export async function callCodexComputerUse(dependencies, {
       elicitationHandler,
     });
     const parsed = parseNodeReplPayload(response);
+    if (parsed.result?.isError === true || parsed.structured?.ok === false) {
+      const message = parsed.content.find((item) => item?.type === "text" && typeof item.text === "string")?.text
+        || parsed.structured?.error
+        || "The bundled Computer Use runtime returned an error.";
+      throw new Error(String(message));
+    }
     operationState = "completed";
     result = {
       ok: true,
@@ -338,6 +379,8 @@ export async function callCodexComputerUse(dependencies, {
       },
       executionPolicy: executionPolicySnapshot(),
     };
+  } catch (error) {
+    operationError = error;
   } finally {
     if (activity?.operationId) {
       const mustRelease = releaseControl || operationState !== "completed";
@@ -358,6 +401,21 @@ export async function callCodexComputerUse(dependencies, {
         approvalGrantReleased = dependencies.releaseHostUnsupportedApproval(app) === true;
       }
     }
+    if (releaseControl || operationState !== "completed") {
+      runtimeCleanup = await resetComputerUseNodeRepl(
+        dependencies,
+        releaseControl ? "explicit-final-observation" : "computer-use-operation-failed",
+      );
+    }
+  }
+  if (operationError) {
+    if (runtimeCleanup?.ok !== true) operationError.runtimeCleanup = runtimeCleanup;
+    throw operationError;
+  }
+  if (releaseControl && runtimeCleanup?.ok !== true) {
+    const error = new Error("Computer Use finished but the conversation-scoped node_repl runtime could not be released.");
+    error.runtimeCleanup = runtimeCleanup;
+    throw error;
   }
   if (result?.nativeRuntimeEvidence) {
     result.nativeRuntimeEvidence.computerUseOverlay = {
@@ -367,6 +425,7 @@ export async function callCodexComputerUse(dependencies, {
       releaseRequested: releaseControl,
       approvalGrantReleased,
     };
+    result.nativeRuntimeEvidence.nodeReplCleanup = runtimeCleanup;
   }
   return result;
 }

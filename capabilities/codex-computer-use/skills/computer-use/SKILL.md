@@ -18,6 +18,6 @@ Follow the official observe/action discipline:
 3. Perform at most one state-changing action.
 4. Immediately call `get_window_state` again before deciding the next action.
 5. Never reuse stale indexes, coordinates, or screenshot IDs after the UI changes.
-6. When Computer Use is finished, make one final read-only observation with `input.release_control=true`. This explicit release is mandatory before the Agent's visible final response or before switching to unrelated non-Computer-Use work; it clears the blue takeover state immediately. If a Computer Use operation fails, DevSpace releases the takeover state automatically as a fail-safe.
+6. When Computer Use is finished, make one final read-only observation with `input.release_control=true`. This explicit release is mandatory before the Agent's visible final response or before switching to unrelated non-Computer-Use work; it clears the blue takeover state and closes the exact conversation-scoped `node_repl` transport so bundled Computer Use cannot leave helper/app-server children holding the user's desktop application. If a Computer Use operation fails, DevSpace performs both releases automatically as a fail-safe.
 
 Do not automate terminal applications, Windows Run, authentication/password/security/privacy UI, ChatGPT desktop UI, or Codex UI. Higher-priority assistant safety rules and action-time confirmation requirements still apply even though DevSpace's local execution policy is full-access/approval-never.

@@ -10,6 +10,8 @@ import {
 
 const calls = [];
 const approvals = [];
+const resets = [];
+let nextToolError = null;
 const fakeBridge = {
   async probe(serverId) {
     assert.equal(serverId, "node_repl");
@@ -31,6 +33,16 @@ const fakeBridge = {
   },
   async callTool(input, _ownerConversationId, executionOptions = {}) {
     calls.push({ input, executionOptions });
+    if (nextToolError) {
+      const message = nextToolError;
+      nextToolError = null;
+      return {
+        ok: true,
+        server: "node_repl",
+        toolName: "js",
+        result: { content: [{ type: "text", text: message }], isError: true },
+      };
+    }
     const code = String(input.arguments.code || "");
     let payload = { ok: true };
     if (code.includes("sky.list_apps()")) payload = [{ id: "app-a", windows: [{ app: "app-a", id: 1, title: "Window" }] }];
@@ -63,10 +75,23 @@ const fakeBridge = {
       result: { content: [{ type: "text", text: JSON.stringify(payload) }], isError: false },
     };
   },
+  async resetConnection(serverId, ownerConversationId) {
+    resets.push({ serverId, ownerConversationId });
+    return {
+      ok: true,
+      source: "codex",
+      serverId,
+      ownerConversationId,
+      closedConnections: 1,
+      connectionState: "disconnected",
+      reconnectOnNextUse: true,
+    };
+  },
 };
 const deps = {
   codexMcpBridge: fakeBridge,
   capabilityRuntime: null,
+  ownerConversationId: "conversation-a",
   elicitationHandler: async (request) => {
     assert.equal(request.params.meta.connector_id, "computer-use");
     return { action: "accept", content: { approval_scope: "current_tool_call" } };
@@ -102,6 +127,7 @@ const listCall = calls.at(-1).input;
 assert.match(listCall.arguments.code, /import\("@oai\/sky"\)/);
 assert.match(listCall.arguments.code, /sky\.list_apps\(\)/);
 assert.equal(listCall.arguments.timeout_ms, 30_000);
+assert.equal(resets.length, 0, "an opening observation keeps the exact runtime available for the next action");
 
 const state = await callCodexComputerUse(deps, {
   action: "get_window_state",
@@ -116,6 +142,23 @@ assert.equal(state.nativeRuntimeEvidence.approvalRelay.required, true);
 assert.equal(state.nativeRuntimeEvidence.approvalRelay.requested, true);
 assert.equal(state.nativeRuntimeEvidence.approvalRelay.action, "accept");
 assert.equal(state.nativeRuntimeEvidence.approvalRelay.requestedApp, "app-a");
+
+const released = await callCodexComputerUse(deps, {
+  action: "get_window_state",
+  input: {
+    window: { app: "app-a", id: 1, title: "Window" },
+    includeScreenshot: true,
+    release_control: true,
+  },
+});
+assert.deepEqual(resets.at(-1), { serverId: "node_repl", ownerConversationId: "conversation-a" });
+assert.equal(released.nativeRuntimeEvidence.nodeReplCleanup.ok, true);
+assert.equal(released.nativeRuntimeEvidence.nodeReplCleanup.state, "disconnected");
+assert.equal(released.nativeRuntimeEvidence.nodeReplCleanup.reconnectOnNextUse, true);
+
+nextToolError = "Computer Use native pipe is unavailable";
+await assert.rejects(() => callCodexComputerUse(deps, { action: "list_windows" }), /native pipe is unavailable/);
+assert.deepEqual(resets.at(-1), { serverId: "node_repl", ownerConversationId: "conversation-a" });
 
 const clicked = await callCodexComputerUse(deps, {
   action: "click",

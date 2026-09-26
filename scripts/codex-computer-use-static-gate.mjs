@@ -59,6 +59,11 @@ assert.match(adapter, /computerUseActivity\.begin/);
 assert.match(adapter, /computerUseActivity\.end/);
 assert.match(adapter, /computerUseActivity\.release/);
 assert.match(adapter, /releaseHostUnsupportedApproval/);
+assert.match(adapter, /resetComputerUseNodeRepl/);
+assert.match(adapter, /bridge\.resetConnection\("node_repl", ownerConversationId\)/,
+  "final release and failed operations must close the exact conversation-scoped node_repl transport");
+assert.match(adapter, /explicit-final-observation/);
+assert.match(adapter, /computer-use-operation-failed/);
 assert.match(adapter, /PROHIBITED_APP_PATTERN/);
 assert.doesNotMatch(adapter, /spawn\(|child_process|Selenium|Playwright|UIAutomation|SendInput/i,
   "the adapter may name prohibited apps, but must not implement a second GUI process or driver");
@@ -82,6 +87,7 @@ assert.match(skill, /shared persistent Codex `node_repl` importing `@oai\/sky`/)
 assert.match(skill, /ordinary Chrome or Edge browser window/);
 assert.match(skill, /obsolete custom Chrome-extension driver has been removed/);
 assert.match(skill, /release_control=true/);
+assert.match(skill, /closes the exact conversation-scoped `node_repl` transport/);
 assert.equal(packageJson.files.includes("capabilities"), true);
 assert.equal(packageJson.files.includes("browser-control-bridge"), false);
 for (const removed of [
@@ -112,6 +118,7 @@ console.log(JSON.stringify({
   overlayAutoClear: true,
   explicitAgentRelease: true,
   errorFailSafeRelease: true,
+  nodeReplTransportRelease: true,
   ordinaryBrowserWindowAutomation: true,
   customChromeExtensionRemoved: true,
   structuredActionsOnly: true,
