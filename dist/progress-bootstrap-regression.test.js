@@ -26,6 +26,20 @@ test('another request sharing the host session cannot inherit conversation A', a
   const registry = new ProgressBootstrapAuthorityRegistry({ now: () => at });
   registry.register(proof);
   assert.equal(await registry.consume({ ...request, traceCorrelationFingerprints: ['c'.repeat(64)] }), null);
+  assert.equal(await registry.consumeCapability({
+    ...request,
+    toolName: 'exec_command',
+    traceCorrelationFingerprints: ['c'.repeat(64)],
+  }), null);
+});
+
+test('same-turn capability lease is repeatable and still revalidates the exact page', async () => {
+  const registry = new ProgressBootstrapAuthorityRegistry({ now: () => at });
+  registry.register(proof);
+  const input = { ...request, toolName: 'read' };
+  assert.equal((await registry.consumeCapability(input))?.conversationId, proof.conversationId);
+  assert.equal((await registry.consumeCapability(input))?.conversationId, proof.conversationId);
+  assert.equal(await registry.consumeCapability({ ...input, verifyPage: async () => null }), null);
 });
 
 test('missing or disappeared current page proof cannot authorize a start', async () => {
@@ -38,9 +52,9 @@ test('missing or disappeared current page proof cannot authorize a start', async
 });
 
 test('stale and unverified progress evidence is never refreshed into authority', () => {
-  const registry = new ProgressBootstrapAuthorityRegistry({ now: () => at + 100_000 });
+  const registry = new ProgressBootstrapAuthorityRegistry({ now: () => at + 700_000 });
   assert.equal(registry.register(proof), null);
-  assert.equal(registry.register({ ...proof, observedAt: new Date(at + 100_000).toISOString(), pageVerified: false }), null);
+  assert.equal(registry.register({ ...proof, observedAt: new Date(at + 700_000).toISOString(), pageVerified: false }), null);
 });
 
 test('asynchronous page verification has a single consumption commit point', async () => {

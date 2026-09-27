@@ -19,6 +19,10 @@ assert.match(server, /checkResourceAllowed\(\{ requestedResource: req\.auth\.res
   "OAuth audience must remain bound to this exact public MCP resource");
 assert.match(server, /devspace_instance_binding_required/);
 assert.match(server, /currentInvocationVerified:\s*true/);
+assert.match(server, /progressBootstrapAuthority\?\.consumeCapability/,
+  "an exact progress claim must unlock ordinary same-turn tools without per-tool manual rebinding");
+assert.match(server, /traceCorrelationFingerprints:\s*requestTraceCorrelationFingerprints/,
+  "the capability lease must remain bound to the exact ChatGPT turn trace");
 assert.match(server, /chatGptConnectorRequest[\s\S]{0,1600}!exactAuthority\?\.conversationId[\s\S]{0,500}!exactLocalInvocation/,
   "non-bootstrap ChatGPT calls must fail closed without a current exact local invocation");
 assert.match(server, /serverInstanceId:\s*config\.serverInstanceId[\s\S]{0,200}resourceOrigin:/,
@@ -42,6 +46,7 @@ console.log(JSON.stringify({
   persistedServerInstanceId: true,
   oauthAudienceBound: true,
   exactLocalInvocationRequired: true,
+  exactProgressTurnCapabilityLease: true,
   connectorAppOriginBound: true,
   tokenBoundOriginProbe: true,
   crossComputerFailClosed: true,

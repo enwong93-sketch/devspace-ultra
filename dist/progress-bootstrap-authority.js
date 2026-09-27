@@ -1,5 +1,8 @@
 const ALLOWED_START_TOOLS = new Set(["devspace_goal_start", "devspace_plan_start", "devspace_goal_turn_report"]);
-const DEFAULT_TTL_MS = 45_000;
+// One exact progress claim is the opening proof for the current ChatGPT turn.
+// Keep the lease long enough for real read/write/command work, while the exact
+// request trace and a fresh page re-check prevent reuse by another turn/server.
+const DEFAULT_TTL_MS = 10 * 60_000;
 const DEFAULT_MAX_SESSIONS = 128;
 
 function cleanText(value, max = 240) {
@@ -50,11 +53,12 @@ export class ProgressBootstrapAuthorityRegistry {
     maxSessions = DEFAULT_MAX_SESSIONS,
   } = {}) {
     this.now = now;
-    this.ttlMs = Math.max(5_000, Math.min(120_000, Number(ttlMs) || DEFAULT_TTL_MS));
+    this.ttlMs = Math.max(5_000, Math.min(15 * 60_000, Number(ttlMs) || DEFAULT_TTL_MS));
     this.maxSessions = Math.max(8, Math.min(512, Number(maxSessions) || DEFAULT_MAX_SESSIONS));
     this.sessions = new Map();
     this.registered = 0;
     this.consumed = 0;
+    this.capabilityConsumed = 0;
     this.ambiguous = 0;
     this.expired = 0;
   }
@@ -154,6 +158,50 @@ export class ProgressBootstrapAuthorityRegistry {
     };
   }
 
+  /**
+   * Reuse the exact progress proof for ordinary tools in the same ChatGPT
+   * turn. Unlike Goal/Plan bootstrap, this is intentionally repeatable: real
+   * agent work commonly calls read/write/exec more than once. Authority stays
+   * bounded by the exact request trace, the original opaque claim, its TTL and
+   * a fresh globally-unique local page verification on every call.
+   */
+  async consumeCapability({ sessionFingerprint, toolName, traceCorrelationFingerprints, verifyPage } = {}) {
+    this.prune();
+    const session = cleanFingerprint(sessionFingerprint);
+    const tool = cleanText(toolName, 220);
+    const traces = cleanTraceFingerprints(traceCorrelationFingerprints);
+    if (!session || !tool || !traces.length || typeof verifyPage !== 'function') return null;
+    const record = this.sessions.get(session);
+    if (!record) return null;
+    if (record.owners.size !== 1) {
+      this.ambiguous += 1;
+      return null;
+    }
+    const owner = [...record.owners.values()][0];
+    if (!traces.some((trace) => owner.traceCorrelationFingerprints.includes(trace))) return null;
+    let live;
+    try { live = await verifyPage(owner.claimId); } catch { return null; }
+    this.prune();
+    if (this.sessions.get(session) !== record || record.owners.size !== 1
+      || record.owners.get(owner.conversationId) !== owner
+      || live?.pageVerified !== true || live?.claimId !== owner.claimId
+      || live?.source !== 'classic-exact-page-progress-claim-cdp-page-verified'
+      || live?.conversationId !== owner.conversationId || !cleanRuntimeKey(live?.runtimeKey)) return null;
+    this.capabilityConsumed += 1;
+    return {
+      conversationId: owner.conversationId,
+      runtimeKey: live.runtimeKey,
+      runtimeKeys: [live.runtimeKey],
+      sessionFingerprint: session,
+      source: 'exact-progress-turn-capability-page-verified',
+      observedAt: live.observedAt,
+      pageVerified: true,
+      currentInvocationVerified: true,
+      bootstrapLease: true,
+      capabilityLease: true,
+    };
+  }
+
   prune() {
     const nowMs = Number(this.now());
     for (const [session, record] of this.sessions) {
@@ -175,6 +223,7 @@ export class ProgressBootstrapAuthorityRegistry {
       ambiguousSessions,
       registered: this.registered,
       consumed: this.consumed,
+      capabilityConsumed: this.capabilityConsumed,
       ambiguousRejects: this.ambiguous,
       expired: this.expired,
       ttlMs: this.ttlMs,

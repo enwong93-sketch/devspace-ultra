@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.5.17 — 2026-09-28
+
+- Fixed the `devspace_instance_binding_required` regression that blocked every ordinary tool after a successful exact-page progress claim.
+- A successful progress claim now grants a short-lived capability lease bound to the same MCP session, exact ChatGPT turn trace and freshly re-verified local Classic page. Repeated read/write/command calls in that turn no longer require manual re-binding.
+- Cross-computer and cross-Connector isolation remains fail-closed: another trace, session, page, conversation, Connector App or server instance cannot borrow the lease.
+
 ## 0.5.16 — 2026-09-28
 
 - Inject an unguessable per-Core origin-probe URL into the local progress relay resource so old cached ChatGPT tool schemas can safely identify this server's `asdk_app_*` sandbox origin.
