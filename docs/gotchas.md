@@ -1,238 +1,40 @@
-# Troubleshooting Gotchas
+# Windows installation troubleshooting
 
-This page collects the setup issues users are most likely to hit.
+Use the [guided Windows setup](ONE_COMMAND_SETUP.md) and keep its configuration, encrypted credentials and existing runtime state intact. A local `healthz` 200 is a preparation milestone, **not** proof that the public ChatGPT Connector works. Diagnose the first failing boundary below; do not repeatedly reinstall or reconnect the Connector.
 
-## `devspace` Command Not Found
+## The package is missing or has no `package.json`
 
-Use `npx`:
+An incomplete Windows global npm junction can result from a Git-URL install. Use the tagged GitHub Release's SHA-256-verified `devspace-ultra-<version>.tgz` through the supported installer, then verify the installed package name, version and CLI before configuring services. Do not repair a running global package with a blind `npm install -g github:...#main`; use the transactional updater for existing installations.
 
-```bash
-npx @waishnav/devspace init
-npx @waishnav/devspace serve
-```
+## `better-sqlite3` cannot load
 
-If you installed globally, confirm npm's global bin directory is on `PATH`.
+The Windows installer deliberately suppresses package install scripts until the release archive is verified. It must then rebuild the required native SQLite dependency under the installed Node ABI and open a temporary in-memory database before declaring the package ready. A successful `npm install` alone is insufficient. If that native check fails, stop before Gateway/OAuth setup and preserve the existing installation for rollback.
 
-## Unsupported Node Version
+## Setup writes one configuration directory while Gateway reads another
 
-DevSpace requires Node `>=22.19 <27`.
+Inspect the exact configuration directory reported by setup and the `--config-dir` path recorded in the `DevSpace-Stable-Gateway` task action. They must match; a process-scoped environment override used during an elevated setup is not a substitute for the persistent Scheduled Task argument. Never copy `auth.json` or paste the Owner secret into chat to make a health check green.
 
-Check:
+## DuckDNS reports `OK` but points to a VPN address
 
-```bash
-node --version
-```
+DuckDNS `OK` acknowledges its update request, not public reachability. Leaving `ip` blank asks DuckDNS to detect the request's IPv4; on a multi-adapter or VPN host this can select the wrong route. The supported direct-ingress path must read and validate the router WAN IPv4, submit it explicitly, and check public DNS after the update. If the router WAN address is unavailable or private/CGNAT, fail closed instead of publishing a VPN address. See [DuckDNS's API specification](https://www.duckdns.org/spec.jsp).
 
-Install Node 22 LTS with your preferred version manager such as `nvm`, `fnm`, or
-`mise`.
+## DNS is correct but the public machine cannot be reached
 
-## `better-sqlite3` Could Not Load
+Check the chain in order: public DNS → publicly routable WAN → router TCP 80/443 mapping to the current LAN IP → Windows Firewall → Caddy on the LAN IP → loopback Gateway. A successful LAN request or a request from the same PC through its public hostname does not replace an independent external-network test; VPN and NAT loopback can distort that result. A router's UPnP mapping lookup returning HTTP 500 is ambiguous until its SOAP fault and the actual add/readback path are checked. Never overwrite an unrelated router mapping or assume a mapping exists from the DuckDNS response.
 
-This usually means native dependencies were installed under a different Node
-runtime.
+If the user declines router ingress, preserve the local state but mark public Connector setup **blocked**. DNS cannot forward TCP packets through NAT on its own. A different stable ingress route requires a separate, explicit user choice; it must not be silently substituted.
 
-Try:
+## Caddy is installed but `caddy.exe` is not found
 
-```bash
-npm rebuild better-sqlite3
-```
+WinGet can install Caddy without making its command available in the current elevated PowerShell process. The installer should resolve the actual installed executable, validate the generated Caddyfile, and record the full executable path in its Scheduled Task. Do not install a second Caddy or start a second 80/443 listener to work around PATH.
 
-Then run:
+## HTTPS or OAuth still fails after public TCP works
 
-```bash
-npx @waishnav/devspace doctor
-```
+Check Caddy's newest ACME error for the selected hostname; public certificate validation normally needs the outside world to reach TCP 80 or 443. Do not disable TLS verification. Once HTTPS is valid, test the public `/.well-known/oauth-protected-resource/mcp` and authorization-server metadata, an unauthenticated `/mcp` OAuth challenge, then complete ChatGPT Connector authorization and one harmless read-only tool call. Only that final call proves product-level acceptance. See [Caddy automatic HTTPS](https://caddyserver.com/docs/automatic-https).
 
-Release starts run a native dependency check before launching.
+## Other runtime boundaries
 
-## Public URL Includes `/mcp`
-
-Use the origin for setup:
-
-```text
-https://your-tunnel-host.example.com
-```
-
-Use the MCP endpoint in the client:
-
-```text
-https://your-tunnel-host.example.com/mcp
-```
-
-If you saved the wrong value:
-
-```bash
-npx @waishnav/devspace config set publicBaseUrl https://your-tunnel-host.example.com
-```
-
-## Tunnel URL Changed
-
-Temporary tunnels often change URLs between runs.
-
-For a one-off run:
-
-```bash
-DEVSPACE_PUBLIC_BASE_URL="https://new-tunnel.example.com" npx @waishnav/devspace serve
-```
-
-For a stable URL:
-
-```bash
-npx @waishnav/devspace config set publicBaseUrl https://devspace.example.com
-```
-
-## Host Header Or 403 Problems
-
-DevSpace derives allowed hosts from the configured public URL.
-
-Run:
-
-```bash
-npx @waishnav/devspace doctor
-```
-
-Confirm the public URL hostname appears in allowed hosts. If you changed tunnel
-URLs, update `publicBaseUrl`.
-
-Use this only for intentional local debugging:
-
-```bash
-DEVSPACE_ALLOWED_HOSTS="*" npx @waishnav/devspace serve
-```
-
-## OAuth Redirect Host Rejected
-
-By default, DevSpace allows redirects for:
-
-```text
-chatgpt.com
-localhost
-127.0.0.1
-```
-
-If another MCP client uses a different redirect host, configure:
-
-```bash
-DEVSPACE_OAUTH_ALLOWED_REDIRECT_HOSTS="chatgpt.com,example.com" npx @waishnav/devspace serve
-```
-
-## Owner Password Not Accepted
-
-Make sure you are entering the Owner password from:
-
-```text
-~/.devspace/auth.json
-```
-
-To regenerate setup:
-
-```bash
-npx @waishnav/devspace init --force
-```
-
-## Unknown `workspaceId`
-
-`workspaceId` values are session identifiers. If the server restarts and the
-client receives an unknown workspace error, call `open_workspace` again for that
-project.
-
-Workspace session metadata is persisted, but clients should still treat
-`open_workspace` as the way to begin a fresh working session.
-
-## Workspace Path Rejected
-
-The path must be inside one of the allowed roots configured during setup.
-
-Run:
-
-```bash
-npx @waishnav/devspace config get
-```
-
-Then either open a project under an allowed root or rerun setup:
-
-```bash
-npx @waishnav/devspace init --force
-```
-
-## Worktree Mode Fails
-
-Worktree mode requires:
-
-- Git installed
-- the path is inside a Git repository
-- the repository has at least one commit
-- the requested `baseRef` resolves to a commit
-
-For a new repository, create the first commit or use checkout mode.
-
-Uncommitted source checkout changes are not copied into the managed worktree.
-Commit, stash, or ask the model to work in checkout mode if those changes are
-needed.
-
-## Windows Shell Commands Fail
-
-DevSpace shell execution requires Bash. Native PowerShell and `cmd.exe` command
-execution are not supported yet.
-
-Install Git for Windows and use Git Bash, or use WSL, MSYS2, or Cygwin Bash.
-
-Run:
-
-```bash
-npx @waishnav/devspace doctor
-```
-
-Confirm Bash is detected.
-
-## Skills Do Not Appear
-
-Skills are enabled by default. Check:
-
-```bash
-DEVSPACE_SKILLS=1 npx @waishnav/devspace serve
-```
-
-DevSpace looks in standard Agent Skills locations:
-
-- `~/.agents/skills`
-- project `.agents/skills`
-- `~/.devspace/skills`
-
-It also checks compatibility and custom paths:
-
-- the bundled `subagent-delegation` skill when `DEVSPACE_SUBAGENTS=1`, unless `~/.devspace/skills/subagent-delegation/SKILL.md` exists
-- `DEVSPACE_AGENT_DIR/skills`, defaulting to `~/.codex/skills`
-- additional paths from `DEVSPACE_SKILL_PATHS`
-
-When `DEVSPACE_SUBAGENTS=1`, DevSpace loads agent profiles from
-`~/.devspace/agents/*.md` and project `.devspace/agents/*.md`, then exposes a
-compact profile catalog through `open_workspace`. The bundled
-`subagent-delegation` skill keeps the model-facing workflow to
-`devspace agents ls`, `devspace agents run`, and `devspace agents show`.
-`devspace agents ls` lists existing subagent sessions, not profile
-definitions.
-
-Packaged agent profile examples under `examples/agents/` are starter templates.
-Copy or adapt them into one of the active profile directories before use.
-
-Legacy project paths such as `.pi/skills` can be added through `DEVSPACE_SKILL_PATHS` when needed.
-
-If a skill appears in `open_workspace`, the model must read that skill's
-`SKILL.md` before reading other files inside the skill directory.
-
-## Review Card Does Not Appear
-
-Per-tool widget cards are disabled by default (`DEVSPACE_WIDGETS=off`) so normal
-coding work does not fill the conversation with `Ran command`, read, and edit
-iframes.
-
-To opt into aggregate review UI, set `DEVSPACE_WIDGETS=changes`. To opt into all
-per-tool cards, set `DEVSPACE_WIDGETS=full`. Plain MCP clients may ignore
-ChatGPT Apps widget metadata and only show text results.
-
-If an already-connected ChatGPT app still shows old per-tool cards after changing
-this setting or upgrading DevSpace, refresh that app's action/tool snapshot in
-ChatGPT. ChatGPT deliberately keeps an approved/frozen tool-metadata snapshot;
-server restarts and MCP `tools/list_changed` notifications do not replace that
-approved snapshot automatically.
+- Keep allowed workspace roots narrow. A rejected workspace path should be checked against the installed configuration; it is not a reason to grant the entire home directory.
+- `bash` needs a compatible Bash installation. Other shell/terminal tools have their own runtime and platform requirements; do not describe every DevSpace command as Bash-only.
+- Do not use `DEVSPACE_ALLOWED_HOSTS=*` as a public-ingress repair. The configured hostname and OAuth resource identity must match the accepted Connector URL.
+- If the host shows a stale tool catalogue after the backend is healthy, distinguish a ChatGPT tool-snapshot refresh from a Gateway/Core outage before changing installation state.

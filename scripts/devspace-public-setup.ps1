@@ -6,7 +6,11 @@ param(
     [string] $PublicHostname = $env:DEVSPACE_PUBLIC_HOSTNAME,
     [string] $AllowedRoot = $HOME,
     [switch] $NonInteractive,
-    [switch] $SkipCaddy
+    [switch] $SkipCaddy,
+    [switch] $EnableRouterUpnp,
+    [switch] $ManualPortForward,
+    [string] $PublicWanIPv4,
+    [switch] $MigrateLegacyIngress
 )
 
 Set-StrictMode -Version Latest
@@ -28,7 +32,8 @@ function Test-Administrator {
 }
 
 function Set-Property($Object, [string] $Name, $Value) {
-    if ($Object.PSObject.Properties.Name -contains $Name) { $Object.$Name = $Value }
+    $existing = $Object.PSObject.Properties.Match($Name)
+    if ($existing.Count -gt 0) { $existing[0].Value = $Value }
     else { $Object | Add-Member -NotePropertyName $Name -NotePropertyValue $Value }
 }
 
@@ -52,6 +57,20 @@ function Write-AtomicText([string] $Path, [string] $Text) {
 
 function Save-ProtectedSecret([string] $Path, [string] $EnvironmentName, [string] $Prompt) {
     $plain = [Environment]::GetEnvironmentVariable($EnvironmentName, "Process")
+    if (-not $plain -and (Test-Path -LiteralPath $Path)) {
+        try {
+            $encrypted = (Get-Content -LiteralPath $Path -Raw -ErrorAction Stop).Trim()
+            if (-not $encrypted) { throw 'Protected secret file is empty.' }
+            $existingSecure = ConvertTo-SecureString $encrypted -ErrorAction Stop
+            $credential = New-Object System.Net.NetworkCredential('', $existingSecure)
+            if ([string]::IsNullOrWhiteSpace($credential.Password)) { throw 'Protected secret is empty.' }
+            $credential = $null
+            return $Path
+        } catch {
+            if ($NonInteractive) { throw "$EnvironmentName existing DPAPI secret is invalid; provide a new process-scoped value." }
+            Write-Warning "Existing protected secret is invalid and will be replaced through a masked prompt."
+        }
+    }
     if ($plain) {
         $secure = ConvertTo-SecureString $plain -AsPlainText -Force
     }
@@ -66,18 +85,34 @@ function Save-ProtectedSecret([string] $Path, [string] $EnvironmentName, [string
     return $Path
 }
 
-function Ensure-WingetPackage([string] $Command, [string] $PackageId) {
+function Find-WingetExecutable([string] $Command, [string] $PackageId) {
     $existing = Get-Command $Command -ErrorAction SilentlyContinue
     if ($existing) { return $existing.Source }
+    $link = Join-Path $env:LOCALAPPDATA "Microsoft\WinGet\Links\$Command"
+    if (Test-Path -LiteralPath $link -PathType Leaf) { return $link }
+    $root = Join-Path $env:LOCALAPPDATA 'Microsoft\WinGet\Packages'
+    $packages = @(Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -like "$PackageId`_*" })
+    $candidates = @($packages | ForEach-Object {
+        Get-ChildItem -LiteralPath $_.FullName -Filter $Command -File -Recurse -Depth 3 -ErrorAction SilentlyContinue
+    })
+    if ($candidates.Count -eq 1) { return $candidates[0].FullName }
+    if ($candidates.Count -gt 1) { throw "$PackageId has ambiguous installed executable paths." }
+    return $null
+}
+
+function Ensure-WingetPackage([string] $Command, [string] $PackageId) {
+    $existing = Find-WingetExecutable -Command $Command -PackageId $PackageId
+    if ($existing) { return $existing }
     if (-not (Get-Command winget.exe -ErrorAction SilentlyContinue)) {
         throw "winget is required to install $PackageId."
     }
     & winget.exe install --exact --id $PackageId --silent --accept-package-agreements --accept-source-agreements
     if ($LASTEXITCODE -ne 0) { throw "$PackageId installation failed with exit code $LASTEXITCODE." }
     $env:Path = "$( [Environment]::GetEnvironmentVariable('Path','Machine') );$( [Environment]::GetEnvironmentVariable('Path','User') )"
-    $installed = Get-Command $Command -ErrorAction SilentlyContinue
+    $installed = Find-WingetExecutable -Command $Command -PackageId $PackageId
     if (-not $installed) { throw "$Command is unavailable after installing $PackageId." }
-    return $installed.Source
+    return $installed
 }
 
 function New-UnlimitedTaskSettings {
@@ -114,6 +149,7 @@ function Normalize-Hostname([string] $Value) {
 }
 
 function Wait-ForGateway {
+    $deadline = (Get-Date).AddSeconds(90)
     while ($true) {
         try {
             $health = Invoke-RestMethod "http://127.0.0.1:7678/healthz"
@@ -126,9 +162,12 @@ function Wait-ForGateway {
         if (-not $listener -and $task -and $task.State -ne "Running" -and $taskInfo.LastTaskResult -notin @(0, 267009)) {
             throw "Local Gateway exited before readiness (Task result $($taskInfo.LastTaskResult))."
         }
+        if ((Get-Date) -ge $deadline) { throw "Local Gateway did not become ready within 90 seconds." }
         Start-Sleep -Milliseconds 500
     }
 }
+
+if ($MyInvocation.InvocationName -eq '.') { return }
 
 if (-not (Test-Administrator)) {
     throw "Administrator elevation is required. Run the root install.ps1 entry point, which requests elevation automatically."
@@ -137,6 +176,8 @@ if (-not (Test-Administrator)) {
 New-Item -ItemType Directory -Path $ConfigDir, $StateDir, $LogDir, $SecretDir, $GeneratedDir -Force | Out-Null
 
 $hostname = $null
+$legacyTaskNames = @()
+$legacyCaddyFile = $null
 $publicBaseUrl = "http://127.0.0.1:7678"
 if ($Network -eq "DuckDNS") {
     if (-not $DuckDnsDomain) {
@@ -146,6 +187,46 @@ if ($Network -eq "DuckDNS") {
     $hostname = Normalize-Hostname $DuckDnsDomain
     if ($hostname -notmatch '\.duckdns\.org$') { $hostname = "$hostname.duckdns.org" }
     $publicBaseUrl = "https://$hostname"
+    if (-not $SkipCaddy) {
+        if ($EnableRouterUpnp -and $ManualPortForward) { throw 'Choose either UPnP or manual router forwarding, not both.' }
+        $legacyTaskNames = @(@('DevSpace-Ultra-DuckDNS', 'DevSpace-Ultra-Caddy') |
+            Where-Object { Get-ScheduledTask -TaskName $_ -ErrorAction SilentlyContinue })
+        if ($legacyTaskNames.Count -gt 0 -and -not $MigrateLegacyIngress) {
+            if ($NonInteractive) {
+                throw "Legacy DuckDNS/Caddy tasks are present. Explicit -MigrateLegacyIngress is required for guarded one-time adoption."
+            }
+            $migrationConsent = Read-Host "Back up and disable the legacy ingress tasks after the maintained ingress works? Type MIGRATE"
+            if ($migrationConsent -cne 'MIGRATE') {
+                throw "Legacy ingress was preserved. No second ingress was started."
+            }
+        }
+        if ($legacyTaskNames -contains 'DevSpace-Ultra-Caddy') {
+            $legacyCaddyFile = Join-Path $GeneratedDir 'Caddyfile'
+            $legacyCaddyTask = Get-ScheduledTask -TaskName 'DevSpace-Ultra-Caddy' -ErrorAction Stop
+            if (-not (Test-Path -LiteralPath $legacyCaddyFile -PathType Leaf) -or
+                [string]$legacyCaddyTask.Actions[0].Arguments -notlike "*$legacyCaddyFile*") {
+                throw 'Legacy Caddy task does not own the expected generated Caddyfile; refusing automatic adoption.'
+            }
+        }
+        if ($ManualPortForward) {
+            if (-not $PublicWanIPv4) {
+                if ($NonInteractive) { throw 'Manual forwarding requires -PublicWanIPv4 from the router WAN page.' }
+                $PublicWanIPv4 = Read-Host 'Enter the public IPv4 shown on the router WAN page'
+            }
+            if (-not $NonInteractive) {
+                $confirmation = Read-Host 'Confirm router TCP 80 and 443 forward to this PC and type FORWARDED'
+                if ($confirmation -cne 'FORWARDED') { throw 'Manual router forwarding was not confirmed.' }
+            }
+        } elseif (-not $EnableRouterUpnp) {
+            if ($NonInteractive) {
+                throw "Direct DuckDNS ingress needs explicit -EnableRouterUpnp consent to request router TCP 80/443 mappings. No router settings were changed."
+            }
+            $consent = Read-Host "Allow DevSpace to request router TCP 80/443 UPnP mappings to this PC? Type YES to continue"
+            if ($consent -cne 'YES') {
+                throw "Router mapping was not authorized. No router settings were changed; use -Network Local or a separately configured public ingress."
+            }
+        }
+    }
 }
 elseif ($Network -eq "Cloudflare") {
     if (-not $PublicHostname) {
@@ -165,7 +246,7 @@ if ($hostname) { $allowedHosts += $hostname }
 Set-Property $config "allowedHosts" @($allowedHosts | Select-Object -Unique)
 Set-Property $config "allowedRoots" @((Resolve-Path $AllowedRoot).Path)
 Set-Property $config "worktreeRoot" (Join-Path $HOME ".devspace\worktrees")
-if (-not ($config.PSObject.Properties.Name -contains "pluginPaths")) { Set-Property $config "pluginPaths" @() }
+if ($config.PSObject.Properties.Match('pluginPaths').Count -eq 0) { Set-Property $config "pluginPaths" @() }
 Set-Property $config "toolMode" "ultra"
 Set-Property $config "pluginsEnabled" $true
 Set-Property $config "skillsEnabled" $true
@@ -192,46 +273,79 @@ Set-Property $config "goalRoundRecoveryEnabled" $true
 Write-AtomicText $ConfigPath (($config | ConvertTo-Json -Depth 100) + "`n")
 
 $node = (Get-Command node.exe -ErrorAction Stop).Source
-$gatewayScript = Join-Path $PackageRoot "scripts\devspace-stable-gateway.mjs"
-$gatewayAction = New-ScheduledTaskAction -Execute $node -Argument ('"{0}"' -f $gatewayScript) -WorkingDirectory $PackageRoot
+$gatewayScript = Join-Path $PackageRoot "scripts\devspace-fixed-backend.mjs"
+if (-not (Test-Path -LiteralPath $gatewayScript)) { throw "Stable Gateway launcher is missing." }
+$gatewayAction = New-ScheduledTaskAction -Execute $node -Argument ('"{0}" --foreground --config-dir "{1}"' -f $gatewayScript, $ConfigDir) -WorkingDirectory $PackageRoot
 $gatewayTriggers = @((New-ScheduledTaskTrigger -AtLogOn -User ([Security.Principal.WindowsIdentity]::GetCurrent().Name)))
 Register-UserTask $GatewayTask $gatewayAction $gatewayTriggers "DevSpace Ultra Stable Local Gateway and Core supervisor"
 
-if ($Network -eq "DuckDNS") {
-    $secretPath = Join-Path $SecretDir "duckdns-token.dpapi"
-    Save-ProtectedSecret $secretPath "DEVSPACE_DUCKDNS_TOKEN" "DuckDNS token" | Out-Null
-    $statusPath = Join-Path $StateDir "duckdns-status.json"
-    $updateScript = Join-Path $PackageRoot "scripts\devspace-duckdns-update.ps1"
-    $duckAction = New-ScheduledTaskAction -Execute "powershell.exe" -Argument ('-NoProfile -ExecutionPolicy Bypass -File "{0}" -Domain "{1}" -SecretPath "{2}" -StatusPath "{3}"' -f $updateScript, $hostname, $secretPath, $statusPath)
-    $repetition = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 5)
-    $logon = New-ScheduledTaskTrigger -AtLogOn -User ([Security.Principal.WindowsIdentity]::GetCurrent().Name)
-    Register-UserTask "DevSpace-Ultra-DuckDNS" $duckAction @($repetition, $logon) "Refresh the DuckDNS address used by DevSpace Ultra"
-    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $updateScript -Domain $hostname -SecretPath $secretPath -StatusPath $statusPath
-    if ($LASTEXITCODE -ne 0) { throw "Initial DuckDNS update failed." }
+Stop-ScheduledTask -TaskName $GatewayTask -ErrorAction SilentlyContinue
+Start-Sleep -Seconds 1
+Start-ScheduledTask -TaskName $GatewayTask
+$health = Wait-ForGateway
 
+if ($Network -eq "DuckDNS") {
     if (-not $SkipCaddy) {
         $caddy = Ensure-WingetPackage "caddy.exe" "CaddyServer.Caddy"
-        $caddyFile = Join-Path $GeneratedDir "Caddyfile"
-        $caddyText = @"
-$hostname {
-    encode zstd gzip
-    reverse_proxy 127.0.0.1:7678
-    header {
-        X-Content-Type-Options nosniff
-        Referrer-Policy no-referrer
-    }
-}
-"@
-        Write-AtomicText $caddyFile $caddyText
-        $caddyAction = New-ScheduledTaskAction -Execute $caddy -Argument ('run --config "{0}" --adapter caddyfile' -f $caddyFile) -WorkingDirectory $GeneratedDir
-        Register-UserTask "DevSpace-Ultra-Caddy" $caddyAction $gatewayTriggers "TLS reverse proxy for the DevSpace Ultra DuckDNS endpoint"
-        foreach ($port in @(80, 443)) {
-            $ruleName = "DevSpace Ultra HTTPS $port"
-            if (-not (Get-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue)) {
-                New-NetFirewallRule -DisplayName $ruleName -Direction Inbound -Action Allow -Protocol TCP -LocalPort $port | Out-Null
+        $secretPath = Join-Path $SecretDir "duckdns-token.dpapi"
+        Save-ProtectedSecret $secretPath "DEVSPACE_DUCKDNS_TOKEN" "DuckDNS token" | Out-Null
+        $ingressStateDir = Join-Path $HOME '.devspace-local-ingress'
+        $ingressTokenPath = Join-Path $ingressStateDir 'duckdns.token.dpapi'
+        $ingressConfigPath = Join-Path $ingressStateDir 'config.json'
+        if (Test-Path -LiteralPath $ingressConfigPath) {
+            $ingressConfig = Get-Content -LiteralPath $ingressConfigPath -Raw | ConvertFrom-Json
+            if ([string]$ingressConfig.domain -ne $hostname) {
+                throw "Existing local ingress belongs to a different DuckDNS domain; refusing to overwrite it."
             }
         }
-        Start-ScheduledTask -TaskName "DevSpace-Ultra-Caddy"
+        if (-not (Test-Path -LiteralPath $ingressTokenPath)) {
+            New-Item -ItemType Directory -Path $ingressStateDir -Force | Out-Null
+            Copy-Item -LiteralPath $secretPath -Destination $ingressTokenPath -ErrorAction Stop
+        }
+        $ingress = Join-Path $PackageRoot 'scripts\devspace-local-ingress.ps1'
+        if (-not (Test-Path -LiteralPath $ingress)) { throw 'Maintained local ingress helper is missing.' }
+        $ingressArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $ingress,
+            '-Action', 'install', '-Domain', $hostname, '-GatewayPort', '7678',
+            '-StateDir', $ingressStateDir, '-CaddyPath', $caddy)
+        $legacyDuckDnsWasEnabled = $false
+        if ($legacyTaskNames.Count -gt 0) {
+            $backupDir = Join-Path $ConfigDir ('legacy-ingress-backups\' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + [guid]::NewGuid().ToString('N'))
+            New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
+            foreach ($name in $legacyTaskNames) {
+                Write-AtomicText (Join-Path $backupDir "$name.xml") (Export-ScheduledTask -TaskName $name -ErrorAction Stop)
+            }
+            if ($legacyCaddyFile) {
+                Copy-Item -LiteralPath $legacyCaddyFile -Destination (Join-Path $backupDir 'Caddyfile') -ErrorAction Stop
+                $ingressArgs += @('-SelectedCaddyfilePath', $legacyCaddyFile)
+            }
+            if ($legacyTaskNames -contains 'DevSpace-Ultra-DuckDNS') {
+                # Prevent the old blank-IP updater from racing the verified WAN update.
+                $legacyDuckDnsWasEnabled = (Get-ScheduledTask -TaskName 'DevSpace-Ultra-DuckDNS' -ErrorAction Stop).Settings.Enabled
+                Disable-ScheduledTask -TaskName 'DevSpace-Ultra-DuckDNS' -ErrorAction Stop | Out-Null
+            }
+        }
+        if ($ManualPortForward) { $ingressArgs += @('-RouterMode', 'Manual', '-PublicWanIPv4', $PublicWanIPv4) }
+        if ([Environment]::GetEnvironmentVariable('DEVSPACE_DUCKDNS_TOKEN', 'Process')) { $ingressArgs += '-RotateToken' }
+        try {
+            & powershell.exe @ingressArgs
+            if ($LASTEXITCODE -ne 0) { throw "DuckDNS router WAN/UPnP/Caddy ingress setup failed with exit code $LASTEXITCODE." }
+        } catch {
+            if ($legacyDuckDnsWasEnabled) {
+                Enable-ScheduledTask -TaskName 'DevSpace-Ultra-DuckDNS' -ErrorAction SilentlyContinue | Out-Null
+            }
+            throw
+        }
+        foreach ($name in $legacyTaskNames) {
+            Disable-ScheduledTask -TaskName $name -ErrorAction Stop | Out-Null
+        }
+        if ($legacyTaskNames -contains 'DevSpace-Ultra-Caddy') {
+            foreach ($port in @(80, 443)) {
+                Get-NetFirewallRule -DisplayName "DevSpace Ultra HTTPS $port" -ErrorAction SilentlyContinue |
+                    Remove-NetFirewallRule -ErrorAction Stop
+            }
+        }
+    } else {
+        Write-Warning 'Caddy was skipped. No DuckDNS update or public HTTPS entry was configured; public Connector acceptance remains pending.'
     }
 }
 elseif ($Network -eq "Cloudflare") {
@@ -246,11 +360,6 @@ elseif ($Network -eq "Cloudflare") {
     Start-ScheduledTask -TaskName "DevSpace-Ultra-Cloudflare"
 }
 
-Stop-ScheduledTask -TaskName $GatewayTask -ErrorAction SilentlyContinue
-Start-Sleep -Seconds 1
-Start-ScheduledTask -TaskName $GatewayTask
-$health = Wait-ForGateway
-
 $memory = $null
 foreach ($port in @(7688, 7689)) {
     try {
@@ -263,6 +372,8 @@ if (-not $memory) { throw "Gateway is healthy, but no Core memory endpoint is av
 
 $summary = [ordered]@{
     ok = $true
+    state = 'local-ready-public-acceptance-pending'
+    publicConnectorVerified = $false
     network = $Network
     publicBaseUrl = $publicBaseUrl
     gatewayPort = 7678
@@ -275,7 +386,11 @@ $summary = [ordered]@{
     configPath = $ConfigPath
     stateDir = $StateDir
     manualActions = if ($Network -eq "DuckDNS") {
-        @("Forward public TCP 80 and 443 to this computer if the router does not already do so.", "Connect the ChatGPT MCP app to $publicBaseUrl/mcp and complete OAuth.")
+        if ($SkipCaddy) {
+            @('Caddy and DuckDNS were skipped. Configure a separate public HTTPS ingress before connecting ChatGPT.')
+        } else {
+            @("Verify router WAN/DuckDNS/Caddy status from an independent external network; local health is insufficient.", "Connect the ChatGPT MCP app to $publicBaseUrl/mcp and complete OAuth and a write-capable tool call.")
+        }
     } elseif ($Network -eq "Cloudflare") {
         @("Confirm the named tunnel routes $hostname to http://127.0.0.1:7678.", "Connect the ChatGPT MCP app to $publicBaseUrl/mcp and complete OAuth.")
     } else {

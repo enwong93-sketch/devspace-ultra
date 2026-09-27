@@ -14,6 +14,7 @@ const [
   packageLock,
   server,
   installer,
+  shellInstaller,
   skillInstaller,
   setupSkill,
   networkSkill,
@@ -27,6 +28,7 @@ const [
   read("package-lock.json"),
   read("dist/server.js"),
   read("install.ps1"),
+  read("install.sh"),
   read("install-skill.ps1"),
   read("skills/devspace-ultra-setup/SKILL.md"),
   read("capabilities/devspace-network-setup/skills/devspace-network-setup/SKILL.md"),
@@ -43,6 +45,7 @@ assert.equal(lock.version, version);
 assert.equal(lock.packages?.[""]?.version, version);
 assert.match(server, new RegExp(`version:\\s*["']${version.replaceAll(".", "\\.")}["']`));
 assert.ok(installer.includes(`[string] $Ref = "${tag}"`));
+assert.ok(shellInstaller.includes(`DEVSPACE_RELEASE_TAG:-${tag}`));
 assert.ok(skillInstaller.includes(`[string] $Ref = "${tag}"`));
 assert.equal(JSON.parse(networkPlugin).version, version);
 for (const [path, source] of [

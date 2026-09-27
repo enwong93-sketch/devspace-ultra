@@ -75,7 +75,7 @@ Use the tagged one-command installer whenever possible:
 
 ```powershell
 $p=Join-Path $env:TEMP 'devspace-ultra-install.ps1'
-iwr https://raw.githubusercontent.com/enwong93-sketch/devspace-ultra/v0.5.8/install.ps1 -OutFile $p
+iwr https://raw.githubusercontent.com/enwong93-sketch/devspace-ultra/v0.5.9/install.ps1 -OutFile $p
 & $p -Network DuckDNS
 ```
 
@@ -85,7 +85,7 @@ Before execution:
 2. Confirm the user controls the selected DuckDNS hostname.
 3. Confirm TCP 80 and 443 can be forwarded to this computer.
 
-The Agent may execute local setup, Scheduled Task creation, Caddy installation/configuration, Windows Firewall rules, Gateway health checks, and certificate/public endpoint tests. The user must perform or approve:
+The Agent may execute local setup, Scheduled Task creation, Caddy installation/configuration, Windows Firewall rules, Gateway health checks, and certificate/public endpoint tests. The installer requests explicit consent before UPnP asks the router for TCP 80/443; a generic HTTP 500 from the router is not proof that a mapping is absent. An incompatible router can instead use confirmed manual forwarding and `-ManualPortForward -PublicWanIPv4 '<router WAN IPv4>'`. The user must perform or approve:
 
 - creating/selecting the DuckDNS subdomain in their account;
 - masked token entry;
@@ -108,7 +108,7 @@ Use only when direct DDNS ingress is unavailable or rejected by evidence.
 
 ```powershell
 $p=Join-Path $env:TEMP 'devspace-ultra-install.ps1'
-iwr https://raw.githubusercontent.com/enwong93-sketch/devspace-ultra/v0.5.8/install.ps1 -OutFile $p
+iwr https://raw.githubusercontent.com/enwong93-sketch/devspace-ultra/v0.5.9/install.ps1 -OutFile $p
 & $p -Network Cloudflare -PublicHostname 'devspace.example.com'
 ```
 
@@ -132,7 +132,7 @@ Do not declare success until all applicable checks pass:
 4. Public HTTPS hostname resolves to the intended route.
 5. `/.well-known/oauth-protected-resource/mcp` returns valid metadata.
 6. `/mcp` produces the expected OAuth challenge without exposing a bearer token.
-7. The ChatGPT connector can initialize, list tools, and execute one harmless read-only tool.
+7. The ChatGPT connector can initialize, list tools, execute one harmless read-only tool, and perform one explicitly authorized write-capable test in a disposable workspace. A local health response alone is not product acceptance.
 8. Reconnect once and confirm the same conversation can still call tools.
 9. Confirm Gateway/Core/Application MCP ports remain loopback-only.
 10. Confirm no secret value appears in config, logs, task arguments, Git status, or generated status files.

@@ -16,7 +16,23 @@ $ingressScript = Join-Path $PSScriptRoot "devspace-local-ingress.ps1"
 $interactiveManager = Join-Path $PSScriptRoot "chat-classic-interactive-runtime.ps1"
 $primaryAlias = Join-Path $env:LOCALAPPDATA "Microsoft\WindowsApps\chatgpt-classic.exe"
 $primaryPort = 9721
-$mainNumbers = @(2, 3, 4, 5)
+$ctcReceiptPath = Join-Path $env:USERPROFILE "chat-to-codex\.local\state\controller\runtime.json"
+$ctcMain05Reserved = Test-Path -LiteralPath $ctcReceiptPath
+$ctcReceiptValid = $false
+if ($ctcMain05Reserved) {
+    try {
+        $ctcOwner = Get-Content -LiteralPath $ctcReceiptPath -Raw | ConvertFrom-Json
+        $ctcReceiptValid = $ctcOwner.scope -eq "chat-to-codex-single-controller" -and
+            $ctcOwner.mainNumber -eq 5 -and $ctcOwner.port -eq 19735 -and
+            $ctcOwner.packageName -eq "OpenAI.ChatGPT-Desktop.Interactive05"
+    }
+    catch { $ctcReceiptValid = $false }
+}
+# A malformed but present ownership receipt still reserves Main-05 so two
+# products never launch the same package on different debug ports.
+$mainNumbers = if ($ctcMain05Reserved) { @(2, 3, 4) } else { @(2, 3, 4, 5) }
+$mainPorts = @(9721, 9732, 9733, 9734)
+if (-not $ctcMain05Reserved) { $mainPorts += 9735 }
 
 function Test-TcpPort {
     param([Parameter(Mandatory)][int]$Port)
@@ -98,13 +114,13 @@ switch ($Action) {
         $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
         $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 15) -RestartCount 2 -RestartInterval (New-TimeSpan -Minutes 1)
         $principal = New-ScheduledTaskPrincipal -UserId ([Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel Limited
-        Register-ScheduledTask -TaskName $taskName -Action $taskAction -Trigger $trigger -Settings $settings -Principal $principal -Description "Start only canonical DevSpace services and Main-01 through Main-05, staggered and minimized; never starts Workers." -Force | Out-Null
+        Register-ScheduledTask -TaskName $taskName -Action $taskAction -Trigger $trigger -Settings $settings -Principal $principal -Description "Start canonical DevSpace services and unreserved Main runtimes; never starts Workers." -Force | Out-Null
         [ordered]@{ Ok = $true; State = "installed"; TaskName = $taskName; WorkerAutostart = $false; ForegroundActivation = $false } | ConvertTo-Json -Compress
     }
     "run" { Invoke-CanonicalStartup | ConvertTo-Json -Depth 8 -Compress }
     "status" {
         $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
-        [ordered]@{ Ok = $true; State = "status"; TaskInstalled = [bool]$task; TaskState = if ($task) { $task.State.ToString() } else { $null }; GatewayReady = (Test-TcpPort -Port 7678); MainPortsReady = @(9721,9732,9733,9734,9735 | ForEach-Object { [ordered]@{ Port = $_; Ready = (Test-TcpPort -Port $_) } }); WorkerAutostart = $false; ForegroundActivation = $false } | ConvertTo-Json -Depth 6 -Compress
+        [ordered]@{ Ok = $true; State = "status"; TaskInstalled = [bool]$task; TaskState = if ($task) { $task.State.ToString() } else { $null }; GatewayReady = (Test-TcpPort -Port 7678); MainPortsReady = @($mainPorts | ForEach-Object { [ordered]@{ Port = $_; Ready = (Test-TcpPort -Port $_) } }); CtcMain05Reserved = $ctcMain05Reserved; CtcReceiptValid = $ctcReceiptValid; WorkerAutostart = $false; ForegroundActivation = $false } | ConvertTo-Json -Depth 6 -Compress
     }
     "remove" {
         if (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) { Unregister-ScheduledTask -TaskName $taskName -Confirm:$false }

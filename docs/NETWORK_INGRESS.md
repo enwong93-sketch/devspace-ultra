@@ -12,10 +12,10 @@ Tailscale is no longer the primary public setup path. Existing state-directory n
 
 - A DuckDNS hostname and token.
 - A publicly routable IPv4 or IPv6 address.
-- Router forwarding of TCP 80 and 443 to the DevSpace computer.
+- Router forwarding of TCP 80 and 443 to the DevSpace computer: explicit-consent UPnP on a compatible router, or confirmed manual forwarding.
 - Caddy must be able to complete public certificate validation.
 
-The updater stores only domain, provider, success state, and observation time. It never records the DuckDNS token or the complete authenticated update URL.
+The maintained ingress reads the router WAN IPv4 directly and sends that explicit address to DuckDNS; an empty `ip=` value could publish a VPN exit and is prohibited. Generic UPnP HTTP 500 is not proof that a port mapping is absent: only UPnP fault 714 is treated as missing, and other errors stop without replacing a mapping. Manual forwarding needs the public router WAN IPv4 supplied explicitly. The status file records no DuckDNS token or authenticated update URL. A local Gateway/Caddy response is not proof of an externally reachable certificate, OAuth, or working ChatGPT tools.
 
 ## Cloudflare fallback and quotas
 

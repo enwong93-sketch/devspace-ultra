@@ -1,4 +1,4 @@
-# Security Model
+# DevSpace Ultra security model
 
 DevSpace exposes local coding capabilities over MCP. Treat it as remote access
 to your development machine.
@@ -32,50 +32,30 @@ C:\
 The narrower the root, the easier it is to reason about what the MCP client can
 reach.
 
-## Owner Password
+## Owner approval
 
-`devspace init` generates an Owner password and stores it in:
-
-```text
-~/.devspace/auth.json
-```
-
-When an MCP client connects, DevSpace shows an approval page. Enter the Owner
-password only when you intentionally want that client to access this server.
-
-For env-driven deployments, set a long random value:
-
-```bash
-DEVSPACE_OAUTH_OWNER_TOKEN="$(openssl rand -base64 32)"
-```
+The guided installer keeps Owner/OAuth material under its selected user-local configuration directory and protects provider tokens with Windows DPAPI. Do not assume an upgraded installation uses the standalone CLI's default directory, and never paste an Owner token or provider token into chat, logs, Task Scheduler arguments or Git. Approve only the MCP client you intentionally want to access this machine.
 
 ## Public URL And Host Allowlist
 
-DevSpace needs `DEVSPACE_PUBLIC_BASE_URL` so MCP clients can discover OAuth
-metadata and connect to the correct resource.
+DevSpace needs the exact stable `publicBaseUrl` so MCP clients can discover OAuth metadata and connect to the correct resource.
 
 The value should be the origin only:
 
 ```text
-https://your-tunnel-host.example.com
+https://your-name.duckdns.org
 ```
 
-Do not include `/mcp` in `DEVSPACE_PUBLIC_BASE_URL`.
+Do not include `/mcp` in `publicBaseUrl`; the Connector URL adds `/mcp` to that origin. The public hostname must match the OAuth resource and the Caddy or named-tunnel route.
 
 By default, DevSpace derives allowed Host headers from the local host and public
 URL. Use `DEVSPACE_ALLOWED_HOSTS=*` only for intentional local debugging.
 
-## Tunnels
+## Public ingress
 
-DevSpace does not manage tunnels. Your tunnel or reverse proxy should point to:
+The Windows production default is DuckDNS/DDNS plus Caddy. Only Caddy's HTTPS/OAuth allowlisted route is public; Gateway `127.0.0.1:7678`, Core slots `7688`/`7689`, Blender and other application MCP ports stay on loopback. Direct ingress also needs a publicly routable WAN address and router TCP 80/443 mapping to the DevSpace computer. A healthy local Gateway or DuckDNS update is not evidence of that external path. For the selected provider and acceptance sequence, see [network ingress](NETWORK_INGRESS.md) and [Windows setup](ONE_COMMAND_SETUP.md).
 
-```text
-http://127.0.0.1:7676
-```
-
-Prefer adding Cloudflare Access, Tailscale identity controls, or equivalent
-protection in front of public tunnels. DevSpace OAuth still protects the MCP
-endpoint, but the tunnel URL should not be treated as a secret.
+A stable named tunnel is an explicit fallback when direct ingress is unavailable, not an automatically equivalent default. Neither a DDNS hostname nor a tunnel URL is an authentication secret; OAuth still protects the MCP endpoint. Never expose Gateway/Core ports directly or weaken TLS to make a reachability test pass.
 
 ## Shell Access
 

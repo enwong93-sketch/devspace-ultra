@@ -7,14 +7,16 @@ DuckDNS/DDNS direct ingress is the recommended production route. It keeps the Lo
 For the most reliable guided path, install the setup Agent Skill first, then ask the Agent to use `devspace-ultra-setup`. The Skill lets the Agent execute local installation/repair commands and guide the user through the unavoidable DuckDNS-account and router-port-forwarding steps one at a time.
 
 ```powershell
-$p=Join-Path $env:TEMP 'devspace-ultra-install-skill.ps1'; iwr https://raw.githubusercontent.com/enwong93-sketch/devspace-ultra/v0.5.8/install-skill.ps1 -OutFile $p; & $p
+$p=Join-Path $env:TEMP 'devspace-ultra-install-skill.ps1'; iwr https://raw.githubusercontent.com/enwong93-sketch/devspace-ultra/v0.5.9/install-skill.ps1 -OutFile $p; & $p
 ```
 
 ```powershell
-$p=Join-Path $env:TEMP 'devspace-ultra-install.ps1'; iwr https://raw.githubusercontent.com/enwong93-sketch/devspace-ultra/v0.5.8/install.ps1 -OutFile $p; & $p -Network DuckDNS
+$p=Join-Path $env:TEMP 'devspace-ultra-install.ps1'; iwr https://raw.githubusercontent.com/enwong93-sketch/devspace-ultra/v0.5.9/install.ps1 -OutFile $p; & $p -Network DuckDNS
 ```
 
 Use the Cloudflare named-tunnel fallback only when DDNS/direct inbound access is unavailable. A Worker relay/free plan is quota-governed and must not be treated as unlimited. See [one-command setup](docs/ONE_COMMAND_SETUP.md) and [network ingress policy](docs/NETWORK_INGRESS.md).
+
+The [v0.5.9 installation audit](docs/INSTALLATION_AUDIT_V0.5.9.md) records which current instructions were corrected, which dated documents remain historical, and the exact public Connector acceptance boundary.
 
 **DevSpace Ultra** is an MIT-licensed distribution of DevSpace with an elastic ChatGPT Classic multi-agent runtime layer.
 
@@ -109,7 +111,7 @@ Because the import text is returned directly by the MCP tool, the current ChatGP
 
 The MP4s are attached to the GitHub release instead of committed into Git history, keeping clones small while leaving both demos directly reachable from the repository.
 
-## One-click install
+## Install and update
 
 ### Existing installs — safe update to the latest stable release
 
@@ -130,36 +132,17 @@ devspace update
 devspace update --status
 ```
 
-The updater resolves GitHub's latest non-prerelease Release, verifies the release archive SHA-256, stages and validates the new package before touching the live install, preserves DevSpace config/auth/ChatGPT runtime state, backs up the previous package and npm command shims, and rolls the package back if post-swap verification fails. Automatic updates are enabled with a daily `DevSpace-Ultra-Auto-Update` task; it **defers instead of interrupting active non-stream Agent/tool work**. Same-version maintenance refreshes are detected by the release archive digest, so a user on an older `0.5.8` payload can still receive a newer `0.5.8` maintenance build.
+The updater resolves GitHub's latest non-prerelease Release, verifies the release archive SHA-256, stages and validates the new package before touching the live install, preserves DevSpace config/auth/ChatGPT runtime state, backs up the previous package and npm command shims, and rolls the package back if post-swap verification fails. Automatic updates are enabled with a daily `DevSpace-Ultra-Auto-Update` task; it **defers instead of interrupting active non-stream Agent/tool work**. Same-version maintenance refreshes are detected by the release archive digest, including historical `0.5.8` maintenance builds.
 
 Older releases cannot retroactively contain an updater they never shipped, so those users must run the bootstrap command above once. From that point onward the update path is installed locally and tracks the latest stable GitHub Release automatically.
 
-### Windows (PowerShell)
+### New Windows install
 
-```powershell
-irm https://raw.githubusercontent.com/enwong93-sketch/devspace-ultra/main/install.ps1 | iex
-```
+Use the pinned, inspectable Windows installer and guided Skill shown at the top of this README. Do not pipe the moving `main` branch into `Invoke-Expression` or install the moving Git branch directly with global npm: neither route is the tested release archive path. The installer prepares the local service; public HTTPS, router ingress and a real ChatGPT Connector tool call remain separate acceptance gates. See [one-command setup](docs/ONE_COMMAND_SETUP.md).
 
-### macOS / Linux
+### macOS / Linux core-only development
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/enwong93-sketch/devspace-ultra/main/install.sh | bash
-```
-
-Or install directly from GitHub with npm:
-
-```bash
-npm install -g github:enwong93-sketch/devspace-ultra#main
-```
-
-Then initialize and run:
-
-```bash
-devspace-ultra init
-devspace-ultra serve
-```
-
-`devspace` remains available as a compatibility alias.
+The Windows ChatGPT Classic/Multi-Main packaging and automatic Windows ingress path do not run on macOS or Linux. The repository retains a separate core development/install script for those platforms, but that path is **not** the Windows public Connector setup and must not be described as an equivalent one-click product installation.
 
 ## Minimum requirements and compatibility
 
@@ -261,7 +244,7 @@ When configured with a ChatGPT Project URL, new worker conversations are created
 
 `update.ps1` and `devspace update` are the product/package updater. The update is staged outside the live global npm package, verified first, then swapped only after the Stable Gateway reports no active non-stream work (automatic runs defer when busy). The updater does not rewrite `~/.devspace`, `~/.devspace-tailscale-bootstrap`, ChatGPT profiles, conversation mappings, or the Chat Swarm controller state. It verifies those protected state files stayed unchanged, retains up to three on-volume package backups, restores old npm shims on rollback, refreshes the Agent setup Skill, and records a durable result under `%LOCALAPPDATA%\DevSpaceUltra\Updater`.
 
-The daily `DevSpace-Ultra-Auto-Update` task is user-scoped, starts when available, ignores overlapping runs, and installs only GitHub's latest stable (non-draft, non-prerelease) Release. It never treats a same semantic version as automatically current unless the installed release digest is already known to match, which supports maintenance republishing such as the current v0.5.8 refresh.
+The daily `DevSpace-Ultra-Auto-Update` task is user-scoped, starts when available, ignores overlapping runs, and installs only GitHub's latest stable (non-draft, non-prerelease) Release. It never treats a same semantic version as automatically current unless the installed release digest is already known to match, which supports maintenance republishing when required.
 
 ### ChatGPT Classic worker package update safety
 
