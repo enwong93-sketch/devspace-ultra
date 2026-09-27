@@ -107,6 +107,7 @@ export function shouldRecoverWorkingRound(goal, snapshot, {
   const exactNativeCurrentRoundFinal = (
     recoverySession?.sawNativeCurrentRoundFinal === true
     && snapshot?.generating === false
+    && snapshot?.retryVisible !== true
     && snapshot?.safetyCheckVisible !== true
     && snapshot?.deliveryTimeoutVisible !== true
     && snapshot?.latestMessageRole === "assistant"
@@ -121,6 +122,7 @@ export function shouldRecoverWorkingRound(goal, snapshot, {
   const nativeComplete = (
     upper(snapshot?.streamStatus) === "COMPLETE"
     && snapshot?.safetyCheckVisible !== true
+    && snapshot?.retryVisible !== true
     && (
       snapshot?.generating === false
       || staleGuiGeneratingOverride
