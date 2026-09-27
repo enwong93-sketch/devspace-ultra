@@ -775,7 +775,7 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
     const server = new McpServer({
         name: "devspace",
         title: "DevSpace",
-         version: "0.5.16",
+         version: "0.5.17",
         description: "Secure local coding workspace for MCP clients. Provides workspace-scoped file, search, edit, write, process, capability, and Codex-parity tools.",
     }, {
         instructions: modelInstructions,
@@ -3743,7 +3743,22 @@ export function createServer(config = loadConfig(), options = {}) {
                 : null;
             if (chatGptConnectorRequest && mcpMethod === "tools/call" && requestedToolName
                 && !instanceBootstrapTool && !conversationStartClaimRelay) {
-                const exactAuthority = requestConversation?.capabilityAuthority || null;
+                let exactAuthority = requestConversation?.capabilityAuthority || null;
+                if (!exactAuthority?.conversationId) {
+                    const capabilityLease = await progressBootstrapAuthority?.consumeCapability?.({
+                        sessionFingerprint: requestConversation?.sessionFingerprint
+                            || coreClientSessionFingerprint(req),
+                        toolName: requestedToolName,
+                        traceCorrelationFingerprints: requestTraceCorrelationFingerprints(req?.headers || {}),
+                        verifyPage: resolveProgressClaimPage,
+                    });
+                    if (capabilityLease?.conversationId) {
+                        requestConversation.capabilityAuthority = capabilityLease;
+                        requestConversation.conversationId = capabilityLease.conversationId;
+                        requestConversation.runtimeKey = capabilityLease.runtimeKey;
+                        exactAuthority = capabilityLease;
+                    }
+                }
                 const exactLocalInvocation = exactAuthority?.currentInvocationVerified === true
                     || exactAuthority?.source === "classic-computer-use-unique-active-page-verified";
                 if (!exactAuthority?.conversationId || !/^main-\d{2}$/i.test(String(exactAuthority?.runtimeKey || "")) || !exactLocalInvocation) {

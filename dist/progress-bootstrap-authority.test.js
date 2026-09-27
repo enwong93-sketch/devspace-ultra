@@ -48,6 +48,20 @@ const plan = await registry.consume({ ...request, toolName: "devspace_plan_start
 assert.equal(plan.conversationId, "conversation-bootstrap-a",
   "the same exact progress preflight may bootstrap one Goal and one Plan for the same conversation");
 
+const capabilityRequest = { ...request, toolName: 'read' };
+const firstCapability = await registry.consumeCapability(capabilityRequest);
+const repeatedCapability = await registry.consumeCapability(capabilityRequest);
+assert.equal(firstCapability.conversationId, 'conversation-bootstrap-a');
+assert.equal(firstCapability.runtimeKey, 'main-01');
+assert.equal(firstCapability.currentInvocationVerified, true);
+assert.equal(firstCapability.capabilityLease, true);
+assert.equal(repeatedCapability.conversationId, 'conversation-bootstrap-a',
+  'ordinary same-turn tools may repeat without another manual binding');
+assert.equal(await registry.consumeCapability({
+  ...capabilityRequest,
+  traceCorrelationFingerprints: ['c'.repeat(64)],
+}), null, 'another ChatGPT turn trace cannot borrow the capability lease');
+
 registry.register({
   ...proof,
   claimId: 'claim_bootstrap_different_20260920',
