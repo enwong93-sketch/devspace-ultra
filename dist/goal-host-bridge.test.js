@@ -11,6 +11,18 @@ assert.equal(typeof moduleUnderTest?.ClassicGoalHostBridge, "function", "Classic
 assert.equal(typeof moduleUnderTest?.defaultMainDebugPorts, "function", "defaultMainDebugPorts must exist");
 assert.equal(typeof moduleUnderTest?.waitForVisibleReportBoundary, "function", "waitForVisibleReportBoundary must exist");
 assert.equal(typeof moduleUnderTest?.probeClassicConversationPagePort, "function", "exact conversation page probe must exist");
+assert.equal(typeof moduleUnderTest?.shouldReuseGoalStreamStatus, "function");
+{
+  const reuse=moduleUnderTest.shouldReuseGoalStreamStatus;
+  const cache={key:'same-route-and-messages',status:'COMPLETE',checkedAtMs:1_000};
+  assert.equal(reuse(cache,cache.key,15_999,false,false,false,false),true,'idle same-route probe reuses a recent status');
+  assert.equal(reuse(cache,cache.key,16_000,false,false,false,false),false,'status cache expires after 15 seconds');
+  assert.equal(reuse(cache,'new-message',2_000,false,false,false,false),false,'a new message invalidates the cache');
+  assert.equal(reuse(cache,cache.key,2_000,true,false,false,false),false,'active generation always fetches fresh status');
+  assert.equal(reuse(cache,cache.key,2_000,false,true,false,false),false,'delivery timeout always fetches fresh status');
+  assert.equal(reuse(cache,cache.key,2_000,false,false,true,false),false,'safety checks always fetch fresh status');
+  assert.equal(reuse(cache,cache.key,2_000,false,false,false,true),false,'retry UI always fetches fresh status');
+}
 
 {
   const snapshots = [

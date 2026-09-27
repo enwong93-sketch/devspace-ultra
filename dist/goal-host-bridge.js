@@ -13,6 +13,13 @@ const DEFAULT_VISIBLE_REPORT_SETTLE_MS = 400;
 const DEFAULT_HIDDEN_CONFIRM_TIMEOUT_MS = 15_000;
 const DEFAULT_HIDDEN_CONFIRM_POLL_MS = 200;
 
+export function shouldReuseGoalStreamStatus(cache, key, nowMs, generating, deliveryTimeoutVisible, safetyCheckVisible, retryVisible) {
+  return !generating && !deliveryTimeoutVisible && !safetyCheckVisible && !retryVisible
+    && cache?.key === key && typeof cache.status === 'string'
+    && nowMs >= Number(cache.checkedAtMs || 0)
+    && nowMs - Number(cache.checkedAtMs || 0) < 15_000;
+}
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -474,17 +481,34 @@ export async function inspectVisibleReportCommit(candidate, options = {}) {
         routeLifecycle.hydratedSinceMs = routeHydrated ? (routeLifecycle.hydratedSinceMs || lifecycleNow) : null;
         routeLifecycle.lastSeenAtMs = lifecycleNow;
         let streamStatus = null;
-        if (conversationId && ${options.skipNativeStatus !== true}) {
-          try {
-            const response = await fetch('/backend-api/conversation/' + conversationId + '/stream_status', {
-              credentials: 'include',
-              cache: 'no-store',
-            });
-            if (response.ok) {
-              const data = await response.json();
-              streamStatus = data?.status || null;
-            }
-          } catch {}
+        // A visible Retry control is an unresolved host failure. A stale
+        // stream COMPLETE cannot authorize Goal recovery while it remains.
+        if (conversationId && ${options.skipNativeStatus !== true} && retryButtons.length === 0) {
+          const cacheKey = JSON.stringify([
+            conversationId, routeLifecycle.routeEpoch,
+            latestUserNode?.getAttribute('data-message-id') || null,
+            latestAssistantNode?.getAttribute('data-message-id') || null,
+            generating,
+          ]);
+          const cache = globalThis.__devspaceGoalStreamStatusCacheV1;
+          const reuse = (${shouldReuseGoalStreamStatus.toString()})(
+            cache, cacheKey, lifecycleNow, generating, deliveryTimeoutVisible, safetyCheckVisible, retryButtons.length > 0);
+          if (reuse) streamStatus = cache.status;
+          else {
+            try {
+              const response = await fetch('/backend-api/conversation/' + conversationId + '/stream_status', {
+                credentials: 'include',
+                cache: 'no-store',
+              });
+              if (response.ok) {
+                const data = await response.json();
+                streamStatus = data?.status || null;
+                if (typeof streamStatus === 'string') {
+                  globalThis.__devspaceGoalStreamStatusCacheV1 = { key: cacheKey, status: streamStatus, checkedAtMs: Date.now() };
+                }
+              }
+            } catch {}
+          }
         }
         return {
           href,

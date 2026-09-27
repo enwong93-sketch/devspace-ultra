@@ -638,8 +638,9 @@ export class GoalContinuationSupervisor {
     }
     const proof=await this.humanSupersessionProof(row,goal);
     if (!proof?.observedAt) {
-      row.manualTimestampRetryAt=this.now()+30_000;
       row.manualTimestampAttempts=Number(row.manualTimestampAttempts||0)+1;
+      const backoffStep=Math.min(6,Math.floor((row.manualTimestampAttempts-1)/5));
+      row.manualTimestampRetryAt=this.now()+Math.min(30*60_000,30_000*(2**backoffStep));
       await this.save();
       return false;
     }

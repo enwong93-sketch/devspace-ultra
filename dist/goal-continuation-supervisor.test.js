@@ -576,6 +576,22 @@ test('restart repairs the current human-started round boundary without replaying
   await restarted.close();
 });
 
+test('unresolved old human-round timestamp repair backs off without replaying delivery', async t => {
+  const h=await harness(t);
+  const id=h.reported.continuation.continuationId;
+  await h.runtime.roundBegin({goalId:h.g.id,continuationId:id});
+  const row=h.driver.records.get(id);
+  row.state='delivered'; row.redeemed=true; row.deliveryMode='human-user-continuation';
+  row.manualUserMessageId='user-after-restart';
+  row.manualTimestampAttempts=900;
+  h.driver.humanSupersessionProof=async()=>null;
+  const before=h.config.now();
+  await h.driver.repairHumanRoundBoundary(row);
+  assert.equal(row.manualTimestampAttempts,901);
+  assert.equal(row.manualTimestampRetryAt,before+30*60_000);
+  assert.equal(h.sends(),0,'timestamp repair must never replay delivery');
+});
+
 test('stale display syncing to an already captured user does not masquerade as new input',async t=>{
   const h=await causalHarness(t);
   h.set([{...h.views()[0],latestUserMessageId:'user-a'},h.finish(h.views()[1])]);

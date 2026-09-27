@@ -53,6 +53,14 @@ assert.equal(moduleUnderTest.shouldRecoverWorkingRound(baseGoal, {
   streamStatus: "COMPLETE",
 }, { nowMs: Date.parse("2026-09-05T03:00:05.000Z") }), true);
 assert.equal(moduleUnderTest.shouldRecoverWorkingRound(baseGoal, {
+  ...eligibleRoute,
+  chatMode: true,
+  generating: false,
+  streamStatus: "COMPLETE",
+  retryVisible: true,
+}, { nowMs: Date.parse("2026-09-05T03:00:05.000Z") }), false,
+"a Retry control cannot be overridden by a stale COMPLETE status");
+assert.equal(moduleUnderTest.shouldRecoverWorkingRound(baseGoal, {
   chatMode: true,
   generating: true,
   streamStatus: "COMPLETE",
@@ -121,6 +129,23 @@ assert.equal(moduleUnderTest.shouldRecoverWorkingRound(baseGoal, {
   },
 }, { nowMs: Date.parse("2026-09-05T03:00:05.000Z") }), true,
 "an exact native current-round final must recover even when stream_status remains stale");
+assert.equal(moduleUnderTest.shouldRecoverWorkingRound(baseGoal, {
+  ...eligibleRoute,
+  chatMode: true,
+  generating: false,
+  streamStatus: "IN_PROGRESS",
+  retryVisible: true,
+  safetyCheckVisible: false,
+  deliveryTimeoutVisible: false,
+  latestMessageRole: "assistant",
+  latestUserMessageId: "user-current-round",
+  latestAssistantMessageId: "assistant-current-round-native-final",
+  latestAssistantText: "A retry is still visible.",
+  recoverySession: { sawNativeCurrentRoundFinal: true,
+    nativeFinalUserMessageId: "user-current-round",
+    nativeFinalAssistantMessageId: "assistant-current-round-native-final" },
+}, { nowMs: Date.parse("2026-09-05T03:00:05.000Z") }), false,
+"a Retry control also blocks native-final recovery");
 assert.equal(moduleUnderTest.shouldRecoverWorkingRound(baseGoal, {
   ...eligibleRoute,
   chatMode: true,
