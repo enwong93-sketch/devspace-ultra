@@ -1,8 +1,8 @@
 {
   "id": "devspace-network-setup",
-  "name": "DevSpace Network Setup",
-  "version": "0.5.9",
-  "description": "Agent-guided one-command DevSpace Ultra setup and upgrade. Prefer DuckDNS/DDNS plus Caddy; guide unavoidable account/router actions; use Cloudflare named-tunnel fallback only when direct ingress is unavailable.",
+  "name": "DevSpace for ChatGPT Classic",
+  "version": "0.5.10",
+  "description": "Install and verify DevSpace Ultra as an OAuth-protected local development MCP for ChatGPT Classic. Codex may execute setup, but Classic connection, OAuth, full tools and read/write/reconnect evidence are mandatory.",
   "aliases": [
     "devspace setup",
     "one command setup",

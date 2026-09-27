@@ -1,5 +1,13 @@
 # DevSpace Ultra
 
+## Core product target: ChatGPT Classic
+
+DevSpace Ultra is built primarily to give **ChatGPT Classic on Windows** an OAuth-protected local development workspace: file reading and writing, patching, command execution, process interaction, progress reporting and durable long-task continuation. Codex may install or repair the product and optional Codex interoperability remains available, but Codex is **not** the installation target and cannot substitute for ChatGPT Classic MCP acceptance.
+
+Checkpoint, handoff and recovery let a project continue when one conversation approaches its usable context boundary. This provides an effectively continuous workflow; it does **not** increase or bypass OpenAI model context windows, account usage, rate limits or token allowances, and must not be represented as literal “unlimited tokens.”
+
+Every installation must follow the [ChatGPT Classic MCP installation contract](docs/CHATGPT_CLASSIC_MCP_INSTALLATION.md): public endpoint → Classic connection → OAuth → complete tool scan → fresh-chat read → authorized disposable write/edit/command → reconnect. Missing any row means setup is incomplete.
+
 ## One-command Windows setup
 
 DuckDNS/DDNS direct ingress is the recommended production route. It keeps the Local Gateway and every Core/application port on loopback, while Caddy exposes only the OAuth-protected HTTPS endpoint.
@@ -7,16 +15,16 @@ DuckDNS/DDNS direct ingress is the recommended production route. It keeps the Lo
 For the most reliable guided path, install the setup Agent Skill first, then ask the Agent to use `devspace-ultra-setup`. The Skill lets the Agent execute local installation/repair commands and guide the user through the unavoidable DuckDNS-account and router-port-forwarding steps one at a time.
 
 ```powershell
-$p=Join-Path $env:TEMP 'devspace-ultra-install-skill.ps1'; iwr https://raw.githubusercontent.com/enwong93-sketch/devspace-ultra/v0.5.9/install-skill.ps1 -OutFile $p; & $p
+$p=Join-Path $env:TEMP 'devspace-ultra-install-skill.ps1'; iwr https://raw.githubusercontent.com/enwong93-sketch/devspace-ultra/v0.5.10/install-skill.ps1 -OutFile $p; & $p
 ```
 
 ```powershell
-$p=Join-Path $env:TEMP 'devspace-ultra-install.ps1'; iwr https://raw.githubusercontent.com/enwong93-sketch/devspace-ultra/v0.5.9/install.ps1 -OutFile $p; & $p -Network DuckDNS
+$p=Join-Path $env:TEMP 'devspace-ultra-install.ps1'; iwr https://raw.githubusercontent.com/enwong93-sketch/devspace-ultra/v0.5.10/install.ps1 -OutFile $p; & $p -Network DuckDNS
 ```
 
 Use the Cloudflare named-tunnel fallback only when DDNS/direct inbound access is unavailable. A Worker relay/free plan is quota-governed and must not be treated as unlimited. See [one-command setup](docs/ONE_COMMAND_SETUP.md) and [network ingress policy](docs/NETWORK_INGRESS.md).
 
-The [v0.5.9 installation audit](docs/INSTALLATION_AUDIT_V0.5.9.md) records which current instructions were corrected, which dated documents remain historical, and the exact public Connector acceptance boundary.
+The [v0.5.9 installation audit](docs/INSTALLATION_AUDIT_V0.5.9.md) records which current instructions were corrected, which dated documents remain historical, and the public Connector acceptance boundary that the newer Classic MCP contract makes fully explicit.
 
 **DevSpace Ultra** is an MIT-licensed distribution of DevSpace with an elastic ChatGPT Classic multi-agent runtime layer.
 
@@ -138,7 +146,7 @@ Older releases cannot retroactively contain an updater they never shipped, so th
 
 ### New Windows install
 
-Use the pinned, inspectable Windows installer and guided Skill shown at the top of this README. Do not pipe the moving `main` branch into `Invoke-Expression` or install the moving Git branch directly with global npm: neither route is the tested release archive path. The installer prepares the local service; public HTTPS, router ingress and a real ChatGPT Connector tool call remain separate acceptance gates. See [one-command setup](docs/ONE_COMMAND_SETUP.md).
+Use the pinned, inspectable Windows installer and guided Skill shown at the top of this README. Do not pipe the moving `main` branch into `Invoke-Expression` or install the moving Git branch directly with global npm: neither route is the tested release archive path. The installer prepares infrastructure; the Agent must then create the ChatGPT Classic MCP connection, complete OAuth, scan the full tool catalogue and prove read/write/reconnect behavior. See [one-command setup](docs/ONE_COMMAND_SETUP.md).
 
 ### macOS / Linux core-only development
 

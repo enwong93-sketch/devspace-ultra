@@ -10,13 +10,6 @@ The public Connector is the product acceptance target. A healthy local Gateway, 
 
 ## Completion boundary
 
-Keep these stages distinct in all installer output and support replies:
-
-1. Package and native dependencies verified.
-2. Local Gateway/Core healthy with the intended configuration and narrow allowed roots.
-3. Public DNS, HTTPS certificate, OAuth metadata and MCP challenge verified from outside the LAN.
-4. ChatGPT Connector OAuth completed and one harmless read-only DevSpace tool call succeeded.
-
-Only stage 4 is a complete ChatGPT Connector installation. If the user cannot or chooses not to provide the required public ingress, preserve the local preparation and report an explicit public-connector blocker rather than success. Do not retry by broadening allowed roots, exposing Gateway/Core ports directly, disabling TLS verification, or replacing DuckDNS with a different provider without the user's choice.
+Follow the [ChatGPT Classic MCP installation graph](CHATGPT_CLASSIC_MCP_INSTALLATION.md). Only its final node is complete acceptance; package install, local health, public ingress, OAuth, tool discovery or a read-only call on their own are intermediate evidence. If a required node cannot pass, preserve working state and report that exact blocker.
 
 For upgrades, use the [transactional update path](ONE_COMMAND_SETUP.md) rather than reinstalling on top of a running global package. For known installation failures and safe recovery, see [troubleshooting](gotchas.md).
