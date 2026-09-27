@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 0.5.11 — 2026-09-27
+
+- Stop recurring `devspace_progress_report` calls from mounting a new hidden MCP App iframe. A report that still needs exact-page ownership now returns one explicit `devspace_progress_bind` action; only that one-time bind tool carries the relay UI.
+- Bound and retire stale progress-claim and Goal-continuation relay frames in every ChatGPT Classic Main while preserving the visible `DEVSPACE 進度旁白` card and its durable, bounded Agent-authored history.
+- Remove the 128-iframe deadlock in exact-page claim resolution. Crowded pages now inspect bounded candidates from both target-list edges, so a newly mounted claim remains recoverable without scanning an unbounded renderer.
+- Release relay DOM and event listeners after success or expiry, preventing completed one-shot Apps from retaining unnecessary renderer state.
+- Trust only loopback reverse proxies by default, eliminating repeated `X-Forwarded-For` validation errors from the local Stable Gateway/Caddy path without accepting arbitrary remote proxy headers.
+- Add regression coverage for 700-frame recovery, relay retention bounds, one-time bind metadata, normal report metadata without UI, Goal/Rescue compatibility, and alternate-port Core startup while production Gateway/Core stay online.
+
 ## 0.5.10 — 2026-09-27
 
 - Define ChatGPT Classic on Windows as the primary product client and make clear that Codex may install or repair DevSpace Ultra but is not the installation acceptance target.

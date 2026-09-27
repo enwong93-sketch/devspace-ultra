@@ -23,4 +23,10 @@ assert.doesNotMatch(source, /Date\.parse\(item\.at\) >= nowMs - maxAgeMs/,
 assert.match(source, /Human-authored narration is durable conversation history/);
 assert.match(source, /const visible = Boolean\(conversationId\)/);
 assert.match(source, /render an empty state rather than[\s\S]*historical rows/);
-console.log(JSON.stringify({ ok:true, gate:"progress-narration-stability-static", anchorFallbackDebounced:true, conversationMapKeyed:true, crossTurnHistoryDurable:true }));
+assert.match(source, /PROGRESS_RELAY_MAX_LIVE_FRAMES = 8/,
+  "hidden exact-page bootstrap relays must have a small live DOM bound");
+assert.match(source, /PROGRESS_RELAY_RETENTION_MS = 150_000/,
+  "the live bound must still retain relays beyond their two-minute claim TTL");
+assert.match(source, /frame\.remove\(\)/,
+  "expired relay iframes must be removed instead of merely hidden forever");
+console.log(JSON.stringify({ ok:true, gate:"progress-narration-stability-static", anchorFallbackDebounced:true, conversationMapKeyed:true, crossTurnHistoryDurable:true, hiddenRelayFramesBounded:true }));

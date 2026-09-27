@@ -170,7 +170,7 @@ const toolNames = {
 };
 function serverInstructions(config) {
     const toolSurface = toolModeCapabilities(config.toolMode);
-    const mandatoryProgressPreflightInstruction = " MANDATORY INTERACTIVE PROGRESS PREFLIGHT: In every user-facing interactive/Main ChatGPT Classic task that is expected to need more than one substantive tool call, more than roughly 30 seconds, or multiple verification gates, start or resume the required Goal/Plan structure and then call devspace_progress_report before the first substantive work tool. The opening report must be concise natural language stating the current objective and immediate first medium step; it is required even though no medium-sized result exists yet. A returned pending claim, unbound identity, unavailable recipient, timeout, or omitted tool is not proof that the card was updated. Use the exact-conversation compatibility bridge once when the current conversation id is known, verify that this conversation owns the projected report, and if verification still fails, state one visible progress-routing blocker in the current chat while continuing the requested safe work; never falsely claim that the card was updated. Re-check the card before each new long phase and before the final response, then continue with meaningful medium-boundary reports without per-tool spam or timer prose. Before entering any external wait, process watch, CI watch, or other phase that may keep the turn occupied long enough to cross the ten-minute ceiling, write a useful Agent-authored report first when the current report would otherwise age past that ceiling; after the wait returns, report the material result before starting another long phase. Backend-only Chat Swarm workers must not write the user-facing card.";
+    const mandatoryProgressPreflightInstruction = " MANDATORY INTERACTIVE PROGRESS PREFLIGHT: In every user-facing interactive/Main ChatGPT Classic task that is expected to need more than one substantive tool call, more than roughly 30 seconds, or multiple verification gates, start or resume the required Goal/Plan structure and then call devspace_progress_report before the first substantive work tool. The opening report must be concise natural language stating the current objective and immediate first medium step; it is required even though no medium-sized result exists yet. A returned pending claim, unbound identity, unavailable recipient, timeout, or omitted tool is not proof that the card was updated. When a pending result explicitly returns nextAction.tool=devspace_progress_bind, call that one-time bootstrap once with its opaque claimId; ordinary reports must never call the bind tool because each bootstrap mounts one hidden relay App. If verification still fails, use the exact-conversation compatibility bridge once when the current conversation id is known, then state one visible progress-routing blocker while continuing the requested safe work; never falsely claim that the card was updated. Re-check the card before each new long phase and before the final response, then continue with meaningful medium-boundary reports without per-tool spam or timer prose. Before entering any external wait, process watch, CI watch, or other phase that may keep the turn occupied long enough to cross the ten-minute ceiling, write a useful Agent-authored report first when the current report would otherwise age past that ceiling; after the wait returns, report the material result before starting another long phase. Backend-only Chat Swarm workers must not write the user-facing card.";
     const classicSurfaceInstruction = " When running inside ChatGPT Classic, DevSpace Ultra's supported user-facing surface is ChatGPT Classic Chat mode only. Work mode is out of scope and must not be used for DevSpace Ultra user-facing operation or product acceptance.";
     const interactiveProgressInstruction = " In every interactive/main ChatGPT Classic conversation, including every secondary Main window and regardless of whether the selected reasoning mode is Thinking/XHi or Pro, DevSpace must project exactly one conversation-scoped floating progress narration card. The blank card remains visible before the Agent writes its first useful report and must never reuse Goal, Plan, transcript, or progress rows from another conversation. Treat this floating card—not the retired inline Goal Dock or inline Plan Card app—as the primary progress surface. For any task expected to require more than one substantive tool call, more than roughly 30 seconds, or multiple verification gates, before the first substantive work tool call start or resume exactly one conversation-bound DevSpace Plan; when the requested outcome needs autonomous continuation across assistant turns, start or resume Goal Mode first and create a fresh turn Plan beneath it. Keep Goal and Plan state current as execution structure and backend telemetry, but neither tool events nor timers may author visible narration. Use devspace_progress_report when you personally judge that a meaningful medium-sized step has completed, an important verification result is available, the execution direction materially changes, or a genuine blocker is useful to report. This is mandatory for qualifying interactive Main work: write the first useful report at the first such boundary, do not wait for several large phases, and during ongoing non-atomic work never leave more than ten minutes between Agent-authored reports. Ten minutes is a maximum silent interval for the working Agent, not a timer cadence: no timer, supervisor, overlay, hidden relay, or another Agent may send reminder prose or create a synthetic user turn. Before entering a long external wait/process/CI watch that could carry the current report past the ten-minute ceiling, publish a useful Agent-authored report first; after that wait returns, report the meaningful result before beginning another long phase. A verified twenty-minute interrupted-turn rescue may emit only the exact visible text `- 繼續`; interruption evidence, exact-conversation ownership, one-shot deduplication, and resume policy remain backend-owned and must never be expanded into a synthetic recovery checklist. If the direct progress recipient is temporarily omitted, disabled, times out, or reports unavailable identity, immediately use the documented exact-conversation compatibility bridge once, pass the known current conversation id as an expected-id guard, and verify the report on this conversation's card; the bridge must inspect the Runtime's live page URL and reject stale authority rather than redirecting the report to another conversation. Write the card text yourself in natural language for the user; never show generated step counters, heartbeat prose, generic program status, or one row per tool. The report correlation path must fail promptly and clean up its request waiter rather than hanging until the host times out. Do not spam user-visible commentary, do not mirror low-level operations, and never expose private reasoning or hidden chain-of-thought. A genuinely atomic one-tool task may leave the blank conversation card untouched and does not need a Plan. This is also enforced by the Local Gateway: once a conversation has an active Plan, substantive tools are rejected until a verified current-turn progress report exists; without a Plan, a second substantive tool is rejected until the Agent reports; a report older than the ten-minute ceiling blocks the next substantive tool; and a Plan cannot be completed until a fresh verified report exists. When a tool returns `devspace_progress_preflight_required`, call `devspace_progress_report` yourself in natural language and retry the blocked tool instead of bypassing the gate. Chat Swarm worker conversations remain backend-only and must not emit user-facing progress. Preserve the bounded DevSpace human-progress transcript without creating a synthetic user message, a new ChatGPT turn, or any refresh/navigation. After each meaningful medium-sized step, write one natural-language devspace_progress_report update: not per tool call, not from a timer or fixed operation count, and not only after several large phases have accumulated. Keep the wording free-form and specific to what just became true.";
     const chatSwarmInstruction = " When coordinating ChatGPT Classic peer conversations through this DevSpace backend, treat the main conversation as the orchestrator and use chat_swarm_* as the task-routing source of truth. Prefer chat_swarm_elastic_scale for production lifecycle so the orchestrator can choose worker capacity dynamically from actual workload. The Windows runtime controller is authoritative for runtime numbering and automatically excludes both reserved runtimes and protected interactive runtimes; never assume workers are simply Runtime-01 through Runtime-N. A protected runtime may temporarily be the user's interactive ChatGPT window after a Windows protocol/default-app routing fault: never stop, repair, recover, autojoin, navigate, minimize, update, canary-reuse, or scale down such a runtime until protection has explicitly been removed after the conversation moved to Primary ChatGPT. Use chat_swarm_runtime_identity_status when runtime identity looks ambiguous and chat_swarm_runtime_identity_repair for the non-destructive Primary/Worker identity guard. New worker conversations should be created inside the configured sub-agents ChatGPT Project. Runtime/UI automation is lifecycle/bootstrap/recovery only; normal dispatch, worker selection, task state, submission, and collection stay in the Chat Swarm backend. Use one continuous worker loop per active membership: join with chat_swarm_join, then call chat_swarm_next exactly once. Do not poll or self-renew. On a lease checkpoint, do not reply to the user and immediately call chat_swarm_next exactly once. When real work arrives, call chat_swarm_status exactly once before substantive work so execution is marked started, then submit backend-only through chat_swarm_submit; submit re-parks the worker. Never emit idle/heartbeat/checkpoint/progress/completion messages to the user. Preserve orchestrator freedom to route any task to any suitable worker; do not impose round-robin or mandatory sticky routing. Before or after a primary ChatGPT Classic desktop update, call chat_swarm_update_status and, when version drift exists, use chat_swarm_update_ensure_compatible so an isolated real-task canary passes before rolling production workers with per-worker backup, exact-conversation recovery, verification, and rollback; protected runtimes are never rollout targets. This path does not require a Codex, Claude, Pi, or API-key model provider. Do not substitute local provider subagents when the user explicitly requests ChatGPT Classic peer conversations.";
@@ -762,7 +762,7 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
     const server = new McpServer({
         name: "devspace",
         title: "DevSpace",
-         version: "0.5.10",
+         version: "0.5.11",
         description: "Secure local coding workspace for MCP clients. Provides workspace-scoped file, search, edit, write, process, capability, and Codex-parity tools.",
     }, {
         instructions: modelInstructions,
@@ -1210,6 +1210,10 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
                 expiresAt: z.string(),
                 state: z.string(),
             }).optional(),
+            nextAction: z.object({
+                tool: z.literal("devspace_progress_bind"),
+                arguments: z.object({ claimId: z.string() }),
+            }).optional(),
             claimId: z.string().optional(),
             conversationId: z.string().optional(),
             runtimeKey: z.string().optional(),
@@ -1226,11 +1230,10 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
         },
         _meta: {
             ui: {
-                resourceUri: PROGRESS_CLAIM_RELAY_URI,
-                // The model authors the first progress message, then the
-                // exact ChatGPT page's hidden MCP App performs the one-time
-                // claim. Restricting this tool to `model` made callTool()
-                // unavailable inside the relay and left every claim pending.
+                // Recurring reports update the single host overlay directly
+                // and must not mount one MCP App iframe per progress message.
+                // Keep app visibility so the rare bootstrap relay can redeem
+                // an unresolved one-time claim through this same tool.
                 visibility: ["model", "app"],
             },
         },
@@ -1299,19 +1302,16 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
                 return {
                     content: [{
                         type: "text",
-                        text: "Progress narration is awaiting exact page-local ownership confirmation.",
+                        text: `Progress narration needs one exact-page bootstrap. Call devspace_progress_bind once with claimId ${progressClaim.claimId}.`,
                     }],
                     structuredContent: {
                         ok: true,
                         pending: true,
                         progressClaim,
-                    },
-                    // Tool-result metadata is delivered only to the MCP App,
-                    // not the model. Mirror only the opaque one-time claim
-                    // descriptor here so the relay can recover even on hosts
-                    // that omit structuredContent from window.openai.toolOutput.
-                    _meta: {
-                        "devspace/progressClaim": progressClaim,
+                        nextAction: {
+                            tool: "devspace_progress_bind",
+                            arguments: { claimId: progressClaim.claimId },
+                        },
                     },
                 };
             }
@@ -1339,6 +1339,48 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
                 structuredContent: { ok: false, error: errorMessage },
             };
         }
+    });
+    registerAppTool(server, "devspace_progress_bind", {
+        title: "Bind Pending Conversation Progress",
+        description: "Bootstrap exact ChatGPT Classic page ownership only when devspace_progress_report returns pending=true and explicitly requests this tool. Call once with that opaque claimId; ordinary progress reports must never call it because each bootstrap mounts one short-lived hidden relay App.",
+        inputSchema: {
+            claimId: z.string().min(16).max(200),
+        },
+        outputSchema: {
+            ok: z.boolean(),
+            pending: z.boolean(),
+            progressClaim: z.object({
+                claimId: z.string(),
+                expiresAt: z.string(),
+                state: z.string(),
+            }),
+        },
+        annotations: {
+            readOnlyHint: true,
+            destructiveHint: false,
+            idempotentHint: true,
+            openWorldHint: false,
+        },
+        _meta: {
+            ui: {
+                resourceUri: PROGRESS_CLAIM_RELAY_URI,
+                visibility: ["model"],
+            },
+        },
+    }, async ({ claimId }) => {
+        const progressClaim = progressClaimRegistry.pendingClaim(claimId);
+        if (!progressClaim) {
+            return {
+                isError: true,
+                content: [{ type: "text", text: "Progress bootstrap claim is unavailable, expired, or already completed." }],
+                structuredContent: { ok: false, pending: false, progressClaim: { claimId, expiresAt: new Date(0).toISOString(), state: "unavailable" } },
+            };
+        }
+        return {
+            content: [{ type: "text", text: "Exact-page progress bootstrap relay mounted." }],
+            structuredContent: { ok: true, pending: true, progressClaim },
+            _meta: { "devspace/progressClaim": progressClaim },
+        };
     });
     registerPlanTools(server, planRuntime, {
         resourceUri: PLAN_CARD_URI,
@@ -2450,7 +2492,7 @@ export function createServer(config = loadConfig(), options = {}) {
         const gatewayCorrelationId = callFingerprint ? randomUUID() : null;
         const toolName = String(req?.body?.params?.name || "").trim() || null;
         await conversationAuthorityReady;
-        const progressOnlyTool = toolName === "devspace_progress_report";
+        const progressOnlyTool = ["devspace_progress_report", "devspace_progress_bind"].includes(toolName);
         const computerUseTool = toolName === "codex_computer_use"
             || toolName === "codex_computer_use_status";
         const progressClaimTool = progressOnlyTool
@@ -2738,7 +2780,7 @@ export function createServer(config = loadConfig(), options = {}) {
             void conversationProgressLiveness?.noteTurn?.(event).catch(() => null);
         },
         onNativeMcpCall: (event) => {
-            const progressOnlyCall = event?.toolName === "devspace_progress_report";
+            const progressOnlyCall = ["devspace_progress_report", "devspace_progress_bind"].includes(event?.toolName);
             if (event?.sessionFingerprint && !progressOnlyCall) {
                 void persistConversationIdentity(event).catch((error) => {
                     logEvent(config.logging, "debug", "classic_native_mcp_identity_persist_failed", {
@@ -3048,9 +3090,11 @@ export function createServer(config = loadConfig(), options = {}) {
             });
         }
     };
-    if (config.logging.trustProxy) {
-        app.set("trust proxy", true);
-    }
+    // Every production ingress reaches this loopback-only Core through the
+    // local Stable Gateway/Caddy boundary. Trust only loopback by default so
+    // express-rate-limit can use the forwarded client address without
+    // accepting spoofed X-Forwarded-For from a non-loopback peer.
+    app.set("trust proxy", config.logging.trustProxy ? true : "loopback");
     app.use((req, res, next) => {
         const requestId = randomUUID();
         const startedAt = performance.now();
@@ -3584,9 +3628,10 @@ export function createServer(config = loadConfig(), options = {}) {
                 ? String(req?.body?.params?.name || "").trim()
                 : "";
             const conversationStartClaimRelay = Boolean(
-                ["devspace_goal_start", "devspace_plan_start"].includes(requestedToolName)
+                (requestedToolName === "devspace_progress_bind")
+                || (["devspace_goal_start", "devspace_plan_start"].includes(requestedToolName)
                 && typeof req?.body?.params?.arguments?.claimId === "string"
-                && String(req.body.params.arguments.claimId).trim().length >= 16
+                && String(req.body.params.arguments.claimId).trim().length >= 16)
             );
             const retiredToolResult = retiredToolCallResult(requestedToolName);
             if (retiredToolResult) {

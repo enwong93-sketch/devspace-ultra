@@ -29,9 +29,19 @@ assert.match(server, /progressBootstrapAuthority\?\.consume\?\.\(\{[\s\S]{0,400}
 assert.match(server, /traceCorrelationFingerprints:\s*requestTraceCorrelationFingerprints\(req\?\.headers \|\| \{\}\)/,
   'the bootstrap trace must originate in this authenticated HTTP request rather than caller tool arguments');
 assert.match(server, /registerAppTool\(server, "devspace_progress_report"[\s\S]*const resolved = await resolveProgressConversation\(extra\);/);
-assert.match(server, /resourceUri:\s*PROGRESS_CLAIM_RELAY_URI/);
-assert.match(server, /resourceUri:\s*PROGRESS_CLAIM_RELAY_URI,[\s\S]{0,800}visibility:\s*\["model",\s*"app"\]/,
-  "the progress relay must be callable by the exact page MCP App as well as the model");
+const progressReportStart = server.indexOf('registerAppTool(server, "devspace_progress_report"');
+const progressBindStart = server.indexOf('registerAppTool(server, "devspace_progress_bind"');
+const progressBindEnd = server.indexOf('registerPlanTools(server, planRuntime', progressBindStart);
+assert.ok(progressReportStart >= 0 && progressBindStart > progressReportStart && progressBindEnd > progressBindStart);
+const progressReportBlock = server.slice(progressReportStart, progressBindStart);
+const progressBindBlock = server.slice(progressBindStart, progressBindEnd);
+assert.doesNotMatch(progressReportBlock, /resourceUri:\s*PROGRESS_CLAIM_RELAY_URI/,
+  "recurring progress reports must not mount one hidden MCP App iframe per update");
+assert.match(progressReportBlock, /visibility:\s*\["model",\s*"app"\]/,
+  "the report tool must remain callable by the rare exact-page bootstrap relay");
+assert.match(progressBindBlock, /resourceUri:\s*PROGRESS_CLAIM_RELAY_URI/,
+  "only the explicit one-time bootstrap tool may mount the claim relay App");
+assert.match(progressBindBlock, /progressClaimRegistry\.pendingClaim\(claimId\)/);
 assert.match(server, /progressClaimRegistry\.create\(\{[\s\S]{0,260}message:\s*reportMessage,[\s\S]{0,180}kind,[\s\S]{0,260}requestBinding:[\s\S]{0,180}sessionFingerprint:\s*currentRequestContext\?\.sessionFingerprint/,
   "pending progress must retain only the hashed request session needed for a short-lived cached-schema bootstrap lease");
 assert.match(server, /claimId:\s*z\.string\(\)\.min\(16\)\.max\(200\)\.optional\(\)/);
@@ -61,6 +71,8 @@ assert.match(server, /progressBootstrapAuthority\?\.consume\?\.\(\{[\s\S]{0,200}
   "Goal\/Plan bootstrap must consume the lease through the current request's hashed session only");
 assert.match(server, /outputSchema:[\s\S]{0,1200}progressClaim:\s*z\.object\(/,
   "progress tool must declare the structured claim output so ChatGPT can hydrate the relay App");
+assert.match(progressReportBlock, /nextAction:[\s\S]{0,220}tool:\s*z\.literal\("devspace_progress_bind"\)/,
+  "an unresolved report must tell the Agent to mount exactly one bootstrap relay");
 assert.match(server, /"devspace\/progressClaim":\s*progressClaim/,
   "pending progress must mirror only the opaque claim descriptor into app-only result metadata");
 
@@ -115,6 +127,8 @@ assert.match(progressRelay, /retireRelay/,
   "expired one-shot relays must retire their own listeners locally");
 assert.match(progressRelay, /removeEventListener/,
   "local relay retirement must detach host event listeners");
+assert.match(progressRelay, /document\.body\.replaceChildren\(\)/,
+  "a completed or expired one-shot relay must release its own DOM and event resources");
 assert.match(progressRelay, /devspace\/conversationStartClaim/);
 assert.match(startClaims, /devspace_goal_start/);
 assert.match(startClaims, /devspace_plan_start/);

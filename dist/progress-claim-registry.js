@@ -222,6 +222,13 @@ export class ProgressClaimRegistry {
       .map((row) => publicClaim(row));
   }
 
+  pendingClaim(claimId) {
+    this.prune();
+    const id = cleanText(claimId, 200);
+    const record = id ? this.records.get(id) : null;
+    return record?.state === "pending" ? publicClaim(record) : null;
+  }
+
   requestIdentity(claimId) {
     this.prune();
     const record = this.records.get(claimId);
