@@ -75,7 +75,7 @@ MCP clients discover metadata from:
 
 Each computer should expose its own stable public MCP URL and keep an independent `serverInstanceId` in `config.json`. `DEVSPACE_SERVER_INSTANCE_ID` may override it for controlled deployments, but ordinary installers generate and persist one automatically. When upgrading a legacy config without that field, DevSpace derives a deterministic fallback from the exact public `/mcp` resource until setup persists a random identity.
 
-Isolation is enforced across the full binding tuple: server instance, public MCP/OAuth resource, ChatGPT Connector App origin, current local Runtime, and conversation. A non-bootstrap ChatGPT tool call without a current exact invocation observed on this computer fails with `devspace_instance_binding_required`. The bootstrap tools may mount a one-time claim, but that claim completes only when this server's local CDP observer sees its own Connector App under the exact local conversation page. Another DevSpace server, hostname, computer, App/link identity or same-named tool cannot borrow the binding.
+Isolation is enforced across the full binding tuple: server instance, public MCP/OAuth resource, ChatGPT Connector App origin, current local Runtime, and conversation. Ordinary calls use a current exact local invocation or an authenticated provider-conversation binding rechecked against the exact live local page. An unbound call fails with `devspace_instance_binding_required`. The one-time bootstrap claim completes only when this server's local CDP observer sees its own Connector App under the exact local conversation page. Another DevSpace server, hostname, computer, App/link identity or same-named tool cannot borrow the binding.
 
 ## Tool Modes
 

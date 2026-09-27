@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.5.18 — 2026-09-28
+
+- Restore ordinary tools in existing ChatGPT Classic Main conversations after reconnect. The server accepts an authenticated provider-conversation binding only after rechecking its exact current local page; an unbound, conflicting or other-computer call still fails closed.
+- Keep the one-time progress claim bootstrap for new conversations and make its `devspace_progress_bind` next action explicit to the Agent.
+- Verified the previously blocked Main-04 progress and Plan read on the live public Connector, and recovered a pending Main-02 claim through the exact local owner bridge without user-side pairing.
+
 ## 0.5.17 — 2026-09-28
 
 - Fixed the `devspace_instance_binding_required` regression that blocked every ordinary tool after a successful exact-page progress claim.

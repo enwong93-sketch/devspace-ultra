@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 
-const [config, server, setup, overlay, resolver] = await Promise.all([
+const [config, server, setup, overlay, resolver, providerBinding] = await Promise.all([
   readFile(new URL("../dist/config.js", import.meta.url), "utf8"),
   readFile(new URL("../dist/server.js", import.meta.url), "utf8"),
   readFile(new URL("./devspace-public-setup.ps1", import.meta.url), "utf8"),
   readFile(new URL("../dist/classic-progress-narration-overlay.js", import.meta.url), "utf8"),
   readFile(new URL("../dist/conversation-start-claim-cdp.js", import.meta.url), "utf8"),
+  readFile(new URL("../dist/openai-conversation-binding.js", import.meta.url), "utf8"),
 ]);
 
 assert.match(config, /serverInstanceId:\s*parseServerInstanceId/);
@@ -24,7 +25,13 @@ assert.match(server, /progressBootstrapAuthority\?\.consumeCapability/,
 assert.match(server, /traceCorrelationFingerprints:\s*requestTraceCorrelationFingerprints/,
   "the capability lease must remain bound to the exact ChatGPT turn trace");
 assert.match(server, /chatGptConnectorRequest[\s\S]{0,1600}!exactAuthority\?\.conversationId[\s\S]{0,500}!exactLocalInvocation/,
-  "non-bootstrap ChatGPT calls must fail closed without a current exact local invocation");
+  "non-bootstrap ChatGPT calls must fail closed without an exact local proof");
+assert.match(server, /verifiedLocalProviderBinding\(providerAuthority, providerIdentity\)/,
+  "a previously proved conversation must retain ordinary tools after reconnect");
+assert.match(server, /verifiedLocalProviderBinding\(exactAuthority, requestConversation\?\.openaiIdentity\)/,
+  "the ordinary-tool gate must accept freshly checked provider conversation ownership");
+assert.match(providerBinding, /authority\?\.providerConversationKey === key/);
+assert.match(providerBinding, /authority\?\.pageVerified === true/);
 assert.match(server, /serverInstanceId:\s*config\.serverInstanceId[\s\S]{0,200}resourceOrigin:/,
   "persisted App origins must be scoped by both server instance and public resource origin");
 assert.match(server, /relayOriginProbeToken\s*=\s*randomUUID\(\)/);
@@ -46,6 +53,7 @@ console.log(JSON.stringify({
   persistedServerInstanceId: true,
   oauthAudienceBound: true,
   exactLocalInvocationRequired: true,
+  verifiedProviderConversationRecovery: true,
   exactProgressTurnCapabilityLease: true,
   connectorAppOriginBound: true,
   tokenBoundOriginProbe: true,
