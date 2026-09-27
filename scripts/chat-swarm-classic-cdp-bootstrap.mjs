@@ -145,7 +145,12 @@ function expressionForProbe() {
       }))
       .filter((item) => /log in|登入|註冊|google|apple|手機|phone|continue|繼續|email|電郵|電子郵件/i.test(item.text + ' ' + item.placeholder + ' ' + item.ariaLabel))
       .slice(0, 24);
-    const throttled = /too many requests|try again later|太多要求|過於頻繁|請稍等幾分鐘後再試/i.test(bodyText);
+    const rateTitle = /^(?:too many requests|太多要求|請求過多|请求过多)(?:\s|$)/i;
+    const rateText = /too many requests|太多要求|請求過多|请求过多|過於頻繁/i;
+    const rateDialogs = [...document.querySelectorAll('[role="dialog"],[role="alertdialog"]')].filter(visible);
+    const throttled = (rateDialogs.length === 1 && rateTitle.test(String(rateDialogs[0].innerText || '').trim())) ||
+      [...document.querySelectorAll('[role="alert"],[data-sonner-toast]')]
+        .filter(visible).some((el) => rateText.test(String(el.innerText || '').trim()));
     const connectionInterrupted = /connection interrupted|waiting for (?:the )?complete response|連線中斷|等待完整回覆/i.test(bodyText);
     const composerText = composer ? ('value' in composer ? String(composer.value || '') : String(composer.innerText || composer.textContent || '')) : '';
     const sendButton = document.querySelector('button[data-testid="send-button"]') ||
@@ -256,24 +261,18 @@ function expressionForGoogleLoginTarget() {
 
 function expressionForDismissThrottle() {
   return String.raw`(() => {
-    const bodyText = String(document.body?.innerText || '');
-    const throttleRe = /too many requests|try again later|太多要求|過於頻繁|請稍等幾分鐘後再試/i;
-    if (!throttleRe.test(bodyText)) return { detected: false, clicked: false };
-
-    const candidates = [...document.querySelectorAll('[role="dialog"], [data-state="open"], body')];
-    for (const container of candidates) {
-      const text = String(container.innerText || container.textContent || '');
-      if (!throttleRe.test(text)) continue;
-      const button = [...container.querySelectorAll('button')].find((el) => {
-        const label = String(el.innerText || el.textContent || el.getAttribute('aria-label') || '').trim();
-        return /^(知道了|got it|ok|okay|dismiss|close|關閉)$/i.test(label) && !el.disabled;
-      });
-      if (button) {
-        button.click();
-        return { detected: true, clicked: true, label: String(button.innerText || button.textContent || button.getAttribute('aria-label') || '').trim() };
-      }
-    }
-    return { detected: true, clicked: false };
+    const visible = (el) => !!el && el.getBoundingClientRect().width > 0 && el.getBoundingClientRect().height > 0;
+    const dialogs = [...document.querySelectorAll('[role="dialog"],[role="alertdialog"]')].filter(visible);
+    const matches = dialogs.filter((el) => /^(?:too many requests|太多要求|請求過多|请求过多)(?:\s|$)/i
+      .test(String(el.innerText || '').trim()));
+    if (matches.length === 0) return { detected: false, clicked: false };
+    if (matches.length !== 1 || dialogs.length !== 1) return { detected: true, clicked: false, ambiguous: true };
+    const buttons = [...matches[0].querySelectorAll('button')].filter(visible).filter((el) =>
+      !el.disabled && el.getAttribute('aria-disabled') !== 'true' &&
+      /^(?:知道了|got it|ok)$/i.test(String(el.innerText || el.textContent || '').trim()));
+    if (buttons.length !== 1) return { detected: true, clicked: false };
+    buttons[0].click();
+    return { detected: true, clicked: true, label: String(buttons[0].innerText || buttons[0].textContent || '').trim() };
   })()`;
 }
 
