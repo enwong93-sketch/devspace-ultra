@@ -12,8 +12,8 @@ function Assert-Throws([scriptblock]$Action, [string]$Message) {
     Assert-True $threw $Message
 }
 
-$tag = 'v0.5.17'
-$name = 'devspace-ultra-0.5.17.tgz'
+$tag = 'v0.5.18'
+$name = 'devspace-ultra-0.5.18.tgz'
 $digest = 'sha256:' + ('a' * 64)
 $url = "https://github.com/enwong93-sketch/devspace-ultra/releases/download/$tag/$name"
 $release = [pscustomobject]@{
@@ -23,7 +23,7 @@ $release = [pscustomobject]@{
     assets = @([pscustomobject]@{ name=$name; digest=$digest; browser_download_url=$url })
 }
 $selected = Select-ReleaseArchiveAsset -Release $release -Tag $tag
-Assert-True ($selected.Name -eq $name -and $selected.Version -eq '0.5.17') 'Exact stable archive selection failed.'
+Assert-True ($selected.Name -eq $name -and $selected.Version -eq '0.5.18') 'Exact stable archive selection failed.'
 Assert-True ($selected.Digest -eq ('a' * 64) -and $selected.Url -eq $url) 'Release digest or URL changed unexpectedly.'
 
 $bad = $release | ConvertTo-Json -Depth 6 | ConvertFrom-Json

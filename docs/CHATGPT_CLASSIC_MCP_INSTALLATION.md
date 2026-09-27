@@ -31,7 +31,7 @@ If A–C already pass, start immediately at D. Do not reopen the router, reinsta
 
 Repeat the graph independently for every computer. One ChatGPT Classic account may keep several DevSpace connections, but each row must use that computer's own public `/mcp` URL, `serverInstanceId`, OAuth audience and Connector/App identity. A PASS from another same-named DevSpace connection is never evidence for this machine.
 
-After OAuth, the first local bootstrap claim must resolve under a Classic Runtime page on the same computer. Every later non-bootstrap tool call requires a current exact local invocation. `devspace_instance_binding_required` means the selected connection is unbound or belongs to the wrong Runtime/server; do not try another computer's connection as a fallback.
+After OAuth, the first local bootstrap claim must resolve under a Classic Runtime page on the same computer. Later calls can reuse its authenticated provider-conversation binding after a fresh check of that exact local page; they do not require manual pairing for every conversation or tool call. If `devspace_progress_report` returns a pending claim with `nextAction.tool=devspace_progress_bind`, the Agent calls that one-time tool with the returned claim ID. `devspace_instance_binding_required` means no valid local proof was available; do not try another computer's connection as a fallback.
 
 ## Required tool check
 

@@ -8,6 +8,17 @@ const hex = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
 const conversation = value => typeof value === 'string' && /^[A-Za-z0-9_-]{8,200}$/.test(value);
 export const OPENAI_CONVERSATION_PAGE_SOURCE = 'openai-conversation-binding-page-verified';
 
+/** A durable binding is usable only after resolve() has rechecked the exact
+ * local Classic page for this authenticated provider conversation identity. */
+export function verifiedLocalProviderBinding(authority, identity) {
+  const key = cleanOpenaiIdentity(identity)?.key;
+  return Boolean(key && authority?.providerConversationKey === key
+    && authority?.source === OPENAI_CONVERSATION_PAGE_SOURCE
+    && authority?.pageVerified === true
+    && conversation(authority?.conversationId)
+    && /^main-(0[1-9]|[12][0-9]|3[0-2])$/.test(authority?.runtimeKey || ''));
+}
+
 /** openai/session is a provider-anonymized CONVERSATION id, not mcp-session-id.
  * Ref: https://developers.openai.com/plugins/reference#client-provided-_meta-fields
  * OAuth and resource checks must already have succeeded. Metadata is routing

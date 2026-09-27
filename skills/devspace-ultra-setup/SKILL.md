@@ -24,6 +24,7 @@ Infrastructure checks are prerequisites, not the product goal. Resume at the ear
 2. Prepare or verify local Gateway/Core and the public OAuth-protected `/mcp` endpoint.
 3. In **ChatGPT Classic**, enable Developer mode, create the exact MCP connection and complete OAuth.
    - Confirm the connection URL is this machine's exact public `/mcp` resource and its reported `serverInstanceId` matches this installation. A similarly named connection for another computer is a separate authority.
+   - When a new conversation's first progress report returns a pending claim, have that Agent call the returned one-time `devspace_progress_bind` action. Later tools reuse the verified provider-conversation binding after a fresh exact-page check; the user need not pair each conversation manually.
 4. Scan or refresh the authenticated tool catalogue and verify all required development tools.
 5. Enable the connection in a fresh ChatGPT Classic conversation.
 6. Run a real read test.
@@ -116,7 +117,7 @@ DuckDNS example:
 
 ```powershell
 $p = Join-Path $env:TEMP 'devspace-ultra-install.ps1'
-iwr 'https://raw.githubusercontent.com/enwong93-sketch/devspace-ultra/v0.5.17/install.ps1' -OutFile $p
+iwr 'https://raw.githubusercontent.com/enwong93-sketch/devspace-ultra/v0.5.18/install.ps1' -OutFile $p
 & $p -Network DuckDNS
 ```
 
@@ -124,7 +125,7 @@ Cloudflare named-tunnel fallback:
 
 ```powershell
 $p = Join-Path $env:TEMP 'devspace-ultra-install.ps1'
-iwr 'https://raw.githubusercontent.com/enwong93-sketch/devspace-ultra/v0.5.17/install.ps1' -OutFile $p
+iwr 'https://raw.githubusercontent.com/enwong93-sketch/devspace-ultra/v0.5.18/install.ps1' -OutFile $p
 & $p -Network Cloudflare -PublicHostname '<stable-hostname>'
 ```
 

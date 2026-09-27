@@ -4,7 +4,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openaiConversationIdentity as identity, OpenaiConversationBindings, localBindingAuthorized,
-  inspectExactConversationPage, OPENAI_CONVERSATION_PAGE_SOURCE } from './openai-conversation-binding.js';
+  inspectExactConversationPage, OPENAI_CONVERSATION_PAGE_SOURCE, verifiedLocalProviderBinding } from './openai-conversation-binding.js';
 const request = { auth: { resource: 'https://owned.example/mcp', clientId: 'oauth-client' },
   meta: { 'openai/session': 'opaque-conversation-one', 'openai/subject': 'opaque-user-one', 'openai/organization': 'org-one' } };
 const proof = { conversationId: 'conversation-exact-a', runtimeKey: 'main-02', pageVerified: true,
@@ -34,6 +34,14 @@ test('unbound provider identity never selects a runtime; proved bindings persist
   assert.equal(await registry.bind(id, { ...proof, source: 'legacy-session-owner' }), null);
   assert.equal((await registry.bind(id, proof)).bound, true);
   assert.equal((await registry.resolve(id)).conversationId, proof.conversationId);
+  const verified = await registry.resolve(id);
+  assert.equal(verifiedLocalProviderBinding(verified, id), true);
+  assert.equal(verifiedLocalProviderBinding(verified, identity({ ...request,
+    auth: { ...request.auth, resource: 'https://other-computer.example/mcp' } })), false,
+    'another computer resource cannot borrow this bound page');
+  assert.equal(verifiedLocalProviderBinding({ ...verified, pageVerified: false }, id), false);
+  assert.equal(verifiedLocalProviderBinding({ ...verified, source: 'legacy-session-owner' }, id), false);
+  assert.equal(verifiedLocalProviderBinding({ ...verified, runtimeKey: 'main-99' }, id), false);
   available = false; assert.equal(await registry.resolve(id), null);
   available = true;
   const restarted = new OpenaiConversationBindings({ statePath, inspect });

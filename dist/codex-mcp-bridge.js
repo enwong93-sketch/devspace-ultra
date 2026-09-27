@@ -364,7 +364,7 @@ export class CodexMcpBridge {
   async createClient(server) {
     const elicitationRuntime = { handler: null };
     const client = new Client(
-        { name: `devspace-codex-mcp-${server.id}`, version: "0.5.17" },
+        { name: `devspace-codex-mcp-${server.id}`, version: "0.5.18" },
       { capabilities: { elicitation: { form: {} } } },
     );
     client.setRequestHandler(ElicitRequestSchema, async (request) => {
