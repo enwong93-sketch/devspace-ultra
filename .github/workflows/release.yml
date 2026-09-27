@@ -41,7 +41,7 @@ jobs:
       - name: Publish release assets
         uses: softprops/action-gh-release@v2
         with:
-          body_path: docs/releases/V0.5.12.md
+          body_path: docs/releases/V0.5.13.md
           files: |
             install.ps1
             install.sh

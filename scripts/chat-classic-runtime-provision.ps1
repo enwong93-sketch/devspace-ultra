@@ -232,7 +232,7 @@ for ($offset = 0; $offset -lt $Count; $offset++) {
     if ($Launch) {
         $aliasPath = Join-Path $env:LOCALAPPDATA ("Microsoft\WindowsApps\" + $descriptor.AliasName)
         if (-not (Test-Path -LiteralPath $aliasPath)) { throw "Runtime alias was not registered: $aliasPath" }
-        Start-Process -FilePath $aliasPath | Out-Null
+        Start-Process -FilePath $aliasPath -WorkingDirectory $env:LOCALAPPDATA | Out-Null
         $launchResult = "started"
     }
 

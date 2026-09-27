@@ -121,7 +121,7 @@ $callback = Get-CallbackFromCompletionUrl -Url $found.Url
 # Keep the one-time callback only in memory. Launching the explicit target alias
 # bypasses Windows' single global chatgpt:// owner and therefore cannot redirect
 # this Interactive login into canonical Main-01.
-Start-Process -FilePath $TargetAlias -ArgumentList @($callback) | Out-Null
+Start-Process -FilePath $TargetAlias -ArgumentList @($callback) -WorkingDirectory $env:LOCALAPPDATA | Out-Null
 $callback = $null
 
 [pscustomobject]@{

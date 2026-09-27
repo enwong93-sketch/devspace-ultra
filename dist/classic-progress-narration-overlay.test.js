@@ -157,6 +157,15 @@ assert.match(script, /PROGRESS_RELAY_MAX_LIVE_FRAMES = 8/);
 assert.match(script, /PROGRESS_RELAY_RETENTION_MS = 150000/);
 assert.match(script, /GOAL_RELAY_MAX_LIVE_FRAMES = 4/);
 assert.match(script, /pruneProgressRelayFrames/);
+assert.match(script, /const RELAY_APP_ORIGINS = \[\]/);
+assert.match(script, /if \(!RELAY_APP_ORIGINS\.length\) return false/);
+assert.match(script, /new URL\(frame\.src, location\.href\)\.origin/);
+const isolatedScript = buildProgressNarrationScript(map, { relayAppOrigins: [
+  "https://asdk_app_local123.web-sandbox.oaiusercontent.com",
+  "https://asdk_app_remote8740.web-sandbox.oaiusercontent.com.evil.example",
+] });
+assert.match(isolatedScript, /asdk_app_local123\.web-sandbox\.oaiusercontent\.com/);
+assert.doesNotMatch(isolatedScript, /remote8740/);
 assert.match(script, /frames\.slice\(0, edge\).*frames\.slice\(-edge\)/s,
   "relay cleanup must preserve both target-order edges because Desktop ordering varies");
 assert.match(script, /frame\.remove\(\)/,

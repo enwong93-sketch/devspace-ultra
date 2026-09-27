@@ -58,6 +58,18 @@ function conversationIdFromUrl(url) {
   catch { return null; }
 }
 
+function appSandboxOriginFromTarget(target) {
+  for (const value of [target?.url, target?.title]) {
+    try {
+      const parsed = new URL(String(value || ""));
+      if (parsed.protocol !== "https:") continue;
+      if (!/^asdk_app_[a-z0-9]+\.web-sandbox\.oaiusercontent\.com$/i.test(parsed.hostname)) continue;
+      return parsed.origin;
+    } catch {}
+  }
+  return null;
+}
+
 function boundedEdgeCandidates(items, limit) {
   const rows = Array.isArray(items) ? items : [];
   const cap = Math.max(8, Number(limit) || DEFAULT_MAX_IFRAMES);
@@ -223,8 +235,12 @@ export class ConversationStartClaimCdpResolver {
           const page = pages.get(String(row.target.parentId || ""));
           const conversationId = conversationIdFromUrl(page?.url);
           const runtimeKey = runtimeKeyForPort(port);
+          const appSandboxOrigin = appSandboxOriginFromTarget(row.target);
           if (!conversationId || !runtimeKey) continue;
-          if (!owners.has(conversationId)) owners.set(conversationId, { runtimeKey, conversationId });
+          const existingOwner = owners.get(conversationId);
+          if (existingOwner?.appSandboxOrigin && appSandboxOrigin && existingOwner.appSandboxOrigin !== appSandboxOrigin) return null;
+          if (!existingOwner) owners.set(conversationId, { runtimeKey, conversationId, appSandboxOrigin });
+          else if (!existingOwner.appSandboxOrigin && appSandboxOrigin) existingOwner.appSandboxOrigin = appSandboxOrigin;
           displays.set(`${port}:${page.id}`, { port, pageId: page.id, conversationId });
         }
         if (owners.size > 1) return null;
@@ -259,6 +275,7 @@ export const conversationStartClaimCdpInternals = {
   claimProbeExpression,
   cleanClaimId,
   conversationIdFromUrl,
+  appSandboxOriginFromTarget,
   boundedEdgeCandidates,
   chooseAppContext,
 };

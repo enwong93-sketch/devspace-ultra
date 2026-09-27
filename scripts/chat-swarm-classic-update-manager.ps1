@@ -210,7 +210,7 @@ function Start-Canary {
     Start-Process -FilePath $Runtime.AliasPath -ArgumentList @(
         "--remote-debugging-address=127.0.0.1",
         "--remote-debugging-port=$($Runtime.DebugPort)"
-    ) | Out-Null
+    ) -WorkingDirectory $env:LOCALAPPDATA | Out-Null
     $deadline = (Get-Date).AddSeconds(20)
     do {
         Start-Sleep -Milliseconds 400

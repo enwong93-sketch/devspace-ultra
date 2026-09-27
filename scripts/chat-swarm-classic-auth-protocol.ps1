@@ -121,7 +121,7 @@ $protocolPresent = $null -ne $verifyManifest.SelectSingleNode("//uap:Extension[@
 if ($Launch) {
     $aliasPath = Join-Path $env:LOCALAPPDATA ("Microsoft\WindowsApps\" + $aliasName)
     if (-not (Test-Path -LiteralPath $aliasPath)) { throw "Worker alias is missing: $aliasPath" }
-    Start-Process -FilePath $aliasPath | Out-Null
+    Start-Process -FilePath $aliasPath -WorkingDirectory $env:LOCALAPPDATA | Out-Null
 }
 
 [pscustomobject]@{

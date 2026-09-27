@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 0.5.13 — 2026-09-28
+
+- Make updater busy detection use the Stable Gateway's authoritative non-stream request counter. Ordinary replayable SSE connections and the updater's own status probe no longer block a safe package handover.
+- Preserve a legacy scoped package root side-by-side when already-open ChatGPT Classic windows inherited it as their process working directory; migrate tasks and shims to the canonical package without closing those conversations.
+- Snapshot and stop the exact DevSpace runtime process tree, including Caddy and descendant helpers, while temporarily disabling runtime/watchdog triggers so a package swap cannot race an automatic restart.
+- Rebuild and execute a real in-memory `better-sqlite3` smoke test in the staged package before promotion, and regenerate Stable Gateway/watchdog tasks from the canonical package after legacy migration.
+- Launch future Main/Worker ChatGPT Classic processes from a stable LocalAppData working directory instead of a package directory, allowing later package retirement without closing user conversations.
+- Retain up to 48 Agent-authored progress messages per conversation under a bounded 256-message global cap, so one busy Main cannot evict every other Main's useful narration history.
+- Add a read-only live relay-retention gate reporting exact Main route, DOM relay count, target count, DOM nodes and JS heap without navigating or sending a turn.
+- Isolate relay cleanup by the exact ChatGPT App sandbox origin learned from this installation's one-time claim. A second Connector such as DevSpace EXP8740 cannot donate authority, satisfy a claim, or have its relay frames removed merely because it uses the same `ui://devspace/...` resource title.
+
 ## 0.5.12 — 2026-09-28
 
 - Fix the transactional Windows updater falsely treating its own authenticated `/__devspace/gateway/status` probe as active non-stream work. The updater now subtracts that one in-flight control request while continuing to defer for every additional HTTP request or real non-stream tool call.

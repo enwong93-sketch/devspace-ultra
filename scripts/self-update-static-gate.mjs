@@ -51,7 +51,26 @@ assert.match(updater, /else \{[\s\S]*npmOutput = @\(& \$npm\.Source install --gl
   "production staging must continue to use a real isolated npm install");
 assert.match(updater, /Get-GatewayBusyState/);
 assert.match(updater, /\$otherHttpActive\s*=\s*\[Math\]::Max\(0,\s*\$httpActive\s*-\s*1\)/, "updater must exclude its own gateway status request from active-work detection");
-assert.match(updater, /Busy\s*=\s*\(\(\$otherHttpActive\s*\+\s*\$toolActive\)\s*-gt\s*0\)/, "real concurrent HTTP and non-stream tool work must still defer updates");
+assert.match(updater, /Busy\s*=\s*\(\$toolActive\s*-gt\s*0\)/, "the authoritative non-stream tool counter must defer real work without treating replayable SSE as busy");
+assert.match(updater, /function Move-ItemWithRetry/);
+assert.match(updater, /bounded Windows lock retries/);
+assert.match(updater, /Collections\.Generic\.HashSet\[int\]/);
+assert.match(updater, /candidate\.ParentProcessId/);
+assert.match(updater, /\$devspaceCaddyConfigs/);
+assert.match(updater, /\[string\]\$_\.Name -ieq 'caddy\.exe'/);
+assert.match(updater, /DevSpace-Stable-Gateway-Watchdog/);
+assert.match(updater, /WasEnabled\s*=\s*\$task\.State\.ToString\(\) -ne "Disabled"/);
+assert.match(updater, /Disable-ScheduledTask/);
+assert.match(updater, /Enable-ScheduledTask/);
+assert.match(updater, /\$descendantProcessIds\s*\+\s*\$ownedProcessIds/);
+assert.match(updater, /DevSpace package-owning process tree did not exit before package swap/);
+assert.match(updater, /Move-ItemWithRetry -Source \$record\.Root/);
+assert.match(updater, /Move-ItemWithRetry -Source \$staged\.Root/);
+assert.match(updater, /npm\.Source rebuild better-sqlite3/);
+assert.match(updater, /better-sqlite3 native binding did not load/);
+assert.match(updater, /preservedLegacyRoots/);
+assert.match(updater, /devspace-stable-gateway-startup\.ps1/);
+assert.match(updater, /-Action install -ConfigDir \$gatewayConfigDir/);
 assert.match(updater, /if \(\$busy\.Known -and \$busy\.Busy -and -not \$Force\)/,
   "automatic update must defer instead of interrupting active Agent/tool work");
 assert.match(updater, /DevSpace-Ultra-Auto-Update/);

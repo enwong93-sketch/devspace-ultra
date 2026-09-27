@@ -137,8 +137,12 @@ for (const required of [
 }
 const blenderRuntime = (listed.body?.result?.tools || []).find((tool) => tool.name === "blender_runtime");
 const blenderMcp = (listed.body?.result?.tools || []).find((tool) => tool.name === "blender_mcp");
+const progressReport = (listed.body?.result?.tools || []).find((tool) => tool.name === "devspace_progress_report");
+const progressBind = (listed.body?.result?.tools || []).find((tool) => tool.name === "devspace_progress_bind");
 assert.ok(blenderRuntime?.inputSchema?.properties?.runtimeId, "blender_runtime must expose runtimeId ownership routing.");
 assert.ok(blenderMcp?.inputSchema?.properties?.runtimeId, "blender_mcp must expose runtimeId so one Agent cannot fall back to another Agent's Blender.");
+assert.equal(progressReport?._meta?.ui?.resourceUri, undefined, "recurring progress reports must not mount a relay iframe");
+assert.equal(progressBind?._meta?.ui?.resourceUri, "ui://devspace/progress-claim-relay.html", "only the one-time progress bind may mount the relay iframe");
 
 if (holdSeconds > 0) {
   console.log(JSON.stringify({

@@ -76,7 +76,7 @@ import { GoalRunProgressSupervisor } from "./goal-run-progress-supervisor.js";
 import { createMemoryDiagnostics, runPassiveDiagnosticGc } from "./memory-diagnostics.js";
 import { McpRequestCorrelationDiagnostics } from "./mcp-request-correlation-diagnostics.js";
 import { incrementBoundedCounter } from "./bounded-diagnostics.js";
-import { pruneStaleAtomicTempFiles } from "./atomic-file.js";
+import { atomicWriteJson, pruneStaleAtomicTempFiles } from "./atomic-file.js";
 import { ToolCatalogRegistry, instrumentToolRegistration } from "./tool-catalog.js";
 import { registerCodexParityTools } from "./codex-parity-tools.js";
 import { registerCodexComputerUseRouter } from "./codex-computer-use-router.js";
@@ -118,6 +118,17 @@ const CHAT_SWARM_UI_DIAGNOSTICS = {
     mcpMethodCounts: {},
 };
 const MCP_CONVERSATION_CORRELATION_TIMEOUT_MS = 6_000;
+function normalizeRelayAppSandboxOrigin(value) {
+    try {
+        const parsed = new URL(String(value || ""));
+        if (parsed.protocol !== "https:") return null;
+        if (!/^asdk_app_[a-z0-9]+\.web-sandbox\.oaiusercontent\.com$/i.test(parsed.hostname)) return null;
+        return parsed.origin;
+    }
+    catch {
+        return null;
+    }
+}
 const WRITE_TOOL_ANNOTATIONS = {
     readOnlyHint: false,
     destructiveHint: true,
@@ -762,7 +773,7 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
     const server = new McpServer({
         name: "devspace",
         title: "DevSpace",
-         version: "0.5.12",
+         version: "0.5.13",
         description: "Secure local coding workspace for MCP clients. Provides workspace-scoped file, search, edit, write, process, capability, and Codex-parity tools.",
     }, {
         instructions: modelInstructions,
@@ -2464,8 +2475,41 @@ export function createServer(config = loadConfig(), options = {}) {
     const progressBootstrapAuthority = new ProgressBootstrapAuthorityRegistry();
     const conversationStartClaimRegistry = new ConversationStartClaimRegistry();
     const conversationStartClaimCdp = new ConversationStartClaimCdpResolver({ ports: classicCdpOptions.ports });
-    const resolveProgressClaimPage = async (claimId) => conversationStartClaimCdp.find({ claimId, claimType: "progress" });
-    const resolveStartClaimPage = async (claimId) => conversationStartClaimCdp.find({ claimId, claimType: "conversation-start" });
+    const relayAppOriginStatePath = join(config.stateDir, "classic-relay-app-origins-v1.json");
+    const relayAppOrigins = new Set();
+    try {
+        const persistedOrigins = JSON.parse(readFileSync(relayAppOriginStatePath, "utf8").replace(/^\uFEFF/, ""));
+        for (const value of Array.isArray(persistedOrigins?.origins) ? persistedOrigins.origins : []) {
+            const origin = normalizeRelayAppSandboxOrigin(value);
+            if (origin)
+                relayAppOrigins.add(origin);
+        }
+    }
+    catch { }
+    let relayAppOriginPersist = Promise.resolve();
+    const recordRelayAppOrigin = (authority) => {
+        const origin = normalizeRelayAppSandboxOrigin(authority?.appSandboxOrigin);
+        if (!origin || relayAppOrigins.has(origin))
+            return;
+        relayAppOrigins.add(origin);
+        while (relayAppOrigins.size > 8)
+            relayAppOrigins.delete(relayAppOrigins.values().next().value);
+        relayAppOriginPersist = relayAppOriginPersist.catch(() => { }).then(() => atomicWriteJson(relayAppOriginStatePath, {
+            version: 1,
+            origins: [...relayAppOrigins],
+            updatedAt: new Date().toISOString(),
+        })).catch(() => { });
+    };
+    const resolveProgressClaimPage = async (claimId) => {
+        const authority = await conversationStartClaimCdp.find({ claimId, claimType: "progress" });
+        recordRelayAppOrigin(authority);
+        return authority;
+    };
+    const resolveStartClaimPage = async (claimId) => {
+        const authority = await conversationStartClaimCdp.find({ claimId, claimType: "conversation-start" });
+        recordRelayAppOrigin(authority);
+        return authority;
+    };
     const mcpRequestCorrelationDiagnostics = new McpRequestCorrelationDiagnostics();
     const requestConversationContext = new McpConversationRequestContext();
     const persistConversationIdentity = async (event) => {
@@ -2837,6 +2881,7 @@ export function createServer(config = loadConfig(), options = {}) {
         planStatePath: join(config.stateDir, "plan-state.json"),
         goalStatePath: join(config.stateDir, "goal-state.json"),
         producerPriority: config.classicUiOwnerPriority,
+        getRelayAppOrigins: () => [...relayAppOrigins],
     });
     const computerUseOverlay = new ClassicComputerUseOverlay({
         adapter: progressLivenessAdapter,

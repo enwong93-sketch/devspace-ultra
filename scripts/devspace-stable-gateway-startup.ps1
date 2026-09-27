@@ -13,6 +13,8 @@ $packageRoot = Split-Path $PSScriptRoot -Parent
 $helper = Join-Path $PSScriptRoot "devspace-fixed-backend.mjs"
 $node = (Get-Command node -ErrorAction Stop).Source
 $configPath = [System.IO.Path]::GetFullPath($ConfigDir)
+$runtimeWorkingDirectory = Join-Path $env:LOCALAPPDATA "DevSpaceUltra\RuntimeWorkingDirectory"
+New-Item -ItemType Directory -Path $runtimeWorkingDirectory -Force | Out-Null
 
 function Invoke-GatewayHelper {
     param([switch]$Status)
@@ -30,7 +32,7 @@ function Get-GatewayTask {
 
 function New-GatewayTaskAction {
     $taskArgs = '"{0}" --foreground --config-dir "{1}"' -f $helper, $configPath
-    return New-ScheduledTaskAction -Execute $node -Argument $taskArgs -WorkingDirectory $packageRoot
+    return New-ScheduledTaskAction -Execute $node -Argument $taskArgs -WorkingDirectory $runtimeWorkingDirectory
 }
 
 function New-GatewayTaskTriggers {
@@ -66,7 +68,7 @@ function New-GatewayTaskPrincipal {
 
 function Install-GatewayWatchdog {
     $watchdogArgs = '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}" -Action watchdog -ConfigDir "{1}"' -f $PSCommandPath, $configPath
-    $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $watchdogArgs -WorkingDirectory $packageRoot
+    $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $watchdogArgs -WorkingDirectory $runtimeWorkingDirectory
     $settings = New-ScheduledTaskSettingsSet `
         -ExecutionTimeLimit (New-TimeSpan -Minutes 2) `
         -MultipleInstances IgnoreNew `
