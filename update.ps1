@@ -321,7 +321,11 @@ function Get-GatewayBusyState {
         $status = Invoke-RestMethod -Uri "http://127.0.0.1:$port/__devspace/gateway/status" -Headers $headers -Method Get -UseBasicParsing
         $httpActive = if ($status.admission -and $status.admission.PSObject.Properties.Name -contains "activeRequests") { [int]$status.admission.activeRequests } else { 0 }
         $toolActive = if ($status.sessions -and $status.sessions.PSObject.Properties.Name -contains "totalNonStreamActiveRequests") { [int]$status.sessions.totalNonStreamActiveRequests } else { 0 }
-        return [pscustomobject]@{ Known = $true; Busy = (($httpActive + $toolActive) -gt 0); HttpActive = $httpActive; ToolActive = $toolActive }
+        # The control GET above is itself admitted before the status snapshot is
+        # generated, so activeRequests always includes this updater probe. Count
+        # only additional HTTP requests; real session/tool work remains guarded.
+        $otherHttpActive = [Math]::Max(0, $httpActive - 1)
+        return [pscustomobject]@{ Known = $true; Busy = (($otherHttpActive + $toolActive) -gt 0); HttpActive = $httpActive; OtherHttpActive = $otherHttpActive; ToolActive = $toolActive }
     }
     catch { return [pscustomobject]@{ Known = $false; Busy = $false } }
 }

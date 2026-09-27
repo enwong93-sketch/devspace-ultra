@@ -1,7 +1,7 @@
 {
   "id": "devspace-network-setup",
   "name": "DevSpace for ChatGPT Classic",
-  "version": "0.5.11",
+  "version": "0.5.12",
   "description": "Install and verify DevSpace Ultra as an OAuth-protected local development MCP for ChatGPT Classic. Codex may execute setup, but Classic connection, OAuth, full tools and read/write/reconnect evidence are mandatory.",
   "aliases": [
     "devspace setup",
