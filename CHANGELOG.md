@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.5.12 — 2026-09-28
+
+- Fix the transactional Windows updater falsely treating its own authenticated `/__devspace/gateway/status` probe as active non-stream work. The updater now subtracts that one in-flight control request while continuing to defer for every additional HTTP request or real non-stream tool call.
+
 ## 0.5.11 — 2026-09-27
 
 - Stop recurring `devspace_progress_report` calls from mounting a new hidden MCP App iframe. A report that still needs exact-page ownership now returns one explicit `devspace_progress_bind` action; only that one-time bind tool carries the relay UI.

@@ -50,6 +50,8 @@ assert.match(updater, /if \(\$script:TestMode\)[\s\S]*archive-extract[\s\S]*Get-
 assert.match(updater, /else \{[\s\S]*npmOutput = @\(& \$npm\.Source install --global --prefix \$stagePrefix \$ArchivePath --ignore-scripts/s,
   "production staging must continue to use a real isolated npm install");
 assert.match(updater, /Get-GatewayBusyState/);
+assert.match(updater, /\$otherHttpActive\s*=\s*\[Math\]::Max\(0,\s*\$httpActive\s*-\s*1\)/, "updater must exclude its own gateway status request from active-work detection");
+assert.match(updater, /Busy\s*=\s*\(\(\$otherHttpActive\s*\+\s*\$toolActive\)\s*-gt\s*0\)/, "real concurrent HTTP and non-stream tool work must still defer updates");
 assert.match(updater, /if \(\$busy\.Known -and \$busy\.Busy -and -not \$Force\)/,
   "automatic update must defer instead of interrupting active Agent/tool work");
 assert.match(updater, /DevSpace-Ultra-Auto-Update/);
