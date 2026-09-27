@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.5.16 — 2026-09-28
+
+- Inject an unguessable per-Core origin-probe URL into the local progress relay resource so old cached ChatGPT tool schemas can safely identify this server's `asdk_app_*` sandbox origin.
+- Accept origin registration only with the matching in-memory probe token and a validated OpenAI sandbox hostname; persist it under the existing `serverInstanceId + resource origin` boundary.
+- Let locally owned stale relay frames become reclaimable without deleting or counting frames owned by another DevSpace Connector on the same ChatGPT account.
+
 ## 0.5.15 — 2026-09-28
 
 - Capture `npm rebuild better-sqlite3` and native smoke-test stdout inside the transactional updater's staging function, preserving its single package-object return contract under PowerShell pipelines.

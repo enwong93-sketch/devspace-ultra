@@ -24,6 +24,17 @@
 (() => {
   let dispatchStarted = false;
   let relayRetired = false;
+  const relayOriginProbeUrl = "__DEVSPACE_RELAY_ORIGIN_PROBE_URL__";
+
+  if (relayOriginProbeUrl.startsWith("https://")) {
+    void fetch(relayOriginProbeUrl, {
+      method: "GET",
+      mode: "cors",
+      credentials: "omit",
+      cache: "no-store",
+      referrerPolicy: "no-referrer",
+    }).catch(() => {});
+  }
 
   const progressClaimFrom = (value) => {
     if (!value || typeof value !== "object") return null;

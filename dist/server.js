@@ -426,8 +426,9 @@ function goalDockHtml() {
 function goalContinuationRelayHtml() {
     return readFileSync(new URL("./ui/goal-continuation-relay.html", import.meta.url), "utf8");
 }
-function progressClaimRelayHtml() {
-    return readFileSync(new URL("./ui/progress-claim-relay.html", import.meta.url), "utf8");
+function progressClaimRelayHtml(relayOriginProbeUrl) {
+    return readFileSync(new URL("./ui/progress-claim-relay.html", import.meta.url), "utf8")
+        .replace("__DEVSPACE_RELAY_ORIGIN_PROBE_URL__", String(relayOriginProbeUrl || ""));
 }
 function appCsp(config) {
     const publicBaseUrl = config.publicBaseUrl.replace(/\/+$/, "");
@@ -767,14 +768,14 @@ function registerCodexProcessTools(server, config, workspaces, processSessions) 
         });
     });
 }
-function createMcpServer(config, workspaces, reviewCheckpoints, processSessions, localAgentProviders, incomingArtifactAdapters, chatSwarm, capabilityRuntime, blenderRuntimeManager, codexMcpBridge, conversationContinuity, contextGuardian, exactUsageAuthority, codexContextBridge, planRuntime, goalRuntime, goalHostBridge, hostOverlayProjection, computerUseOverlay, conversationAuthority, conversationAuthorityReady, goalRunProgress, requestConversationContext, progressClaimRegistry, progressBootstrapAuthority, conversationStartClaimRegistry, resolveProgressClaimPage, resolveStartClaimPage, interactiveProgressGate, conversationProgressLiveness = null, openaiBindings = null) {
+function createMcpServer(config, workspaces, reviewCheckpoints, processSessions, localAgentProviders, incomingArtifactAdapters, chatSwarm, capabilityRuntime, blenderRuntimeManager, codexMcpBridge, conversationContinuity, contextGuardian, exactUsageAuthority, codexContextBridge, planRuntime, goalRuntime, goalHostBridge, hostOverlayProjection, computerUseOverlay, conversationAuthority, conversationAuthorityReady, goalRunProgress, requestConversationContext, progressClaimRegistry, progressBootstrapAuthority, conversationStartClaimRegistry, resolveProgressClaimPage, resolveStartClaimPage, interactiveProgressGate, conversationProgressLiveness = null, openaiBindings = null, relayOriginProbeUrl = "") {
     const toolSurface = toolModeCapabilities(config.toolMode);
     const modelInstructions = serverInstructions(config);
     const modelInstructionsFingerprint = createHash("sha256").update(modelInstructions).digest("hex");
     const server = new McpServer({
         name: "devspace",
         title: "DevSpace",
-         version: "0.5.15",
+         version: "0.5.16",
         description: "Secure local coding workspace for MCP clients. Provides workspace-scoped file, search, edit, write, process, capability, and Codex-parity tools.",
     }, {
         instructions: modelInstructions,
@@ -943,7 +944,7 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
             {
                 uri: PROGRESS_CLAIM_RELAY_URI,
                 mimeType: RESOURCE_MIME_TYPE,
-                text: progressClaimRelayHtml(),
+                text: progressClaimRelayHtml(relayOriginProbeUrl),
                 _meta: {
                     ui: {
                         csp: appCsp(config),
@@ -2506,6 +2507,8 @@ export function createServer(config = loadConfig(), options = {}) {
             updatedAt: new Date().toISOString(),
         })).catch(() => { });
     };
+    const relayOriginProbeToken = randomUUID();
+    const relayOriginProbeUrl = `${config.publicBaseUrl.replace(/\/+$/, "")}/__devspace/relay-origin-probe?t=${encodeURIComponent(relayOriginProbeToken)}`;
     const resolveProgressClaimPage = async (claimId) => {
         const authority = await conversationStartClaimCdp.find({ claimId, claimType: "progress" });
         recordRelayAppOrigin(authority);
@@ -3120,7 +3123,7 @@ export function createServer(config = loadConfig(), options = {}) {
     const localAgentProviders = config.subagents
         ? getLocalAgentProviderAvailabilitySnapshot()
         : [];
-    const mcpServerTemplate = createMcpServer(config, workspaces, reviewCheckpoints, processSessions, localAgentProviders, incomingArtifactAdapters, chatSwarm, capabilityRuntime, blenderRuntimeManager, codexMcpBridge, conversationContinuity, contextGuardian, exactUsageAuthority, codexContextBridge, planRuntime, goalRuntime, goalHostBridge, hostOverlayProjection, computerUseOverlay, conversationAuthority, conversationAuthorityReady, goalRunProgress, requestConversationContext, progressClaimRegistry, progressBootstrapAuthority, conversationStartClaimRegistry, resolveProgressClaimPage, resolveStartClaimPage, interactiveProgressGate, conversationProgressLiveness, openaiBindings);
+    const mcpServerTemplate = createMcpServer(config, workspaces, reviewCheckpoints, processSessions, localAgentProviders, incomingArtifactAdapters, chatSwarm, capabilityRuntime, blenderRuntimeManager, codexMcpBridge, conversationContinuity, contextGuardian, exactUsageAuthority, codexContextBridge, planRuntime, goalRuntime, goalHostBridge, hostOverlayProjection, computerUseOverlay, conversationAuthority, conversationAuthorityReady, goalRunProgress, requestConversationContext, progressClaimRegistry, progressBootstrapAuthority, conversationStartClaimRegistry, resolveProgressClaimPage, resolveStartClaimPage, interactiveProgressGate, conversationProgressLiveness, openaiBindings, relayOriginProbeUrl);
     const mcpTemplateDiagnostics = mcpServerTemplateDiagnostics(mcpServerTemplate);
     logEvent(config.logging, "info", "mcp_server_template_ready", mcpTemplateDiagnostics);
     const createSessionMcpServer = () => createMcpSessionServerFromTemplate(mcpServerTemplate);
@@ -3191,6 +3194,20 @@ export function createServer(config = loadConfig(), options = {}) {
         fallthrough: false,
         setHeaders: setAssetHeaders,
     }));
+    app.get("/__devspace/relay-origin-probe", (req, res) => {
+        const origin = normalizeRelayAppSandboxOrigin(req.get("origin"));
+        const token = String(req.query?.t || "");
+        res.setHeader("cache-control", "no-store");
+        res.setHeader("x-content-type-options", "nosniff");
+        if (!origin || token !== relayOriginProbeToken) {
+            res.status(404).end();
+            return;
+        }
+        recordRelayAppOrigin({ appSandboxOrigin: origin });
+        res.setHeader("access-control-allow-origin", origin);
+        res.setHeader("vary", "Origin");
+        res.status(204).end();
+    });
     app.get("/healthz", (_req, res) => {
         res.json({ ok: true, name: "devspace", serverInstanceId: config.serverInstanceId, resource: resourceServerUrl.toString(), executionPolicy: executionPolicySnapshot(), chatSwarmUi: CHAT_SWARM_UI_DIAGNOSTICS });
     });
