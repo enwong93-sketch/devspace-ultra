@@ -1,6 +1,6 @@
 {
   "name": "devspace-ultra",
-  "version": "0.5.15",
+  "version": "0.5.16",
   "description": "DevSpace Ultra: OAuth-protected local development and durable long-task continuity for ChatGPT Classic on Windows.",
   "type": "module",
   "main": "dist/server.js",

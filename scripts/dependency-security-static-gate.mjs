@@ -26,7 +26,7 @@ const braceExpansion = versionAt('brace-expansion');
 assert.ok(semver.gte(undici, '8.9.0'), `undici ${undici} is below the reviewed fix boundary`);
 assert.ok(semver.gt(protobufjs, '7.6.4'), `protobufjs ${protobufjs} is still advisory-affected`);
 assert.ok(semver.gte(braceExpansion, '5.0.9'), `brace-expansion ${braceExpansion} is still advisory-affected`);
-assert.equal(pkg.version, '0.5.15', 'reviewed ChatGPT Classic install-contract release version must not silently drift');
+assert.equal(pkg.version, '0.5.16', 'reviewed ChatGPT Classic install-contract release version must not silently drift');
 
 console.log(JSON.stringify({
   ok: true,

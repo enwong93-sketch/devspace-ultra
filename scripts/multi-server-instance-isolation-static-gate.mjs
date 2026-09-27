@@ -23,6 +23,13 @@ assert.match(server, /chatGptConnectorRequest[\s\S]{0,1600}!exactAuthority\?\.co
   "non-bootstrap ChatGPT calls must fail closed without a current exact local invocation");
 assert.match(server, /serverInstanceId:\s*config\.serverInstanceId[\s\S]{0,200}resourceOrigin:/,
   "persisted App origins must be scoped by both server instance and public resource origin");
+assert.match(server, /relayOriginProbeToken\s*=\s*randomUUID\(\)/);
+assert.match(server, /__devspace\/relay-origin-probe\?t=/);
+assert.match(server, /token !== relayOriginProbeToken/,
+  "an arbitrary second Connector must not be able to register its App origin against this instance");
+assert.match(server, /access-control-allow-origin/);
+assert.match(server, /progressClaimRelayHtml\(relayOriginProbeUrl\)/,
+  "the token-bound origin probe must be injected only into this server's relay resource");
 assert.match(overlay, /ownedRelayFrame/);
 assert.match(overlay, /RELAY_APP_ORIGINS/);
 assert.match(resolver, /existingOwner\.appSandboxOrigin !== appSandboxOrigin/,
@@ -36,5 +43,6 @@ console.log(JSON.stringify({
   oauthAudienceBound: true,
   exactLocalInvocationRequired: true,
   connectorAppOriginBound: true,
+  tokenBoundOriginProbe: true,
   crossComputerFailClosed: true,
 }));

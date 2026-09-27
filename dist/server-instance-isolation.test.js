@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig } from "./config.js";
@@ -103,8 +103,32 @@ try {
   const protocolVersion = initialized.body?.result?.protocolVersion || "2025-11-25";
   await post({ jsonrpc: "2.0", method: "notifications/initialized", params: {} }, sessionId, protocolVersion);
 
+  const resourceResult = await post({
+    jsonrpc: "2.0", id: 2, method: "resources/read",
+    params: { uri: "ui://devspace/progress-claim-relay.html" },
+  }, sessionId, protocolVersion);
+  const relayHtml = resourceResult.body?.result?.contents?.[0]?.text || "";
+  const probeMatch = relayHtml.match(/https:\/\/computer-a\.example\/__devspace\/relay-origin-probe\?t=[0-9a-f-]+/i);
+  assert.ok(probeMatch, "relay resource must contain one unguessable instance-origin probe URL");
+  const publicProbe = new URL(probeMatch[0]);
+  const localProbe = new URL(`${publicProbe.pathname}${publicProbe.search}`, base);
+  const appOrigin = "https://asdk_app_computera.web-sandbox.oaiusercontent.com";
+  const probed = await fetch(localProbe, { headers: { origin: appOrigin } });
+  assert.equal(probed.status, 204);
+  assert.equal(probed.headers.get("access-control-allow-origin"), appOrigin);
+  let persistedOrigins = null;
+  for (let attempt = 0; attempt < 20 && !persistedOrigins; attempt += 1) {
+    try { persistedOrigins = JSON.parse(readFileSync(join(config.stateDir, "classic-relay-app-origins-v1.json"), "utf8")); }
+    catch { await new Promise((resolve) => setTimeout(resolve, 25)); }
+  }
+  assert.equal(persistedOrigins?.serverInstanceId, "computer-a-instance");
+  assert.equal(persistedOrigins?.resourceOrigin, "https://computer-a.example");
+  assert.deepEqual(persistedOrigins?.origins, [appOrigin]);
+  const rejectedProbe = await fetch(new URL(`${localProbe.pathname}?t=wrong`, base), { headers: { origin: "https://asdk_app_remote.web-sandbox.oaiusercontent.com" } });
+  assert.equal(rejectedProbe.status, 404);
+
   const denied = await post({
-    jsonrpc: "2.0", id: 2, method: "tools/call",
+    jsonrpc: "2.0", id: 3, method: "tools/call",
     params: { name: "open_workspace", arguments: { path: root } },
   }, sessionId, protocolVersion);
   assert.equal(denied.body?.error?.code, -32031);
@@ -113,7 +137,7 @@ try {
   assert.equal(denied.body?.error?.data?.resource, resource.toString());
   assert.equal(denied.body?.error?.data?.bootstrapTools.includes("devspace_progress_report"), true);
 
-  console.log(JSON.stringify({ ok: true, gate: "server-instance-isolation", wrongComputerCallDenied: true, exactLocalInvocationRequired: true }));
+  console.log(JSON.stringify({ ok: true, gate: "server-instance-isolation", wrongComputerCallDenied: true, exactLocalInvocationRequired: true, tokenBoundAppOriginProbe: true }));
 } finally {
   if (httpServer) {
     const closed = new Promise((resolve) => httpServer.close(resolve));
