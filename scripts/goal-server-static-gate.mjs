@@ -64,7 +64,7 @@ assert.match(source, /new ConversationStartClaimRegistry\(\)/,
   "Goal start recovery must use one bounded in-memory claim registry rather than a reusable session owner");
 assert.match(source, /new ConversationStartClaimCdpResolver\(\{\s*ports:\s*classicCdpOptions\.ports,?\s*\}\)/s,
   "Goal start recovery must prove the hidden claim iframe under the bounded Classic Main port set");
-assert.match(source, /const resolveStartClaimPage = async \(claimId\) => conversationStartClaimCdp\.find\(\{ claimId, claimType: "conversation-start" \}\)/,
+assert.match(source, /const resolveStartClaimPage = async \(claimId\) => \{[\s\S]{0,240}conversationStartClaimCdp\.find\(\{ claimId, claimType: "conversation-start" \}\)[\s\S]{0,160}recordRelayAppOrigin\(authority\)[\s\S]{0,120}return authority/,
   "Goal start recovery must resolve a one-time claim to its exact parent ChatGPT page");
 assert.match(source, /conversationStartClaimRelay/,
   "exact-page relay retries must not be counted as a second substantive user work tool");

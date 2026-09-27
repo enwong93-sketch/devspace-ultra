@@ -146,11 +146,26 @@ function serializeInline(value) {
     .replace(/\u2029/g, "\\u2029");
 }
 
+function normalizeRelayAppOrigins(values) {
+  const origins = [];
+  for (const value of Array.isArray(values) ? values : []) {
+    try {
+      const parsed = new URL(String(value || ""));
+      if (parsed.protocol !== "https:") continue;
+      if (!/^asdk_app_[a-z0-9]+\.web-sandbox\.oaiusercontent\.com$/i.test(parsed.hostname)) continue;
+      if (!origins.includes(parsed.origin)) origins.push(parsed.origin);
+    } catch {}
+  }
+  return origins.slice(-8);
+}
+
 export function buildProgressNarrationScript(map, {
   producerId = "devspace-progress-default",
   producerPriority = 0,
+  relayAppOrigins = [],
 } = {}) {
   const serialized = serializeInline(map && typeof map === "object" ? map : {});
+  const serializedRelayAppOrigins = serializeInline(normalizeRelayAppOrigins(relayAppOrigins));
   return `(() => {
     const ROOT_ID = ${JSON.stringify(ROOT_ID)};
     const STYLE_ID = ${JSON.stringify(STYLE_ID)};
@@ -165,6 +180,7 @@ export function buildProgressNarrationScript(map, {
     const PROGRESS_RELAY_RETENTION_MS = ${PROGRESS_RELAY_RETENTION_MS};
     const GOAL_RELAY_RESOURCE_TITLE = ${JSON.stringify(GOAL_RELAY_RESOURCE_TITLE)};
     const GOAL_RELAY_MAX_LIVE_FRAMES = ${GOAL_RELAY_MAX_LIVE_FRAMES};
+    const RELAY_APP_ORIGINS = ${serializedRelayAppOrigins};
     const LEASE_MS = ${LEASE_MS};
     const conversationId = location.pathname.match(/\\/c\\/([^/?#]+)/)?.[1] || null;
     const lifecycleNow = Date.now();
@@ -262,6 +278,11 @@ export function buildProgressNarrationScript(map, {
       }
       return frame?.parentElement?.parentElement || frame || null;
     };
+    const ownedRelayFrame = (frame) => {
+      if (!RELAY_APP_ORIGINS.length) return false;
+      try { return RELAY_APP_ORIGINS.includes(new URL(frame.src, location.href).origin); }
+      catch { return false; }
+    };
     const retireLegacyInlineApps = () => {
       let retiredApps = 0;
       let retiredErrors = 0;
@@ -293,7 +314,7 @@ export function buildProgressNarrationScript(map, {
     };
     const pruneProgressRelayFrames = () => {
       const frames = [...document.querySelectorAll('iframe')]
-        .filter((frame) => (frame.getAttribute('title') || '') === PROGRESS_RELAY_RESOURCE_TITLE);
+        .filter((frame) => (frame.getAttribute('title') || '') === PROGRESS_RELAY_RESOURCE_TITLE && ownedRelayFrame(frame));
       const now = Date.now();
       const edge = Math.ceil(PROGRESS_RELAY_MAX_LIVE_FRAMES / 2);
       const keep = new Set([...frames.slice(0, edge), ...frames.slice(-edge)]);
@@ -312,7 +333,7 @@ export function buildProgressNarrationScript(map, {
     };
     const pruneGoalRelayFrames = () => {
       const frames = [...document.querySelectorAll('iframe')]
-        .filter((frame) => (frame.getAttribute('title') || '') === GOAL_RELAY_RESOURCE_TITLE);
+        .filter((frame) => (frame.getAttribute('title') || '') === GOAL_RELAY_RESOURCE_TITLE && ownedRelayFrame(frame));
       const now = Date.now();
       const edge = Math.ceil(GOAL_RELAY_MAX_LIVE_FRAMES / 2);
       const keep = new Set([...frames.slice(0, edge), ...frames.slice(-edge)]);
@@ -736,6 +757,7 @@ export class ClassicProgressNarrationOverlay {
     now = () => Date.now(),
     producerId = randomUUID(),
     producerPriority = 0,
+    getRelayAppOrigins = () => [],
   } = {}) {
     if (!contextAdapter || typeof contextAdapter.status !== "function" || typeof contextAdapter.evaluateRuntime !== "function") {
       throw new Error("ClassicProgressNarrationOverlay requires the shared Context Guardian CDP adapter.");
@@ -752,6 +774,7 @@ export class ClassicProgressNarrationOverlay {
       this.now = now;
       this.producerId = String(producerId || randomUUID());
       this.producerPriority = Math.max(0, Math.floor(number(producerPriority, 0)));
+      this.getRelayAppOrigins = typeof getRelayAppOrigins === "function" ? getRelayAppOrigins : () => [];
       this.timer = null;
       this.syncing = null;
       this.closed = false;
@@ -776,6 +799,7 @@ export class ClassicProgressNarrationOverlay {
     this.now = now;
     this.producerId = String(producerId || randomUUID());
     this.producerPriority = Math.max(0, Math.floor(number(producerPriority, 0)));
+    this.getRelayAppOrigins = typeof getRelayAppOrigins === "function" ? getRelayAppOrigins : () => [];
     this.timer = null;
     this.syncing = null;
     this.closed = false;
@@ -807,6 +831,7 @@ export class ClassicProgressNarrationOverlay {
       const script = buildProgressNarrationScript(map, {
         producerId: this.producerId,
         producerPriority: this.producerPriority,
+        relayAppOrigins: this.getRelayAppOrigins(),
       });
       const runtimes = this.contextAdapter.status()?.runtimes || [];
       const settled = await Promise.allSettled(runtimes.map(async (runtime) => ({
@@ -867,6 +892,7 @@ export class ClassicProgressNarrationOverlay {
     const script = buildProgressNarrationScript({}, {
       producerId: this.producerId,
       producerPriority: this.producerPriority,
+      relayAppOrigins: this.getRelayAppOrigins(),
     });
     const runtimes = this.contextAdapter.status()?.runtimes || [];
     await Promise.allSettled(runtimes.map((runtime) => this.contextAdapter.evaluateRuntime(runtime.runtimeKey, script)));
@@ -874,3 +900,4 @@ export class ClassicProgressNarrationOverlay {
 }
 
 export { ROOT_ID as PROGRESS_NARRATION_ROOT_ID };
+export const progressNarrationRelayInternals = { normalizeRelayAppOrigins };

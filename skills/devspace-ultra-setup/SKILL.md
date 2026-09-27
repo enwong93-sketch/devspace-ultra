@@ -114,7 +114,7 @@ DuckDNS example:
 
 ```powershell
 $p = Join-Path $env:TEMP 'devspace-ultra-install.ps1'
-iwr 'https://raw.githubusercontent.com/enwong93-sketch/devspace-ultra/v0.5.12/install.ps1' -OutFile $p
+iwr 'https://raw.githubusercontent.com/enwong93-sketch/devspace-ultra/v0.5.13/install.ps1' -OutFile $p
 & $p -Network DuckDNS
 ```
 
@@ -122,7 +122,7 @@ Cloudflare named-tunnel fallback:
 
 ```powershell
 $p = Join-Path $env:TEMP 'devspace-ultra-install.ps1'
-iwr 'https://raw.githubusercontent.com/enwong93-sketch/devspace-ultra/v0.5.12/install.ps1' -OutFile $p
+iwr 'https://raw.githubusercontent.com/enwong93-sketch/devspace-ultra/v0.5.13/install.ps1' -OutFile $p
 & $p -Network Cloudflare -PublicHostname '<stable-hostname>'
 ```
 

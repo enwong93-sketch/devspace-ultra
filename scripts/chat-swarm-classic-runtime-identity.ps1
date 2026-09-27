@@ -530,10 +530,10 @@ function Ensure-PrimaryRunning {
     if (-not (Test-Path -LiteralPath $alias)) { throw "Primary ChatGPT execution alias is missing: $alias" }
     $launchArguments = if ($NoWindowActivation) { @("--remote-debugging-address=127.0.0.1", "--remote-debugging-port=9721") } else { @() }
     if ($NoWindowActivation) {
-        Start-Process -FilePath $alias -ArgumentList $launchArguments -WindowStyle Minimized | Out-Null
+        Start-Process -FilePath $alias -ArgumentList $launchArguments -WindowStyle Minimized -WorkingDirectory $env:LOCALAPPDATA | Out-Null
     }
     else {
-        Start-Process -FilePath $alias | Out-Null
+        Start-Process -FilePath $alias -WorkingDirectory $env:LOCALAPPDATA | Out-Null
     }
     $deadline = (Get-Date).AddSeconds($PrimaryLaunchWaitSeconds)
     do {

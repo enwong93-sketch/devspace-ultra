@@ -3,6 +3,7 @@ import { atomicWriteJson } from "./atomic-file.js";
 import { normalizeProgressOwnershipProof } from "./progress-ownership-proof.js";
 
 const DEFAULT_LIMIT = 48;
+const DEFAULT_TOTAL_LIMIT = 256;
 const MAX_LEGACY_TEXT = 400;
 const MAX_MESSAGE_TEXT = 1600;
 const MAX_METADATA_TEXT = 200;
@@ -91,15 +92,32 @@ function normalizePersistedMessage(item) {
   return message;
 }
 
-export async function createStableGatewayHumanProgress({ statePath, limit = DEFAULT_LIMIT, now = Date.now } = {}) {
+function retainConversationBounded(messages, perConversationLimit, totalLimit) {
+  const retained = [];
+  const counts = new Map();
+  for (let index = messages.length - 1; index >= 0 && retained.length < totalLimit; index -= 1) {
+    const item = messages[index];
+    const key = item?.conversationId || "__unbound__";
+    const count = counts.get(key) || 0;
+    if (count >= perConversationLimit) continue;
+    counts.set(key, count + 1);
+    retained.push(item);
+  }
+  return retained.reverse();
+}
+
+export async function createStableGatewayHumanProgress(options = {}) {
+  const { statePath, limit = DEFAULT_LIMIT, now = Date.now } = options;
   const path = String(statePath || "").trim();
   if (!path) throw new Error("statePath is required.");
-  const maxItems = Math.max(1, Math.min(64, Number(limit) || DEFAULT_LIMIT));
+  const perConversationLimit = Math.max(1, Math.min(64, Number(limit) || DEFAULT_LIMIT));
+  const explicitLimit = Object.prototype.hasOwnProperty.call(options, "limit");
+  const maxItems = Math.max(perConversationLimit, Math.min(512,
+    Number(options.totalLimit) || (explicitLimit ? perConversationLimit : DEFAULT_TOTAL_LIMIT)));
   const persisted = await readState(path);
-  const persistedMessages = (Array.isArray(persisted?.messages) ? persisted.messages : [])
+  const persistedMessages = retainConversationBounded((Array.isArray(persisted?.messages) ? persisted.messages : [])
     .map(normalizePersistedMessage)
-    .filter(Boolean)
-    .slice(-maxItems);
+    .filter(Boolean), perConversationLimit, maxItems);
   let state = {
     version: 3,
     messages: persistedMessages,
@@ -168,7 +186,7 @@ export async function createStableGatewayHumanProgress({ statePath, limit = DEFA
       const duplicate = normalized?.dedupeKey
         && state.messages.some((item) => item?.dedupeKey === normalized.dedupeKey);
       if (normalized && !duplicate) state.messages.push(normalized);
-      if (state.messages.length > maxItems) state.messages.splice(0, state.messages.length - maxItems);
+      state.messages = retainConversationBounded(state.messages, perConversationLimit, maxItems);
     }
     if (completedText) {
       state.completed.unshift({ text: completedText, at });

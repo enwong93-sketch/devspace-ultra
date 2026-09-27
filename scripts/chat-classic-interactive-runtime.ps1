@@ -201,10 +201,10 @@ function Start-InteractiveRuntime {
         "--remote-debugging-port=$($Runtime.DebugPort)"
     )
     if ($StartMinimized) {
-        Start-Process -FilePath $Runtime.AliasPath -ArgumentList $args -WindowStyle Minimized | Out-Null
+        Start-Process -FilePath $Runtime.AliasPath -ArgumentList $args -WindowStyle Minimized -WorkingDirectory $env:LOCALAPPDATA | Out-Null
     }
     else {
-        Start-Process -FilePath $Runtime.AliasPath -ArgumentList $args | Out-Null
+        Start-Process -FilePath $Runtime.AliasPath -ArgumentList $args -WorkingDirectory $env:LOCALAPPDATA | Out-Null
     }
     $deadline = (Get-Date).AddSeconds($VerifyTimeoutSeconds)
     $current = Get-InteractiveRuntime -Number $Runtime.Number

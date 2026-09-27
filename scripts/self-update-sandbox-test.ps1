@@ -103,9 +103,10 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "Legacy migration updater exited with $LASTEXITCODE." }
     $canonical1 = Join-Path $prefix1 "node_modules\devspace-ultra"
     if ((Read-Version $canonical1) -ne $targetVersion) { throw "Legacy migration did not install the target version." }
-    if (Test-Path -LiteralPath $legacyRoot) { throw "Legacy scoped package root still exists after migration." }
+    if ((Read-Version $legacyRoot) -ne "0.3.0") { throw "Legacy scoped package root was not preserved as the live-window rollback source." }
     $status1 = Get-Content -LiteralPath (Join-Path $state1 "last-update.json") -Raw | ConvertFrom-Json
     if ([string]$status1.state -ne "completed") { throw "Legacy migration did not record completed status." }
+    if ([int]$status1.preservedLegacyRoots -ne 1) { throw "Legacy migration did not report its preserved side-by-side root." }
 
     # Case 2: inject a post-swap verification failure and prove rollback restores package + shim.
     $prefix2 = Join-Path $temp "prefix-rollback"
@@ -138,6 +139,7 @@ try {
         legacyFrom = "@waishnav/devspace@0.3.0"
         migratedTo = "devspace-ultra@$targetVersion"
         legacyLayoutMigration = $true
+        legacyRootPreservedForLiveWindows = $true
         legacyScheduledTaskPathMigration = $true
         releaseArchiveStagedBeforeSwap = $true
         rollbackPackageRestored = $true

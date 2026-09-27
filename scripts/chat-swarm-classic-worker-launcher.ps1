@@ -52,7 +52,7 @@ for ($offset = 0; $offset -lt $Count; $offset++) {
         continue
     }
 
-    Start-Process -FilePath $aliasPath | Out-Null
+    Start-Process -FilePath $aliasPath -WorkingDirectory $env:LOCALAPPDATA | Out-Null
     $deadline = (Get-Date).AddSeconds($VerifyTimeoutSeconds)
     $root = @()
     do {

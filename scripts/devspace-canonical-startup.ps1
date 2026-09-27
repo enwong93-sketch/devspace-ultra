@@ -60,7 +60,7 @@ function Wait-TcpPort {
 function Start-PrimaryMinimized {
     if (Test-TcpPort -Port $primaryPort) { return [pscustomobject]@{ State = "already-running"; Port = $primaryPort } }
     if (-not (Test-Path -LiteralPath $primaryAlias)) { throw "Canonical Main-01 alias is missing." }
-    Start-Process -FilePath $primaryAlias -ArgumentList @("--remote-debugging-address=127.0.0.1", "--remote-debugging-port=$primaryPort") -WindowStyle Minimized | Out-Null
+    Start-Process -FilePath $primaryAlias -ArgumentList @("--remote-debugging-address=127.0.0.1", "--remote-debugging-port=$primaryPort") -WindowStyle Minimized -WorkingDirectory $env:LOCALAPPDATA | Out-Null
     if (-not (Wait-TcpPort -Port $primaryPort)) { throw "Main-01 did not become CDP-ready." }
     return [pscustomobject]@{ State = "started-minimized"; Port = $primaryPort }
 }
@@ -110,7 +110,7 @@ switch ($Action) {
         $powershell = Join-Path $env:WINDIR "System32\WindowsPowerShell\v1.0\powershell.exe"
         if (-not (Test-Path -LiteralPath $powershell)) { throw "Windows PowerShell host is missing: $powershell" }
         $arguments = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$PSCommandPath`" -Action run -StaggerSeconds $StaggerSeconds"
-        $taskAction = New-ScheduledTaskAction -Execute $powershell -Argument $arguments -WorkingDirectory $packageRoot
+        $taskAction = New-ScheduledTaskAction -Execute $powershell -Argument $arguments -WorkingDirectory $configDir
         $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
         $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 15) -RestartCount 2 -RestartInterval (New-TimeSpan -Minutes 1)
         $principal = New-ScheduledTaskPrincipal -UserId ([Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel Limited

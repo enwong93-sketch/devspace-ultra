@@ -424,10 +424,10 @@ function Start-WorkerRuntime {
             $args += "--remote-debugging-port=$($Runtime.DebugPort)"
         }
         if ($args.Count -gt 0) {
-            Start-Process -FilePath $Runtime.AliasPath -ArgumentList $args | Out-Null
+            Start-Process -FilePath $Runtime.AliasPath -ArgumentList $args -WorkingDirectory $env:LOCALAPPDATA | Out-Null
         }
         else {
-            Start-Process -FilePath $Runtime.AliasPath | Out-Null
+            Start-Process -FilePath $Runtime.AliasPath -WorkingDirectory $env:LOCALAPPDATA | Out-Null
         }
 
         $deadline = (Get-Date).AddSeconds(15)

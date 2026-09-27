@@ -90,7 +90,7 @@ function Start-AndVerifyCanonicalPrimary {
         "--remote-debugging-address=127.0.0.1",
         "--remote-debugging-port=$primaryDebugPort"
     )
-    Start-Process -FilePath $Primary.ExecutablePath -ArgumentList $args | Out-Null
+    Start-Process -FilePath $Primary.ExecutablePath -ArgumentList $args -WorkingDirectory $env:LOCALAPPDATA | Out-Null
     $deadline = (Get-Date).AddSeconds($VerifyTimeoutSeconds)
     do {
         $current = Get-CanonicalPrimary

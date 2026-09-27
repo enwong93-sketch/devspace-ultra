@@ -151,7 +151,7 @@ if ($Launch) {
         if (-not (Test-Path -LiteralPath $target.AliasPath)) {
             throw "Execution alias is missing for $($target.WorkerId): $($target.AliasPath)"
         }
-        Start-Process -FilePath $target.AliasPath | Out-Null
+        Start-Process -FilePath $target.AliasPath -WorkingDirectory $env:LOCALAPPDATA | Out-Null
     }
     Start-Sleep -Seconds 3
 

@@ -29,4 +29,8 @@ assert.match(source, /PROGRESS_RELAY_RETENTION_MS = 150_000/,
   "the live bound must still retain relays beyond their two-minute claim TTL");
 assert.match(source, /frame\.remove\(\)/,
   "expired relay iframes must be removed instead of merely hidden forever");
-console.log(JSON.stringify({ ok:true, gate:"progress-narration-stability-static", anchorFallbackDebounced:true, conversationMapKeyed:true, crossTurnHistoryDurable:true, hiddenRelayFramesBounded:true }));
+assert.match(source, /RELAY_APP_ORIGINS/);
+assert.match(source, /ownedRelayFrame/);
+assert.match(source, /new URL\(frame\.src, location\.href\)\.origin/,
+  "relay cleanup must be restricted to connector App origins proved by this DevSpace instance");
+console.log(JSON.stringify({ ok:true, gate:"progress-narration-stability-static", anchorFallbackDebounced:true, conversationMapKeyed:true, crossTurnHistoryDurable:true, hiddenRelayFramesBounded:true, crossConnectorRelayIsolation:true }));

@@ -84,11 +84,11 @@ function Start-CanonicalPrimaryDebug {
         "--remote-debugging-port=$primaryDebugPort"
     )
     try {
-        Start-Process -FilePath $Primary.ExecutablePath -ArgumentList $args | Out-Null
+        Start-Process -FilePath $Primary.ExecutablePath -ArgumentList $args -WorkingDirectory $env:LOCALAPPDATA | Out-Null
     }
     catch {
         if (-not (Test-Path -LiteralPath $primaryAlias)) { throw }
-        Start-Process -FilePath $primaryAlias -ArgumentList $args | Out-Null
+        Start-Process -FilePath $primaryAlias -ArgumentList $args -WorkingDirectory $env:LOCALAPPDATA | Out-Null
     }
 
     $deadline = (Get-Date).AddSeconds($VerifyTimeoutSeconds)
@@ -102,7 +102,7 @@ function Start-CanonicalPrimaryDebug {
 
 function Restore-CanonicalPrimaryNormal {
     if (Test-Path -LiteralPath $primaryAlias) {
-        try { Start-Process -FilePath $primaryAlias | Out-Null } catch {}
+        try { Start-Process -FilePath $primaryAlias -WorkingDirectory $env:LOCALAPPDATA | Out-Null } catch {}
     }
 }
 
@@ -113,7 +113,7 @@ function Show-CanonicalPrimary {
     # Acceptance-only activation: ask the canonical registered app to surface its
     # existing single-instance window. Do not stop the process, alter protocol
     # ownership, or touch the current conversation URL.
-    Start-Process -FilePath $primaryAlias | Out-Null
+    Start-Process -FilePath $primaryAlias -WorkingDirectory $env:LOCALAPPDATA | Out-Null
     $deadline = (Get-Date).AddSeconds($VerifyTimeoutSeconds)
     do {
         Start-Sleep -Milliseconds 300

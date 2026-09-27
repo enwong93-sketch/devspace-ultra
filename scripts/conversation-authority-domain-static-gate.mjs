@@ -15,6 +15,14 @@ const startClaims = await readFile(new URL("../dist/conversation-start-claim-reg
 const progressRelay = await readFile(new URL("../dist/ui/progress-claim-relay.html", import.meta.url), "utf8");
 const claimCdp = await readFile(new URL("../dist/conversation-start-claim-cdp.js", import.meta.url), "utf8");
 
+assert.match(server, /classic-relay-app-origins-v1\.json/);
+assert.match(server, /normalizeRelayAppSandboxOrigin/);
+assert.match(server, /getRelayAppOrigins:\s*\(\) => \[\.\.\.relayAppOrigins\]/,
+  "the overlay must receive only connector App origins learned from this local claim authority");
+assert.match(claimCdp, /appSandboxOriginFromTarget/);
+assert.match(claimCdp, /existingOwner\.appSandboxOrigin !== appSandboxOrigin/,
+  "the same claim observed through two connector Apps must fail closed");
+
 assert.match(server, /const resolveCapabilityConversationAuthority = async \(extra\) =>/);
 assert.match(server, /const resolveProgressConversationAuthority = async \(extra\) =>/);
 assert.match(server, /const resolveConversationAuthority = resolveCapabilityConversationAuthority;/);

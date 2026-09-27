@@ -42,7 +42,8 @@ $script:KnownRuntimeTasks = @(
     "DevSpace-Fixed-Backend",
     "DevSpace-Local-Ingress",
     "DevSpace-Live-Progress-Overlay",
-    "DevSpace-Canonical-Startup"
+    "DevSpace-Canonical-Startup",
+    "DevSpace-Stable-Gateway-Watchdog"
 )
 $script:UpdaterStateRoot = if ($UpdaterStateRoot) { [IO.Path]::GetFullPath($UpdaterStateRoot) } else { Join-Path $env:LOCALAPPDATA "DevSpaceUltra\Updater" }
 $script:CurrentStatePath = Join-Path $script:UpdaterStateRoot "current.json"
@@ -77,6 +78,28 @@ function Read-JsonFile([string] $Path) {
     if (-not (Test-Path -LiteralPath $Path)) { return $null }
     try { return Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json }
     catch { return $null }
+}
+
+function Move-ItemWithRetry(
+    [string] $Source,
+    [string] $Destination,
+    [string] $Operation,
+    [int] $TimeoutMilliseconds = 15000
+) {
+    $deadline = [DateTime]::UtcNow.AddMilliseconds([Math]::Max(1000, $TimeoutMilliseconds))
+    $lastFailure = $null
+    do {
+        try {
+            Move-Item -LiteralPath $Source -Destination $Destination -Force -ErrorAction Stop
+            return
+        }
+        catch {
+            $lastFailure = $_
+            if ([DateTime]::UtcNow -ge $deadline) { break }
+            Start-Sleep -Milliseconds 250
+        }
+    } while ($true)
+    throw "$Operation failed after bounded Windows lock retries: $($lastFailure.Exception.Message)"
 }
 
 function Get-NpmPrefixPath {
@@ -240,6 +263,7 @@ function Get-TaskSnapshot {
         $rows += [pscustomobject]@{
             Name = $name
             State = $task.State.ToString()
+            WasEnabled = $task.State.ToString() -ne "Disabled"
             WasRunning = $task.State.ToString() -eq "Running"
             Actions = @($task.Actions | ForEach-Object {
                 [pscustomobject]@{
@@ -321,42 +345,88 @@ function Get-GatewayBusyState {
         $status = Invoke-RestMethod -Uri "http://127.0.0.1:$port/__devspace/gateway/status" -Headers $headers -Method Get -UseBasicParsing
         $httpActive = if ($status.admission -and $status.admission.PSObject.Properties.Name -contains "activeRequests") { [int]$status.admission.activeRequests } else { 0 }
         $toolActive = if ($status.sessions -and $status.sessions.PSObject.Properties.Name -contains "totalNonStreamActiveRequests") { [int]$status.sessions.totalNonStreamActiveRequests } else { 0 }
-        # The control GET above is itself admitted before the status snapshot is
-        # generated, so activeRequests always includes this updater probe. Count
-        # only additional HTTP requests; real session/tool work remains guarded.
+        # Admission includes this status probe and replayable SSE connections,
+        # neither of which is active Agent/tool work. The session registry owns
+        # the authoritative non-stream counter used by Gateway quiet/drain logic.
         $otherHttpActive = [Math]::Max(0, $httpActive - 1)
-        return [pscustomobject]@{ Known = $true; Busy = (($otherHttpActive + $toolActive) -gt 0); HttpActive = $httpActive; OtherHttpActive = $otherHttpActive; ToolActive = $toolActive }
+        return [pscustomobject]@{ Known = $true; Busy = ($toolActive -gt 0); HttpActive = $httpActive; OtherHttpActive = $otherHttpActive; ToolActive = $toolActive }
     }
     catch { return [pscustomobject]@{ Known = $false; Busy = $false } }
 }
 
 function Stop-DevSpaceRuntime([object[]] $PackageRecords, [object[]] $TaskSnapshot) {
     if ($script:TestMode) { return }
-    foreach ($task in $TaskSnapshot) {
-        if (-not $task.WasRunning) { continue }
-        try { Stop-ScheduledTask -TaskName $task.Name -ErrorAction Stop } catch {}
-    }
-    Start-Sleep -Milliseconds 600
     $roots = @($PackageRecords | ForEach-Object { [string]$_.Root })
-    if ($roots.Count -eq 0) { return }
-    $processes = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+    $devspaceCaddyConfigs = @(
+        (Join-Path $HOME 'DevSpaceIngress\Caddyfile'),
+        (Join-Path $HOME '.devspace-local-ingress\Caddyfile')
+    )
+    $allProcesses = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
+    $processes = @($allProcesses | Where-Object {
         if ([int]$_.ProcessId -eq $PID) { return $false }
         $command = [string]$_.CommandLine
         if (-not $command) { return $false }
+        $isDevSpaceCaddy = ([string]$_.Name -ieq 'caddy.exe') -and @($devspaceCaddyConfigs | Where-Object {
+            $command.IndexOf($_, [StringComparison]::OrdinalIgnoreCase) -ge 0
+        }).Count -gt 0
+        if ($isDevSpaceCaddy) { return $true }
         $matchesRoot = $false
         foreach ($root in $roots) { if ($command.IndexOf($root, [StringComparison]::OrdinalIgnoreCase) -ge 0) { $matchesRoot = $true; break } }
         if (-not $matchesRoot) { return $false }
         return $command -match 'devspace-(?:stable-gateway|fixed-backend|local-ingress|live-progress)|dist[\\/]cli\.js\s+serve'
+    })
+    $ownedProcessIds = @($processes | ForEach-Object { [int]$_.ProcessId })
+    $processTreeIds = [Collections.Generic.HashSet[int]]::new()
+    foreach ($processId in $ownedProcessIds) { $null = $processTreeIds.Add($processId) }
+    do {
+        $added = $false
+        foreach ($candidate in $allProcesses) {
+            $candidateId = [int]$candidate.ProcessId
+            if ($candidateId -eq $PID -or $processTreeIds.Contains($candidateId)) { continue }
+            if ($processTreeIds.Contains([int]$candidate.ParentProcessId)) {
+                $null = $processTreeIds.Add($candidateId)
+                $added = $true
+            }
+        }
+    } while ($added)
+    $descendantProcessIds = @($processTreeIds | Where-Object { $ownedProcessIds -notcontains $_ })
+
+    foreach ($task in $TaskSnapshot) {
+        if ($task.WasEnabled) {
+            try { Disable-ScheduledTask -TaskName $task.Name -ErrorAction Stop | Out-Null } catch {}
+        }
+        if ($task.WasRunning) {
+            try { Stop-ScheduledTask -TaskName $task.Name -ErrorAction Stop } catch {}
+        }
     }
-    foreach ($process in $processes) {
-        try { Stop-Process -Id ([int]$process.ProcessId) -Force -ErrorAction Stop } catch {}
+    Start-Sleep -Milliseconds 600
+    if ($roots.Count -eq 0) { return }
+    foreach ($processId in @($descendantProcessIds + $ownedProcessIds)) {
+        try { Stop-Process -Id $processId -Force -ErrorAction Stop } catch {}
     }
-    Start-Sleep -Milliseconds 400
+    $deadline = [DateTime]::UtcNow.AddSeconds(15)
+    do {
+        $remaining = @($processTreeIds | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue })
+        if ($remaining.Count -eq 0) { break }
+        foreach ($processId in $remaining) {
+            try { Stop-Process -Id $processId -Force -ErrorAction Stop } catch {}
+        }
+        Start-Sleep -Milliseconds 250
+    } while ([DateTime]::UtcNow -lt $deadline)
+    $remaining = @($processTreeIds | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue })
+    if ($remaining.Count -gt 0) {
+        throw "DevSpace package-owning process tree did not exit before package swap: $($remaining -join ', ')"
+    }
+    Start-Sleep -Milliseconds 500
 }
 
 function Restart-PreviousRuntime([object[]] $TaskSnapshot) {
     if ($script:TestMode) { return }
     if ($SkipRuntimeRestart) { return }
+    foreach ($task in $TaskSnapshot) {
+        if (-not $task.WasEnabled) { continue }
+        try { Enable-ScheduledTask -TaskName $task.Name -ErrorAction Stop | Out-Null } catch {}
+    }
     foreach ($task in $TaskSnapshot) {
         if (-not $task.WasRunning) { continue }
         try {
@@ -509,6 +579,14 @@ function Invoke-StagePackage($Release, [string] $ArchivePath, [string] $Prefix) 
         if ($LASTEXITCODE -ne 0 -or $reportedVersion -notmatch [regex]::Escape($Release.Version)) {
             throw "Staged CLI could not report target version $($Release.Version)."
         }
+        $npm = Get-Command npm.cmd -ErrorAction SilentlyContinue
+        if (-not $npm) { $npm = Get-Command npm -ErrorAction Stop }
+        & $npm.Source rebuild better-sqlite3 --prefix $root --ignore-scripts=false --no-audit --no-fund
+        if ($LASTEXITCODE -ne 0) { throw "Staged better-sqlite3 rebuild failed with exit code $LASTEXITCODE." }
+        $sqliteModule = Join-Path $root "node_modules\better-sqlite3"
+        $smoke = "const DB=require(process.argv[1]);const db=new DB(':memory:');db.close();"
+        & node -e $smoke $sqliteModule
+        if ($LASTEXITCODE -ne 0) { throw "Staged better-sqlite3 native binding did not load under the installed Node.js runtime." }
     }
     return [pscustomobject]@{ Prefix = $stagePrefix; Root = $root; Manifest = $manifest }
 }
@@ -612,6 +690,8 @@ $taskSnapshot = @()
 $shimBackupDirectory = $null
 $shimPresent = @()
 $packageBackups = @()
+$preservedLegacyRoots = @()
+$canonicalPromoted = $false
 $protectedFingerprint = Get-ProtectedStateFingerprint
 
 try {
@@ -638,16 +718,24 @@ try {
     $shimBackupDirectory = Join-Path $backupDirectory "shims"
     $shimPresent = @(Backup-Shims -Prefix $prefix -Directory $shimBackupDirectory)
 
+    $canonicalRoot = Join-Path $globalRoot "devspace-ultra"
     foreach ($record in $records) {
+        if (-not [string]::Equals([IO.Path]::GetFullPath($record.Root), [IO.Path]::GetFullPath($canonicalRoot), [StringComparison]::OrdinalIgnoreCase)) {
+            # Existing Classic windows can legitimately retain their inherited
+            # CWD on the legacy scoped-package root. Keep that tree in place as
+            # the rollback source while tasks and shims migrate side-by-side.
+            $preservedLegacyRoots += $record.Root
+            continue
+        }
         $safeName = $record.Name -replace '[@/\\]', '_'
         $destination = Join-Path $backupDirectory ("package-" + $safeName)
-        Move-Item -LiteralPath $record.Root -Destination $destination -Force
+        Move-ItemWithRetry -Source $record.Root -Destination $destination -Operation "Backup of installed package $($record.Name)"
         $packageBackups += [pscustomobject]@{ Original = $record.Root; Backup = $destination }
     }
 
-    $canonicalRoot = Join-Path $globalRoot "devspace-ultra"
     if (Test-Path -LiteralPath $canonicalRoot) { throw "Canonical package root unexpectedly exists after backup: $canonicalRoot" }
-    Move-Item -LiteralPath $staged.Root -Destination $canonicalRoot -Force
+    Move-ItemWithRetry -Source $staged.Root -Destination $canonicalRoot -Operation "Promotion of staged DevSpace Ultra package"
+    $canonicalPromoted = $true
     Copy-Shims -SourcePrefix $staged.Prefix -TargetPrefix $prefix
 
     $nodePtyFix = Join-Path $canonicalRoot "scripts\fix-node-pty-permissions.mjs"
@@ -674,6 +762,17 @@ try {
     }
 
     Migrate-RuntimeTaskPackagePaths -TaskSnapshot $taskSnapshot -PackageRecords $records -CanonicalRoot $canonicalRoot
+    $gatewaySnapshot = @($taskSnapshot | Where-Object Name -eq "DevSpace-Stable-Gateway" | Select-Object -First 1)
+    if (-not $script:TestMode -and $gatewaySnapshot.Count -gt 0) {
+        $gatewayConfigDir = @(
+            (Join-Path $HOME ".devspace-tailscale-bootstrap"),
+            (Join-Path $HOME ".devspace")
+        ) | Where-Object { Test-Path -LiteralPath (Join-Path $_ "config.json") } | Select-Object -First 1
+        if (-not $gatewayConfigDir) { throw "Cannot regenerate Stable Gateway tasks because no canonical config directory exists." }
+        $gatewayInstaller = Join-Path $canonicalRoot "scripts\devspace-stable-gateway-startup.ps1"
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $gatewayInstaller -Action install -ConfigDir $gatewayConfigDir | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "Stable Gateway task regeneration failed after package migration." }
+    }
     Restart-PreviousRuntime -TaskSnapshot $taskSnapshot
     $autoUpdateEnabled = Try-InstallAutoUpdateTask -PackageRoot $canonicalRoot
 
@@ -691,6 +790,7 @@ try {
     $completionExtra["installedVersion"] = $release.Version
     $completionExtra["rollbackAvailable"] = [bool]$backupDirectory
     $completionExtra["autoUpdateEnabled"] = [bool]$autoUpdateEnabled
+    $completionExtra["preservedLegacyRoots"] = $preservedLegacyRoots.Count
     $status = Write-UpdateStatus -State "completed" -Extra $completionExtra
     Write-Info "DevSpace Ultra is now on stable $($release.Version). Existing config, auth, conversations and runtime profiles were preserved." Green
     if (-not $Quiet) { $status | ConvertTo-Json -Depth 8 }
@@ -699,15 +799,17 @@ catch {
     $failure = $_
     try {
         $canonicalRoot = Join-Path $globalRoot "devspace-ultra"
+        if ($canonicalPromoted -and (Test-Path -LiteralPath $canonicalRoot)) {
+            Remove-Item -LiteralPath $canonicalRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
         if ($packageBackups.Count -gt 0) {
-            if (Test-Path -LiteralPath $canonicalRoot) { Remove-Item -LiteralPath $canonicalRoot -Recurse -Force -ErrorAction SilentlyContinue }
             foreach ($item in $packageBackups) {
                 $parent = Split-Path -Parent $item.Original
                 New-Item -ItemType Directory -Path $parent -Force | Out-Null
-                if (Test-Path -LiteralPath $item.Backup) { Move-Item -LiteralPath $item.Backup -Destination $item.Original -Force }
+                if (Test-Path -LiteralPath $item.Backup) { Move-ItemWithRetry -Source $item.Backup -Destination $item.Original -Operation "Rollback restore of $($item.Original)" }
             }
-            if ($shimBackupDirectory) { Restore-Shims -Prefix $prefix -Directory $shimBackupDirectory -OriginallyPresent $shimPresent }
         }
+        if ($shimBackupDirectory) { Restore-Shims -Prefix $prefix -Directory $shimBackupDirectory -OriginallyPresent $shimPresent }
         Restore-RuntimeTaskActions -TaskSnapshot $taskSnapshot
         Restart-PreviousRuntime -TaskSnapshot $taskSnapshot
     }

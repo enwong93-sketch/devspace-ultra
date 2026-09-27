@@ -103,8 +103,21 @@ try {
   assert.equal(defaultSnapshot.messages.length, 48, "default progress history must retain 48 bounded entries for scrolling");
   assert.match(defaultSnapshot.messages[0].text, /第 8 個已驗證步驟/);
   assert.match(defaultSnapshot.messages.at(-1).text, /第 55 個已驗證步驟/);
+
+  const multiPath = join(root, "per-conversation-limit.json");
+  const multiProgress = await createStableGatewayHumanProgress({ statePath: multiPath });
+  for (let index = 0; index < 60; index += 1) {
+    await multiProgress.update({ message: `A-${index + 1}`, conversationId: "conversation-a" });
+  }
+  for (let index = 0; index < 10; index += 1) {
+    await multiProgress.update({ message: `B-${index + 1}`, conversationId: "conversation-b" });
+  }
+  const multiSnapshot = multiProgress.snapshot();
+  assert.equal(multiSnapshot.messages.filter((item) => item.conversationId === "conversation-a").length, 48);
+  assert.equal(multiSnapshot.messages.filter((item) => item.conversationId === "conversation-b").length, 10);
+  assert.equal(multiSnapshot.messages.length, 58, "one busy conversation must not evict another conversation's bounded history");
 } finally {
   await rm(root, { recursive: true, force: true });
 }
 
-console.log(JSON.stringify({ ok: true, gate: "stable-gateway-human-progress", durable: true, naturalLanguageStream: true, defaultHistoryLimit: 48, hardHistoryLimit: 64, legacyCompatible: true }));
+console.log(JSON.stringify({ ok: true, gate: "stable-gateway-human-progress", durable: true, naturalLanguageStream: true, perConversationHistoryLimit: 48, totalHistoryLimit: 256, legacyCompatible: true }));
