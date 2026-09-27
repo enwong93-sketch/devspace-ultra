@@ -1,132 +1,22 @@
-# Setup Guide
+# DevSpace Ultra setup
 
-This guide is for users who want ChatGPT or another MCP host to work in local
-projects through DevSpace.
+This page is the current DevSpace Ultra entry point. For a new Windows installation, follow [the guided one-command setup](ONE_COMMAND_SETUP.md); for the selected public route and its prerequisites, read [network ingress](NETWORK_INGRESS.md). The separate upstream DevSpace CLI instructions are not an installation path for the Ultra Windows package.
 
-## Requirements
+## What the installer can prepare
 
-- Node `>=22.19 <27`
-- npm
-- Git
-- Bash, including Git Bash or WSL on Windows
-- a public HTTPS URL that forwards to the local DevSpace server
+The tagged Windows installer installs the verified release package and setup Skill, creates a user-local configuration and protected credentials, starts the Stable Gateway/Core on loopback, and prepares the selected public ingress. For the recommended DuckDNS route, Caddy terminates HTTPS and forwards only approved public MCP/OAuth paths to the loopback Gateway.
 
-DevSpace does not create the public tunnel for you. Use Cloudflare Tunnel,
-ngrok, Pinggy, Tailscale Funnel, or your own HTTPS reverse proxy.
+The public Connector is the product acceptance target. A healthy local Gateway, successful DuckDNS update or a running Caddy process is **not** evidence that ChatGPT can reach the machine. A direct DDNS route additionally needs a publicly routable WAN address, router TCP 80/443 ingress, a valid certificate, and an independent external-network test. The Agent guides account/router actions that require the user's involvement; it never silently changes another router mapping.
 
-## Install And Configure
+## Completion boundary
 
-Run:
+Keep these stages distinct in all installer output and support replies:
 
-```bash
-npx @waishnav/devspace init
-```
+1. Package and native dependencies verified.
+2. Local Gateway/Core healthy with the intended configuration and narrow allowed roots.
+3. Public DNS, HTTPS certificate, OAuth metadata and MCP challenge verified from outside the LAN.
+4. ChatGPT Connector OAuth completed and one harmless read-only DevSpace tool call succeeded.
 
-The setup flow asks one question at a time.
+Only stage 4 is a complete ChatGPT Connector installation. If the user cannot or chooses not to provide the required public ingress, preserve the local preparation and report an explicit public-connector blocker rather than success. Do not retry by broadening allowed roots, exposing Gateway/Core ports directly, disabling TLS verification, or replacing DuckDNS with a different provider without the user's choice.
 
-### Project Roots
-
-Choose the folders ChatGPT is allowed to open through DevSpace. Keep this
-narrow.
-
-Examples:
-
-```text
-~/personal,~/work
-```
-
-```text
-/Users/alice/dev,/Users/alice/work
-```
-
-```text
-C:\Users\alice\dev,C:\Users\alice\work
-```
-
-### Local Port
-
-The default is `7676`.
-
-The local MCP URL is:
-
-```text
-http://127.0.0.1:7676/mcp
-```
-
-### Public Base URL
-
-Start your tunnel or reverse proxy before entering this value. Point the tunnel
-at:
-
-```text
-http://127.0.0.1:7676
-```
-
-Enter the public origin without `/mcp`:
-
-```text
-https://your-tunnel-host.example.com
-```
-
-Configure the MCP client with the full MCP endpoint:
-
-```text
-https://your-tunnel-host.example.com/mcp
-```
-
-## Start The Server
-
-Run:
-
-```bash
-npx @waishnav/devspace serve
-```
-
-If your tunnel URL changes for one run, override it without rewriting config:
-
-```bash
-DEVSPACE_PUBLIC_BASE_URL="https://new-tunnel.example.com" npx @waishnav/devspace serve
-```
-
-For a stable public URL, persist it:
-
-```bash
-npx @waishnav/devspace config set publicBaseUrl https://devspace.example.com
-npx @waishnav/devspace serve
-```
-
-## Approve The Client
-
-When ChatGPT, Claude, or another MCP client connects, DevSpace shows an Owner
-password approval page. Enter the Owner password printed during setup.
-
-The default config files are:
-
-```text
-~/.devspace/config.json
-~/.devspace/auth.json
-```
-
-Keep `auth.json` private.
-
-## Check Your Setup
-
-Run:
-
-```bash
-npx @waishnav/devspace doctor
-```
-
-The doctor command reports the resolved config, Node version, Node ABI, platform,
-Git, Bash, public URL, allowed hosts, and SQLite native dependency status.
-
-## Running From A Local Checkout
-
-If you are developing DevSpace itself instead of using the published package:
-
-```bash
-npm install --include=dev
-npm run dev
-```
-
-The same setup rules apply.
+For upgrades, use the [transactional update path](ONE_COMMAND_SETUP.md) rather than reinstalling on top of a running global package. For known installation failures and safe recovery, see [troubleshooting](gotchas.md).

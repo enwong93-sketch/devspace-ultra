@@ -5,6 +5,7 @@ import { resolve } from "node:path";
 const root = resolve(import.meta.dirname, "..");
 const files = Object.fromEntries(await Promise.all([
   "install.ps1",
+  "install.sh",
   "install-skill.ps1",
   "skills/devspace-ultra-setup/SKILL.md",
   "skills/devspace-ultra-setup/agents/openai.yaml",
@@ -13,13 +14,20 @@ const files = Object.fromEntries(await Promise.all([
   "scripts/devspace-cloudflare-run.ps1",
   "docs/ONE_COMMAND_SETUP.md",
   "docs/NETWORK_INGRESS.md",
+  ".github/workflows/release.yml",
   "scripts/devspace-stable-gateway.mjs",
 ].map(async (path) => [path, await readFile(resolve(root, path), "utf8")])));
 
 const setup = files["scripts/devspace-public-setup.ps1"];
+const shellInstaller = files["install.sh"];
 assert.match(files["install.ps1"], /\[ValidateSet\("DuckDNS", "Cloudflare", "Local"\)\][\s\S]*\$Network = "DuckDNS"/);
 assert.match(files["install.ps1"], /install-skill\.ps1/);
 assert.match(files["install-skill.ps1"], /\.codex\\skills\\devspace-ultra-setup/);
+assert.match(shellInstaller, /releases\/tags\/\$\{tag\}/, "shell installer must resolve an exact tagged Release");
+assert.match(shellInstaller, /asset\.digest/, "shell installer must require the GitHub Release digest");
+assert.match(shellInstaller, /createHash\('sha256'\)/, "shell installer must verify the archive SHA-256");
+assert.match(shellInstaller, /npm rebuild better-sqlite3/, "shell installer must rebuild the native SQLite module");
+assert.doesNotMatch(shellInstaller, /github:enwong93-sketch\/devspace-ultra#main/, "shell installer must not install a moving Git branch");
 assert.match(files["skills/devspace-ultra-setup/SKILL.md"], /DuckDNS\/DDNS \+ Caddy direct ingress/);
 assert.match(files["skills/devspace-ultra-setup/SKILL.md"], /Cloudflare named tunnel/);
 assert.match(setup, /stableGatewayCoreHeapProfile" "system"/);
@@ -35,6 +43,8 @@ assert.match(files["docs/ONE_COMMAND_SETUP.md"], /DuckDNS\/DDNS direct to the lo
 assert.match(files["docs/ONE_COMMAND_SETUP.md"], /daily request quota/i);
 assert.match(files["docs/NETWORK_INGRESS.md"], /Cloudflare named tunnel/);
 assert.match(files["docs/NETWORK_INGRESS.md"], /Workers plan/i);
+assert.match(files[".github/workflows/release.yml"], /npm run verify:setup/, "release publication must run Windows setup gates");
+assert.match(files[".github/workflows/release.yml"], /npm run verify:local-ingress/, "release publication must run direct-ingress gates");
 assert.doesNotMatch(files["scripts/devspace-stable-gateway.mjs"], /C:\\\\Users\\\\enwong/i);
 
 for (const [path, source] of Object.entries(files)) {

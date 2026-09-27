@@ -1,37 +1,19 @@
-# Configuration Reference
+# DevSpace Ultra configuration reference
 
-DevSpace can be configured through `devspace init`, persisted config files, or
-environment variables.
+This is an advanced configuration reference, **not** the Windows public Connector installer. New users should follow [the guided setup](ONE_COMMAND_SETUP.md). The selected configuration directory must be the same one used by the Scheduled Task that starts the Gateway; do not assume a standalone CLI default is the active Windows production directory. Upgraded installations may retain `.devspace-tailscale-bootstrap` for state compatibility.
 
-The default files are:
-
-```text
-~/.devspace/config.json
-~/.devspace/auth.json
-```
-
-Use another config directory with:
-
-```bash
-DEVSPACE_CONFIG_DIR=/path/to/config npx @waishnav/devspace serve
-```
+For a one-off read-only CLI inspection from PowerShell, set the current process's config directory to the directory reported by the installed setup, then run `devspace config get`. Never paste or print the separate protected authentication file.
 
 ## Commands
 
-```bash
-npx @waishnav/devspace init
-npx @waishnav/devspace serve
-npx @waishnav/devspace doctor
-npx @waishnav/devspace config get
-npx @waishnav/devspace config set publicBaseUrl https://devspace.example.com
-```
+`devspace doctor` and `devspace config get` are diagnostic commands. Do not run `devspace init` or start a second standalone `serve` process merely to repair an installed Stable Gateway; use the guided setup or its verified recovery path.
 
 ## Core Environment Variables
 
 | Variable | Purpose |
 | --- | --- |
 | `HOST` | Local bind host. Defaults to `127.0.0.1`. |
-| `PORT` | Local port. Defaults to `7676`. |
+| `PORT` | Standalone Core fallback only. The Windows Ultra setup uses loopback Gateway `7678` and Core slots `7688`/`7689`; do not publish any of these ports directly. |
 | `DEVSPACE_ALLOWED_ROOTS` | Comma-separated local roots that workspaces may open. |
 | `DEVSPACE_PUBLIC_BASE_URL` | Public origin for the server, without `/mcp`. |
 | `DEVSPACE_ALLOWED_HOSTS` | Optional Host header allowlist override. |
@@ -45,7 +27,7 @@ Native-file download is disabled by default. Enable it when ChatGPT needs to han
 an attached or generated file into an already-open workspace:
 
 ```bash
-DEVSPACE_ARTIFACTS=1 npx @waishnav/devspace serve
+DEVSPACE_ARTIFACTS=1 devspace serve
 ```
 
 This feature currently supports Linux. It is not registered on macOS, Windows,
@@ -166,7 +148,7 @@ Example:
 
 ```bash
 DEVSPACE_SKILL_PATHS="$HOME/.claude/skills,$HOME/company/skills" \
-npx @waishnav/devspace serve
+devspace serve
 ```
 
 ## Unified Agent Capability Plugins
@@ -247,18 +229,6 @@ Core stdout/stderr use a backpressure-aware rotating writer. Each active log is 
 
 Full per-request and MCP session lifecycle logs are intentionally not written at normal `info` level. Set `DEVSPACE_LOG_REQUESTS=1` or `DEVSPACE_LOG_LEVEL=debug` only for a bounded diagnostic window. Set `DEVSPACE_LOG_FORMAT=pretty` for local debugging and `DEVSPACE_LOG_SHELL_COMMANDS=1` only when you intentionally want command previews in logs.
 
-## Env-Only Example
+## Production setup boundary
 
-```bash
-DEVSPACE_OAUTH_OWNER_TOKEN="$(openssl rand -base64 32)" \
-DEVSPACE_ALLOWED_ROOTS="$HOME/personal,$HOME/work" \
-DEVSPACE_PUBLIC_BASE_URL="https://devspace.example.com" \
-DEVSPACE_WORKTREE_ROOT="$HOME/.devspace/worktrees" \
-DEVSPACE_ARTIFACTS="1" \
-DEVSPACE_TOOL_MODE="minimal" \
-DEVSPACE_WIDGETS="full" \
-npx @waishnav/devspace serve
-```
-
-The environment assignments must be part of the same command invocation, or
-exported first.
+The Windows installer writes the selected public URL, narrow allowed roots, system-managed Core profile and protected Owner credentials through the guided setup. Do not reconstruct a production deployment from an env-only standalone command: it would bypass the Gateway task, public ingress and Connector acceptance gates. The `DEVSPACE_CONFIG_DIR` override is only safe when the setup and its Gateway task are both bound to that exact directory.

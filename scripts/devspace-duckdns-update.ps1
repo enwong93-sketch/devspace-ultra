@@ -2,7 +2,8 @@
 param(
     [Parameter(Mandatory)] [string] $Domain,
     [Parameter(Mandatory)] [string] $SecretPath,
-    [Parameter(Mandatory)] [string] $StatusPath
+    [Parameter(Mandatory)] [string] $StatusPath,
+    [Parameter(Mandatory)] [string] $WanIPv4
 )
 
 Set-StrictMode -Version Latest
@@ -36,11 +37,26 @@ function Write-AtomicJson([string] $Path, $Value) {
 
 $subdomain = $Domain.Trim().ToLowerInvariant() -replace '\.duckdns\.org$', ''
 if ($subdomain -notmatch '^[a-z0-9-]{1,63}$') { throw "DuckDNS domain must be one subdomain label or a <name>.duckdns.org hostname." }
+$parsedIp = $null
+if (-not [Net.IPAddress]::TryParse($WanIPv4, [ref]$parsedIp) -or
+    $parsedIp.AddressFamily -ne [Net.Sockets.AddressFamily]::InterNetwork -or
+    $WanIPv4 -in @('0.0.0.0', '255.255.255.255')) {
+    throw 'An explicit router WAN IPv4 address is required; blank-IP DuckDNS updates are unsafe with a VPN.'
+}
+$octets = $parsedIp.GetAddressBytes()
+if ($octets[0] -in @(0, 10, 127) -or $octets[0] -ge 224 -or
+    ($octets[0] -eq 100 -and $octets[1] -ge 64 -and $octets[1] -le 127) -or
+    ($octets[0] -eq 169 -and $octets[1] -eq 254) -or
+    ($octets[0] -eq 172 -and $octets[1] -ge 16 -and $octets[1] -le 31) -or
+    ($octets[0] -eq 192 -and $octets[1] -eq 168)) {
+    throw 'Router WAN IPv4 is private, CGNAT, or reserved; refusing to publish it to DuckDNS.'
+}
 $token = Read-ProtectedSecret $SecretPath
 try {
-    $uri = "https://www.duckdns.org/update?domains=$([uri]::EscapeDataString($subdomain))&token=$([uri]::EscapeDataString($token))&ip="
-    $response = (Invoke-RestMethod -Uri $uri -Method Get).ToString().Trim()
-    $ok = $response -eq "OK"
+    $uri = "https://www.duckdns.org/update?domains=$([uri]::EscapeDataString($subdomain))&token=$([uri]::EscapeDataString($token))&ip=$([uri]::EscapeDataString($WanIPv4))"
+    $response = Invoke-WebRequest -UseBasicParsing -Uri $uri -Method Get -TimeoutSec 10
+    $body = if ($response.Content -is [byte[]]) { [Text.Encoding]::UTF8.GetString($response.Content) } else { [string]$response.Content }
+    $ok = (($body -split "\r?\n")[0]).Trim().ToUpperInvariant() -eq "OK"
     Write-AtomicJson $StatusPath ([ordered]@{
         ok = $ok
         domain = "$subdomain.duckdns.org"

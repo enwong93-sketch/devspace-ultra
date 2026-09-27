@@ -56,7 +56,7 @@ The user must personally complete account actions on DuckDNS and router-administ
 2. obtain the token without posting it in chat;
 3. identify the DevSpace computer's stable LAN address;
 4. reserve that LAN address in DHCP when practical;
-5. forward TCP 80 and 443 to that LAN address;
+5. explicitly approve the installer's UPnP request for TCP 80/443, or manually forward those ports to that LAN address;
 6. confirm no other local service already owns those ports.
 
 After each user action, re-run the relevant local or external verification instead of asking the user to guess whether it worked.
@@ -90,7 +90,7 @@ DuckDNS example:
 
 ```powershell
 $p = Join-Path $env:TEMP 'devspace-ultra-install.ps1'
-iwr 'https://raw.githubusercontent.com/enwong93-sketch/devspace-ultra/v0.5.8/install.ps1' -OutFile $p
+iwr 'https://raw.githubusercontent.com/enwong93-sketch/devspace-ultra/v0.5.9/install.ps1' -OutFile $p
 & $p -Network DuckDNS
 ```
 
@@ -98,7 +98,7 @@ Cloudflare named-tunnel fallback:
 
 ```powershell
 $p = Join-Path $env:TEMP 'devspace-ultra-install.ps1'
-iwr 'https://raw.githubusercontent.com/enwong93-sketch/devspace-ultra/v0.5.8/install.ps1' -OutFile $p
+iwr 'https://raw.githubusercontent.com/enwong93-sketch/devspace-ultra/v0.5.9/install.ps1' -OutFile $p
 & $p -Network Cloudflare -PublicHostname '<stable-hostname>'
 ```
 
@@ -112,6 +112,8 @@ The installer should:
 - configure DPAPI-protected provider credentials;
 - start Local Gateway and wait for both Gateway and Core health;
 - print remaining external actions clearly.
+
+The Windows installer downloads one exact Release archive and verifies its SHA-256 digest before installation; it does not use a moving Git URL global npm install. After `--ignore-scripts`, it rebuilds and loads `better-sqlite3`. The maintained direct-ingress helper publishes the router WAN IPv4 explicitly to DuckDNS and never auto-detects a VPN egress. Require explicit user consent for UPnP; if the router is incompatible, use confirmed manual port forwarding with the router WAN IPv4. Existing standalone DuckDNS/Caddy tasks require one-time guarded adoption: export task definitions and Caddyfile first, reuse the existing Caddy path, prove the new ingress, then disable the old tasks rather than start a competing route.
 
 If the installer fails, diagnose the newest launch-specific log section. Do not mix old OOM, EPERM, or ReferenceError entries into the current diagnosis merely because they remain in an append-only file.
 

@@ -7,9 +7,13 @@ param(
     [string] $PublicHostname = $env:DEVSPACE_PUBLIC_HOSTNAME,
     [string] $AllowedRoot = $HOME,
     [string] $Repository = "https://github.com/enwong93-sketch/devspace-ultra.git",
-    [string] $Ref = "v0.5.8",
+    [string] $Ref = "v0.5.9",
     [switch] $NonInteractive,
-    [switch] $SkipCaddy
+    [switch] $SkipCaddy,
+    [switch] $EnableRouterUpnp,
+    [switch] $ManualPortForward,
+    [string] $PublicWanIPv4,
+    [switch] $MigrateLegacyIngress
 )
 
 Set-StrictMode -Version Latest
@@ -122,6 +126,76 @@ function Invoke-LatestStableUpdater {
     }
 }
 
+function Select-ReleaseArchiveAsset {
+    param($Release, [string]$Tag)
+    if ($Tag -notmatch '^v(\d+\.\d+\.\d+)$') { throw "An exact stable release tag is required: $Tag" }
+    $version = $Matches[1]
+    if (-not $Release -or [string]$Release.tag_name -ne $Tag -or
+        $Release.draft -eq $true -or $Release.prerelease -eq $true) {
+        throw "GitHub did not return the exact stable DevSpace Ultra release $Tag."
+    }
+    $name = "devspace-ultra-$version.tgz"
+    $assets = @($Release.assets | Where-Object { [string]$_.name -eq $name })
+    if ($assets.Count -ne 1) { throw "Release $Tag must contain exactly one $name archive." }
+    $asset = $assets[0]
+    $digest = ([string]$asset.digest).ToLowerInvariant() -replace '^sha256:', ''
+    if ($digest -notmatch '^[0-9a-f]{64}$') { throw "Release $Tag archive has no valid SHA-256 digest." }
+    $url = [string]$asset.browser_download_url
+    $expectedPrefix = "https://github.com/enwong93-sketch/devspace-ultra/releases/download/$Tag/"
+    if (-not $url.StartsWith($expectedPrefix, [System.StringComparison]::OrdinalIgnoreCase) -or
+        -not $url.EndsWith("/$name", [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Release $Tag archive URL is outside the expected repository and tag."
+    }
+    return [pscustomobject]@{ Name=$name; Version=$version; Digest=$digest; Url=$url }
+}
+
+function Install-VerifiedReleaseArchive {
+    param([string]$Tag)
+    $headers = @{ "User-Agent" = "DevSpace-Ultra-Installer"; "Accept" = "application/vnd.github+json" }
+    $api = "https://api.github.com/repos/enwong93-sketch/devspace-ultra/releases/tags/$Tag"
+    $release = Invoke-RestMethod -Uri $api -Headers $headers -Method Get -UseBasicParsing
+    $asset = Select-ReleaseArchiveAsset -Release $release -Tag $Tag
+    $temporary = Join-Path ([System.IO.Path]::GetTempPath()) ("devspace-ultra-install-" + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $temporary -ErrorAction Stop | Out-Null
+    $archive = Join-Path $temporary $asset.Name
+    try {
+        Invoke-WebRequest -Uri $asset.Url -Headers $headers -OutFile $archive -UseBasicParsing
+        $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLowerInvariant()
+        if ($actual -ne $asset.Digest) { throw "Downloaded $Tag archive failed SHA-256 verification." }
+        & npm install --global $archive --ignore-scripts --no-audit --no-fund
+        if ($LASTEXITCODE -ne 0) { throw "Release archive installation failed with exit code $LASTEXITCODE." }
+        $root = Join-Path ((& npm root --global).Trim()) 'devspace-ultra'
+        $manifestPath = Join-Path $root 'package.json'
+        if (-not (Test-Path -LiteralPath $manifestPath)) { throw "Release installation is incomplete: package.json is missing." }
+        $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+        if ($manifest.name -ne 'devspace-ultra' -or $manifest.version -ne $asset.Version -or
+            -not (Test-Path -LiteralPath (Join-Path $root 'dist\cli.js'))) {
+            throw "Release installation did not produce the exact package/CLI for $Tag."
+        }
+        return $root
+    }
+    finally {
+        if (Test-Path -LiteralPath $archive) { Remove-Item -LiteralPath $archive -Force -ErrorAction SilentlyContinue }
+        if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue }
+    }
+}
+
+function Assert-NativeSqliteBinding {
+    param([string]$PackageRoot)
+    Write-Step "Rebuilding and verifying the native SQLite dependency"
+    & npm rebuild better-sqlite3 --prefix $PackageRoot --ignore-scripts=false --no-audit --no-fund
+    if ($LASTEXITCODE -ne 0) { throw "better-sqlite3 rebuild failed with exit code $LASTEXITCODE." }
+    $modulePath = Join-Path $PackageRoot 'node_modules\better-sqlite3'
+    if (-not (Test-Path -LiteralPath (Join-Path $modulePath 'package.json'))) {
+        throw "Required better-sqlite3 dependency is missing from the installed package."
+    }
+    $smoke = "const DB=require(process.argv[1]);const db=new DB(':memory:');db.close();"
+    & node -e $smoke $modulePath
+    if ($LASTEXITCODE -ne 0) { throw "better-sqlite3 native binding did not load under the installed Node.js runtime." }
+}
+
+if ($MyInvocation.InvocationName -eq '.') { return }
+
 if ($env:OS -ne "Windows_NT") {
     throw "This installer currently targets Windows because ChatGPT Classic runtime management and Scheduled Tasks are Windows-specific."
 }
@@ -137,11 +211,12 @@ if ($existingPackageRoot -and $Repository -eq "https://github.com/enwong93-sketc
     $packageRoot = Find-InstalledPackageRoot
 }
 else {
-    Write-Step "Installing DevSpace Ultra from GitHub"
-    $source = if ($Ref) { "$Repository#$Ref" } else { $Repository }
-    & npm install --global $source --ignore-scripts --no-audit --no-fund
-    if ($LASTEXITCODE -ne 0) { throw "npm installation failed with exit code $LASTEXITCODE." }
-    $packageRoot = Find-InstalledPackageRoot
+    if ($Repository -ne "https://github.com/enwong93-sketch/devspace-ultra.git") {
+        throw "The stable Windows installer supports only the official digest-verified GitHub Release. Use a separate developer checkout for a custom repository."
+    }
+    Write-Step "Installing the verified DevSpace Ultra release archive"
+    $packageRoot = Install-VerifiedReleaseArchive -Tag $Ref
+    Assert-NativeSqliteBinding -PackageRoot $packageRoot
 }
 $setupScript = Join-Path $packageRoot "scripts\devspace-public-setup.ps1"
 if (-not (Test-Path -LiteralPath $setupScript)) {
@@ -186,11 +261,15 @@ if ($DuckDnsDomain) { $arguments += @("-DuckDnsDomain", (Quote-NativeArgument $D
 if ($PublicHostname) { $arguments += @("-PublicHostname", (Quote-NativeArgument $PublicHostname)) }
 if ($NonInteractive) { $arguments += "-NonInteractive" }
 if ($SkipCaddy) { $arguments += "-SkipCaddy" }
+if ($EnableRouterUpnp) { $arguments += "-EnableRouterUpnp" }
+if ($ManualPortForward) { $arguments += "-ManualPortForward" }
+if ($PublicWanIPv4) { $arguments += @("-PublicWanIPv4", (Quote-NativeArgument $PublicWanIPv4)) }
+if ($MigrateLegacyIngress) { $arguments += "-MigrateLegacyIngress" }
 
 $process = Start-Process powershell.exe -Verb RunAs -Wait -PassThru -ArgumentList ($arguments -join " ")
 if ($process.ExitCode -ne 0) { throw "DevSpace Ultra setup exited with code $($process.ExitCode)." }
 
-Write-Host "`nDevSpace Ultra setup completed." -ForegroundColor Green
+Write-Host "`nDevSpace Ultra local setup finished; public ChatGPT Connector acceptance is still required." -ForegroundColor Yellow
 Write-Host "Network route: $Network"
 Write-Host "Package root: $packageRoot"
 Write-Host "Re-run this same tagged command to upgrade or reconcile the installation."

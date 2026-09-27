@@ -24,7 +24,9 @@ assert.match(cli, /goalRoundRecoveryEnabled:\s*files\.config\.goalRoundRecoveryE
 // Root one-command bootstrap.
 assert.match(installer, /\[ValidateSet\("DuckDNS", "Cloudflare", "Local"\)\]/);
 assert.match(installer, /\$Network = "DuckDNS"/, "DuckDNS must be the bootstrap default");
-assert.match(installer, /& npm install --global \$source --ignore-scripts --no-audit --no-fund/, "bootstrap installer must install the selected tagged GitHub package globally");
+assert.match(installer, /Install-VerifiedReleaseArchive -Tag \$Ref/, "bootstrap installer must use an exact digest-verified release archive");
+assert.match(installer, /Assert-NativeSqliteBinding -PackageRoot \$packageRoot/, "bootstrap installer must prove the native SQLite binding loads");
+assert.doesNotMatch(installer, /& npm install --global \$source\b/, "bootstrap installer must not use a moving Git URL global install");
 assert.match(installer, /OpenJS\.NodeJS\.LTS/, "missing Node.js should be bootstrapped through winget");
 assert.match(installer, /Git\.Git/, "missing Git should be bootstrapped through winget");
 assert.match(installer, /install-skill\.ps1/, "the bootstrap must install the guided setup Agent Skill");
@@ -44,6 +46,9 @@ assert.match(publicSetup, /ConvertFrom-SecureString/, "provider credentials must
 assert.match(publicSetup, /Read-Host \$Prompt -AsSecureString/, "interactive secrets must be entered through a masked local prompt");
 assert.match(publicSetup, /Wait-ForGateway/, "setup must wait for real Gateway readiness");
 assert.match(publicSetup, /__devspace\/memory\/status/, "setup must verify a real Core rather than only Gateway health");
+assert.match(publicSetup, /devspace-local-ingress\.ps1/, "DuckDNS setup must use the maintained router WAN/UPnP/Caddy ingress helper");
+assert.match(publicSetup, /EnableRouterUpnp/, "router UPnP mapping needs explicit consent");
+assert.match(publicSetup, /publicConnectorVerified\s*=\s*\$false/, "local readiness is not public Connector acceptance");
 assert.doesNotMatch(publicSetup, /Write-(?:Host|Output)[^\r\n]*(?:token|Password)/i, "setup must never print secret values");
 
 // Direct ingress support remains generic rather than router-specific.

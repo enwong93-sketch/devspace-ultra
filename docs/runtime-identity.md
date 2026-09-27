@@ -1,6 +1,6 @@
 # ChatGPT Classic Runtime Identity Safety
 
-Status: **Introduced in DevSpace Ultra v0.4.0; maintained in current v0.5.0**. Windows-only ChatGPT Classic package-identity layer.
+Status: **Introduced in DevSpace Ultra v0.4.0 and maintained in the v0.5 series**. Windows-only ChatGPT Classic package-identity layer. This is a runtime identity reference, not a Windows installer entry point.
 
 DevSpace Ultra creates isolated ChatGPT Classic AppX **Worker** packages and separate user-facing **Interactive/Main** packages. Neither role may become a global substitute for the user's canonical Primary/Main-01 installation.
 

@@ -19,13 +19,11 @@ Classic Stream Recovery, Context Guardian, and Classic Host Overlay are enabled 
 | `DEVSPACE_CONTEXT_GUARDIAN` | `1` | `contextGuardianEnabled` | Enable/disable model-aware Main context protection and rollover. |
 | `DEVSPACE_CLASSIC_HOST_OVERLAY` | `1` | `classicHostOverlayEnabled` | Enable/disable the backend-authoritative Goal strip and compact Plan HUD projection. |
 
-Disable any feature explicitly when troubleshooting:
-
-```bash
-DEVSPACE_CLASSIC_STREAM_RECOVERY=0 npx @waishnav/devspace serve
-DEVSPACE_CONTEXT_GUARDIAN=0 npx @waishnav/devspace serve
-DEVSPACE_CLASSIC_HOST_OVERLAY=0 npx @waishnav/devspace serve
-```
+To disable one feature for troubleshooting, change only its corresponding
+`classicStreamRecoveryEnabled`, `contextGuardianEnabled`, or
+`classicHostOverlayEnabled` key in the active Gateway configuration, then use
+the controlled Gateway reload procedure. Do not launch `npx` or a second
+`serve` process beside the canonical Gateway/Core tasks.
 
 The Stream Recovery grace, poll, and cooldown values are intentionally internal safe defaults rather than general-user tuning knobs. Exposing aggressive timing controls would make it easier to mistake a legitimately slow model for a stalled renderer.
 

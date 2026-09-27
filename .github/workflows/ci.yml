@@ -38,8 +38,14 @@ jobs:
         run: |
           $files = @(
             'install.ps1',
+            'scripts/devspace-public-setup.ps1',
+            'scripts/devspace-duckdns-update.ps1',
             'scripts/devspace-ultra-setup.ps1',
             'scripts/devspace-local-ingress.ps1',
+            'scripts/devspace-public-setup.test.ps1',
+            'scripts/devspace-local-ingress.test.ps1',
+            'scripts/devspace-upnp-loopback.test.ps1',
+            'scripts/windows-installer.test.ps1',
             'scripts/devspace-stable-gateway-startup.ps1',
             'scripts/chat-swarm-classic-controller.ps1',
             'scripts/chat-swarm-classic-runtime-clone.ps1',

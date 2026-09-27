@@ -20,6 +20,8 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run verify:public-release
+      - run: npm run verify:setup
+      - run: npm run verify:local-ingress
       - run: npm run verify:stable-gateway
       - run: npm run verify:capabilities
       - name: Build npm-compatible archive
@@ -28,7 +30,7 @@ jobs:
           npm pack
           $archive = Get-ChildItem -Filter 'devspace-ultra-*.tgz' | Select-Object -First 1
           if (-not $archive) { throw 'npm pack did not create an archive.' }
-          $assets = @($archive.FullName, 'install.ps1', 'install-skill.ps1', 'update.ps1')
+          $assets = @($archive.FullName, 'install.ps1', 'install.sh', 'install-skill.ps1', 'update.ps1')
           $lines = foreach ($asset in $assets) {
             $item = Get-Item -LiteralPath $asset
             $hash = Get-FileHash -Algorithm SHA256 -LiteralPath $item.FullName
@@ -39,9 +41,10 @@ jobs:
       - name: Publish release assets
         uses: softprops/action-gh-release@v2
         with:
-          body_path: docs/releases/V0.5.8.md
+          body_path: docs/releases/V0.5.9.md
           files: |
             install.ps1
+            install.sh
             install-skill.ps1
             update.ps1
             devspace-ultra-*.tgz

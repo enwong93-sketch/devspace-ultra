@@ -6,6 +6,10 @@ param(
     [string]$InterfaceAlias,
     [int]$GatewayPort = 7678,
     [string]$StateDir = (Join-Path $env:USERPROFILE ".devspace-local-ingress"),
+    [string]$CaddyPath,
+    [string]$SelectedCaddyfilePath,
+    [ValidateSet('Upnp', 'Manual')][string]$RouterMode = 'Upnp',
+    [string]$PublicWanIPv4,
     [switch]$RotateToken
 )
 
@@ -67,12 +71,17 @@ function Get-DefaultInterfaceAlias {
     )
     foreach ($route in $routes) {
         $adapter = Get-NetAdapter -InterfaceIndex $route.InterfaceIndex -ErrorAction SilentlyContinue
-        if ($adapter -and $adapter.Status -eq "Up") {
+        if ($adapter -and $adapter.Status -eq "Up" -and $adapter.HardwareInterface -eq $true -and
+            (Test-PrivateLanGateway -Address ([string]$route.NextHop))) {
             return [string]$adapter.Name
         }
     }
     $fallback = Get-NetIPConfiguration -ErrorAction SilentlyContinue |
-        Where-Object { $_.IPv4DefaultGateway -and $_.NetAdapter.Status -eq "Up" } |
+        Where-Object {
+            $_.IPv4DefaultGateway -and $_.NetAdapter.Status -eq "Up" -and
+            $_.NetAdapter.HardwareInterface -eq $true -and
+            (Test-PrivateLanGateway -Address ([string]$_.IPv4DefaultGateway.NextHop))
+        } |
         Select-Object -First 1
     if ($fallback) { return [string]$fallback.InterfaceAlias }
     throw "Unable to auto-detect the active physical network interface. Pass -InterfaceAlias explicitly."
@@ -176,8 +185,8 @@ function Invoke-UpnpSoap {
         -Uri $Service.Control `
         -Method POST `
         -Headers @{ SOAPAction = '"' + $Service.ServiceType + '#' + $ActionName + '"' } `
-        -ContentType 'text/xml; charset="utf-8"' `
-        -Body $body `
+        -ContentType 'text/xml; charset=utf-8' `
+        -Body ([System.Text.Encoding]::UTF8.GetBytes($body)) `
         -TimeoutSec 8
 }
 
@@ -188,22 +197,30 @@ function Get-RouterWanIp {
     $match = [regex]::Match($response.Content, '<NewExternalIPAddress>([^<]+)</NewExternalIPAddress>')
     if (-not $match.Success) { throw "Router did not return an external IPv4 address." }
     $ip = $match.Groups[1].Value.Trim()
+    if (-not (Test-PublicWanIPv4 -Address $ip)) {
+        throw "Router WAN address $ip is private/CGNAT/reserved, so direct DuckDNS ingress cannot be verified. Use a public IPv4 address or the Cloudflare fallback."
+    }
+    return $ip
+}
+
+function Test-PublicWanIPv4 {
+    param([string]$Address)
     $parsed = $null
-    if (-not [System.Net.IPAddress]::TryParse($ip, [ref]$parsed)) { throw "Router returned an invalid WAN address." }
+    if (-not [System.Net.IPAddress]::TryParse($Address, [ref]$parsed) -or
+        $parsed.AddressFamily -ne [System.Net.Sockets.AddressFamily]::InterNetwork) { return $false }
     $octets = $parsed.GetAddressBytes()
     $privateOrReserved = (
-        $octets[0] -eq 10 -or
+        $octets[0] -in @(0, 10, 127) -or
         ($octets[0] -eq 100 -and $octets[1] -ge 64 -and $octets[1] -le 127) -or
-        ($octets[0] -eq 127) -or
         ($octets[0] -eq 169 -and $octets[1] -eq 254) -or
         ($octets[0] -eq 172 -and $octets[1] -ge 16 -and $octets[1] -le 31) -or
         ($octets[0] -eq 192 -and $octets[1] -eq 168) -or
+        ($octets[0] -eq 192 -and $octets[1] -eq 0 -and $octets[2] -eq 2) -or
+        ($octets[0] -eq 198 -and $octets[1] -in @(18, 19, 51) -and ($octets[1] -ne 51 -or $octets[2] -eq 100)) -or
+        ($octets[0] -eq 203 -and $octets[1] -eq 0 -and $octets[2] -eq 113) -or
         $octets[0] -ge 224
     )
-    if ($privateOrReserved) {
-        throw "Router WAN address $ip is private/CGNAT/reserved, so direct DuckDNS ingress cannot be verified. Use the Cloudflare fallback or obtain a public IPv4 address."
-    }
-    return $ip
+    return -not $privateOrReserved
 }
 
 function Get-PortMapping {
@@ -219,7 +236,15 @@ function Get-PortMapping {
         $response = Invoke-UpnpSoap -Service $Service -ActionName "GetSpecificPortMappingEntry" -ActionXml $xml
     } catch {
         $responseObject = $_.Exception.Response
-        if ($responseObject -and [int]$responseObject.StatusCode -eq 500) { return $null }
+        if ($responseObject -and [int]$responseObject.StatusCode -eq 500) {
+            # PowerShell 7 often disposes HttpResponseMessage.Content before the
+            # catch block runs, but preserves the server body in ErrorDetails.
+            $fault = [string]$_.ErrorDetails.Message
+            if ([string]::IsNullOrWhiteSpace($fault)) {
+                $fault = Get-UpnpFaultResponseText -Response $responseObject
+            }
+            if ((Get-UpnpFaultCode -Content $fault) -eq 714) { return $null }
+        }
         throw
     }
     $content = [string]$response.Content
@@ -236,6 +261,42 @@ function Get-PortMapping {
         Description = [string](& $capture "NewPortMappingDescription")
         Enabled = [string](& $capture "NewEnabled")
     }
+}
+
+function Get-UpnpFaultResponseText {
+    param($Response)
+    if ($Response.PSObject.Methods.Match('GetResponseStream').Count -gt 0) {
+        $stream = $Response.GetResponseStream()
+        if (-not $stream) { return '' }
+        $reader = New-Object System.IO.StreamReader($stream)
+        try { return $reader.ReadToEnd() } finally { $reader.Dispose() }
+    }
+    if ($Response.PSObject.Properties.Match('Content').Count -gt 0 -and $Response.Content -and
+        $Response.Content.PSObject.Methods.Match('ReadAsStringAsync').Count -gt 0) {
+        return $Response.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+    }
+    return ''
+}
+
+function Test-PrivateLanGateway {
+    param([string]$Address)
+    $ip = $null
+    if (-not [Net.IPAddress]::TryParse($Address, [ref]$ip)) { return $false }
+    if ($ip.AddressFamily -ne [Net.Sockets.AddressFamily]::InterNetwork) { return $false }
+    $o = $ip.GetAddressBytes()
+    return ($o[0] -eq 10 -or ($o[0] -eq 172 -and $o[1] -ge 16 -and $o[1] -le 31) -or
+        ($o[0] -eq 192 -and $o[1] -eq 168))
+}
+
+function Get-UpnpFaultCode {
+    param([string]$Content)
+    $match = [regex]::Match($Content, '<(?:\w+:)?errorCode>\s*(\d+)\s*</(?:\w+:)?errorCode>', 'IgnoreCase')
+    if (-not $match.Success) {
+        $plain = ([string]$Content).Trim()
+        if ($plain -match '^\d{3}$') { return [int]$plain }
+        return $null
+    }
+    return [int]$match.Groups[1].Value
 }
 
 function Remove-PortMapping {
@@ -294,7 +355,12 @@ function Get-DuckDnsToken {
 }
 
 function Save-DuckDnsToken {
-    $secure = Read-Host "Enter DuckDNS token (it will be stored with Windows DPAPI)" -AsSecureString
+    $plain = [Environment]::GetEnvironmentVariable('DEVSPACE_DUCKDNS_TOKEN', 'Process')
+    $secure = if ($plain) {
+        ConvertTo-SecureString $plain -AsPlainText -Force
+    } else {
+        Read-Host "Enter DuckDNS token (it will be stored with Windows DPAPI)" -AsSecureString
+    }
     $encrypted = ConvertFrom-SecureString $secure
     Write-Utf8NoBom -Path $tokenPath -Text ($encrypted + "`n")
 }
@@ -334,10 +400,34 @@ function Get-DuckDnsResponseFirstLine {
 function Write-CaddyConfig {
     param([string]$DomainName, [int]$UpstreamPort, [string]$LanIPv4, [string]$Path)
     if ([string]::IsNullOrWhiteSpace($LanIPv4)) { throw "LAN IPv4 is required for the Caddy bind." }
+    $ctcBlock = ""
+    if (Test-Path -LiteralPath $Path) {
+        $existing = Get-Content -LiteralPath $Path -Raw
+        $begin = "# BEGIN CTC shared infrastructure route - product backend stays separate"
+        $end = "# END CTC shared infrastructure route - product backend stays separate"
+        $beginCount = ([regex]::Matches($existing, [regex]::Escape($begin))).Count
+        $endCount = ([regex]::Matches($existing, [regex]::Escape($end))).Count
+        if ($beginCount -ne $endCount -or $beginCount -gt 1) {
+            throw "Shared Caddyfile has ambiguous CTC route markers; existing configuration was preserved."
+        }
+        if ($beginCount -eq 0 -and $existing -match '(?i)/ctc(?:/|\*)|reverse_proxy\s+127\.0\.0\.1:19150') {
+            throw "Shared Caddyfile has an unmarked CTC route; refusing to overwrite it."
+        }
+        if ($beginCount -eq 1) {
+            $pattern = '(?ms)^[ \t]*' + [regex]::Escape($begin) + '[ \t]*\r?\n.*?^[ \t]*' +
+                [regex]::Escape($end) + '[ \t]*'
+            $match = [regex]::Match($existing, $pattern)
+            if (-not $match.Success -or $match.Value -notmatch 'reverse_proxy 127\.0\.0\.1:19150') {
+                throw "Shared Caddyfile CTC route is not the expected bounded block; existing configuration was preserved."
+            }
+            $ctcBlock = $match.Value.TrimEnd() + "`r`n"
+        }
+    }
     $text = @"
 $DomainName {
     bind $LanIPv4
     route {
+$ctcBlock
         @public path /healthz /mcp /.well-known/oauth-protected-resource/mcp /.well-known/oauth-authorization-server /authorize /token /register /revoke /mcp-app-assets/*
 
         handle @public {
@@ -420,10 +510,21 @@ function Get-CaddyListener {
 }
 
 function Start-Caddy {
-    param($Config)
+    param($Config, [switch]$ReloadExisting)
     if ($script:caddyProcess -and -not $script:caddyProcess.HasExited) { return $script:caddyProcess.Id }
     $existing = Get-CaddyListener -LanIPv4 ([string]$Config.LanIPv4)
-    if ($existing) { return $existing.Pid }
+    if ($existing) {
+        $process = Get-CimInstance Win32_Process -Filter "ProcessId=$($existing.Pid)" -ErrorAction Stop
+        $expected = [regex]::Escape([string]$Config.CaddyfilePath)
+        if (-not $process -or [string]$process.CommandLine -notmatch $expected) {
+            throw "TCP 80/443 is served by an unrelated Caddy config; refusing to adopt or replace it."
+        }
+        if ($ReloadExisting) {
+            & ([string]$Config.CaddyPath) reload --config ([string]$Config.CaddyfilePath) --adapter caddyfile | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "Managed Caddy failed to reload the updated configuration." }
+        }
+        return $existing.Pid
+    }
     New-Item -ItemType Directory -Force $logDir | Out-Null
     $outLog = Join-Path $logDir "caddy.out.log"
     $errLog = Join-Path $logDir "caddy.err.log"
@@ -457,19 +558,67 @@ function Write-RuntimeStatus {
     Write-JsonFile -Path $statusPath -Value $payload
 }
 
+function Update-CaddyBindingForLan {
+    param($Config, $Lan)
+    $observedIPv4 = [string]$Lan.LocalIPv4
+    if ([string]::Equals([string]$Config.LanIPv4, $observedIPv4, [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $false
+    }
+    $staged = ([string]$Config.CaddyfilePath) + '.lan-rebind.staged'
+    try {
+        if (Test-Path -LiteralPath ([string]$Config.CaddyfilePath)) {
+            Copy-Item -LiteralPath ([string]$Config.CaddyfilePath) -Destination $staged -Force
+        }
+        Write-CaddyConfig -DomainName ([string]$Config.Domain) -UpstreamPort ([int]$Config.GatewayPort) -LanIPv4 $observedIPv4 -Path $staged
+        & ([string]$Config.CaddyPath) validate --config $staged --adapter caddyfile | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "Generated Caddy configuration did not validate after LAN IPv4 changed." }
+        if ($script:caddyProcess -and -not $script:caddyProcess.HasExited) {
+            Stop-Process -Id $script:caddyProcess.Id -Force -ErrorAction Stop
+            $script:caddyProcess.WaitForExit(5000) | Out-Null
+            $script:caddyProcess = $null
+        }
+        Move-Item -LiteralPath $staged -Destination ([string]$Config.CaddyfilePath) -Force
+        $Config | Add-Member -NotePropertyName lanIPv4 -NotePropertyValue $observedIPv4 -Force
+        Write-JsonFile -Path $configPath -Value $Config
+        return $true
+    } finally {
+        if (Test-Path -LiteralPath $staged) { Remove-Item -LiteralPath $staged -Force }
+    }
+}
+
 function Invoke-RefreshOnce {
     param($Config, [string]$PreviousWanIp = $null, [switch]$ForceDuckDns)
     $lan = Get-LanInfo -Alias ([string]$Config.InterfaceAlias)
-    $service = Get-UpnpWanService -Gateway $lan.Gateway
-    $wanIp = Get-RouterWanIp -Service $service
-    $mappings = @(
-        Ensure-PortMapping -Service $service -Port 80 -LocalIPv4 $lan.LocalIPv4
-        Ensure-PortMapping -Service $service -Port 443 -LocalIPv4 $lan.LocalIPv4
-    )
+    $rebinding = Update-CaddyBindingForLan -Config $Config -Lan $lan
+    $mode = if ($Config -is [System.Collections.IDictionary]) {
+        [string]$Config['routerMode']
+    } elseif ($Config.PSObject.Properties.Match('routerMode').Count -gt 0) {
+        [string]$Config.routerMode
+    } else { 'Upnp' }
+    if (-not $mode) { $mode = 'Upnp' }
+    if ($mode -eq 'Manual') {
+        $wanIp = $null
+        try {
+            $readOnlyService = Get-UpnpWanService -Gateway $lan.Gateway
+            $wanIp = Get-RouterWanIp -Service $readOnlyService
+        } catch {
+            $wanIp = [string]$Config.PublicWanIPv4
+        }
+        if (-not (Test-PublicWanIPv4 -Address $wanIp)) { throw 'Manual router mode requires a confirmed public router WAN IPv4 address.' }
+        $mappings = @([pscustomobject]@{ Port = 80; Mode = 'manual'; Verified = $false },
+            [pscustomobject]@{ Port = 443; Mode = 'manual'; Verified = $false })
+    } else {
+        $service = Get-UpnpWanService -Gateway $lan.Gateway
+        $wanIp = Get-RouterWanIp -Service $service
+        $mappings = @(
+            Ensure-PortMapping -Service $service -Port 80 -LocalIPv4 $lan.LocalIPv4
+            Ensure-PortMapping -Service $service -Port 443 -LocalIPv4 $lan.LocalIPv4
+        )
+    }
     if ($ForceDuckDns -or -not $PreviousWanIp -or $PreviousWanIp -ne $wanIp) {
         Update-DuckDns -DomainName ([string]$Config.Domain) -WanIp $wanIp
     }
-    $caddyPid = Start-Caddy -Config $Config
+    $caddyPid = Start-Caddy -Config $Config -ReloadExisting:$rebinding
     Write-RuntimeStatus -Ok $true -Config $Config -Lan $lan -WanIp $wanIp -Mappings $mappings -CaddyPid $caddyPid
     return [pscustomobject]@{ Lan = $lan; WanIp = $wanIp; Mappings = $mappings; CaddyPid = $caddyPid }
 }
@@ -480,11 +629,12 @@ function Install-Task {
     if (-not (Test-Path -LiteralPath $powershell)) { throw "Windows PowerShell host is missing: $powershell" }
     $quotedScript = '"{0}"' -f $scriptPath
     $quotedState = '"{0}"' -f $StateDir
-    $taskAction = New-ScheduledTaskAction -Execute $powershell -Argument "-NoProfile -ExecutionPolicy Bypass -File $quotedScript -Action run -StateDir $quotedState"
+    $taskAction = New-ScheduledTaskAction -Execute $powershell -Argument "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File $quotedScript -Action run -StateDir $quotedState"
     $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
     $settings = New-ScheduledTaskSettingsSet `
         -StartWhenAvailable `
         -MultipleInstances IgnoreNew `
+        -Hidden `
         -ExecutionTimeLimit (New-TimeSpan -Seconds 0) `
         -RestartCount 999 `
         -RestartInterval (New-TimeSpan -Minutes 1)
@@ -505,15 +655,25 @@ switch ($Action) {
         $normalizedDomain = Normalize-Domain $Domain
         if (-not $InterfaceAlias) { $InterfaceAlias = Get-DefaultInterfaceAlias }
         if ($GatewayPort -lt 1 -or $GatewayPort -gt 65535) { throw "GatewayPort is invalid." }
+        if ($RouterMode -eq 'Manual' -and -not (Test-PublicWanIPv4 -Address $PublicWanIPv4)) {
+            throw 'Manual router mode requires -PublicWanIPv4 set to the confirmed public router WAN address.'
+        }
         New-Item -ItemType Directory -Force $StateDir | Out-Null
         New-Item -ItemType Directory -Force $logDir | Out-Null
-        $caddyCommand = Get-Command caddy -ErrorAction Stop
-        $caddyPath = [string]$caddyCommand.Source
-        $caddyfilePath = Join-Path $env:USERPROFILE "DevSpaceIngress\Caddyfile"
+        $resolvedCaddyPath = if ($CaddyPath) {
+            (Resolve-Path -LiteralPath $CaddyPath -ErrorAction Stop).Path
+        } else {
+            [string](Get-Command caddy -ErrorAction Stop).Source
+        }
+        $caddyfilePath = if ($SelectedCaddyfilePath) {
+            (Resolve-Path -LiteralPath $SelectedCaddyfilePath -ErrorAction Stop).Path
+        } else {
+            Join-Path $env:USERPROFILE "DevSpaceIngress\Caddyfile"
+        }
         if ($RotateToken -or -not (Test-Path -LiteralPath $tokenPath)) { Save-DuckDnsToken }
         $lan = Get-LanInfo -Alias $InterfaceAlias
         Write-CaddyConfig -DomainName $normalizedDomain -UpstreamPort $GatewayPort -LanIPv4 $lan.LocalIPv4 -Path $caddyfilePath
-        & $caddyPath validate --config $caddyfilePath --adapter caddyfile | Out-Null
+        & $resolvedCaddyPath validate --config $caddyfilePath --adapter caddyfile | Out-Null
         if ($LASTEXITCODE -ne 0) { throw "Generated Caddy configuration did not validate." }
         $config = [ordered]@{
             schemaVersion = 1
@@ -521,12 +681,15 @@ switch ($Action) {
             interfaceAlias = $InterfaceAlias
             lanIPv4 = $lan.LocalIPv4
             gatewayPort = $GatewayPort
-            caddyPath = $caddyPath
+            routerMode = $RouterMode
+            publicWanIPv4 = if ($RouterMode -eq 'Manual') { $PublicWanIPv4 } else { $null }
+            caddyPath = $resolvedCaddyPath
             caddyfilePath = $caddyfilePath
             installedAt = (Get-Date).ToUniversalTime().ToString("o")
         }
         Write-JsonFile -Path $configPath -Value $config
         Ensure-FirewallRule -Alias $InterfaceAlias
+        $null = Start-Caddy -Config $config -ReloadExisting
         $null = Invoke-RefreshOnce -Config $config -ForceDuckDns
         Install-Task -Config $config
         Start-Sleep -Seconds 2
@@ -562,7 +725,7 @@ switch ($Action) {
         if ($LASTEXITCODE -ne 0) { throw "Generated Caddy configuration did not validate." }
         $config | Add-Member -NotePropertyName lanIPv4 -NotePropertyValue $lan.LocalIPv4 -Force
         Write-JsonFile -Path $configPath -Value $config
-        $caddyPid = Start-Caddy -Config $config
+        $caddyPid = Start-Caddy -Config $config -ReloadExisting
         Install-Task -Config $config
         [ordered]@{
             ok = $true
@@ -616,7 +779,7 @@ switch ($Action) {
             if ($task.State -eq "Running") { Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue }
             Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
         }
-        if ($config) {
+        if ($config -and [string]$config.routerMode -ne 'Manual') {
             try {
                 $lan = Get-LanInfo -Alias ([string]$config.InterfaceAlias)
                 $service = Get-UpnpWanService -Gateway $lan.Gateway

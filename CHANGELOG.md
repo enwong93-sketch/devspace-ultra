@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 0.5.9 — 2026-09-27
+
+- Repair the fresh-install routes: Windows and the macOS/Linux core-only installer select one exact GitHub Release archive, verify its SHA-256 digest, check the installed package/CLI, and rebuild plus load-test the `better-sqlite3` native binding after `--ignore-scripts`.
+- Fix empty-config StrictMode setup and same-shell WinGet executable discovery; launch the Stable Gateway with the configuration directory actually written by setup.
+- Unify DuckDNS setup with the maintained router-WAN/LAN-bound Caddy ingress helper. Require explicit consent before UPnP requests TCP 80/443, allow confirmed manual forwarding with a public router WAN IPv4, and refuse competing legacy ingress tasks.
+- Treat only UPnP fault 714 as an absent mapping, never infer that from a generic HTTP 500; publish an explicit WAN address to DuckDNS instead of VPN-sensitive blank-IP detection. Send UPnP SOAP with a PowerShell 5.1/7-compatible Content-Type and deterministic UTF-8 body. Preserve bounded CTC shared Caddy routes and support LAN address rebind.
+- Remove current-install documentation that still recommended the old `npx @waishnav/devspace`, port 7676, unpinned moving-branch script execution, or direct Git URL global npm install. Historical specifications and previous release notes remain intact.
+- Report local readiness separately from independently verified public HTTPS, OAuth, Connector tool listing, and a real write-capable acceptance call.
+- Preserve a CTC-owned Interactive05 controller across canonical startup and shared-Caddy regeneration; an ownership receipt reserves Main-05 and a bounded CTC route survives LAN rebinding without coupling the two backends.
+
 ## 0.5.8 — 2026-09-15
 
 - Tightened the twenty-minute interrupted-turn rescue clock so only substantive DevSpace tool requests actually admitted by the Local Gateway after the progress preflight reset silence. Raw page-observed tool attempts that are later blocked by the ten-minute narration gate no longer postpone rescue, and transport-only HTTP `loadingFinished` boundaries no longer advance `lastActivityAt` despite remaining non-terminal.
