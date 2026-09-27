@@ -581,11 +581,11 @@ function Invoke-StagePackage($Release, [string] $ArchivePath, [string] $Prefix) 
         }
         $npm = Get-Command npm.cmd -ErrorAction SilentlyContinue
         if (-not $npm) { $npm = Get-Command npm -ErrorAction Stop }
-        & $npm.Source rebuild better-sqlite3 --prefix $root --ignore-scripts=false --no-audit --no-fund
+        $nativeRebuildOutput = @(& $npm.Source rebuild better-sqlite3 --prefix $root --ignore-scripts=false --no-audit --no-fund 2>&1)
         if ($LASTEXITCODE -ne 0) { throw "Staged better-sqlite3 rebuild failed with exit code $LASTEXITCODE." }
         $sqliteModule = Join-Path $root "node_modules\better-sqlite3"
         $smoke = "const DB=require(process.argv[1]);const db=new DB(':memory:');db.close();"
-        & node -e $smoke $sqliteModule
+        $nativeSmokeOutput = @(& node -e $smoke $sqliteModule 2>&1)
         if ($LASTEXITCODE -ne 0) { throw "Staged better-sqlite3 native binding did not load under the installed Node.js runtime." }
     }
     return [pscustomobject]@{ Prefix = $stagePrefix; Root = $root; Manifest = $manifest }

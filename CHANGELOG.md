@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 0.5.15 — 2026-09-28
+
+- Capture `npm rebuild better-sqlite3` and native smoke-test stdout inside the transactional updater's staging function, preserving its single package-object return contract under PowerShell pipelines.
+- Add a static regression gate for both native-command outputs after production proved the complete 0.5.14 side-by-side update path.
+
 ## 0.5.14 — 2026-09-28
 
 - Support one cloud ChatGPT Classic account connected to multiple DevSpace MCP servers on different computers while keeping each DDNS/OAuth/Connector/Runtime authority completely isolated.
