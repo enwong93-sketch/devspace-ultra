@@ -12,6 +12,7 @@ Use this Skill as an interactive installation and recovery runbook. The Agent ex
 - The primary client and product acceptance target is **ChatGPT Classic on Windows**.
 - Codex may act as the installer or repair executor, but Codex is **not** the product client and a working Codex connection is never DevSpace Ultra acceptance.
 - The core outcome is one OAuth-protected ChatGPT Classic MCP connection that exposes verified local development tools.
+- One ChatGPT account may contain several DevSpace connections for different computers. Each installation needs its own DDNS/tunnel URL, persisted `serverInstanceId`, OAuth resource, and Connector entry. Never reuse or test another computer's DevSpace connection as acceptance for this machine.
 - Long-context checkpoint, handoff and recovery can keep a project moving beyond one conversation's usable context. This is continuity, not a literal increase or bypass of model, account, rate or token limits; never advertise “unlimited tokens” as a technical entitlement.
 - Local setup, DDNS, Caddy, health checks, optional Multi-Main, Goal/Rescue and extra capabilities are incomplete until the ChatGPT Classic MCP connection, OAuth and real read/write/reconnect tests pass.
 
@@ -22,6 +23,7 @@ Infrastructure checks are prerequisites, not the product goal. Resume at the ear
 1. Inspect and preserve existing state.
 2. Prepare or verify local Gateway/Core and the public OAuth-protected `/mcp` endpoint.
 3. In **ChatGPT Classic**, enable Developer mode, create the exact MCP connection and complete OAuth.
+   - Confirm the connection URL is this machine's exact public `/mcp` resource and its reported `serverInstanceId` matches this installation. A similarly named connection for another computer is a separate authority.
 4. Scan or refresh the authenticated tool catalogue and verify all required development tools.
 5. Enable the connection in a fresh ChatGPT Classic conversation.
 6. Run a real read test.
@@ -114,7 +116,7 @@ DuckDNS example:
 
 ```powershell
 $p = Join-Path $env:TEMP 'devspace-ultra-install.ps1'
-iwr 'https://raw.githubusercontent.com/enwong93-sketch/devspace-ultra/v0.5.13/install.ps1' -OutFile $p
+iwr 'https://raw.githubusercontent.com/enwong93-sketch/devspace-ultra/v0.5.14/install.ps1' -OutFile $p
 & $p -Network DuckDNS
 ```
 
@@ -122,7 +124,7 @@ Cloudflare named-tunnel fallback:
 
 ```powershell
 $p = Join-Path $env:TEMP 'devspace-ultra-install.ps1'
-iwr 'https://raw.githubusercontent.com/enwong93-sketch/devspace-ultra/v0.5.13/install.ps1' -OutFile $p
+iwr 'https://raw.githubusercontent.com/enwong93-sketch/devspace-ultra/v0.5.14/install.ps1' -OutFile $p
 & $p -Network Cloudflare -PublicHostname '<stable-hostname>'
 ```
 

@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 0.5.14 — 2026-09-28
+
+- Support one cloud ChatGPT Classic account connected to multiple DevSpace MCP servers on different computers while keeping each DDNS/OAuth/Connector/Runtime authority completely isolated.
+- Persist a unique `serverInstanceId` per installation (with a deterministic exact-resource fallback for legacy configs) and expose the instance plus exact OAuth resource in health and model instructions.
+- Require every non-bootstrap ChatGPT tool call to carry a current exact invocation observed on a local Classic Runtime page for that server. Wrong-computer or stale Connector calls fail closed with `devspace_instance_binding_required`; Codex and non-ChatGPT MCP clients keep their existing path.
+- Scope persisted App sandbox origins by `serverInstanceId + public resource origin`, and reject one claim observed through two Connector App origins.
+- Document and gate the public multi-computer installation contract without hard-coding any private hostname or connection name.
+
 ## 0.5.13 — 2026-09-28
 
 - Make updater busy detection use the Stable Gateway's authoritative non-stream request counter. Ordinary replayable SSE connections and the updater's own status probe no longer block a safe package handover.

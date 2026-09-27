@@ -257,6 +257,9 @@ Set-Property $config "classicHostOverlayEnabled" $true
 Set-Property $config "host" "127.0.0.1"
 Set-Property $config "port" 7678
 Set-Property $config "publicBaseUrl" $publicBaseUrl
+if ($config.PSObject.Properties.Match('serverInstanceId').Count -eq 0 -or [string]::IsNullOrWhiteSpace([string]$config.serverInstanceId)) {
+    Set-Property $config "serverInstanceId" ("dsi_" + [guid]::NewGuid().ToString('N'))
+}
 Set-Property $config "stateDir" $StateDir
 Set-Property $config "stableGatewayPort" 7678
 Set-Property $config "stableGatewayPublicBaseUrl" $publicBaseUrl
@@ -275,7 +278,9 @@ Write-AtomicText $ConfigPath (($config | ConvertTo-Json -Depth 100) + "`n")
 $node = (Get-Command node.exe -ErrorAction Stop).Source
 $gatewayScript = Join-Path $PackageRoot "scripts\devspace-fixed-backend.mjs"
 if (-not (Test-Path -LiteralPath $gatewayScript)) { throw "Stable Gateway launcher is missing." }
-$gatewayAction = New-ScheduledTaskAction -Execute $node -Argument ('"{0}" --foreground --config-dir "{1}"' -f $gatewayScript, $ConfigDir) -WorkingDirectory $PackageRoot
+$runtimeWorkingDirectory = Join-Path $env:LOCALAPPDATA "DevSpaceUltra\RuntimeWorkingDirectory"
+New-Item -ItemType Directory -Path $runtimeWorkingDirectory -Force | Out-Null
+$gatewayAction = New-ScheduledTaskAction -Execute $node -Argument ('"{0}" --foreground --config-dir "{1}"' -f $gatewayScript, $ConfigDir) -WorkingDirectory $runtimeWorkingDirectory
 $gatewayTriggers = @((New-ScheduledTaskTrigger -AtLogOn -User ([Security.Principal.WindowsIdentity]::GetCurrent().Name)))
 Register-UserTask $GatewayTask $gatewayAction $gatewayTriggers "DevSpace Ultra Stable Local Gateway and Core supervisor"
 
