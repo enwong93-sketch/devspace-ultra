@@ -1,11 +1,13 @@
 interface:
-  display_name: DevSpace Ultra Setup
-  short_description: Guided DuckDNS-first installation, repair, and verification for DevSpace Ultra.
+  display_name: DevSpace Ultra for ChatGPT Classic
+  short_description: Install and verify ChatGPT Classic local development through DevSpace Ultra.
   default_prompt: >-
-    Use the DevSpace Ultra Setup Skill to inspect the current machine, preserve existing state,
-    prefer DuckDNS/DDNS plus Caddy, fall back to a stable Cloudflare named tunnel only when
-    direct inbound access is unavailable, execute every safe local step, guide the user through
-    account/router actions one at a time, and verify the complete OAuth-protected MCP path.
+    Install or repair DevSpace Ultra for ChatGPT Classic, not Codex. Preserve existing state,
+    prepare or verify the public OAuth-protected MCP endpoint, then create the exact ChatGPT
+    Classic connection, complete OAuth, scan the full development tool catalogue, and prove
+    fresh-chat read, authorized disposable write/edit/command, and reconnect behavior. Never
+    stop at local health or omit a gate. Describe long-task continuity accurately, not as a
+    literal change to OpenAI token, context, usage, or rate limits.
 policy:
   allow_implicit_invocation: true
   network_secrets_in_chat: false

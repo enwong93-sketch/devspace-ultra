@@ -7,6 +7,16 @@ summary: Install, upgrade, diagnose, and verify DevSpace Ultra with DuckDNS/DDNS
 
 Use this Skill when the user asks to install, set up, upgrade, reconnect, publish, expose, or repair DevSpace Ultra, Local Gateway, DuckDNS/DDNS, Caddy, Cloudflare tunnel, OAuth, router forwarding, or the public MCP URL.
 
+## Core product contract
+
+DevSpace Ultra is primarily for **ChatGPT Classic**, not Codex. Codex may execute installation or repair work, but successful Codex tooling does not satisfy product acceptance. The required outcome is a ChatGPT Classic MCP connection with completed OAuth and verified local read/write/edit/patch/command/process tools.
+
+DevSpace provides checkpoint, handoff and recovery for long-running work. Describe this as durable continuity beyond one conversation's usable context—not as a literal increase or bypass of OpenAI token, context, usage or rate limits.
+
+The non-skippable order is: preserve state → prove local/public prerequisites → enable ChatGPT Classic Developer mode → create the Classic connection → complete OAuth → scan/refresh tools → enable it in a fresh Classic conversation → real read → authorized disposable write/edit/command → reconnect test → complete pass/fail report. Resume at the first incomplete gate. If public ingress already passes, the next action is the Classic connection and OAuth, not more router work.
+
+See [the canonical ChatGPT Classic MCP installation contract](../../../../docs/CHATGPT_CLASSIC_MCP_INSTALLATION.md).
+
 ## Operating principle
 
 Work as an installation guide **and** local executor:
@@ -75,7 +85,7 @@ Use the tagged one-command installer whenever possible:
 
 ```powershell
 $p=Join-Path $env:TEMP 'devspace-ultra-install.ps1'
-iwr https://raw.githubusercontent.com/enwong93-sketch/devspace-ultra/v0.5.9/install.ps1 -OutFile $p
+iwr https://raw.githubusercontent.com/enwong93-sketch/devspace-ultra/v0.5.10/install.ps1 -OutFile $p
 & $p -Network DuckDNS
 ```
 
@@ -108,7 +118,7 @@ Use only when direct DDNS ingress is unavailable or rejected by evidence.
 
 ```powershell
 $p=Join-Path $env:TEMP 'devspace-ultra-install.ps1'
-iwr https://raw.githubusercontent.com/enwong93-sketch/devspace-ultra/v0.5.9/install.ps1 -OutFile $p
+iwr https://raw.githubusercontent.com/enwong93-sketch/devspace-ultra/v0.5.10/install.ps1 -OutFile $p
 & $p -Network Cloudflare -PublicHostname 'devspace.example.com'
 ```
 
@@ -118,7 +128,7 @@ Use a **named tunnel** with a stable hostname routed to `http://127.0.0.1:7678`.
 
 If a Worker relay is used, explain that Worker invocations consume the current plan allowance. Do not quote a stale numerical quota from memory; consult current official Cloudflare limits when the exact allowance matters.
 
-## Phase 4 — authoritative verification
+## Final authoritative verification — follow the graph
 
 Do not declare success until all applicable checks pass:
 
@@ -132,10 +142,12 @@ Do not declare success until all applicable checks pass:
 4. Public HTTPS hostname resolves to the intended route.
 5. `/.well-known/oauth-protected-resource/mcp` returns valid metadata.
 6. `/mcp` produces the expected OAuth challenge without exposing a bearer token.
-7. The ChatGPT connector can initialize, list tools, execute one harmless read-only tool, and perform one explicitly authorized write-capable test in a disposable workspace. A local health response alone is not product acceptance.
-8. Reconnect once and confirm the same conversation can still call tools.
-9. Confirm Gateway/Core/Application MCP ports remain loopback-only.
-10. Confirm no secret value appears in config, logs, task arguments, Git status, or generated status files.
+7. The ChatGPT Classic connection exists and OAuth completes for the exact stable MCP URL.
+8. Its authenticated catalogue contains `read`, `write`, `edit`, `apply_patch`, `exec_command`, `write_stdin`, and `devspace_progress_report`.
+9. A fresh Classic conversation completes verified read, disposable write/edit/command and read-back calls.
+10. A reconnect or second fresh Classic conversation retains authenticated access without recreating the connection.
+11. Gateway/Core/Application MCP ports remain loopback-only.
+12. No secret value appears in config, logs, task arguments, evidence, Git status, or generated status files.
 
 Write a progress report after the local installation phase, after public ingress verification, and after final ChatGPT connector acceptance when each is a meaningful medium-sized milestone. Do not report every command.
 
@@ -153,8 +165,11 @@ Write a progress report after the local installation phase, after public ingress
 
 Return:
 
+- confirmation that ChatGPT Classic—not Codex—was the tested client;
 - selected route and why;
 - stable public MCP URL;
+- ChatGPT Classic connection name and OAuth result without secrets;
+- complete required tool list plus read/write/reconnect evidence;
 - Gateway/Core health evidence;
 - any manual router/account action still outstanding;
 - Cloudflare quota caveat when the fallback route is used;

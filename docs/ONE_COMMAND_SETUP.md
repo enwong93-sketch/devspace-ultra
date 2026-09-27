@@ -2,6 +2,8 @@
 
 DevSpace Ultra uses a tagged Windows installer to install the package, create the Local Gateway/Core supervisor, write a user-local configuration, and configure one selected ingress route. Local health is **not** proof that a public ChatGPT Connector works.
 
+The product target is **ChatGPT Classic—not Codex**. Infrastructure installation is followed immediately by the mandatory [ChatGPT Classic MCP connection, OAuth and read/write/reconnect workflow](CHATGPT_CLASSIC_MCP_INSTALLATION.md). Codex can execute setup commands but is never substitute acceptance. Continuity features do not alter OpenAI token, context, usage or rate limits.
+
 For an **existing** installation, use the transactional updater instead of reinstalling over the running global package. Builds old enough not to contain `devspace update` can bootstrap the current updater once from the latest stable GitHub Release; the updater verifies the release digest, stages the new package before replacement, migrates legacy package/task paths, preserves user state and rolls the old package/shims back if post-swap verification fails. After migration, `devspace update` and the daily safe-update task handle future stable releases automatically and defer while non-stream Agent/tool work is active.
 
 ```powershell
@@ -22,7 +24,7 @@ DuckDNS account creation, router login, WAN/CGNAT checks, and port forwarding ca
 
 ```powershell
 $p=Join-Path $env:TEMP 'devspace-ultra-install-skill.ps1'
-iwr https://raw.githubusercontent.com/enwong93-sketch/devspace-ultra/v0.5.9/install-skill.ps1 -OutFile $p
+iwr https://raw.githubusercontent.com/enwong93-sketch/devspace-ultra/v0.5.10/install-skill.ps1 -OutFile $p
 & $p
 ```
 
@@ -33,7 +35,7 @@ Then ask the Agent to **use `devspace-ultra-setup` to install or repair DevSpace
 Run the following from a normal PowerShell window. The installer requests elevation only for the machine-level operations that need it. It prompts before requesting router UPnP mappings for TCP 80/443; declining makes **no router change** and stops before public ingress setup.
 
 ```powershell
-$p=Join-Path $env:TEMP 'devspace-ultra-install.ps1'; iwr https://raw.githubusercontent.com/enwong93-sketch/devspace-ultra/v0.5.9/install.ps1 -OutFile $p; & $p -Network DuckDNS
+$p=Join-Path $env:TEMP 'devspace-ultra-install.ps1'; iwr https://raw.githubusercontent.com/enwong93-sketch/devspace-ultra/v0.5.10/install.ps1 -OutFile $p; & $p -Network DuckDNS
 ```
 
 The installer prompts for the DuckDNS subdomain and token. The token is protected with Windows DPAPI for the current user; it is not written to `config.json`, Task Scheduler arguments, logs, or Git. It then:
@@ -59,7 +61,7 @@ Create a stable named Cloudflare Tunnel route to `http://127.0.0.1:7678`, then r
 ```powershell
 $env:DEVSPACE_CLOUDFLARE_TUNNEL_TOKEN = '<one-time tunnel token>'
 $p=Join-Path $env:TEMP 'devspace-ultra-install.ps1'
-iwr https://raw.githubusercontent.com/enwong93-sketch/devspace-ultra/v0.5.9/install.ps1 -OutFile $p
+iwr https://raw.githubusercontent.com/enwong93-sketch/devspace-ultra/v0.5.10/install.ps1 -OutFile $p
 & $p `
   -Network Cloudflare `
   -PublicHostname 'devspace.example.com'
@@ -79,7 +81,7 @@ Set secrets in process-scoped environment variables and pass the remaining value
 ```powershell
 $env:DEVSPACE_DUCKDNS_TOKEN = '<token>'
 $p=Join-Path $env:TEMP 'devspace-ultra-install.ps1'
-iwr https://raw.githubusercontent.com/enwong93-sketch/devspace-ultra/v0.5.9/install.ps1 -OutFile $p
+iwr https://raw.githubusercontent.com/enwong93-sketch/devspace-ultra/v0.5.10/install.ps1 -OutFile $p
 & $p `
   -Network DuckDNS `
   -DuckDnsDomain 'example.duckdns.org' `

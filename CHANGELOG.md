@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 0.5.10 — 2026-09-27
+
+- Define ChatGPT Classic on Windows as the primary product client and make clear that Codex may install or repair DevSpace Ultra but is not the installation acceptance target.
+- Add one canonical, non-skippable MCP installation contract: public endpoint, Classic connection, OAuth, authenticated tool scan, fresh-chat enablement, real read, authorized disposable write/edit/command, and reconnect persistence.
+- Update both packaged setup Agent Skills, their OpenAI interface prompts, the setup capability manifest, README and setup documentation to require the complete ordered workflow and an explicit pass/fail report for every gate.
+- Make installer/setup output name ChatGPT Classic and print the exact post-infrastructure sequence instead of leaving OAuth and tools as an easily missed final note.
+- Require the full local development catalogue (`read`, `write`, `edit`, `apply_patch`, `exec_command`, `write_stdin`, and `devspace_progress_report`) and reject read-only acceptance in release documentation and CI.
+- Clarify that checkpoint/handoff/recovery provides durable long-task continuity but does not increase or bypass OpenAI model context, token, account usage or rate limits.
+- Add a release gate that fails if future documentation or Skills omit the Classic target, OAuth, tool catalogue, fresh-chat read/write/command or reconnect evidence.
+
 ## 0.5.9 — 2026-09-27
 
 - Repair the fresh-install routes: Windows and the macOS/Linux core-only installer select one exact GitHub Release archive, verify its SHA-256 digest, check the installed package/CLI, and rebuild plus load-test the `better-sqlite3` native binding after `--ignore-scripts`.

@@ -30,7 +30,7 @@ WinGet can install Caddy without making its command available in the current ele
 
 ## HTTPS or OAuth still fails after public TCP works
 
-Check Caddy's newest ACME error for the selected hostname; public certificate validation normally needs the outside world to reach TCP 80 or 443. Do not disable TLS verification. Once HTTPS is valid, test the public `/.well-known/oauth-protected-resource/mcp` and authorization-server metadata, an unauthenticated `/mcp` OAuth challenge, then complete ChatGPT Connector authorization and one harmless read-only tool call. Only that final call proves product-level acceptance. See [Caddy automatic HTTPS](https://caddyserver.com/docs/automatic-https).
+Check Caddy's newest ACME error for the selected hostname; public certificate validation normally needs the outside world to reach TCP 80 or 443. Do not disable TLS verification. Once HTTPS is valid, continue through the full [ChatGPT Classic MCP installation graph](CHATGPT_CLASSIC_MCP_INSTALLATION.md); OAuth or a read-only call alone is not complete. See [Caddy automatic HTTPS](https://caddyserver.com/docs/automatic-https).
 
 ## Other runtime boundaries
 

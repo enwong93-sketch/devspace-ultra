@@ -1,6 +1,6 @@
 interface:
-  display_name: "DevSpace Network Setup"
-  short_description: "Install and verify DuckDNS/DDNS or Cloudflare ingress"
-  default_prompt: "Set up or repair DevSpace Ultra. Prefer DuckDNS/DDNS plus Caddy, execute safe local commands, guide only unavoidable user account/router actions, and verify the real public MCP/OAuth path."
+  display_name: "DevSpace for ChatGPT Classic"
+  short_description: "Install and verify ChatGPT Classic local development access"
+  default_prompt: "Install or repair DevSpace Ultra for ChatGPT Classic, not Codex. Verify the public MCP path, create the exact Classic connection, complete OAuth, scan the full tool catalogue, and prove fresh-chat read, authorized disposable write/edit/command, and reconnect behavior without omitting any gate."
 policy:
   allow_implicit_invocation: true

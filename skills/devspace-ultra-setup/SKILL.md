@@ -7,6 +7,30 @@ description: Install, upgrade, repair, or expose DevSpace Ultra through the reco
 
 Use this Skill as an interactive installation and recovery runbook. The Agent executes every safe local command it can execute, verifies each result itself, and asks the user only for account, router, or physical-network actions that cannot be completed locally. Do not merely paste a long command and leave the user to diagnose it.
 
+## Core product contract
+
+- The primary client and product acceptance target is **ChatGPT Classic on Windows**.
+- Codex may act as the installer or repair executor, but Codex is **not** the product client and a working Codex connection is never DevSpace Ultra acceptance.
+- The core outcome is one OAuth-protected ChatGPT Classic MCP connection that exposes verified local development tools.
+- Long-context checkpoint, handoff and recovery can keep a project moving beyond one conversation's usable context. This is continuity, not a literal increase or bypass of model, account, rate or token limits; never advertise “unlimited tokens” as a technical entitlement.
+- Local setup, DDNS, Caddy, health checks, optional Multi-Main, Goal/Rescue and extra capabilities are incomplete until the ChatGPT Classic MCP connection, OAuth and real read/write/reconnect tests pass.
+
+## Mandatory order — never omit or silently reorder
+
+Infrastructure checks are prerequisites, not the product goal. Resume at the earliest incomplete gate. If the public endpoint already passes external checks, go directly to ChatGPT Classic connection and OAuth; do not reopen the router, reinstall Caddy or redo DNS.
+
+1. Inspect and preserve existing state.
+2. Prepare or verify local Gateway/Core and the public OAuth-protected `/mcp` endpoint.
+3. In **ChatGPT Classic**, enable Developer mode, create the exact MCP connection and complete OAuth.
+4. Scan or refresh the authenticated tool catalogue and verify all required development tools.
+5. Enable the connection in a fresh ChatGPT Classic conversation.
+6. Run a real read test.
+7. Run an explicitly authorized disposable write/edit/command test and verify it on disk.
+8. Reconnect or open another fresh Classic conversation and prove authenticated tools persist.
+9. Report every gate as pass/fail. A missing or unverified row means installation is incomplete.
+
+Follow [the canonical ChatGPT Classic MCP installation contract](../../docs/CHATGPT_CLASSIC_MCP_INSTALLATION.md) for exact evidence and failure boundaries.
+
 ## Operating rules
 
 - Prefer **DuckDNS/DDNS + Caddy direct ingress**.
@@ -19,7 +43,7 @@ Use this Skill as an interactive installation and recovery runbook. The Agent ex
 - Keep `autoCompactEnabled=false`. Enable `goalRoundRecoveryEnabled=true` only when the installed release contains the exact-conversation page-composer recovery gate: one successful recovery per Goal round, no Primary repair, no window activation, no page navigation/reload, and duplicate conversations fail closed. Retain `DEVSPACE_GOAL_ROUND_RECOVERY=0` as the explicit operator hold.
 - Use `devspace_progress_report` before substantive work on a multi-step setup and after each meaningful medium-sized setup step, not after every command and not only at the very end. The Local Gateway may reject a second substantive tool, stale-report continuation, or Plan completion with `devspace_progress_preflight_required`; when that happens, author the progress update yourself, verify the current conversation owns it, and retry the blocked operation.
 
-## Phase 1 — inspect before changing anything
+## Prerequisite A — inspect before changing anything
 
 1. Call `devspace_route` for the requested setup/repair outcome and follow the returned route chain.
 2. Open the installed DevSpace Ultra package workspace when present.
@@ -37,7 +61,7 @@ Use this Skill as an interactive installation and recovery runbook. The Agent ex
 
 Report the resulting baseline in natural language.
 
-## Phase 2 — choose the route using evidence
+## Prerequisite B — choose the route using evidence
 
 ### DuckDNS/DDNS route
 
@@ -67,7 +91,7 @@ Use a Cloudflare named tunnel when direct ingress is unavailable. The user compl
 
 Do not use an ephemeral Quick Tunnel as the production ChatGPT Connector URL. Explain that named-tunnel traffic and Cloudflare Worker execution are separate products; when a Worker relay is used, its requests count against the selected plan's current limits.
 
-## Phase 3 — install or reconcile
+## Prerequisite C — install or reconcile local infrastructure
 
 Prefer the installed tagged release's root `install.ps1`. For a fresh machine, download the tagged installer to a temporary file, allow inspection, and execute the file rather than piping remote text directly into `Invoke-Expression`.
 
@@ -90,7 +114,7 @@ DuckDNS example:
 
 ```powershell
 $p = Join-Path $env:TEMP 'devspace-ultra-install.ps1'
-iwr 'https://raw.githubusercontent.com/enwong93-sketch/devspace-ultra/v0.5.9/install.ps1' -OutFile $p
+iwr 'https://raw.githubusercontent.com/enwong93-sketch/devspace-ultra/v0.5.10/install.ps1' -OutFile $p
 & $p -Network DuckDNS
 ```
 
@@ -98,7 +122,7 @@ Cloudflare named-tunnel fallback:
 
 ```powershell
 $p = Join-Path $env:TEMP 'devspace-ultra-install.ps1'
-iwr 'https://raw.githubusercontent.com/enwong93-sketch/devspace-ultra/v0.5.9/install.ps1' -OutFile $p
+iwr 'https://raw.githubusercontent.com/enwong93-sketch/devspace-ultra/v0.5.10/install.ps1' -OutFile $p
 & $p -Network Cloudflare -PublicHostname '<stable-hostname>'
 ```
 
@@ -117,7 +141,7 @@ The Windows installer downloads one exact Release archive and verifies its SHA-2
 
 If the installer fails, diagnose the newest launch-specific log section. Do not mix old OOM, EPERM, or ReferenceError entries into the current diagnosis merely because they remain in an append-only file.
 
-## Phase 4 — verify the full path
+## Final acceptance — follow the graph
 
 A setup is not complete until all applicable checks pass:
 
@@ -129,10 +153,13 @@ A setup is not complete until all applicable checks pass:
 6. HTTPS certificate validation succeeds.
 7. `/.well-known/oauth-protected-resource/mcp` and the authorization-server metadata are reachable through the public hostname.
 8. An unauthenticated `/mcp` request receives the expected OAuth challenge rather than a generic proxy error.
-9. The ChatGPT Connector completes OAuth and can call a harmless read-only DevSpace tool.
-10. Secrets are absent from logs, config, Scheduled Task command lines, and Git status.
+9. The ChatGPT Classic connection exists for the exact stable `/mcp` URL and OAuth is complete.
+10. The authenticated catalogue contains `read`, `write`, `edit`, `apply_patch`, `exec_command`, `write_stdin`, and `devspace_progress_report`.
+11. A fresh ChatGPT Classic conversation can run verified read, disposable write/edit/command and read-back calls.
+12. A reconnect or second fresh conversation retains authenticated tool access without recreating the connection.
+13. Secrets are absent from logs, config, Scheduled Task command lines, evidence and Git status.
 
-Report what was verified, what remains a user-owned external action, and the stable MCP URL. Never claim end-to-end success based only on a local `healthz` result.
+Report a pass/fail table for every prerequisite and core gate, the stable MCP URL, the ChatGPT Classic connection name, the required tool names observed, and the read/write/reconnect evidence. Never claim end-to-end success based only on local health, schemas, Codex access or an OAuth callback page.
 
 ## Repair mode
 
