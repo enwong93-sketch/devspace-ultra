@@ -21,7 +21,8 @@ flowchart TD
     H -- Yes --> I[Enable connection in a fresh Classic chat]
     I --> J[Real read test]
     J --> K[Authorized disposable write/edit/command and read-back]
-    K --> L[Reconnect or second fresh chat test]
+    K --> K2[Stateful tools survive host-session alias rotation]
+    K2 --> L[Reconnect or second fresh chat test]
     L --> M[Report every step PASS; installation complete]
 ```
 
@@ -31,7 +32,9 @@ If A–C already pass, start immediately at D. Do not reopen the router, reinsta
 
 Repeat the graph independently for every computer. One ChatGPT Classic account may keep several DevSpace connections, but each row must use that computer's own public `/mcp` URL, `serverInstanceId`, OAuth audience and Connector/App identity. A PASS from another same-named DevSpace connection is never evidence for this machine.
 
-After OAuth, the first local bootstrap claim must resolve under a Classic Runtime page on the same computer. Later calls can reuse its authenticated provider-conversation binding after a fresh check of that exact local page; they do not require manual pairing for every conversation or tool call. If `devspace_progress_report` returns a pending claim with `nextAction.tool=devspace_progress_bind`, the Agent calls that one-time tool with the returned claim ID. `devspace_instance_binding_required` means no valid local proof was available; do not try another computer's connection as a fallback.
+After OAuth, the first local bootstrap claim must resolve under a Classic Runtime page on the same computer. Later calls can reuse its authenticated provider-conversation binding after a fresh check of that exact local page; they do not require manual pairing for every conversation or tool call. The fresh-chat contract also requires the claim-derived capability lease to remain usable across a sequence of stateful `read`/write/edit/command calls even when ChatGPT rotates `mcp-session-id`, transport sessions, request traces or its provider conversation alias during the same physical chat. DevSpace must wait for the bounded request-scoped exact-page correlation before returning `devspace_instance_binding_required`, bind a newly observed provider alias only after that exact local proof, and renew the lease only while real verified work continues. A fixed timer must not make an active Agent periodically lose work tools.
+
+If `devspace_progress_report` returns a pending claim with `nextAction.tool=devspace_progress_bind`, the Agent calls that one-time tool with the returned claim ID. Duplicate pages, another conversation reusing the same host session, another computer/resource or missing exact-page proof must still fail closed. `devspace_instance_binding_required` means no valid local proof was available after those bounded checks; do not try another computer's connection as a fallback.
 
 ## Required tool check
 

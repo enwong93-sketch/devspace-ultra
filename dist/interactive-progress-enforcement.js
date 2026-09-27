@@ -88,8 +88,8 @@ export function goalRoundClosureState({ activeGoal = null, activePlan = null, la
   };
 }
 
-function block(reason, message, extra = {}) {
-  return { ok: false, blocked: true, activityAccepted: false, reason, message, ...extra };
+function advisory(reason, message, extra = {}, activityAccepted = false) {
+  return { ok: true, blocked: false, advisory: true, activityAccepted, reason, message, ...extra };
 }
 
 export class InteractiveProgressEnforcementGate {
@@ -150,11 +150,12 @@ export class InteractiveProgressEnforcementGate {
     const name = String(toolName || "").trim();
     if (!id || !runtime) return { ok: true, enforced: false, activityAccepted: false, reason: "not-exact-main" };
     if (name === "devspace_progress_report") return { ok: true, enforced: true, activityAccepted: false, reason: "progress-tool" };
+    const row = this.#ensureTurn(id);
 
     if (name === "devspace_goal_turn_report" && activePlan) {
-      return block(
+      return advisory(
         "goal-round-plan-incomplete",
-        `Active Plan ${activePlan.id || "for this turn"} is not completed. Update every Plan step to completed before calling devspace_goal_turn_report. Do not end the visible turn while this Plan remains active.`,
+        `Active Plan ${activePlan.id || "for this turn"} is not completed. This call is continuing, but update every Plan step to completed before treating the Goal round as structurally closed.`,
         {
           errorType: "devspace_goal_round_plan_incomplete",
           planId: activePlan.id || null,
@@ -174,20 +175,21 @@ export class InteractiveProgressEnforcementGate {
           ...roundClosure,
         };
       }
-      return block(
+      row.substantiveCalls += 1;
+      return advisory(
         "goal-round-report-required",
-        `Plan ${roundClosure.planId || "for this turn"} is completed while Goal ${roundClosure.goalId || "for this conversation"} round ${roundClosure.round ?? "current"} is still working. If the round is finished, call devspace_goal_turn_report as the final tool now and then give one visible final report. If meaningful work remains, start a fresh devspace_plan_start before any other substantive tool.`,
+        `Plan ${roundClosure.planId || "for this turn"} is completed while Goal ${roundClosure.goalId || "for this conversation"} round ${roundClosure.round ?? "current"} is still working. Ordinary work continues. If the round is finished, call devspace_goal_turn_report as the final tool and then give one visible final report; if meaningful work remains, start a fresh devspace_plan_start to keep the next phase visible.`,
         {
           errorType: "devspace_goal_round_report_required",
           goalId: roundClosure.goalId || null,
           round: roundClosure.round ?? null,
           planId: roundClosure.planId || null,
         },
+        true,
       );
     }
 
     const nowMs = this.now();
-    const row = this.#ensureTurn(id);
     const persistedAtMs = timestampMs(await this.latestProgressAt(id).catch(() => null));
     if (persistedAtMs && persistedAtMs > Number(row.lastReportAtMs || 0)) row.lastReportAtMs = persistedAtMs;
 
@@ -199,11 +201,11 @@ export class InteractiveProgressEnforcementGate {
 
     if (isPlanCompletionCall(name, args)) {
       if (!reportFresh) {
-        return block(
+        return advisory(
           hasCurrentReport ? "final-progress-stale" : "final-progress-required",
           hasCurrentReport
-            ? "Progress narration is stale. Call devspace_progress_report with the latest verified result before completing the Plan and replying to the user."
-            : "This multi-step Plan cannot be completed yet. Call devspace_progress_report with the latest verified result before completing the Plan and replying to the user.",
+            ? "Plan completion is continuing with stale narration. Call devspace_progress_report with the latest verified result before the user-visible final report."
+            : "Plan completion is continuing without a current narration entry. Call devspace_progress_report with the latest verified result before the user-visible final report.",
           { reportAgeMs, maxSilentMs: this.maxSilentMs },
         );
       }
@@ -214,12 +216,14 @@ export class InteractiveProgressEnforcementGate {
 
     if (activePlan) {
       if (!reportFresh) {
-        return block(
+        row.substantiveCalls += 1;
+        return advisory(
           hasCurrentReport ? "progress-stale" : "progress-preflight-required",
           hasCurrentReport
-            ? "The current progress narration is older than the ten-minute ceiling. Call devspace_progress_report with a useful current update before starting another substantive tool."
-            : "This conversation has an active multi-step Plan but no successful progress preflight for the current turn. Call devspace_progress_report before this substantive tool, then retry it.",
+            ? "The current progress narration is older than the ten-minute ceiling. This substantive tool is continuing; call devspace_progress_report with a useful current update at the next meaningful boundary."
+            : "This conversation has an active multi-step Plan but no successful progress preflight for the current turn. This substantive tool is continuing; call devspace_progress_report at the next meaningful boundary.",
           { reportAgeMs, maxSilentMs: this.maxSilentMs, planId: activePlan.id || null },
+          true,
         );
       }
       row.substantiveCalls += 1;
@@ -227,17 +231,21 @@ export class InteractiveProgressEnforcementGate {
     }
 
     if (hasCurrentReport && !reportFresh) {
-      return block(
+      row.substantiveCalls += 1;
+      return advisory(
         "progress-stale",
-        "The current progress narration is older than the ten-minute ceiling. Call devspace_progress_report with a useful current update before starting another substantive tool.",
+        "The current progress narration is older than the ten-minute ceiling. This substantive tool is continuing; call devspace_progress_report with a useful current update at the next meaningful boundary.",
         { substantiveCalls: row.substantiveCalls, reportAgeMs, maxSilentMs: this.maxSilentMs },
+        true,
       );
     }
     if (!reportFresh && row.substantiveCalls >= 1) {
-      return block(
+      row.substantiveCalls += 1;
+      return advisory(
         "second-substantive-tool-requires-progress",
-        "This turn is no longer atomic: a second substantive tool was requested without a successful progress narration. Call devspace_progress_report now, then retry this tool. If the direct claim is pending, complete the exact-page relay/bridge first; program telemetry must not author the message for you.",
+        "This turn is no longer atomic and a second substantive tool is continuing without a successful progress narration. Call devspace_progress_report at the next meaningful boundary; if the direct claim is pending, complete the exact-page relay or owner bridge without asking the user to perform routine pairing. Program telemetry must not author the message for you.",
         { substantiveCalls: row.substantiveCalls, reportAgeMs, maxSilentMs: this.maxSilentMs },
+        true,
       );
     }
     row.substantiveCalls += 1;

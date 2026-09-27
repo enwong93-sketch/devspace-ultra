@@ -20,32 +20,35 @@ const firstAtomic = await gate.beforeTool({ ...main, toolName: "read" });
 assert.equal(firstAtomic.ok, true, "one substantive tool remains a valid atomic exception");
 assert.equal(firstAtomic.activityAccepted, true, "an admitted substantive tool is positive rescue-clock activity");
 let result = await gate.beforeTool({ ...main, toolName: "grep" });
-assert.equal(result.ok, false);
+assert.equal(result.ok, true);
+assert.equal(result.advisory, true);
 assert.equal(result.reason, "second-substantive-tool-requires-progress");
-assert.equal(result.activityAccepted, false,
-  "a progress-preflight-blocked tool attempt must never postpone interrupted-turn rescue");
+assert.equal(result.activityAccepted, true,
+  "work continues and advances liveness even when narration is late");
 
 gate.noteReport({ conversationId: main.conversationId, observedAtMs: now + 1_000 });
 assert.equal((await gate.beforeTool({ ...main, toolName: "grep" })).ok, true);
 
 now += 11 * 60_000;
 result = await gate.beforeTool({ ...main, toolName: "exec_command" });
-assert.equal(result.ok, false);
+assert.equal(result.ok, true);
+assert.equal(result.advisory, true);
 assert.equal(result.reason, "progress-stale");
 
 const planned = { conversationId: "conversation-main-02", runtimeKey: "main-02" };
 gate.noteTurn({ ...planned, kind: "started", observedAtMs: now, turnTraceFingerprint: "b".repeat(64) });
 const activePlan = { id: "plan-a", createdAt: new Date(now).toISOString() };
 result = await gate.beforeTool({ ...planned, toolName: "read", activePlan });
-assert.equal(result.ok, false);
-assert.equal(result.reason, "progress-preflight-required", "starting a Plan proves the task is multi-step, so the first substantive tool must wait for narration");
-assert.equal(result.activityAccepted, false,
-  "an active-Plan preflight rejection must not count as substantive liveness");
+assert.equal(result.ok, true);
+assert.equal(result.reason, "progress-preflight-required", "a Plan may recommend narration without holding the first work tool");
+assert.equal(result.activityAccepted, true,
+  "the active work tool advances liveness even when narration is pending");
 const planStatus = await gate.beforeTool({ ...planned, toolName: "devspace_plan_status", activePlan });
 assert.equal(planStatus.ok, true);
 assert.equal(planStatus.activityAccepted, false, "progress/setup tools do not reset interrupted-turn rescue");
 const prematureRoundReport = await gate.beforeTool({ ...planned, toolName: "devspace_goal_turn_report", activePlan });
-assert.equal(prematureRoundReport.ok, false);
+assert.equal(prematureRoundReport.ok, true);
+assert.equal(prematureRoundReport.advisory, true);
 assert.equal(prematureRoundReport.reason, "goal-round-plan-incomplete");
 assert.equal(prematureRoundReport.errorType, "devspace_goal_round_plan_incomplete");
 assert.match(prematureRoundReport.message, /update every Plan step to completed/i);
@@ -54,7 +57,7 @@ durable.set(planned.conversationId, new Date(now + 500).toISOString());
 const admittedPlannedRead = await gate.beforeTool({ ...planned, toolName: "read", activePlan });
 assert.equal(admittedPlannedRead.ok, true, "the exact compatibility bridge must satisfy the gate through durable progress state");
 assert.equal(admittedPlannedRead.activityAccepted, true,
-  "only the substantive call admitted after the verified progress preflight may reset the rescue clock");
+  "a substantive call resets the rescue clock regardless of narration timing");
 
 result = await gate.beforeTool({
   ...planned,
@@ -71,8 +74,8 @@ result = await gate.beforeTool({
   args: { steps: [{ id: "one", status: "completed" }, { id: "two", status: "completed" }] },
   activePlan,
 });
-assert.equal(result.ok, false);
-assert.equal(result.reason, "final-progress-stale", "final Plan completion must not bypass the reporting ceiling");
+assert.equal(result.ok, true);
+assert.equal(result.reason, "final-progress-stale", "late narration is advisory when completing a Plan");
 
 const roundBeganAt = new Date(now + 1_000).toISOString();
 const completedAt = new Date(now + 5_000).toISOString();
@@ -99,11 +102,12 @@ assert.deepEqual(roundClosure, {
   planCompletedAt: completedAt,
 });
 result = await gate.beforeTool({ ...planned, toolName: "exec_command", roundClosure });
-assert.equal(result.ok, false);
+assert.equal(result.ok, true);
+assert.equal(result.advisory, true);
 assert.equal(result.reason, "goal-round-report-required");
 assert.equal(result.errorType, "devspace_goal_round_report_required");
-assert.equal(result.activityAccepted, false,
-  "a blocked post-Plan tool cannot postpone same-round recovery or rescue");
+assert.equal(result.activityAccepted, true,
+  "post-Plan work remains live activity even before the next round report");
 assert.match(result.message, /devspace_goal_turn_report.*final tool/i);
 
 for (const allowedTool of [
@@ -151,8 +155,9 @@ for (let mainNumber = 1; mainNumber <= 5; mainNumber += 1) {
   const coverageGate = new InteractiveProgressEnforcementGate({ now: () => now });
   coverageGate.noteTurn({ conversationId, runtimeKey, kind: "started", observedAtMs: now });
   assert.equal((await coverageGate.beforeTool({ conversationId, runtimeKey, toolName: "read" })).ok, true);
-  const blocked = await coverageGate.beforeTool({ conversationId, runtimeKey, toolName: "grep" });
-  assert.equal(blocked.reason, "second-substantive-tool-requires-progress", `${runtimeKey} must share the same mandatory progress policy`);
+  const advised = await coverageGate.beforeTool({ conversationId, runtimeKey, toolName: "grep" });
+  assert.equal(advised.ok, true);
+  assert.equal(advised.reason, "second-substantive-tool-requires-progress", `${runtimeKey} receives the same non-blocking progress advice`);
 }
 
 assert.equal(isProgressSetupTool("open_workspace"), true);
@@ -163,16 +168,16 @@ console.log(JSON.stringify({
   ok: true,
   gate: "interactive-progress-enforcement",
   atomicFirstToolException: true,
-  secondSubstantiveToolBlockedUntilNarration: true,
-  activePlanRequiresOpeningNarration: true,
-  incompletePlanBlocksGoalRoundReport: true,
+  secondSubstantiveToolContinuesWithoutNarration: true,
+  activePlanProgressAdvisory: true,
+  incompletePlanReportsAdvisory: true,
   durableBridgeNarrationAccepted: true,
-  tenMinuteCeilingEnforced: true,
-  planCompletionRequiresFreshNarration: true,
-  completedPlanRequiresGoalRoundReport: true,
+  tenMinuteReportAdvisory: true,
+  planCompletionContinuesWithoutFreshNarration: true,
+  completedPlanWorkContinues: true,
   freshPlanCanReopenRoundWork: true,
   priorRoundPlanIgnored: true,
-  onlyAdmittedSubstantiveToolsCountAsActivity: true,
+  substantiveToolsCountAsActivity: true,
   main01Through05Covered: true,
   backendWorkersExcluded: true,
   syntheticNarration: false,

@@ -45,6 +45,7 @@ const planStartOutputSchema = {
   claimed: z.boolean().optional(),
   claimId: z.string().optional(),
   conversationStartClaim: conversationStartClaimSchema.optional(),
+  nextAction: z.object({ tool: z.literal("devspace_plan_start"), claimId: z.string() }).optional(),
 };
 
 function textResult(plan, text, extra = {}) {
@@ -109,6 +110,7 @@ export function registerPlanTools(server, planRuntime, {
     structuredContent: {
       pending: true,
       conversationStartClaim: claim,
+      nextAction: { tool: "devspace_plan_start", claimId: claim.claimId },
     },
     _meta: {
       "devspace/conversationStartClaim": claim,
@@ -117,7 +119,7 @@ export function registerPlanTools(server, planRuntime, {
 
   registerAppTool(server, "devspace_plan_start", {
     title: "Start DevSpace Plan",
-    description: "Start a fresh conversation-bound execution plan for the current physical turn or fresh Goal round when the work is genuinely multi-step. The floating Plan HUD and progress narration card are projected automatically; do not create a legacy inline Plan card. If an active plan already exists from an interrupted turn, resume that active plan with devspace_update_plan instead of creating a duplicate. A completed plan belongs to its finished turn and must not be reused in the next turn.",
+    description: "Start a fresh conversation-bound execution plan for the current physical turn or fresh Goal round when the work is genuinely multi-step. If the result is pending, immediately call this same tool once with the returned nextAction.claimId and the original title/steps. The Agent performs this bootstrap without asking the user to pair the conversation. The floating Plan HUD and progress narration card are projected automatically; do not create a legacy inline Plan card. If an active plan already exists from an interrupted turn, resume that active plan with devspace_update_plan instead of creating a duplicate. A completed plan belongs to its finished turn and must not be reused in the next turn.",
     inputSchema: {
       title: z.string().min(1).max(240),
       steps: z.array(z.object({

@@ -143,6 +143,8 @@ try {
       assert.equal(unresolved.structuredContent.plan, undefined);
       assert.equal(unresolved.structuredContent.conversationStartClaim.toolName, "devspace_plan_start");
       const planClaimId = unresolved.structuredContent.conversationStartClaim.claimId;
+      assert.deepEqual(unresolved.structuredContent.nextAction,
+        { tool: "devspace_plan_start", claimId: planClaimId });
       const claimedPlan = await boundStart.handler({
         title: "[exact-page-claim-relay]",
         steps: [

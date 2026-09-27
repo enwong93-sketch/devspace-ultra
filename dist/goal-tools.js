@@ -91,6 +91,7 @@ const goalStartOutputSchema = {
   claimed: z.boolean().optional(),
   claimId: z.string().optional(),
   conversationStartClaim: conversationStartClaimSchema.optional(),
+  nextAction: z.object({ tool: z.literal("devspace_goal_start"), claimId: z.string() }).optional(),
 };
 const continuationClaimSchema = z.object({
   goalId: z.string(),
@@ -192,6 +193,7 @@ export function registerGoalTools(server, goalRuntime, {
     structuredContent: {
       pending: true,
       conversationStartClaim: claim,
+      nextAction: { tool: "devspace_goal_start", claimId: claim.claimId },
     },
     _meta: {
       "devspace/conversationStartClaim": claim,
@@ -200,7 +202,7 @@ export function registerGoalTools(server, goalRuntime, {
 
   registerAppTool(server, "devspace_goal_start", {
     title: "Start DevSpace Goal",
-    description: "Start persistent Goal Mode for a genuine multi-turn objective. Store the full final objective and explicit success criteria once; ordinary steering may change the execution approach but not silently rewrite this Goal. The floating Goal strip and progress narration card are projected automatically; do not create the retired inline Goal Dock.",
+    description: "Start persistent Goal Mode for a genuine multi-turn objective. Store the full final objective and explicit success criteria once; ordinary steering may change the execution approach but not silently rewrite this Goal. If the result is pending, immediately call this same tool once with the returned nextAction.claimId and the original objective/successCriteria. The Agent performs this bootstrap without asking the user to pair the conversation. The floating Goal strip and progress narration card are projected automatically; do not create the retired inline Goal Dock.",
     inputSchema: {
       objective: z.string().min(1).max(4_000),
       successCriteria: z.array(z.string().min(1).max(1_000)).min(1).max(12),

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openaiConversationIdentity as identity, OpenaiConversationBindings, localBindingAuthorized,
@@ -9,6 +9,8 @@ const request = { auth: { resource: 'https://owned.example/mcp', clientId: 'oaut
   meta: { 'openai/session': 'opaque-conversation-one', 'openai/subject': 'opaque-user-one', 'openai/organization': 'org-one' } };
 const proof = { conversationId: 'conversation-exact-a', runtimeKey: 'main-02', pageVerified: true,
   source: 'classic-exact-page-progress-claim-cdp-page-verified' };
+const serverInstanceA = 'dsi_instance_a_20260928';
+const serverInstanceB = 'dsi_instance_b_20260928';
 
 test('official conversation key survives transport reconnect but separates users, organizations and conversations', () => {
   assert.deepEqual(identity({ ...request, headers: { 'mcp-session-id': 'transport-a' } }), identity({ ...request, headers: { 'mcp-session-id': 'transport-b' } }));
@@ -27,7 +29,7 @@ test('unbound provider identity never selects a runtime; proved bindings persist
   const statePath = join(root, 'bindings.json');
   let available = true;
   const inspect = async (runtimeKey, conversationId) => available ? { runtimeKey, conversationId, pageVerified: true } : null;
-  const registry = new OpenaiConversationBindings({ statePath, inspect });
+  const registry = new OpenaiConversationBindings({ statePath, inspect, serverInstanceId: serverInstanceA });
   const id = identity(request);
   assert.equal(await registry.resolve(id), null);
   assert.equal(await registry.bind(id, { ...proof, pageVerified: false }), null);
@@ -44,21 +46,99 @@ test('unbound provider identity never selects a runtime; proved bindings persist
   assert.equal(verifiedLocalProviderBinding({ ...verified, runtimeKey: 'main-99' }, id), false);
   available = false; assert.equal(await registry.resolve(id), null);
   available = true;
-  const restarted = new OpenaiConversationBindings({ statePath, inspect });
+  const restarted = new OpenaiConversationBindings({ statePath, inspect, serverInstanceId: serverInstanceA });
   assert.equal((await restarted.resolve(id)).conversationId, proof.conversationId);
   const persisted = await readFile(statePath, 'utf8');
+  assert.equal(JSON.parse(persisted).version, 2);
+  assert.equal(JSON.parse(persisted).serverInstanceId, serverInstanceA);
   assert.equal(persisted.includes('opaque-'), false);
   assert.equal(persisted.includes('oauth-client'), false);
   assert.equal(await restarted.resolve(identity({ ...request, meta: { ...request.meta, 'openai/session': 'other-chat' } })), null);
 });
 
+test('a late exact invocation binds a rotated provider alias for the same physical conversation', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'provider-alias-binding-')); t.after(() => rm(root, { recursive: true, force: true }));
+  const statePath = join(root, 'bindings.json');
+  const inspect = async (runtimeKey, conversationId) => ({ runtimeKey, conversationId, pageVerified: true });
+  const registry = new OpenaiConversationBindings({ statePath, inspect, serverInstanceId: serverInstanceA });
+  const original = identity(request);
+  const rotatedRequest = {
+    ...request,
+    meta: { ...request.meta, 'openai/session': 'opaque-conversation-rotated-alias' },
+  };
+  const rotated = identity(rotatedRequest);
+  await registry.bind(original, proof);
+  assert.equal(await registry.resolve(rotated), null, 'an unseen provider alias is not trusted before exact correlation');
+  const exactInvocation = {
+    ...proof,
+    source: 'classic-native-call-mcp-page-verified',
+    currentInvocationVerified: true,
+    callFingerprint: 'c'.repeat(64),
+  };
+  assert.equal(await registry.bind(rotated, exactInvocation), null,
+    'current invocation proof must be explicitly selected by the internal caller');
+  assert.equal((await registry.bind(rotated, exactInvocation, { currentInvocation: true }))?.bound, true);
+  assert.equal((await registry.resolve(rotated))?.conversationId, proof.conversationId);
+  assert.equal(registry.status().bindings, 2, 'both host aliases resolve to the same exact physical conversation');
+  assert.equal(await registry.resolve(identity({
+    ...rotatedRequest,
+    auth: { ...request.auth, resource: 'https://another-computer.example/mcp' },
+  })), null, 'another server resource cannot borrow this provider alias binding');
+  const persisted = JSON.parse(await readFile(statePath, 'utf8'));
+  assert.equal(persisted.bindings.some((row) => row.provenance === 'authenticated-current-invocation-exact-page'), true);
+});
+
 test('conflicting provider-to-URL proof is quarantined, not last-writer-wins', async () => {
-  const registry = new OpenaiConversationBindings({ inspect: async (runtimeKey, conversationId) => ({ runtimeKey, conversationId, pageVerified: true }) });
+  const registry = new OpenaiConversationBindings({
+    inspect: async (runtimeKey, conversationId) => ({ runtimeKey, conversationId, pageVerified: true }),
+    serverInstanceId: serverInstanceA,
+  });
   const id = identity(request);
   await registry.bind(id, proof);
   assert.equal(await registry.bind(id, { ...proof, conversationId: 'conversation-exact-b' }), null);
   assert.equal(await registry.resolve(id), null);
   assert.equal(registry.status().conflicted, 1);
+});
+
+test('persisted provider bindings reset on server-instance mismatch and legacy unscoped state', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'provider-instance-binding-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const inspect = async (runtimeKey, conversationId) => ({ runtimeKey, conversationId, pageVerified: true });
+  const id = identity(request);
+  const statePath = join(root, 'bindings.json');
+  const first = new OpenaiConversationBindings({ statePath, inspect, serverInstanceId: serverInstanceA });
+  assert.equal((await first.bind(id, proof))?.bound, true);
+  const changedInstance = new OpenaiConversationBindings({ statePath, inspect, serverInstanceId: serverInstanceB });
+  assert.equal(await changedInstance.resolve(id), null,
+    'a logical server instance cannot reuse the previous instance binding store');
+  assert.equal(changedInstance.status().resetReason, 'server-instance-mismatch');
+  assert.equal((await changedInstance.bind(id, proof))?.bound, true,
+    'the current exact page may establish a fresh binding after the safe reset');
+  assert.equal(JSON.parse(await readFile(statePath, 'utf8')).serverInstanceId, serverInstanceB);
+
+  const legacyPath = join(root, 'legacy-bindings.json');
+  await writeFile(legacyPath, JSON.stringify({
+    version: 1,
+    bindings: [{
+      key: id.key,
+      conversationId: proof.conversationId,
+      runtimes: [proof.runtimeKey],
+      boundAt: new Date().toISOString(),
+      conflicted: false,
+    }],
+  }));
+  const migrated = new OpenaiConversationBindings({
+    statePath: legacyPath,
+    inspect,
+    serverInstanceId: serverInstanceA,
+  });
+  assert.equal(await migrated.resolve(id), null,
+    'an unscoped legacy binding requires one new exact-page bootstrap');
+  assert.equal(migrated.status().resetReason, 'legacy-store-without-server-instance');
+  assert.equal((await migrated.bind(id, proof))?.bound, true);
+  const migratedState = JSON.parse(await readFile(legacyPath, 'utf8'));
+  assert.equal(migratedState.version, 2);
+  assert.equal(migratedState.serverInstanceId, serverInstanceA);
 });
 
 test('operator bootstrap requires local owner credential and rejects browser or proxy requests', () => {

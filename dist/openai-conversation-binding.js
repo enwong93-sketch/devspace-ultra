@@ -6,6 +6,7 @@ const hash = value => createHash('sha256').update(value).digest('hex');
 const text = value => typeof value === 'string' && value.length >= 1 && value.length <= 2048 ? value : null;
 const hex = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
 const conversation = value => typeof value === 'string' && /^[A-Za-z0-9_-]{8,200}$/.test(value);
+const instance = value => typeof value === 'string' && /^[A-Za-z0-9._:-]{8,128}$/.test(value);
 export const OPENAI_CONVERSATION_PAGE_SOURCE = 'openai-conversation-binding-page-verified';
 
 /** A durable binding is usable only after resolve() has rechecked the exact
@@ -75,16 +76,28 @@ export async function inspectExactConversationPage(runtimeKey, conversationId, f
  * sessions, survives reconnects, and cannot be seeded from legacy session maps.
  */
 export class OpenaiConversationBindings {
-  constructor({ statePath = null, inspect = inspectExactConversationPage, maxBindings = 2048 } = {}) {
+  constructor({ statePath = null, inspect = inspectExactConversationPage, maxBindings = 2048,
+    serverInstanceId = null } = {}) {
     this.statePath = statePath; this.inspect = inspect; this.maxBindings = maxBindings;
+    this.serverInstanceId = instance(serverInstanceId) ? serverInstanceId : null;
     this.records = new Map(); this.queue = Promise.resolve(); this.loadError = null;
+    this.resetReason = null;
     this.ready = this.load();
   }
   async load() {
     if (!this.statePath) return;
     try {
       const data = JSON.parse(await readFile(this.statePath, 'utf8'));
-      if (data.version !== 1 || !Array.isArray(data.bindings) || data.bindings.length > this.maxBindings) throw new Error('Invalid binding store');
+      if (!Array.isArray(data.bindings) || data.bindings.length > this.maxBindings) throw new Error('Invalid binding store');
+      if (this.serverInstanceId && (data.version !== 2 || data.serverInstanceId !== this.serverInstanceId)) {
+        this.records.clear();
+        this.resetReason = data.version === 1
+          ? 'legacy-store-without-server-instance'
+          : 'server-instance-mismatch';
+        await this.save();
+        return;
+      }
+      if (!this.serverInstanceId && ![1, 2].includes(data.version)) throw new Error('Invalid binding store version');
       for (const row of data.bindings) {
         if (!hex(row.key) || !conversation(row.conversationId) || !Array.isArray(row.runtimes)
           || !row.runtimes.length || row.runtimes.some(r => !/^main-(0[1-9]|[12][0-9]|3[0-2])$/.test(r))) throw new Error('Invalid binding row');
@@ -94,15 +107,24 @@ export class OpenaiConversationBindings {
   }
   async save() {
     if (!this.statePath) return;
-    const data = { version: 1, bindings: [...this.records.values()].map(x => structuredClone(x)) };
+    const data = {
+      version: this.serverInstanceId ? 2 : 1,
+      ...(this.serverInstanceId ? { serverInstanceId: this.serverInstanceId } : {}),
+      bindings: [...this.records.values()].map(x => structuredClone(x)),
+    };
     const next = this.queue.catch(() => {}).then(() => atomicWriteJson(this.statePath, data));
     this.queue = next; await next;
   }
-  async bind(identity, proof, { operator = false } = {}) {
+  async bind(identity, proof, { operator = false, currentInvocation = false } = {}) {
     await this.ready;
     const id = cleanOpenaiIdentity(identity);
     if (this.loadError || !id || !conversation(proof?.conversationId) || proof?.pageVerified !== true) return null;
-    if (!operator && proof?.source !== 'classic-exact-page-progress-claim-cdp-page-verified') return null;
+    const exactProgressClaim = proof?.source === 'classic-exact-page-progress-claim-cdp-page-verified';
+    const exactCurrentInvocation = currentInvocation === true
+      && proof?.currentInvocationVerified === true
+      && hex(proof?.callFingerprint)
+      && String(proof?.source || '').includes('page-verified');
+    if (!operator && !exactProgressClaim && !exactCurrentInvocation) return null;
     if (operator && proof?.source !== OPENAI_CONVERSATION_PAGE_SOURCE) return null;
     const live = await this.inspect(proof.runtimeKey, proof.conversationId);
     if (!live?.pageVerified || live.conversationId !== proof.conversationId) return null;
@@ -114,7 +136,11 @@ export class OpenaiConversationBindings {
     if (!existing && this.records.size >= this.maxBindings) return null;
     existing ??= { key: id.key, conversationId: proof.conversationId, runtimes: [], boundAt: new Date().toISOString(), conflicted: false };
     existing.runtimes = [...new Set([...existing.runtimes, proof.runtimeKey])];
-    existing.provenance = operator ? 'owner-authorized-exact-page-bootstrap' : 'authenticated-receipt-exact-page';
+    existing.provenance = operator
+      ? 'owner-authorized-exact-page-bootstrap'
+      : exactCurrentInvocation
+        ? 'authenticated-current-invocation-exact-page'
+        : 'authenticated-receipt-exact-page';
     this.records.set(id.key, existing); await this.save();
     return { bound: true, conversationId: existing.conversationId };
   }
@@ -130,5 +156,6 @@ export class OpenaiConversationBindings {
     return live ? { ...live, source: OPENAI_CONVERSATION_PAGE_SOURCE, providerConversationKey: id.key } : null;
   }
   status() { return { bindings: this.records.size, conflicted: [...this.records.values()].filter(x => x.conflicted).length,
-    loadError: this.loadError, transportSessionOwnership: false, rawMetadataPersisted: false }; }
+    loadError: this.loadError, resetReason: this.resetReason, serverInstanceScoped: Boolean(this.serverInstanceId),
+    transportSessionOwnership: false, rawMetadataPersisted: false }; }
 }

@@ -262,6 +262,8 @@ try {
       assert.equal(JSON.stringify(unresolved.structuredContent.conversationStartClaim).includes("Must not become global"), false,
         "pending Goal claim must not expose the stored objective");
       const goalClaimId = unresolved.structuredContent.conversationStartClaim.claimId;
+      assert.deepEqual(unresolved.structuredContent.nextAction,
+        { tool: "devspace_goal_start", claimId: goalClaimId });
       const claimedGoal = await boundStart.handler({
         objective: "[exact-page-claim-relay]",
         successCriteria: ["[exact-page-claim-relay]"],

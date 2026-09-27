@@ -33,10 +33,14 @@ assert.match(contract, /Scan or refresh tools/);
 assert.match(contract, /Enable connection in a fresh Classic chat/);
 assert.match(contract, /Real read test/);
 assert.match(contract, /Authorized disposable write\/edit\/command and read-back/);
+assert.match(contract, /Stateful tools survive host-session alias rotation/);
 assert.match(contract, /Reconnect or second fresh chat test/);
 assert.match(contract, /Report every step PASS/);
 assert.match(contract, /developers\.openai\.com\/plugins\/deploy\/connect-chatgpt/);
 assert.match(contract, /does not increase or bypass OpenAI context, token, account usage or rate limits/i);
+assert.match(contract, /wait for the bounded request-scoped exact-page correlation/i);
+assert.match(contract, /fixed timer must not make an active Agent periodically lose work tools/i);
+assert.match(contract, /Duplicate pages, another conversation reusing the same host session, another computer\/resource or missing exact-page proof must still fail closed/i);
 
 const requiredTools = ['read', 'write', 'edit', 'apply_patch', 'exec_command', 'write_stdin', 'devspace_progress_report'];
 for (const tool of requiredTools) {
@@ -52,6 +56,9 @@ for (const [name, source] of [['setup Skill', setupSkill], ['network Skill', net
   assert.match(source, /fresh (?:ChatGPT )?Classic conversation/i, `${name} must require fresh-chat enablement`);
   assert.match(source, /disposable write|disposable write\/edit\/command/i, `${name} must require a real disposable write test`);
   assert.match(source, /reconnect|second fresh/i, `${name} must require persistence verification`);
+  assert.match(source, /alias rotation|rotat(?:es|ion)[^\r\n]{0,100}alias/i, `${name} must require stateful tool continuity across host alias rotation`);
+  assert.match(source, /fixed timer/i, `${name} must reject timer-based capability expiry during active verified work`);
+  assert.match(source, /fail(?:-| )closed/i, `${name} must preserve cross-conversation and cross-computer isolation`);
   assert.match(source, /pass\/fail/i, `${name} must require an explicit gate report`);
 }
 
@@ -70,5 +77,8 @@ console.log(JSON.stringify({
   orderedGraph: true,
   requiredTools,
   realReadWriteReconnect: true,
+  statefulAliasRotationContinuity: true,
+  activeLeaseKeepalive: true,
+  crossConversationIsolation: true,
   literalUnlimitedTokenClaim: false,
 }));

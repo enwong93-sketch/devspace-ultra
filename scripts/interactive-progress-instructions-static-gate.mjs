@@ -33,12 +33,18 @@ assert.match(source, /Call devspace_progress_bind once with claimId/,
   "only unresolved first-use progress may request the one-time bootstrap relay");
 assert.match(source, /conversation-bound update to the floating DEV Space progress narration card in your own natural language/i);
 assert.match(source, /exact ChatGPT Classic page that received this result confirms a one-time claim/i);
-assert.match(source, /devspace_progress_preflight_required/);
+assert.match(source, /Local Gateway progress guidance is advisory/);
+assert.match(source, /Exact local conversation authority, server-instance isolation, and cross-computer Connector isolation remain separate hard security gates/i,
+  "advisory progress must never weaken the separate instance and exact-conversation security boundary");
+assert.doesNotMatch(source, /serverInstructions\(config\)\.replace\(/,
+  "published model instructions must contain the advisory contract directly rather than mutating it with a runtime regex");
+assert.doesNotMatch(source, /if \(progressGate\?\.ok === false && progressGate\?\.blocked === true\)/,
+  "a late or pending narration must not reject an ordinary MCP tool call");
 assert.match(source, /goalRoundClosureState/,
-  "the exact-conversation tool gate must derive Goal round closure from persisted Goal and Plan state");
+  "Goal round guidance still derives from persisted Goal and Plan state");
 assert.match(source, /interactiveProgressGate\.beforeTool/);
 assert.match(source, /progressGate\?\.activityAccepted === true/,
-  "rescue liveness may advance only after the Local Gateway admits a substantive tool request");
+  "actual substantive work advances the exact conversation rescue clock");
 assert.match(source, /conversationProgressLiveness\?\.noteActivity/,
   "an admitted substantive tool request must advance the exact conversation rescue clock");
 assert.doesNotMatch(source, /onToolInvocation:\s*\(event\)\s*=>\s*\{[\s\S]{0,900}conversationProgressLiveness\?\.noteActivity/,
@@ -67,8 +73,8 @@ assert.match(agents, /Thinking failed.*思考失敗.*at least thirty seconds/i);
 assert.match(agents, /normally completed or explicitly cancelled turn must disarm rescue immediately/i);
 assert.match(agents, /only visible text emitted by any verified interrupted-turn rescue.*exactly `- 繼續`/i);
 assert.match(agents, /Write the update yourself in natural language/i);
-assert.match(agents, /This is a product gate, not only a prompt preference/i);
-assert.match(agents, /second substantive tool is rejected until the Agent reports/i);
+assert.match(agents, /Progress narration is an Agent responsibility, not a reason to deny ordinary tools/i);
+assert.match(agents, /pending first-use claim, late report, active Plan or completed Plan does not stop reads, edits, commands/i);
 assert.doesNotMatch(agents, /batches of roughly ten steps/i);
 
 assert.match(enforcement, /second-substantive-tool-requires-progress/);
@@ -78,18 +84,18 @@ assert.match(enforcement, /final-progress-stale/);
 assert.match(enforcement, /goal-round-plan-incomplete/);
 assert.match(enforcement, /goal-round-report-required/);
 assert.match(enforcement, /devspace_goal_round_report_required/,
-  "completed turn Plans must make Goal round closure a backend-enforced next action");
+  "completed turn Plans still produce a Goal round advisory");
 assert.match(enforcement, /GOAL_ROUND_CLOSURE_ALLOWED_TOOLS/);
 assert.match(enforcement, /devspace_goal_turn_report as the final tool/);
 assert.match(enforcement, /maxSilentMs/);
 assert.match(enforcement, /activityAccepted:\s*false/,
-  "blocked/setup calls must explicitly stay outside rescue-clock activity");
+  "setup/control calls stay outside rescue-clock activity");
 assert.match(enforcement, /activityAccepted:\s*true/,
-  "admitted substantive calls must explicitly qualify as rescue-clock activity");
+  "substantive calls qualify as rescue-clock activity even when a report is late");
 assert.match(enforcement, /runtime.*main-/is,
-  "hard enforcement must remain restricted to user-facing Main runtimes rather than backend workers");
+  "progress guidance applies to user-facing Main runtimes rather than backend workers");
 assert.doesNotMatch(enforcement, /append\(|message:\s*["'`]/,
-  "the enforcement gate must block and instruct the Agent; it must never synthesize narration prose into the card");
+  "progress guidance must never synthesize narration prose into the card");
 
 assert.doesNotMatch(toolProgress, /noteToolStart|noteToolBoundary|setTimeout|Promise\.race/,
   "raw MCP tool traffic must remain internal telemetry and must not generate visible narration");
@@ -124,9 +130,11 @@ console.log(JSON.stringify({
   normalCompletionDisarms: true,
   rawToolNarration: false,
   boundedCorrelationDeadline: true,
-  hardProgressGate: true,
-  secondSubstantiveToolBlockedUntilNarration: true,
-  activePlanRequiresOpeningNarration: true,
-  planCompletionRequiresFreshNarration: true,
-  onlyAdmittedSubstantiveToolsResetRescueClock: true,
+  hardProgressGate: false,
+  crossComputerIsolationStillHardGate: true,
+  modelInstructionsDirect: true,
+  secondSubstantiveToolContinuesWithoutNarration: true,
+  activePlanProgressAdvisory: true,
+  planCompletionContinuesWithoutFreshNarration: true,
+  substantiveToolsResetRescueClock: true,
 }));

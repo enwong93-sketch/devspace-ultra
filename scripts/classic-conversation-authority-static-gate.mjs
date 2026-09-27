@@ -56,8 +56,10 @@ assert.match(server, /const exactPageClaim = Boolean\([\s\S]{0,320}resolved\?\.c
   "only the one-time hidden iframe-parent claim may bypass a missing call fingerprint");
 assert.match(server, /if \(!exactRequest && !exactPageClaim && !providerBound\)/,
   'progress must require a native request proof, exact receipt, or authenticated provider-conversation binding with current page verification');
-assert.match(server, /const providerIdentity = openaiConversationIdentity\(\{ auth: req\.auth, meta: req\.body\?\.params\?\._meta, headers: req\.headers \}\)/,
+assert.match(server, /const requestProviderIdentity = mcpMethod === "tools\/call"[\s\S]{0,180}openaiConversationIdentity\(\{ auth: req\.auth, meta: req\.body\?\.params\?\._meta, headers: req\.headers \}\)/,
   'provider identity must come from the OAuth-accepted host metadata, never tool arguments or MCP transport session id');
+assert.match(server, /hasOpenaiProviderMetadata/,
+  'OpenAI provider metadata must activate the exact-instance gate even when User-Agent formatting changes');
 assert.match(server, /await openaiBindings\.resolve\(providerIdentity\)/,
   'documented anonymous conversation bindings must revalidate their current exact page per request');
 
