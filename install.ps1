@@ -7,7 +7,7 @@ param(
     [string] $PublicHostname = $env:DEVSPACE_PUBLIC_HOSTNAME,
     [string] $AllowedRoot = $HOME,
     [string] $Repository = "https://github.com/enwong93-sketch/devspace-ultra.git",
-    [string] $Ref = "v0.5.13",
+    [string] $Ref = "v0.5.14",
     [switch] $NonInteractive,
     [switch] $SkipCaddy,
     [switch] $EnableRouterUpnp,

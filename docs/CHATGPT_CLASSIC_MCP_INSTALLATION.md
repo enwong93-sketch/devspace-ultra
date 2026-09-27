@@ -27,6 +27,12 @@ flowchart TD
 
 If A–C already pass, start immediately at D. Do not reopen the router, reinstall Caddy or redo DNS. Do not do optional Multi-Main, Goal/Rescue or extra plugin work before D–L.
 
+## Multi-computer isolation
+
+Repeat the graph independently for every computer. One ChatGPT Classic account may keep several DevSpace connections, but each row must use that computer's own public `/mcp` URL, `serverInstanceId`, OAuth audience and Connector/App identity. A PASS from another same-named DevSpace connection is never evidence for this machine.
+
+After OAuth, the first local bootstrap claim must resolve under a Classic Runtime page on the same computer. Every later non-bootstrap tool call requires a current exact local invocation. `devspace_instance_binding_required` means the selected connection is unbound or belongs to the wrong Runtime/server; do not try another computer's connection as a fallback.
+
 ## Required tool check
 
 The authenticated ChatGPT Classic connection must show:

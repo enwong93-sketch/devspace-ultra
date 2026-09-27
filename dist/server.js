@@ -181,6 +181,7 @@ const toolNames = {
 };
 function serverInstructions(config) {
     const toolSurface = toolModeCapabilities(config.toolMode);
+    const instanceIsolationInstruction = ` SERVER INSTANCE ISOLATION: This MCP server is instance ${config.serverInstanceId} at ${new URL("/mcp", config.publicBaseUrl)}. A cloud ChatGPT Classic account may connect many DevSpace servers on different computers; never treat matching tool names, resource URIs, conversations, App frames, or account identity as cross-server authority. Every non-bootstrap ChatGPT tool call must carry a current exact invocation proved on a local Classic Runtime page for this instance. If the server returns devspace_instance_binding_required, use this same connection's one-time progress/Goal/Plan claim bootstrap; never switch to another DevSpace connection or computer. `;
     const mandatoryProgressPreflightInstruction = " MANDATORY INTERACTIVE PROGRESS PREFLIGHT: In every user-facing interactive/Main ChatGPT Classic task that is expected to need more than one substantive tool call, more than roughly 30 seconds, or multiple verification gates, start or resume the required Goal/Plan structure and then call devspace_progress_report before the first substantive work tool. The opening report must be concise natural language stating the current objective and immediate first medium step; it is required even though no medium-sized result exists yet. A returned pending claim, unbound identity, unavailable recipient, timeout, or omitted tool is not proof that the card was updated. When a pending result explicitly returns nextAction.tool=devspace_progress_bind, call that one-time bootstrap once with its opaque claimId; ordinary reports must never call the bind tool because each bootstrap mounts one hidden relay App. If verification still fails, use the exact-conversation compatibility bridge once when the current conversation id is known, then state one visible progress-routing blocker while continuing the requested safe work; never falsely claim that the card was updated. Re-check the card before each new long phase and before the final response, then continue with meaningful medium-boundary reports without per-tool spam or timer prose. Before entering any external wait, process watch, CI watch, or other phase that may keep the turn occupied long enough to cross the ten-minute ceiling, write a useful Agent-authored report first when the current report would otherwise age past that ceiling; after the wait returns, report the material result before starting another long phase. Backend-only Chat Swarm workers must not write the user-facing card.";
     const classicSurfaceInstruction = " When running inside ChatGPT Classic, DevSpace Ultra's supported user-facing surface is ChatGPT Classic Chat mode only. Work mode is out of scope and must not be used for DevSpace Ultra user-facing operation or product acceptance.";
     const interactiveProgressInstruction = " In every interactive/main ChatGPT Classic conversation, including every secondary Main window and regardless of whether the selected reasoning mode is Thinking/XHi or Pro, DevSpace must project exactly one conversation-scoped floating progress narration card. The blank card remains visible before the Agent writes its first useful report and must never reuse Goal, Plan, transcript, or progress rows from another conversation. Treat this floating card—not the retired inline Goal Dock or inline Plan Card app—as the primary progress surface. For any task expected to require more than one substantive tool call, more than roughly 30 seconds, or multiple verification gates, before the first substantive work tool call start or resume exactly one conversation-bound DevSpace Plan; when the requested outcome needs autonomous continuation across assistant turns, start or resume Goal Mode first and create a fresh turn Plan beneath it. Keep Goal and Plan state current as execution structure and backend telemetry, but neither tool events nor timers may author visible narration. Use devspace_progress_report when you personally judge that a meaningful medium-sized step has completed, an important verification result is available, the execution direction materially changes, or a genuine blocker is useful to report. This is mandatory for qualifying interactive Main work: write the first useful report at the first such boundary, do not wait for several large phases, and during ongoing non-atomic work never leave more than ten minutes between Agent-authored reports. Ten minutes is a maximum silent interval for the working Agent, not a timer cadence: no timer, supervisor, overlay, hidden relay, or another Agent may send reminder prose or create a synthetic user turn. Before entering a long external wait/process/CI watch that could carry the current report past the ten-minute ceiling, publish a useful Agent-authored report first; after that wait returns, report the meaningful result before beginning another long phase. A verified twenty-minute interrupted-turn rescue may emit only the exact visible text `- 繼續`; interruption evidence, exact-conversation ownership, one-shot deduplication, and resume policy remain backend-owned and must never be expanded into a synthetic recovery checklist. If the direct progress recipient is temporarily omitted, disabled, times out, or reports unavailable identity, immediately use the documented exact-conversation compatibility bridge once, pass the known current conversation id as an expected-id guard, and verify the report on this conversation's card; the bridge must inspect the Runtime's live page URL and reject stale authority rather than redirecting the report to another conversation. Write the card text yourself in natural language for the user; never show generated step counters, heartbeat prose, generic program status, or one row per tool. The report correlation path must fail promptly and clean up its request waiter rather than hanging until the host times out. Do not spam user-visible commentary, do not mirror low-level operations, and never expose private reasoning or hidden chain-of-thought. A genuinely atomic one-tool task may leave the blank conversation card untouched and does not need a Plan. This is also enforced by the Local Gateway: once a conversation has an active Plan, substantive tools are rejected until a verified current-turn progress report exists; without a Plan, a second substantive tool is rejected until the Agent reports; a report older than the ten-minute ceiling blocks the next substantive tool; and a Plan cannot be completed until a fresh verified report exists. When a tool returns `devspace_progress_preflight_required`, call `devspace_progress_report` yourself in natural language and retry the blocked tool instead of bypassing the gate. Chat Swarm worker conversations remain backend-only and must not emit user-facing progress. Preserve the bounded DevSpace human-progress transcript without creating a synthetic user message, a new ChatGPT turn, or any refresh/navigation. After each meaningful medium-sized step, write one natural-language devspace_progress_report update: not per tool call, not from a timer or fixed operation count, and not only after several large phases have accumulated. Keep the wording free-form and specific to what just became true.";
@@ -200,10 +201,10 @@ function serverInstructions(config) {
         ? " If the turn successfully modifies files by creating, editing, overwriting, deleting, moving, or applying patches, call show_changes exactly once for that workspace after the final related file change and before your final response so the user can inspect the aggregate diff for that turn. Do not call it after every individual file change; do not skip it because individual file-change tools already returned diffs."
         : "";
     if (config.toolMode === "codex") {
-        return `${mandatoryProgressPreflightInstruction} Use DevSpace as a local coding workspace. Call ${toolNames.openWorkspace} once per project folder or worktree and reuse its workspaceId. Use ${toolNames.read} for direct file reads, apply_patch for all file modifications, exec_command for inspection, tests, builds, and other commands, and write_stdin to poll or interact with running processes. Follow instructions returned by ${toolNames.openWorkspace}; read applicable instruction and skill files before working in their scope.${classicSurfaceInstruction}${interactiveProgressInstruction}${artifactInstruction}${showChangesInstruction}${chatSwarmInstruction}${browserControlInstruction}${computerUseInstruction}${capabilityInstruction}${parityInstruction}${continuityInstruction}${contextBridgeInstruction}${planInstruction}${goalInstruction}`;
+        return `${mandatoryProgressPreflightInstruction} Use DevSpace as a local coding workspace. Call ${toolNames.openWorkspace} once per project folder or worktree and reuse its workspaceId. Use ${toolNames.read} for direct file reads, apply_patch for all file modifications, exec_command for inspection, tests, builds, and other commands, and write_stdin to poll or interact with running processes. Follow instructions returned by ${toolNames.openWorkspace}; read applicable instruction and skill files before working in their scope.${instanceIsolationInstruction}${classicSurfaceInstruction}${interactiveProgressInstruction}${artifactInstruction}${showChangesInstruction}${chatSwarmInstruction}${browserControlInstruction}${computerUseInstruction}${capabilityInstruction}${parityInstruction}${continuityInstruction}${contextBridgeInstruction}${planInstruction}${goalInstruction}`;
     }
     if (config.toolMode === "ultra") {
-        return `${mandatoryProgressPreflightInstruction} Use DevSpace as a local coding workspace. Call ${toolNames.openWorkspace} once per project folder or worktree and reuse its workspaceId. Prefer ${toolNames.read} for direct reads, apply_patch for file modifications, exec_command for inspection, tests, builds, and other commands, and write_stdin for running-process interaction. The legacy ${toolNames.write}, ${toolNames.edit}, ${toolNames.shell}, ${toolNames.grep}, ${toolNames.glob}, and ${toolNames.ls} tools remain available as a compatibility superset for cached ChatGPT tool schemas and non-Codex agents; never duplicate one operation across aliases. Follow instructions returned by ${toolNames.openWorkspace}; read applicable instruction and skill files before working in their scope.${classicSurfaceInstruction}${interactiveProgressInstruction}${artifactInstruction}${showChangesInstruction}${chatSwarmInstruction}${browserControlInstruction}${computerUseInstruction}${capabilityInstruction}${parityInstruction}${continuityInstruction}${contextBridgeInstruction}${planInstruction}${goalInstruction}`;
+        return `${mandatoryProgressPreflightInstruction} Use DevSpace as a local coding workspace. Call ${toolNames.openWorkspace} once per project folder or worktree and reuse its workspaceId. Prefer ${toolNames.read} for direct reads, apply_patch for file modifications, exec_command for inspection, tests, builds, and other commands, and write_stdin for running-process interaction. The legacy ${toolNames.write}, ${toolNames.edit}, ${toolNames.shell}, ${toolNames.grep}, ${toolNames.glob}, and ${toolNames.ls} tools remain available as a compatibility superset for cached ChatGPT tool schemas and non-Codex agents; never duplicate one operation across aliases. Follow instructions returned by ${toolNames.openWorkspace}; read applicable instruction and skill files before working in their scope.${instanceIsolationInstruction}${classicSurfaceInstruction}${interactiveProgressInstruction}${artifactInstruction}${showChangesInstruction}${chatSwarmInstruction}${browserControlInstruction}${computerUseInstruction}${capabilityInstruction}${parityInstruction}${continuityInstruction}${contextBridgeInstruction}${planInstruction}${goalInstruction}`;
     }
     const inspection = !toolSurface.dedicatedSearchTools
         ? `In minimal tool mode, ${toolNames.grep}, ${toolNames.glob}, and ${toolNames.ls} are disabled; use ${toolNames.shell} with command-line tools such as grep, rg, find, ls, and tree for search and directory inspection. `
@@ -212,7 +213,7 @@ function serverInstructions(config) {
         ? `When ${toolNames.openWorkspace} returns available skills and a task matches a skill, use ${toolNames.read} to read that skill's path before proceeding. Skill paths may be outside the workspace, but ${toolNames.read} only permits advertised SKILL.md files and files under already-loaded skill directories. `
         : "";
     const agentsMd = `Follow instructions returned by ${toolNames.openWorkspace}. Before working under a path listed in availableAgentsFiles, use ${toolNames.read} to inspect that instruction file and follow it. `;
-    return `${mandatoryProgressPreflightInstruction} Use DevSpace as a local coding workspace. Call ${toolNames.openWorkspace} once per project folder or worktree to obtain a workspaceId. Reuse that same workspaceId for all later file, search, edit, write, show-changes, and shell tools in that folder; do not call ${toolNames.openWorkspace} again unless switching folders/worktrees, changing checkout/worktree mode, the workspaceId is rejected as unknown, or the user explicitly asks to reopen. ${agentsMd}${skills}${inspection}Prefer ${toolNames.edit} for targeted modifications, ${toolNames.write} only for new files or complete rewrites, and ${toolNames.shell} for tests, builds, git inspection, package scripts, and commands that are better executed by the shell. Do not create or modify files with ${toolNames.shell}; avoid shell redirection, heredocs, tee, sed -i, perl -i, node/python/ruby scripts, or any command whose purpose is to write project files.${classicSurfaceInstruction}${interactiveProgressInstruction}${artifactInstruction}${showChangesInstruction}${chatSwarmInstruction}${browserControlInstruction}${computerUseInstruction}${capabilityInstruction}${parityInstruction}${continuityInstruction}${contextBridgeInstruction}${planInstruction}${goalInstruction}`;
+    return `${mandatoryProgressPreflightInstruction} Use DevSpace as a local coding workspace. Call ${toolNames.openWorkspace} once per project folder or worktree to obtain a workspaceId. Reuse that same workspaceId for all later file, search, edit, write, show-changes, and shell tools in that folder; do not call ${toolNames.openWorkspace} again unless switching folders/worktrees, changing checkout/worktree mode, the workspaceId is rejected as unknown, or the user explicitly asks to reopen. ${agentsMd}${skills}${inspection}Prefer ${toolNames.edit} for targeted modifications, ${toolNames.write} only for new files or complete rewrites, and ${toolNames.shell} for tests, builds, git inspection, package scripts, and commands that are better executed by the shell. Do not create or modify files with ${toolNames.shell}; avoid shell redirection, heredocs, tee, sed -i, perl -i, node/python/ruby scripts, or any command whose purpose is to write project files.${instanceIsolationInstruction}${classicSurfaceInstruction}${interactiveProgressInstruction}${artifactInstruction}${showChangesInstruction}${chatSwarmInstruction}${browserControlInstruction}${computerUseInstruction}${capabilityInstruction}${parityInstruction}${continuityInstruction}${contextBridgeInstruction}${planInstruction}${goalInstruction}`;
 }
 function formatVisibleAgent(agent) {
     const model = agent.model ? `, model ${agent.model}` : "";
@@ -773,7 +774,7 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
     const server = new McpServer({
         name: "devspace",
         title: "DevSpace",
-         version: "0.5.13",
+         version: "0.5.14",
         description: "Secure local coding workspace for MCP clients. Provides workspace-scoped file, search, edit, write, process, capability, and Codex-parity tools.",
     }, {
         instructions: modelInstructions,
@@ -2479,7 +2480,10 @@ export function createServer(config = loadConfig(), options = {}) {
     const relayAppOrigins = new Set();
     try {
         const persistedOrigins = JSON.parse(readFileSync(relayAppOriginStatePath, "utf8").replace(/^\uFEFF/, ""));
-        for (const value of Array.isArray(persistedOrigins?.origins) ? persistedOrigins.origins : []) {
+        const resourceOrigin = new URL(config.publicBaseUrl).origin;
+        const compatible = persistedOrigins?.serverInstanceId === config.serverInstanceId
+            && persistedOrigins?.resourceOrigin === resourceOrigin;
+        for (const value of compatible && Array.isArray(persistedOrigins?.origins) ? persistedOrigins.origins : []) {
             const origin = normalizeRelayAppSandboxOrigin(value);
             if (origin)
                 relayAppOrigins.add(origin);
@@ -2496,6 +2500,8 @@ export function createServer(config = loadConfig(), options = {}) {
             relayAppOrigins.delete(relayAppOrigins.values().next().value);
         relayAppOriginPersist = relayAppOriginPersist.catch(() => { }).then(() => atomicWriteJson(relayAppOriginStatePath, {
             version: 1,
+            serverInstanceId: config.serverInstanceId,
+            resourceOrigin: new URL(config.publicBaseUrl).origin,
             origins: [...relayAppOrigins],
             updatedAt: new Date().toISOString(),
         })).catch(() => { });
@@ -2652,6 +2658,7 @@ export function createServer(config = loadConfig(), options = {}) {
                     ...verified,
                     callFingerprint: identity.callFingerprint || callFingerprint || null,
                     invocationFingerprint: identity.invocationFingerprint || null,
+                    currentInvocationVerified: true,
                   }
                 : null;
         };
@@ -3185,7 +3192,7 @@ export function createServer(config = loadConfig(), options = {}) {
         setHeaders: setAssetHeaders,
     }));
     app.get("/healthz", (_req, res) => {
-        res.json({ ok: true, name: "devspace", executionPolicy: executionPolicySnapshot(), chatSwarmUi: CHAT_SWARM_UI_DIAGNOSTICS });
+        res.json({ ok: true, name: "devspace", serverInstanceId: config.serverInstanceId, resource: resourceServerUrl.toString(), executionPolicy: executionPolicySnapshot(), chatSwarmUi: CHAT_SWARM_UI_DIAGNOSTICS });
     });
     app.get("/__devspace/memory/status", async (req, res) => {
         const remoteAddress = String(req.socket?.remoteAddress ?? "");
@@ -3672,6 +3679,8 @@ export function createServer(config = loadConfig(), options = {}) {
             const requestedToolName = mcpMethod === "tools/call"
                 ? String(req?.body?.params?.name || "").trim()
                 : "";
+            const chatGptConnectorRequest = /(?:openai-mcp|chatgpt)/i.test(String(req.get("user-agent") || ""));
+            const instanceBootstrapTool = ["devspace_progress_report", "devspace_progress_bind", "devspace_goal_start", "devspace_plan_start"].includes(requestedToolName);
             const conversationStartClaimRelay = Boolean(
                 (requestedToolName === "devspace_progress_bind")
                 || (["devspace_goal_start", "devspace_plan_start"].includes(requestedToolName)
@@ -3700,16 +3709,44 @@ export function createServer(config = loadConfig(), options = {}) {
                     const providerIdentity = openaiConversationIdentity({ auth: req.auth, meta: req.body?.params?._meta, headers: req.headers });
                     const providerAuthority = await openaiBindings.resolve(providerIdentity);
                     if (providerAuthority) providerAuthority.callFingerprint = fingerprintMcpToolCall('tools/call', req.body.params);
-                    if (providerAuthority) return { conversationId: providerAuthority.conversationId,
+                    if (providerAuthority && !chatGptConnectorRequest) return { conversationId: providerAuthority.conversationId,
                         capabilityAuthority: providerAuthority, progressAuthority: providerAuthority,
                         sessionFingerprint: coreClientSessionFingerprint(req), openaiIdentity: providerIdentity };
-                    return { ...await resolveAndBindMcpConversation(req), openaiIdentity: providerIdentity };
+                    const correlated = await resolveAndBindMcpConversation(req);
+                    if (correlated?.conversationId) return { ...correlated, openaiIdentity: providerIdentity };
+                    if (providerAuthority && instanceBootstrapTool) return { conversationId: providerAuthority.conversationId,
+                        capabilityAuthority: providerAuthority, progressAuthority: providerAuthority,
+                        sessionFingerprint: coreClientSessionFingerprint(req), openaiIdentity: providerIdentity };
+                    return { ...correlated, openaiIdentity: providerIdentity };
                 })().catch(() => ({
                     conversationId: null,
                     sessionFingerprint: coreClientSessionFingerprint(req),
                     runtimeKey: null,
                 }))
                 : null;
+            if (chatGptConnectorRequest && mcpMethod === "tools/call" && requestedToolName
+                && !instanceBootstrapTool && !conversationStartClaimRelay) {
+                const exactAuthority = requestConversation?.capabilityAuthority || null;
+                const exactLocalInvocation = exactAuthority?.currentInvocationVerified === true
+                    || exactAuthority?.source === "classic-computer-use-unique-active-page-verified";
+                if (!exactAuthority?.conversationId || !/^main-\d{2}$/i.test(String(exactAuthority?.runtimeKey || "")) || !exactLocalInvocation) {
+                    res.status(200).json({
+                        jsonrpc: "2.0",
+                        id: req?.body?.id ?? null,
+                        error: {
+                            code: -32031,
+                            message: "This ChatGPT tool call is not bound to an exact local Classic Runtime page for this DevSpace server instance.",
+                            data: {
+                                type: "devspace_instance_binding_required",
+                                serverInstanceId: config.serverInstanceId,
+                                resource: resourceServerUrl.toString(),
+                                bootstrapTools: ["devspace_progress_report", "devspace_goal_start", "devspace_plan_start"],
+                            },
+                        },
+                    });
+                    return;
+                }
+            }
             if (mcpMethod === "tools/call" && requestedToolName && !conversationStartClaimRelay) {
                 const gateAuthority = requestConversation?.capabilityAuthority
                     || requestConversation?.progressAuthority

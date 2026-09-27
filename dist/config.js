@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { expandHomePath } from "./roots.js";
@@ -175,6 +176,16 @@ function defaultWorktreeRoot() {
 function defaultAgentDir() {
     return join(homedir(), ".codex");
 }
+function parseServerInstanceId(value, publicBaseUrl) {
+    const explicit = String(value || "").trim();
+    if (explicit) {
+        if (!/^[A-Za-z0-9._:-]{8,128}$/.test(explicit))
+            throw new Error("DEVSPACE_SERVER_INSTANCE_ID must be 8-128 safe identifier characters.");
+        return explicit;
+    }
+    const resource = new URL("/mcp", publicBaseUrl).toString();
+    return `dsi_${createHash("sha256").update(resource).digest("hex").slice(0, 24)}`;
+}
 export function loadConfig(env = process.env) {
     const files = loadDevspaceFiles(env);
     const host = env.HOST ?? files.config.host ?? "127.0.0.1";
@@ -209,6 +220,7 @@ export function loadConfig(env = process.env) {
         allowedRoots: parseAllowedRoots(env.DEVSPACE_ALLOWED_ROOTS ?? files.config.allowedRoots),
         allowedHosts: parseAllowedHosts(env.DEVSPACE_ALLOWED_HOSTS, derivedAllowedHosts),
         publicBaseUrl,
+        serverInstanceId: parseServerInstanceId(env.DEVSPACE_SERVER_INSTANCE_ID ?? files.config.serverInstanceId, publicBaseUrl),
         toolMode: parseToolMode(env, files.config.toolMode),
         widgets: parseWidgetMode(env.DEVSPACE_WIDGETS),
         stateDir: resolve(expandHomePath(env.DEVSPACE_STATE_DIR ?? files.config.stateDir ?? defaultStateDir())),

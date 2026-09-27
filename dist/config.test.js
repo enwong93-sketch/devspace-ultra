@@ -12,6 +12,13 @@ const baseEnv = {
 
 try {
   assert.equal(loadConfig(baseEnv).widgets, "off", "DevSpace should not attach per-tool widget cards by default");
+  assert.match(loadConfig(baseEnv).serverInstanceId, /^dsi_[0-9a-f]{24}$/);
+  assert.equal(loadConfig({ ...baseEnv, DEVSPACE_SERVER_INSTANCE_ID: "machine-a.example" }).serverInstanceId, "machine-a.example");
+  assert.notEqual(
+    loadConfig({ ...baseEnv, DEVSPACE_PUBLIC_BASE_URL: "https://machine-a.example" }).serverInstanceId,
+    loadConfig({ ...baseEnv, DEVSPACE_PUBLIC_BASE_URL: "https://machine-b.example" }).serverInstanceId,
+    "independent public MCP resources must derive independent fallback server identities",
+  );
   assert.equal(loadConfig({ ...baseEnv, DEVSPACE_WIDGETS: "changes" }).widgets, "changes");
   assert.equal(loadConfig({ ...baseEnv, DEVSPACE_WIDGETS: "full" }).widgets, "full");
   assert.equal(loadConfig(baseEnv).classicStreamRecoveryEnabled, true, "Classic Stream Recovery should be safe-on by default");

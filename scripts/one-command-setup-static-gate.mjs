@@ -49,6 +49,10 @@ assert.match(publicSetup, /__devspace\/memory\/status/, "setup must verify a rea
 assert.match(publicSetup, /devspace-local-ingress\.ps1/, "DuckDNS setup must use the maintained router WAN/UPnP/Caddy ingress helper");
 assert.match(publicSetup, /EnableRouterUpnp/, "router UPnP mapping needs explicit consent");
 assert.match(publicSetup, /publicConnectorVerified\s*=\s*\$false/, "local readiness is not public Connector acceptance");
+assert.match(publicSetup, /serverInstanceId/,
+  "every public installation must persist an identity independent from other DDNS/MCP servers on the same ChatGPT account");
+assert.match(publicSetup, /DevSpaceUltra\\RuntimeWorkingDirectory/,
+  "Gateway tasks must not make the replaceable package directory their process working directory");
 assert.doesNotMatch(publicSetup, /Write-(?:Host|Output)[^\r\n]*(?:token|Password)/i, "setup must never print secret values");
 
 // Direct ingress support remains generic rather than router-specific.
