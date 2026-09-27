@@ -67,6 +67,10 @@ assert.match(updater, /DevSpace package-owning process tree did not exit before 
 assert.match(updater, /Move-ItemWithRetry -Source \$record\.Root/);
 assert.match(updater, /Move-ItemWithRetry -Source \$staged\.Root/);
 assert.match(updater, /npm\.Source rebuild better-sqlite3/);
+assert.match(updater, /\$nativeRebuildOutput\s*=\s*@\(& \$npm\.Source rebuild better-sqlite3/,
+  "native rebuild stdout must not corrupt the stage function's single-object return contract");
+assert.match(updater, /\$nativeSmokeOutput\s*=\s*@\(& node -e \$smoke \$sqliteModule/,
+  "native smoke stdout must remain captured inside the stage function");
 assert.match(updater, /better-sqlite3 native binding did not load/);
 assert.match(updater, /preservedLegacyRoots/);
 assert.match(updater, /devspace-stable-gateway-startup\.ps1/);
