@@ -9,12 +9,12 @@ const server = new McpServer({ name: "priority-test", version: "1" });
 for (let index = 0; index < 80; index += 1) {
   server.registerTool(`fixture_${String(index).padStart(3, "0")}`, { inputSchema: { value: z.string().optional() } }, async () => ({ content: [{ type: "text", text: "ok" }] }));
 }
-for (const name of ["blender_mcp", "devspace_progress_report", "blender_runtime", "devspace_route", "tool_search", "open_workspace", "write", "edit", "apply_patch", "exec_command", "write_stdin", "devspace_goal_start", "devspace_goal_control", "devspace_goal_turn_report"]) {
+for (const name of ["blender_mcp", "devspace_progress_report", "devspace_progress_bind", "blender_runtime", "devspace_route", "tool_search", "open_workspace", "write", "edit", "apply_patch", "exec_command", "write_stdin", "devspace_goal_start", "devspace_goal_control", "devspace_goal_turn_report"]) {
   server.registerTool(name, { inputSchema: {} }, async () => ({ content: [{ type: "text", text: "ok" }] }));
 }
 const result = prioritizeMcpTools(server);
 assert.equal(result.ok, true);
-assert.equal(result.toolCount, 94);
+assert.equal(result.toolCount, 95);
 const expectedFirst = [
   "open_workspace",
   "write",
@@ -23,6 +23,7 @@ const expectedFirst = [
   "exec_command",
   "write_stdin",
   "devspace_progress_report",
+  "devspace_progress_bind",
   "devspace_goal_start",
   "devspace_goal_turn_report",
   "devspace_goal_control",
@@ -38,7 +39,7 @@ await client.connect(clientTransport);
 const listed = await client.listTools();
 const liveNames = listed.tools.map((tool) => tool.name);
 assert.deepEqual(liveNames.slice(0, expectedFirst.length), expectedFirst);
-assert.equal(liveNames.length, 94);
+assert.equal(liveNames.length, 95);
 await client.close();
 await server.close();
 

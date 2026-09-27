@@ -23,6 +23,22 @@
 <script>
 (() => {
   let dispatchStarted = false;
+  let retired = false;
+  let onGlobals = null;
+  let onMessage = null;
+
+  const retire = () => {
+    if (retired) return;
+    retired = true;
+    if (onGlobals) window.removeEventListener("openai:set_globals", onGlobals);
+    if (onMessage) window.removeEventListener("message", onMessage);
+    onGlobals = null;
+    onMessage = null;
+    try {
+      document.body.replaceChildren();
+      document.documentElement.dataset.devspaceRelayReleased = "true";
+    } catch {}
+  };
 
   const goalFrom = (value) => {
     if (!value || typeof value !== "object") return null;
@@ -58,21 +74,27 @@
       });
     } catch {
       // Backend lease/host-bridge recovery remains authoritative.
+    } finally {
+      retire();
     }
   };
 
-  window.addEventListener("openai:set_globals", () => {
+  onGlobals = () => {
     void dispatch(window.openai?.toolOutput);
-  }, { passive: true });
+  };
+  window.addEventListener("openai:set_globals", onGlobals, { passive: true });
 
-  window.addEventListener("message", (event) => {
+  onMessage = (event) => {
     if (event.source !== window.parent) return;
     const message = event.data;
     if (!message || message.jsonrpc !== "2.0") return;
     if (message.method === "ui/notifications/tool-result") {
       void dispatch(message.params?.structuredContent ?? message.params);
     }
-  }, { passive: true });
+  };
+  window.addEventListener("message", onMessage, { passive: true });
+
+  setTimeout(retire, 150000);
 
   void dispatch(window.openai?.toolOutput);
 })();

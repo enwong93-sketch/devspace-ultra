@@ -15,6 +15,12 @@ assert.match(html, /ui\/notifications\/tool-result/);
 assert.match(html, /status === ["']active["']/);
 assert.match(html, /roundState === ["']reported["']/);
 assert.match(html, /continuation\?\.state === ["']pending["']/);
+assert.match(html, /removeEventListener/,
+  "completed Goal relays must release host listeners instead of accumulating per round");
+assert.match(html, /document\.body\.replaceChildren\(\)/,
+  "completed or expired Goal relays must release their hidden DOM");
+assert.match(html, /setTimeout\(retire, 150000\)/,
+  "a failed hidden Goal relay must still self-retire after a bounded interval");
 assert.doesNotMatch(html, /<button/i);
 assert.doesNotMatch(html, /<script[^>]+src=/i);
 assert.doesNotMatch(html, /<link[^>]+stylesheet/i);

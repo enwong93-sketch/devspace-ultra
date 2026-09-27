@@ -66,6 +66,37 @@ assert.equal((await duplicateSamePage.find({ claimId }))?.conversationId, "conve
 
 assert.equal(await resolver.find({ claimId: "short" }), null);
 
+const crowdedFrames = Array.from({ length: 700 }, (_, index) => ({
+  id: `crowded-${index}`,
+  parentId: "page-crowded",
+  type: "iframe",
+  webSocketDebuggerUrl: `ws://crowded-${index}`,
+}));
+const crowded = new ConversationStartClaimCdpResolver({
+  ports: [9734],
+  maxIframes: 128,
+  listTargets: async () => [
+    { id: "page-crowded", type: "page", url: "https://chatgpt.com/c/conversation-crowded" },
+    ...crowdedFrames,
+  ],
+  evaluateTarget: async (target) => target.id === "crowded-699",
+});
+const crowdedFound = await crowded.find({ claimId, claimType: "progress" });
+assert.equal(crowdedFound?.conversationId, "conversation-crowded",
+  "a newly mounted relay at either target-list edge must remain recoverable after historical iframe growth");
+assert.ok(crowdedFound.inspectedIframes <= 128);
+assert.equal(crowdedFound.inventoryIframes, 700);
+assert.ok(crowdedFound.truncatedIframes >= 572);
+
+const hiddenMiddle = new ConversationStartClaimCdpResolver({
+  ports: [9734],
+  maxIframes: 128,
+  listTargets: crowded.listTargets,
+  evaluateTarget: async (target) => target.id === "crowded-350",
+});
+assert.equal(await hiddenMiddle.find({ claimId, claimType: "progress" }), null,
+  "an uninspected historical middle target must fail closed rather than be guessed");
+
 console.log(JSON.stringify({
   ok: true,
   gate: "conversation-start-claim-cdp",
@@ -74,6 +105,7 @@ console.log(JSON.stringify({
   innerAppExecutionContext: true,
   duplicateSamePageAllowed: true,
   crossMainAmbiguityFailsClosed: true,
+  crowdedIframeRecoveryBounded: true,
   runtimeOnlyInference: false,
   pageNavigation: false,
 }));

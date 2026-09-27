@@ -152,6 +152,15 @@ assert.match(script, /Failed to fetch template\|載入應用程式時發生錯�
 assert.match(script, /legacyFrames\.some\(\(frame\) => ancestor\.contains\(frame\)\)/);
 assert.match(script, /retiredLegacyInlineApps/);
 assert.match(script, /retiredLegacyInlineErrors/);
+assert.match(script, /ui:\/\/devspace\/progress-claim-relay\.html/);
+assert.match(script, /PROGRESS_RELAY_MAX_LIVE_FRAMES = 8/);
+assert.match(script, /PROGRESS_RELAY_RETENTION_MS = 150000/);
+assert.match(script, /GOAL_RELAY_MAX_LIVE_FRAMES = 4/);
+assert.match(script, /pruneProgressRelayFrames/);
+assert.match(script, /frames\.slice\(0, edge\).*frames\.slice\(-edge\)/s,
+  "relay cleanup must preserve both target-order edges because Desktop ordering varies");
+assert.match(script, /frame\.remove\(\)/,
+  "expired and excess hidden progress relays must leave the live DOM instead of accumulating indefinitely");
 assert.match(script, /LEASE_MS/);
 assert.match(script, /PRODUCER_LEASE_MS/);
 assert.match(script, /suppressedByProducerLease/);
@@ -180,6 +189,8 @@ assert.match(inspectProgressNarrationExpression(), /retiredLegacyInlineApps/);
 assert.match(inspectProgressNarrationExpression(), /retiredLegacyInlineErrors/);
 assert.match(inspectProgressNarrationExpression(), /visibleLegacyInlineFrames/);
 assert.match(inspectProgressNarrationExpression(), /visibleLegacyInlineErrors/);
+assert.match(inspectProgressNarrationExpression(), /progressRelayFrames/);
+assert.match(inspectProgressNarrationExpression(), /goalRelayFrames/);
 assert.match(inspectProgressNarrationExpression(), /scrollHeight/);
 
 const root = await mkdtemp(join(tmpdir(), "devspace-progress-overlay-"));
@@ -242,6 +253,8 @@ try {
     automaticTelemetryVisible: false,
     legacyInlineGoalAndPlanRetired: true,
     legacyInlineTemplateErrorsRetired: true,
+    progressRelayFramesBounded: true,
+    goalRelayFramesBounded: true,
     duplicateTextSuppressed: true,
     scrollHistory: true,
     alwaysVisibleScrollbar: true,

@@ -11,6 +11,7 @@ const DEFAULT_PRIORITY = Object.freeze([
   "ls",
   "bash",
   "devspace_progress_report",
+  "devspace_progress_bind",
   "devspace_plan_start",
   "devspace_plan_status",
   "devspace_plan_mount",

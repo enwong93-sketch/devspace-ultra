@@ -18,6 +18,7 @@ const claim = registry.create({
 assert.equal(claim.state, "pending");
 assert.equal(registry.diagnostics().pending, 1);
 assert.equal(registry.pendingClaims()[0]?.claimId, claim.claimId);
+assert.equal(registry.pendingClaim(claim.claimId)?.claimId, claim.claimId);
 assert.equal(JSON.stringify(registry.diagnostics()).includes("Exact progress message"), false);
 
 const authorityA = {
@@ -48,6 +49,7 @@ assert.equal(registry.requestIdentity(claim.claimId), null, 'completed claims ca
 assert.equal(registry.requestFingerprint(claim.claimId), null);
 assert.equal(writes, 1);
 assert.equal(registry.pendingClaims().some((item) => item.claimId === claim.claimId), false);
+assert.equal(registry.pendingClaim(claim.claimId), null);
 
 const duplicate = await registry.claim({
   claimId: claim.claimId,

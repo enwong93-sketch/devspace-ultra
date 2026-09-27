@@ -58,6 +58,25 @@ function conversationIdFromUrl(url) {
   catch { return null; }
 }
 
+function boundedEdgeCandidates(items, limit) {
+  const rows = Array.isArray(items) ? items : [];
+  const cap = Math.max(8, Number(limit) || DEFAULT_MAX_IFRAMES);
+  if (rows.length <= cap) return rows;
+  // Chromium target ordering has varied between Desktop builds. A newly
+  // mounted one-time relay appears at one edge, so inspect both edges instead
+  // of rejecting the entire conversation after historical iframes exceed a
+  // fixed cap. Middle targets remain untrusted and are never guessed.
+  const firstCount = Math.floor(cap / 2);
+  const selected = [...rows.slice(0, firstCount), ...rows.slice(-(cap - firstCount))];
+  const seen = new Set();
+  return selected.filter((row, index) => {
+    const key = String(row?.id || row?.webSocketDebuggerUrl || `candidate-${index}`);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 async function fetchTargets(port, {
   fetchImpl = globalThis.fetch,
   timeoutMs = DEFAULT_PROBE_TIMEOUT_MS,
@@ -173,6 +192,7 @@ export class ConversationStartClaimCdpResolver {
     const owners = new Map();
     const displays = new Map();
     let inspected = 0;
+    let inventoryIframes = 0;
     // Probe offline loopback ports concurrently, not 32 sequential deadlines.
     // No ownership is cached between requests.
     const inventories = await Promise.all(this.ports.map(async (port) => ({
@@ -188,10 +208,11 @@ export class ConversationStartClaimCdpResolver {
       if (!pages.size) continue;
       const iframes = targets
         .filter((target) => target?.type === "iframe" && pages.has(String(target?.parentId || "")) && target?.webSocketDebuggerUrl);
-      if (iframes.length > this.maxIframes) return null; // incomplete ambiguity scan
+      inventoryIframes += iframes.length;
+      const candidates = boundedEdgeCandidates(iframes, this.maxIframes);
 
-      for (let index = 0; index < iframes.length; index += this.batchSize) {
-        const batch = iframes.slice(index, index + this.batchSize);
+      for (let index = 0; index < candidates.length; index += this.batchSize) {
+        const batch = candidates.slice(index, index + this.batchSize);
         const results = await Promise.all(batch.map(async (target) => ({
           target,
           matched: await this.evaluateTarget(target, expected, normalizedType).catch(() => false),
@@ -227,6 +248,8 @@ export class ConversationStartClaimCdpResolver {
       pageVerified: true,
       observedAt: new Date(Number(this.now())).toISOString(),
       inspectedIframes: inspected,
+      inventoryIframes,
+      truncatedIframes: Math.max(0, inventoryIframes - inspected),
       matchingDisplays: displays.size,
     };
   }
@@ -236,5 +259,6 @@ export const conversationStartClaimCdpInternals = {
   claimProbeExpression,
   cleanClaimId,
   conversationIdFromUrl,
+  boundedEdgeCandidates,
   chooseAppContext,
 };

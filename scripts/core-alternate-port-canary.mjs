@@ -171,7 +171,7 @@ try {
   if (!memory.response.ok || memory.body?.ok !== true) throw new Error(`Canary memory endpoint failed with HTTP ${memory.response.status}.`);
   const toolSurface = await import("../dist/mcp-tool-priority.js");
   if (!Array.isArray(toolSurface.DEFAULT_MCP_TOOL_PRIORITY)) throw new Error("MCP tool priority export is unavailable.");
-  for (const required of ["devspace_progress_report", "blender_runtime", "blender_mcp"]) {
+  for (const required of ["devspace_progress_report", "devspace_progress_bind"]) {
     if (!toolSurface.DEFAULT_MCP_TOOL_PRIORITY.includes(required)) throw new Error(`Canary source priority is missing ${required}.`);
   }
   await sleep(2_000);

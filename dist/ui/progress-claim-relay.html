@@ -107,6 +107,13 @@
     onOpenAiGlobals = null;
     onHostMessage = null;
   };
+  const releaseRelayDocument = () => {
+    retireRelay();
+    try {
+      document.body.replaceChildren();
+      document.documentElement.dataset.devspaceRelayReleased = "true";
+    } catch {}
+  };
 
   const dispatch = async (value) => {
     const action = relayActionFrom(value);
@@ -120,7 +127,7 @@
     const expiresAt = Date.parse(String(action.expiresAt || ''));
     const lifetimeMs = Number.isFinite(expiresAt)
       ? Math.max(0, Math.min(120000, expiresAt - Date.now())) : 120000;
-    setTimeout(() => { retireRelay(); }, lifetimeMs);
+    setTimeout(() => { releaseRelayDocument(); }, lifetimeMs);
     for (let attempt = 0; attempt < 3; attempt += 1) {
       try {
         if (typeof window.openai?.callTool !== "function") throw new Error("tool bridge unavailable");
@@ -128,11 +135,13 @@
         const structured = result?.structuredContent ?? result?.structured_content ?? result;
         if (action.toolName === "devspace_progress_report") {
           if (structured?.ok === true && structured?.claimed === true) {
+            releaseRelayDocument();
             return;
           }
           throw new Error("progress claim was not completed");
         }
         if (structured?.claimed === true && (structured?.goal || structured?.plan)) {
+          releaseRelayDocument();
           return;
         }
         throw new Error("conversation start claim was not completed");

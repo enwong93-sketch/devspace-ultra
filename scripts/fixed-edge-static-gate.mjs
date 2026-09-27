@@ -12,6 +12,7 @@ const backendReload = await read("scripts/devspace-fixed-backend-reload.mjs");
 const worker = await read("edge/cloudflare-worker/src/index.js");
 const edgeRuntime = await read("dist/edge-cloudflare.js");
 const cli = await read("dist/cli.js");
+const server = await read("dist/server.js");
 
 assert.match(helper, /edgeTransportMode[\s\S]*workers-vpc/, "startup helper must activate only for Workers VPC edge mode");
 assert.match(helper, /edgeTunnelId/, "startup helper must read the persisted named tunnel id");
@@ -64,5 +65,7 @@ assert.match(cli, /probeFixedEdge\(files\.config\.edgePublicBaseUrl\)/, "edge st
 assert.doesNotMatch(cli, /--activate/, "edge setup must never expose an activation switch that rewrites the live control backend identity");
 assert.doesNotMatch(cli, /activated\.publicBaseUrl|activated\.port|activated\.stateDir/, "edge setup must not repoint the live control backend during fixed-edge setup");
 assert.match(cli, /writeDevspaceConfig\(files\.config\)/, "if startup-task installation fails after config commit, setup must restore the previous DevSpace config");
+assert.match(server, /app\.set\("trust proxy", config\.logging\.trustProxy \? true : "loopback"\)/,
+  "loopback ingress must not flood stderr or mis-key rate limits when Caddy/Gateway supplies X-Forwarded-For");
 
 console.log(JSON.stringify({ ok: true, gate: "fixed-edge-static", workersVpc: true, quickTunnelRequired: false }));

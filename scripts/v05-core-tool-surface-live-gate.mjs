@@ -131,6 +131,7 @@ for (const required of [
   "capability_route",
   "tool_search",
   "devspace_progress_report",
+  "devspace_progress_bind",
 ]) {
   assert.ok(names.has(required), `missing live V0.5 tool: ${required}`);
 }

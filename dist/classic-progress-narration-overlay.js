@@ -12,6 +12,11 @@ const LEGACY_INLINE_RESOURCE_TITLES = [
   "ui://devspace/goal-dock.html",
   "ui://devspace/plan-card.html",
 ];
+const PROGRESS_RELAY_RESOURCE_TITLE = "ui://devspace/progress-claim-relay.html";
+const PROGRESS_RELAY_MAX_LIVE_FRAMES = 8;
+const PROGRESS_RELAY_RETENTION_MS = 150_000;
+const GOAL_RELAY_RESOURCE_TITLE = "ui://devspace/goal-continuation-relay.html";
+const GOAL_RELAY_MAX_LIVE_FRAMES = 4;
 const LEASE_MS = 60_000;
 const PRODUCER_LEASE_MS = 2_500;
 const DEFAULT_POLL_MS = 500;
@@ -155,6 +160,11 @@ export function buildProgressNarrationScript(map, {
     const PRODUCER_PRIORITY = ${Math.max(0, Math.floor(number(producerPriority, 0)))};
     const PRODUCER_LEASE_MS = ${PRODUCER_LEASE_MS};
     const LEGACY_INLINE_RESOURCE_TITLES = ${serializeInline(LEGACY_INLINE_RESOURCE_TITLES)};
+    const PROGRESS_RELAY_RESOURCE_TITLE = ${JSON.stringify(PROGRESS_RELAY_RESOURCE_TITLE)};
+    const PROGRESS_RELAY_MAX_LIVE_FRAMES = ${PROGRESS_RELAY_MAX_LIVE_FRAMES};
+    const PROGRESS_RELAY_RETENTION_MS = ${PROGRESS_RELAY_RETENTION_MS};
+    const GOAL_RELAY_RESOURCE_TITLE = ${JSON.stringify(GOAL_RELAY_RESOURCE_TITLE)};
+    const GOAL_RELAY_MAX_LIVE_FRAMES = ${GOAL_RELAY_MAX_LIVE_FRAMES};
     const LEASE_MS = ${LEASE_MS};
     const conversationId = location.pathname.match(/\\/c\\/([^/?#]+)/)?.[1] || null;
     const lifecycleNow = Date.now();
@@ -244,22 +254,21 @@ export function buildProgressNarrationScript(map, {
       node.style.setProperty('padding','0','important');
       return true;
     };
+    const frameShell = (frame) => {
+      let node = frame?.parentElement || null;
+      for (let depth = 0; depth < 5 && node; depth += 1, node = node.parentElement) {
+        const className = String(node.className || '');
+        if (node.tagName === 'DIV' && /(?:^|\\s)no-scrollbar(?:\\s|$)/.test(className)) return node;
+      }
+      return frame?.parentElement?.parentElement || frame || null;
+    };
     const retireLegacyInlineApps = () => {
       let retiredApps = 0;
       let retiredErrors = 0;
       const legacyFrames = [...document.querySelectorAll('iframe')]
         .filter((frame) => LEGACY_INLINE_RESOURCE_TITLES.includes(frame.getAttribute('title') || ''));
       for (const frame of legacyFrames) {
-        let shell = null;
-        let node = frame.parentElement;
-        for (let depth = 0; depth < 5 && node; depth += 1, node = node.parentElement) {
-          const className = String(node.className || '');
-          if (node.tagName === 'DIV' && /(?:^|\\s)no-scrollbar(?:\\s|$)/.test(className)) {
-            shell = node;
-            break;
-          }
-        }
-        shell ||= frame.parentElement?.parentElement || frame;
+        const shell = frameShell(frame);
         if (retireNode(shell, 'devspaceLegacyInlineRetired')) retiredApps += 1;
         frame.setAttribute('tabindex','-1');
       }
@@ -282,9 +291,49 @@ export function buildProgressNarrationScript(map, {
       }
       return { apps: retiredApps, errors: retiredErrors };
     };
+    const pruneProgressRelayFrames = () => {
+      const frames = [...document.querySelectorAll('iframe')]
+        .filter((frame) => (frame.getAttribute('title') || '') === PROGRESS_RELAY_RESOURCE_TITLE);
+      const now = Date.now();
+      const edge = Math.ceil(PROGRESS_RELAY_MAX_LIVE_FRAMES / 2);
+      const keep = new Set([...frames.slice(0, edge), ...frames.slice(-edge)]);
+      let pruned = 0;
+      for (const frame of frames) {
+        const firstSeen = Number(frame.dataset.devspaceProgressRelayFirstSeenAt || 0) || now;
+        frame.dataset.devspaceProgressRelayFirstSeenAt = String(firstSeen);
+        const expired = now - firstSeen > PROGRESS_RELAY_RETENTION_MS;
+        const outsideBoundedEdges = frames.length > PROGRESS_RELAY_MAX_LIVE_FRAMES && !keep.has(frame);
+        if (!expired && !outsideBoundedEdges) continue;
+        retireNode(frameShell(frame), 'devspaceProgressRelayRetired');
+        frame.remove();
+        pruned += 1;
+      }
+      return { found: frames.length, kept: frames.length - pruned, pruned };
+    };
+    const pruneGoalRelayFrames = () => {
+      const frames = [...document.querySelectorAll('iframe')]
+        .filter((frame) => (frame.getAttribute('title') || '') === GOAL_RELAY_RESOURCE_TITLE);
+      const now = Date.now();
+      const edge = Math.ceil(GOAL_RELAY_MAX_LIVE_FRAMES / 2);
+      const keep = new Set([...frames.slice(0, edge), ...frames.slice(-edge)]);
+      let pruned = 0;
+      for (const frame of frames) {
+        const firstSeen = Number(frame.dataset.devspaceGoalRelayFirstSeenAt || 0) || now;
+        frame.dataset.devspaceGoalRelayFirstSeenAt = String(firstSeen);
+        const expired = now - firstSeen > PROGRESS_RELAY_RETENTION_MS;
+        const outsideBoundedEdges = frames.length > GOAL_RELAY_MAX_LIVE_FRAMES && !keep.has(frame);
+        if (!expired && !outsideBoundedEdges) continue;
+        retireNode(frameShell(frame), 'devspaceGoalRelayRetired');
+        frame.remove();
+        pruned += 1;
+      }
+      return { found: frames.length, kept: frames.length - pruned, pruned };
+    };
     const retiredLegacyInline = retireLegacyInlineApps();
     const retiredLegacyInlineApps = retiredLegacyInline.apps;
     const retiredLegacyInlineErrors = retiredLegacyInline.errors;
+    const progressRelayFrames = pruneProgressRelayFrames();
+    const goalRelayFrames = pruneGoalRelayFrames();
     const radios = [...document.querySelectorAll('[role="radio"]')];
     const work = radios.find((el) => /^(工作|Work)$/i.test((el.innerText || el.textContent || '').trim()));
     const mode = work?.getAttribute('aria-checked') === 'true' || /[?&]surface=work(?:&|$)/i.test(location.search) ? 'work' : 'chat';
@@ -623,6 +672,12 @@ html.dark #${ROOT_ID} .devspace-progress-scroll{scrollbar-color:rgba(220,220,220
       pageMutationCount:visible ? 1 : 0,
       retiredLegacyInlineApps,
       retiredLegacyInlineErrors,
+      progressRelayFramesFound:progressRelayFrames.found,
+      progressRelayFramesKept:progressRelayFrames.kept,
+      progressRelayFramesPruned:progressRelayFrames.pruned,
+      goalRelayFramesFound:goalRelayFrames.found,
+      goalRelayFramesKept:goalRelayFrames.kept,
+      goalRelayFramesPruned:goalRelayFrames.pruned,
       syntheticUserMessages:0,
       suppressedByProducerLease:false,
       producerId:PRODUCER_ID,
@@ -654,6 +709,8 @@ export function inspectProgressNarrationExpression() {
       retiredLegacyInlineErrors:Number(root?.dataset.retiredLegacyInlineErrors || 0),
       legacyInlineGoalDockFrames:document.querySelectorAll('iframe[title="ui://devspace/goal-dock.html"]').length,
       legacyInlinePlanCardFrames:document.querySelectorAll('iframe[title="ui://devspace/plan-card.html"]').length,
+      progressRelayFrames:document.querySelectorAll('iframe[title="ui://devspace/progress-claim-relay.html"]').length,
+      goalRelayFrames:document.querySelectorAll('iframe[title="ui://devspace/goal-continuation-relay.html"]').length,
       visibleLegacyInlineFrames:[...document.querySelectorAll('iframe[title="ui://devspace/goal-dock.html"],iframe[title="ui://devspace/plan-card.html"]')]
         .filter((frame)=>{const shell=frame.closest('[data-devspace-legacy-inline-retired="true"]') || frame.parentElement?.parentElement || frame;return getComputedStyle(shell).display !== 'none'}).length,
       visibleLegacyInlineErrors:[...document.querySelectorAll('aside')]

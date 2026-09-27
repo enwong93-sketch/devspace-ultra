@@ -26,6 +26,11 @@ assert.match(source, /rescue may emit only the exact visible text `- 繼續`/i);
 assert.match(source, /Write the card text yourself in natural language/i);
 assert.match(source, /never show generated step counters, heartbeat prose, generic program status/i);
 assert.match(source, /registerAppTool\(server, "devspace_progress_report"/);
+assert.match(source, /registerAppTool\(server, "devspace_progress_bind"/);
+assert.match(source, /Recurring reports update the single host overlay directly/,
+  "ordinary progress reports must not create one MCP App iframe per update");
+assert.match(source, /Call devspace_progress_bind once with claimId/,
+  "only unresolved first-use progress may request the one-time bootstrap relay");
 assert.match(source, /conversation-bound update to the floating DEV Space progress narration card in your own natural language/i);
 assert.match(source, /exact ChatGPT Classic page that received this result confirms a one-time claim/i);
 assert.match(source, /devspace_progress_preflight_required/);
