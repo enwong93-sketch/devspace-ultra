@@ -57,6 +57,10 @@ assert.match(server, /bootstrapTools:\s*\["devspace_progress_report", "devspace_
   "the binding error must expose only tools available in older ChatGPT snapshots");
 assert.match(server, /!instanceBootstrapTool && !conversationStartClaimRelay && !instanceIndependentTool/,
   "workspace and Blender tools must not require an unrelated progress claim");
+assert.match(server, /const staticCapabilityInspect = requestedToolName === "capability_inspect"[\s\S]{0,100}probeMcp !== true/,
+  "static capability inspection must remain usable while live MCP probing stays conversation-scoped");
+assert.match(server, /"capability_list", "capability_search", "capability_read"/,
+  "the shared routing catalogue must remain usable before progress-card binding");
 assert.match(providerBinding, /authority\?\.providerConversationKey === key/);
 assert.match(providerBinding, /authority\?\.pageVerified === true/);
 assert.match(providerBinding, /version:\s*this\.serverInstanceId \? 2 : 1/,

@@ -3766,17 +3766,22 @@ export function createServer(config = loadConfig(), options = {}) {
             const chatGptConnectorRequest = Boolean(requestProviderIdentity || hasOpenaiProviderMetadata)
                 || /(?:openai-mcp|chatgpt)/i.test(String(req.get("user-agent") || ""));
             const instanceBootstrapTool = ["devspace_progress_report", "devspace_progress_bind", "devspace_goal_start", "devspace_plan_start"].includes(requestedToolName);
-            // These tools are scoped by the OAuth-protected server and an
-            // explicit workspaceId or Blender runtimeId, not by a ChatGPT
-            // conversation. Requiring a page-local progress claim before they
+            // These tools are scoped by the OAuth-protected server and, when
+            // applicable, an explicit workspaceId or Blender runtimeId. The
+            // metadata-only routes do not open a conversation-scoped MCP
+            // client. Requiring a page-local progress claim before they
             // run stranded fresh Classic chats whenever the host retained an
             // older tool snapshot. Conversation-owned Goal/Plan/progress and
             // capability-session tools still require exact-page authority.
-            const instanceIndependentTool = new Set([
+            const staticCapabilityInspect = requestedToolName === "capability_inspect"
+                && req?.body?.params?.arguments?.probeMcp !== true;
+            const instanceIndependentTool = staticCapabilityInspect || new Set([
                 "open_workspace", "read", "write", "edit", "apply_patch",
                 "exec_command", "write_stdin", "bash", "grep", "glob", "ls",
                 "show_changes", "blender_runtime", "blender_mcp",
-                "devspace_route", "tool_search",
+                "devspace_route", "tool_search", "capability_route",
+                "capability_list", "capability_search", "capability_read",
+                "toolchain_status", "current_time", "codex_mcp_catalog",
             ]).has(requestedToolName);
             const conversationStartClaimRelay = Boolean(
                 (requestedToolName === "devspace_progress_bind")

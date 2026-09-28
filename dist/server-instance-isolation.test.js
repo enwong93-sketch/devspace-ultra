@@ -143,6 +143,30 @@ try {
   }, sessionId, protocolVersion);
   assert.notEqual(blender.body?.error?.code, -32031,
     "a Blender runtime listing must not depend on a ChatGPT conversation claim");
+  const capabilityList = await post({
+    jsonrpc: "2.0", id: 12, method: "tools/call",
+    params: { name: "capability_list", arguments: {} },
+  }, sessionId, protocolVersion);
+  assert.equal(capabilityList.body?.result?.structuredContent?.ok, true,
+    "shared capability metadata must be usable before page binding");
+  const capabilityRoute = await post({
+    jsonrpc: "2.0", id: 15, method: "tools/call",
+    params: { name: "capability_route", arguments: { query: "local file workspace" } },
+  }, sessionId, protocolVersion);
+  assert.notEqual(capabilityRoute.body?.error?.code, -32031,
+    "a routed metadata next step must not stop at the conversation gate");
+  const staticInspect = await post({
+    jsonrpc: "2.0", id: 13, method: "tools/call",
+    params: { name: "capability_inspect", arguments: { pluginId: "missing-test-plugin", probeMcp: false } },
+  }, sessionId, protocolVersion);
+  assert.notEqual(staticInspect.body?.error?.code, -32031,
+    "static capability inspection must not require a conversation claim");
+  const liveInspect = await post({
+    jsonrpc: "2.0", id: 14, method: "tools/call",
+    params: { name: "capability_inspect", arguments: { pluginId: "missing-test-plugin", probeMcp: true } },
+  }, sessionId, protocolVersion);
+  assert.equal(liveInspect.body?.error?.code, -32031,
+    "live capability probing must retain conversation isolation");
 
   const denied = await post({
     jsonrpc: "2.0", id: 4, method: "tools/call",
@@ -154,7 +178,7 @@ try {
   assert.equal(denied.body?.error?.data?.resource, resource.toString());
   assert.equal(denied.body?.error?.data?.bootstrapTools.includes("devspace_progress_report"), true);
 
-  console.log(JSON.stringify({ ok: true, gate: "server-instance-isolation", workspaceAvailableWithoutClaim: true, blenderAvailableWithoutClaim: true, conversationStateRequiresExactPage: true, tokenBoundAppOriginProbe: true }));
+  console.log(JSON.stringify({ ok: true, gate: "server-instance-isolation", workspaceAvailableWithoutClaim: true, blenderAvailableWithoutClaim: true, capabilityMetadataAvailableWithoutClaim: true, liveCapabilityProbeRequiresExactPage: true, conversationStateRequiresExactPage: true, tokenBoundAppOriginProbe: true }));
 } finally {
   if (httpServer) {
     const closed = new Promise((resolve) => httpServer.close(resolve));
