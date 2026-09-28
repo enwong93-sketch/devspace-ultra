@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 0.5.19 — 2026-09-28
+
+- Allow native Computer Use to operate an explicitly requested ChatGPT Classic desktop window; keep the exact local window/conversation scope without blocking the whole Classic app family.
+- Continue an active Goal from the native completed assistant turn; a progress report/card or completed Plan is not a tool or continuation prerequisite.
+- Change progress, Goal and Plan sequencing from an ordinary-work hard gate to advisory guidance. Reads, edits, commands and later Plan work continue while the Agent remains responsible for useful narration and structurally correct round closure.
+- Keep exact local Classic stateful tools alive after the short-lived hidden progress relay is removed. Active verified work and recurring progress reports renew the capability family, and the current call fingerprint binds rotated authenticated provider aliases without another manual claim.
+- Select one conversation on a reusable host transport by exact request trace, while trace collisions, duplicate or unhydrated pages, wrong Runtime/card owner, wrong OAuth resource, another server instance and another computer remain fail-closed.
+- Scope persisted provider-conversation bindings to `serverInstanceId`; legacy unscoped state resets once and requires a fresh exact-page bootstrap.
+- Require physical ChatGPT Classic long-duration acceptance before stable installation and auto-update restoration; a cloud branch or one-shot `open_workspace` result is not sufficient.
+
 ## 0.5.18 — 2026-09-28
 
 - Restore ordinary tools in existing ChatGPT Classic Main conversations after reconnect. The server accepts an authenticated provider-conversation binding only after rechecking its exact current local page; an unbound, conflicting or other-computer call still fails closed.

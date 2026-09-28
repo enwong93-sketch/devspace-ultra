@@ -53,6 +53,18 @@ const evidenceSchema = z.object({
   criterionId: z.string(),
   evidence: z.string(),
 });
+const turnCompletionSchema = z.object({
+  round: z.number().int().positive(),
+  source: z.literal("native-assistant-turn-final"),
+  conversationId: z.string(),
+  runtimeKey: z.string(),
+  pageTargetId: z.string(),
+  sourceUserMessageId: z.string(),
+  assistantMessageId: z.string(),
+  assistantTextHash: z.string(),
+  assistantCreatedAt: z.string(),
+  completedAt: z.string(),
+});
 const goalSchema = z.object({
   id: z.string(),
   conversationId: z.string().nullable(),
@@ -71,6 +83,7 @@ const goalSchema = z.object({
   blockedAt: z.string().nullable(),
   successCriteria: z.array(criterionSchema),
   lastRoundReport: roundReportSchema.nullable(),
+  lastTurnCompletion: turnCompletionSchema.nullable().optional(),
   recentReports: z.array(roundReportSchema),
   completionEvidence: z.array(evidenceSchema).nullable(),
   blocker: blockerSchema,
@@ -89,8 +102,10 @@ const goalStartOutputSchema = {
   goal: goalSchema.optional(),
   pending: z.boolean().optional(),
   claimed: z.boolean().optional(),
+  resumed: z.boolean().optional(),
   claimId: z.string().optional(),
   conversationStartClaim: conversationStartClaimSchema.optional(),
+  nextAction: z.object({ tool: z.literal("devspace_goal_start"), claimId: z.string() }).optional(),
 };
 const continuationClaimSchema = z.object({
   goalId: z.string(),
@@ -161,6 +176,8 @@ export function registerGoalTools(server, goalRuntime, {
   startClaimRegistry = null,
   claimRelayResourceUri = null,
   resolveStartClaimPage = null,
+  completeStartClaim = null,
+  resolveProviderIdentity = null,
 } = {}) {
   if (!resourceUri) throw new Error("registerGoalTools requires resourceUri.");
   if (!relayResourceUri) throw new Error("registerGoalTools requires relayResourceUri.");
@@ -192,6 +209,7 @@ export function registerGoalTools(server, goalRuntime, {
     structuredContent: {
       pending: true,
       conversationStartClaim: claim,
+      nextAction: { tool: "devspace_goal_start", claimId: claim.claimId },
     },
     _meta: {
       "devspace/conversationStartClaim": claim,
@@ -200,7 +218,7 @@ export function registerGoalTools(server, goalRuntime, {
 
   registerAppTool(server, "devspace_goal_start", {
     title: "Start DevSpace Goal",
-    description: "Start persistent Goal Mode for a genuine multi-turn objective. Store the full final objective and explicit success criteria once; ordinary steering may change the execution approach but not silently rewrite this Goal. The floating Goal strip and progress narration card are projected automatically; do not create the retired inline Goal Dock.",
+    description: "Start persistent Goal Mode for a genuine multi-turn objective. Store the full final objective and explicit success criteria once; ordinary steering may change the execution approach but not silently rewrite this Goal. If the result is pending, immediately call this same tool once with the returned nextAction.claimId and the original objective/successCriteria. The Agent performs this bootstrap without asking the user to pair the conversation. The floating Goal strip and progress narration card are projected automatically; do not create the retired inline Goal Dock.",
     inputSchema: {
       objective: z.string().min(1).max(4_000),
       successCriteria: z.array(z.string().min(1).max(1_000)).min(1).max(12),
@@ -221,9 +239,11 @@ export function registerGoalTools(server, goalRuntime, {
         });
         if (!existing) throw new Error("Goal start claim is unavailable or expired.");
         if (existing.completed && existing.result?.goal) {
+          const resumed = existing.result.resumed === true;
           return {
-            ...textResult(existing.result.goal, `Started Goal ${existing.result.goal.id} at round ${existing.result.goal.round}.`, {
+            ...textResult(existing.result.goal, `${resumed ? "Resumed" : "Started"} Goal ${existing.result.goal.id} at round ${existing.result.goal.round}.`, {
               claimed: true,
+              resumed,
               claimId: relayClaimId,
             }),
           };
@@ -233,20 +253,26 @@ export function registerGoalTools(server, goalRuntime, {
           resolved = await resolveStartClaimPage(relayClaimId);
         }
         if (!resolved?.conversationId) return pendingStartResult(existing);
-        const claimed = await startClaimRegistry.claim({
-          claimId: relayClaimId,
-          toolName: "devspace_goal_start",
-          authority: resolved,
-          complete: async ({ input, authority }) => ({
-            goal: await goalRuntime.start({
-              objective: input.objective,
-              successCriteria: input.successCriteria,
-              conversationId: authority.conversationId,
-            }),
-          }),
-        });
-        return textResult(claimed.goal, `Started Goal ${claimed.goal.id} at round ${claimed.goal.round}.`, {
+        const claimed = typeof completeStartClaim === "function"
+          ? await completeStartClaim({ claimId: relayClaimId, toolName: "devspace_goal_start", authority: resolved })
+          : await startClaimRegistry.claim({
+              claimId: relayClaimId,
+              toolName: "devspace_goal_start",
+              authority: resolved,
+              complete: async ({ input, authority }) => {
+                const start = await goalRuntime.startOrResume({
+                  objective: input.objective,
+                  successCriteria: input.successCriteria,
+                  conversationId: authority.conversationId,
+                });
+                return { goal: start.goal, resumed: start.resumed };
+              },
+            });
+        if (!claimed?.goal) throw new Error("Exact-page Goal recovery did not return a Goal.");
+        const resumed = claimed.resumed === true;
+        return textResult(claimed.goal, `${resumed ? "Resumed" : "Started"} Goal ${claimed.goal.id} at round ${claimed.goal.round}.`, {
           claimed: true,
+          resumed,
           claimId: relayClaimId,
         });
       }
@@ -259,9 +285,13 @@ export function registerGoalTools(server, goalRuntime, {
         if (!startClaimRegistry || !claimRelayResourceUri) {
           throw new Error("ChatGPT Classic conversation identity is unresolved; refusing to create an unbound Goal.");
         }
+        const providerIdentity = typeof resolveProviderIdentity === "function"
+          ? resolveProviderIdentity(extra)
+          : null;
         const claim = startClaimRegistry.create({
           toolName: "devspace_goal_start",
           input: { objective, successCriteria },
+          providerIdentity,
         });
         return pendingStartResult(claim);
       }
@@ -290,7 +320,7 @@ export function registerGoalTools(server, goalRuntime, {
 
   registerAppTool(server, "devspace_goal_round_begin", {
     title: "Begin Continued Goal Round",
-    description: "Redeem the hidden Goal continuation at the start of an automatically continued assistant turn. The continuation prompt provides both IDs. Call this before substantive work in that continued turn.",
+    description: "Compatibility reconciliation for a hidden Goal continuation. Current backends normally redeem the next round automatically during exact-page dispatch; cached continuation prompts may still call this endpoint, and duplicate redemption is idempotent.",
     inputSchema: {
       goalId: z.string().min(1),
       continuationId: z.string().min(1),
@@ -310,7 +340,7 @@ export function registerGoalTools(server, goalRuntime, {
 
   registerAppTool(server, "devspace_goal_turn_report", {
     title: "Record Goal Round Report",
-    description: "Call this after the current Goal round has finished its work and verification, immediately before the user-visible final report. This records the report gate and, if the Goal remains active, makes one hidden continuation eligible. This must be the final tool call of the turn; after it returns, emit one complete visible final report and call no more tools.",
+    description: "Optional checkpoint for a Goal round. It is not required for continuation: DevSpace automatically continues an active, incomplete Goal when the exact native assistant turn ends. Use this only when a concise explicit checkpoint is useful; it never gates ordinary tools or continuation.",
     inputSchema: {
       goalId: z.string().min(1),
       summary: z.string().min(1).max(4_000),
@@ -331,7 +361,7 @@ export function registerGoalTools(server, goalRuntime, {
         : null;
       return textResult(
         goal,
-        `Goal round ${goal.round} report recorded. Now give the user the complete visible report for this round as your final response. Do not call any more tools in this turn.${armed ? (armed.armed ? ' The backend will dispatch one minimal continuation only after this exact user turn has a new completed final report; on the next turn inspect Goal status and continue its already-working round.' : ` Automatic continuation is not armed: ${armed.reason || armed.state}.`) : ''}`,
+        `Goal round ${goal.round} checkpoint recorded. Continue the requested work normally. If the Goal remains active/incomplete when this exact assistant turn ends, DevSpace will continue it automatically.${armed ? (armed.armed ? ' The checkpoint continuation is armed for the exact conversation.' : ` The optional checkpoint relay is ${armed.reason || armed.state}; native turn completion remains the automatic continuation path.`) : ''}`,
       );
     } catch (error) {
       return errorResult(error);
@@ -340,7 +370,7 @@ export function registerGoalTools(server, goalRuntime, {
 
   registerAppTool(server, "devspace_goal_complete", {
     title: "Complete DevSpace Goal",
-    description: "Mark the full Goal completed only when current authoritative evidence covers every stored success criterion. Normally call this before the final visible user report, then finish that physical turn with devspace_goal_turn_report after the report is visible.",
+    description: "Mark the full Goal completed only when current authoritative evidence covers every stored success criterion. Then give the user a clear final report; no Goal turn-report call is required.",
     inputSchema: {
       goalId: z.string().min(1),
       evidence: z.array(z.object({
@@ -355,7 +385,7 @@ export function registerGoalTools(server, goalRuntime, {
     try {
       await bindOrVerifyActiveGoal(goalId, extra);
       const goal = await goalRuntime.complete({ goalId, evidence });
-      return textResult(goal, `Goal ${goal.id} is marked completed. Give the user the final visible report, then record that round report.`);
+      return textResult(goal, `Goal ${goal.id} is marked completed. Give the user the final visible report.`);
     } catch (error) {
       return errorResult(error);
     }
@@ -363,7 +393,7 @@ export function registerGoalTools(server, goalRuntime, {
 
   registerAppTool(server, "devspace_goal_blocked", {
     title: "Mark DevSpace Goal Blocked",
-    description: "Mark the Goal blocked only after the runtime has recorded at least three consecutive no-progress reported rounds with the same normalized blocker. After marking blocked, give the user a visible blocked report and finish with devspace_goal_turn_report.",
+    description: "Use only when a genuine external dependency or user decision prevents further useful progress. A missing progress report, active/incomplete Plan, or lack of recent progress is not by itself a reason to block the Goal. After marking blocked, explain the concrete blocker to the user.",
     inputSchema: { goalId: z.string().min(1) },
     outputSchema: goalOutputSchema,
     annotations: MUTATING,
@@ -372,7 +402,7 @@ export function registerGoalTools(server, goalRuntime, {
     try {
       await bindOrVerifyActiveGoal(goalId, extra);
       const goal = await goalRuntime.markBlocked({ goalId });
-      return textResult(goal, `Goal ${goal.id} is blocked after ${goal.blocker.consecutiveRounds} consecutive blocker rounds.`);
+      return textResult(goal, `Goal ${goal.id} is blocked. Explain the concrete external blocker and what would unblock it.`);
     } catch (error) {
       return errorResult(error);
     }

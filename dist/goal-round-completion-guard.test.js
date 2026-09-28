@@ -529,6 +529,68 @@ assert.equal(reentry.recovered, 0);
 assert.equal(reentryClaims, 0, "a route entered after the old turn request must not inject a recovery prompt");
 assert.equal(reentry.results[0].reason, "reentry-or-unobserved-turn");
 
+let autoRoundRecoveryClaims = 0;
+const autoContinuationCalls = [];
+const autoFinalGoal = {
+  ...baseGoal,
+  roundBeganAt: "2026-09-05T03:00:00.000Z",
+};
+const autoFinalAssistantId = "assistant-auto-final";
+const autoFinalAssistantAt = "2026-09-05T03:00:11.000Z";
+const autoContinueGuard = new moduleUnderTest.ClassicGoalRoundCompletionGuard({
+  goalRuntime: {
+    async recoverableWorkingRounds() { return [autoFinalGoal]; },
+    async claimRoundRecovery() { autoRoundRecoveryClaims += 1; return { claimed: false, reason: "normal-final-must-not-use-rescue" }; },
+    async roundRecovery() {},
+  },
+  now: () => Date.parse("2026-09-05T03:00:12.000Z"),
+  inspect: async () => ({
+    ...stablePageRoute,
+    chatMode: true,
+    generating: false,
+    streamStatus: "COMPLETE",
+    latestMessageRole: "assistant",
+    latestAssistantText: "A complete visible assistant turn, with the Goal still active.",
+    latestAssistantMessageId: autoFinalAssistantId,
+    latestUserMessageId: "user-auto-final",
+    safetyCheckVisible: false,
+    deliveryTimeoutVisible: false,
+    retryVisible: false,
+    nativeContinuation: {
+      resolved: true,
+      currentNodeId: autoFinalAssistantId,
+      currentMessageId: autoFinalAssistantId,
+      currentRole: "assistant",
+      currentStatus: "finished_successfully",
+      currentEndTurn: true,
+      currentCreatedAt: autoFinalAssistantAt,
+      latestAssistantMessageId: autoFinalAssistantId,
+      latestAssistantStatus: "finished_successfully",
+      latestAssistantEndTurn: true,
+      latestAssistantCreatedAt: autoFinalAssistantAt,
+      latestUserMessageId: "user-auto-final",
+      latestUserCreatedAt: "2026-09-05T03:00:01.000Z",
+    },
+  }),
+  continueIncompleteGoal: async ({ goal, nativeCompletion }) => {
+    autoContinuationCalls.push({ goalId: goal.id, nativeCompletion });
+    return { continued: true };
+  },
+  dispatch: async () => { throw new Error("normal completed turns use next-round continuation, not same-round recovery"); },
+  pollMs: 0,
+});
+const autoContinued = await autoContinueGuard.pollOnce();
+assert.equal(autoContinued.autoContinued, 1,
+  "a genuine exact-page assistant turn end automatically advances an incomplete active Goal");
+assert.equal(autoContinuationCalls.length, 1);
+assert.equal(autoContinuationCalls[0].nativeCompletion.conversationId, autoFinalGoal.conversationId);
+assert.equal(autoContinuationCalls[0].nativeCompletion.sourceUserMessageId, "user-auto-final");
+assert.equal(autoContinuationCalls[0].nativeCompletion.assistantMessageId, autoFinalAssistantId);
+assert.equal(autoContinuationCalls[0].nativeCompletion.runtimeKey, "main-02");
+assert.match(autoContinuationCalls[0].nativeCompletion.assistantTextHash, /^[a-f0-9]{64}$/);
+assert.equal(autoRoundRecoveryClaims, 0,
+  "normal final completion must not be classified as an interrupted-turn rescue");
+
 await guard.close();
 await prematureCompleteGuard.close();
 await failedGuard.close();
@@ -537,6 +599,7 @@ await restartEvidenceGuard.close();
 await nativeFallbackGuard.close();
 await staleStreamGuard.close();
 await reentryGuard.close();
+await autoContinueGuard.close();
 
 console.log(JSON.stringify({
   ok: true,
@@ -549,4 +612,5 @@ console.log(JSON.stringify({
   restartFinishedEvidenceRecovers: true,
   restartNativeFinalEvidenceRecovers: true,
   staleStreamNativeFinalRecovers: true,
+  completedActiveGoalAutoContinues: true,
 }));

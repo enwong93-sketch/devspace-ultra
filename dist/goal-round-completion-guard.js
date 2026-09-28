@@ -1,9 +1,11 @@
+import { createHash } from "node:crypto";
+
 const DEFAULT_POLL_MS = 2_000;
 const DEFAULT_ROUND_SETTLE_MS = 2_000;
 const DEFAULT_NATIVE_COMPLETE_GRACE_MS = 5_000;
 const DEFAULT_ROUTE_SETTLE_MS = 3_000;
 const DEFAULT_REQUEST_PRE_ROUND_SLOP_MS = 30_000;
-const DEFAULT_NATIVE_FINAL_RETRY_MS = 5 * 60_000;
+const DEFAULT_NATIVE_FINAL_RETRY_MS = 5_000;
 const DEFAULT_ASSISTANT_FINAL_SLOP_MS = 1_000;
 const ACTIVE_STREAM_STATES = new Set(["IN_PROGRESS", "IS_STREAMING", "STREAMING", "RUNNING"]);
 
@@ -30,6 +32,18 @@ function recoveryPageIdentity(snapshot) {
   const conversationId = String(snapshot?.conversationId || "").trim();
   if (!runtime || !pageTargetId || !documentId || !Number.isInteger(routeEpoch) || routeEpoch < 1 || !conversationId) return null;
   return `${runtime}:${pageTargetId}:${documentId}:${routeEpoch}:${conversationId}`;
+}
+
+function runtimeKeyForPort(port) {
+  if (port === 9721) return "main-01";
+  if (Number.isInteger(port) && port >= 9731 && port <= 9762) {
+    return `main-${String(port - 9730).padStart(2, "0")}`;
+  }
+  return null;
+}
+
+function hashText(value) {
+  return createHash("sha256").update(String(value || "")).digest("hex");
 }
 
 export function shouldInspectNativeCurrentRoundFinal(snapshot) {
@@ -149,6 +163,7 @@ export class ClassicGoalRoundCompletionGuard {
     goalRuntime,
     inspect,
     dispatch,
+    continueIncompleteGoal = null,
     pollMs = DEFAULT_POLL_MS,
     minimumRoundSettleMs = DEFAULT_ROUND_SETTLE_MS,
     routeSettleMs = DEFAULT_ROUTE_SETTLE_MS,
@@ -165,6 +180,8 @@ export class ClassicGoalRoundCompletionGuard {
     this.goalRuntime = goalRuntime;
     this.inspect = inspect;
     this.dispatch = dispatch;
+    this.continueIncompleteGoal = typeof continueIncompleteGoal === "function"
+      ? continueIncompleteGoal : null;
     this.pollMs = Math.max(0, Number(pollMs) || 0);
     this.minimumRoundSettleMs = Math.max(0, Number(minimumRoundSettleMs) || 0);
     this.routeSettleMs = Math.max(0, Number(routeSettleMs) || 0);
@@ -376,6 +393,7 @@ export class ClassicGoalRoundCompletionGuard {
     }
     const results = [];
     let recovered = 0;
+    let autoContinued = 0;
     for (const goal of goals) {
       let snapshot;
       try {
@@ -383,16 +401,10 @@ export class ClassicGoalRoundCompletionGuard {
         const key = `${goal.id}:${goal.round}`;
         let recoverySession = this.observeRecoverySession(goal, snapshot);
         if (recoverySession.reset) this.nativeCompleteSince.delete(key);
-        const ordinaryCurrentRoundFinal = (
-          recoverySession.eligible === true
-          && recoverySession.sawCurrentRoundAssistant === true
-          && upper(snapshot?.streamStatus) === "COMPLETE"
-        );
         const nativeFinalInspectionNeeded = (
           recoverySession.stableOpenRoute === true
           && recoverySession.sawNativeCurrentRoundFinal !== true
           && shouldInspectNativeCurrentRoundFinal(snapshot)
-          && ordinaryCurrentRoundFinal !== true
         );
         if (
           nativeFinalInspectionNeeded
@@ -425,6 +437,63 @@ export class ClassicGoalRoundCompletionGuard {
       } catch (error) {
         results.push({ goalId: goal.id, round: goal.round, recovered: false, reason: "inspect-failed", error: String(error?.message || error) });
         continue;
+      }
+
+      const nativeFinal = snapshot?.recoverySession?.sawNativeCurrentRoundFinal === true
+        && provesNativeCurrentRoundFinal(goal, snapshot, { nowMs: this.now() });
+      if (nativeFinal && this.continueIncompleteGoal) {
+        const native = snapshot.nativeContinuation;
+        const runtimeKey = runtimeKeyForPort(snapshot.runtimePort);
+        const nativeCompletion = {
+          source: "native-assistant-turn-final",
+          conversationId: snapshot.conversationId,
+          runtimeKey,
+          pageTargetId: snapshot.pageTargetId,
+          sourceUserMessageId: snapshot.latestUserMessageId,
+          assistantMessageId: snapshot.latestAssistantMessageId,
+          assistantTextHash: hashText(snapshot.latestAssistantText),
+          assistantCreatedAt: native.latestAssistantCreatedAt || native.currentCreatedAt,
+        };
+        if (runtimeKey && nativeCompletion.conversationId === goal.conversationId
+          && nativeCompletion.pageTargetId && nativeCompletion.sourceUserMessageId
+          && nativeCompletion.assistantMessageId) {
+          try {
+            const continued = await this.continueIncompleteGoal({ goal, snapshot, nativeCompletion });
+            if (continued?.continued === true) {
+              autoContinued += 1;
+              recovered += 1;
+              results.push({
+                goalId: goal.id,
+                round: goal.round,
+                recovered: true,
+                reason: "native-turn-auto-continued",
+                transport: continued.transport || null,
+              });
+            } else {
+              results.push({
+                goalId: goal.id,
+                round: goal.round,
+                recovered: false,
+                reason: continued?.reason || "goal-no-longer-active",
+              });
+            }
+          } catch (error) {
+            results.push({
+              goalId: goal.id,
+              round: goal.round,
+              recovered: false,
+              reason: "native-turn-auto-continuation-retry",
+              error: String(error?.message || error),
+            });
+          }
+          // A normally completed native assistant turn is not an interrupted
+          // turn. Never replay it as same-round recovery if next-round setup
+          // needs another poll to finish.
+          this.nativeCompleteSince.delete(`${goal.id}:${goal.round}`);
+          this.nativeFinalRetryAt.delete(`${goal.id}:${goal.round}`);
+          this.recoverySessions.delete(`${goal.id}:${goal.round}`);
+          continue;
+        }
       }
       if (!shouldRecoverWorkingRound(goal, snapshot, {
         nowMs: this.now(),
@@ -492,7 +561,7 @@ export class ClassicGoalRoundCompletionGuard {
         results.push({ goalId: goal.id, round: goal.round, recovered: false, reason: "dispatch-failed", error: sent?.error || "exact-page round recovery dispatch failed" });
       }
     }
-    return { ok: true, recovered, results };
+    return { ok: true, recovered, autoContinued, results };
   }
 
   async close() {

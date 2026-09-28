@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { readFile, unlink } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { loadConfig } from "../dist/config.js";
@@ -95,6 +96,7 @@ async function post(body, sessionId = null, protocolVersion = null) {
       authorization: `Bearer ${token}`,
       accept: "application/json, text/event-stream",
       "content-type": "application/json",
+      "user-agent": "openai-mcp/devspace-live-gate",
       ...(sessionId ? { "mcp-session-id": sessionId } : {}),
       ...(protocolVersion ? { "mcp-protocol-version": protocolVersion } : {}),
     },
@@ -141,8 +143,54 @@ const progressReport = (listed.body?.result?.tools || []).find((tool) => tool.na
 const progressBind = (listed.body?.result?.tools || []).find((tool) => tool.name === "devspace_progress_bind");
 assert.ok(blenderRuntime?.inputSchema?.properties?.runtimeId, "blender_runtime must expose runtimeId ownership routing.");
 assert.ok(blenderMcp?.inputSchema?.properties?.runtimeId, "blender_mcp must expose runtimeId so one Agent cannot fall back to another Agent's Blender.");
-assert.equal(progressReport?._meta?.ui?.resourceUri, undefined, "recurring progress reports must not mount a relay iframe");
-assert.equal(progressBind?._meta?.ui?.resourceUri, "ui://devspace/progress-claim-relay.html", "only the one-time progress bind may mount the relay iframe");
+assert.equal(progressReport?._meta?.ui?.resourceUri, "ui://devspace/progress-claim-relay.html", "the existing report tool must bootstrap without a separate host snapshot refresh");
+assert.equal(progressBind?._meta?.ui?.resourceUri, "ui://devspace/progress-claim-relay.html", "the legacy bind tool remains compatible");
+
+let unboundWorkspaceAvailable = null;
+let unboundBlenderAvailable = null;
+let unboundConversationStateDenied = null;
+let disposableWriteReadEditCommandPassed = null;
+if (process.env.DEVSPACE_PROBE_WORKSPACE_PATH) {
+  const workspace = await post({ jsonrpc: "2.0", id: 3, method: "tools/call",
+    params: { name: "open_workspace", arguments: { path: process.env.DEVSPACE_PROBE_WORKSPACE_PATH } } }, sessionId, protocolVersion);
+  unboundWorkspaceAvailable = Boolean(workspace.body?.result?.structuredContent?.workspaceId);
+  assert.equal(unboundWorkspaceAvailable, true, "an authenticated unbound Classic request must open the local workspace");
+  const blender = await post({ jsonrpc: "2.0", id: 4, method: "tools/call",
+    params: { name: "blender_runtime", arguments: { action: "list" } } }, sessionId, protocolVersion);
+  unboundBlenderAvailable = blender.body?.error?.code !== -32031;
+  assert.equal(unboundBlenderAvailable, true, "Blender runtime discovery must not depend on progress binding");
+  const goal = await post({ jsonrpc: "2.0", id: 5, method: "tools/call",
+    params: { name: "devspace_goal_status", arguments: {} } }, sessionId, protocolVersion);
+  unboundConversationStateDenied = goal.body?.error?.data?.type === "devspace_instance_binding_required";
+  assert.equal(unboundConversationStateDenied, true, "unbound clients must not read another conversation's Goal state");
+  if (process.env.DEVSPACE_PROBE_DISPOSABLE_WRITE === "1") {
+    const workspaceId = workspace.body.result.structuredContent.workspaceId;
+    const filename = `.devspace-v0519-live-${randomUUID()}.txt`;
+    const path = join(process.env.DEVSPACE_PROBE_WORKSPACE_PATH, filename);
+    try {
+      const written = await post({ jsonrpc: "2.0", id: 6, method: "tools/call",
+        params: { name: "write", arguments: { workspaceId, path: filename, content: "DEVSPACE_V0519_A\n" } } }, sessionId, protocolVersion);
+      assert.equal(written.body?.result?.isError, undefined, "disposable write failed");
+      const firstRead = await post({ jsonrpc: "2.0", id: 7, method: "tools/call",
+        params: { name: "read", arguments: { workspaceId, path: filename } } }, sessionId, protocolVersion);
+      assert.match(JSON.stringify(firstRead.body?.result || {}), /DEVSPACE_V0519_A/, "first readback failed");
+      const edited = await post({ jsonrpc: "2.0", id: 8, method: "tools/call",
+        params: { name: "edit", arguments: { workspaceId, path: filename,
+          edits: [{ oldText: "DEVSPACE_V0519_A", newText: "DEVSPACE_V0519_B" }] } } }, sessionId, protocolVersion);
+      assert.equal(edited.body?.result?.isError, undefined, "disposable edit failed");
+      const secondRead = await post({ jsonrpc: "2.0", id: 9, method: "tools/call",
+        params: { name: "read", arguments: { workspaceId, path: filename } } }, sessionId, protocolVersion);
+      assert.match(JSON.stringify(secondRead.body?.result || {}), /DEVSPACE_V0519_B/, "second readback failed");
+      const executed = await post({ jsonrpc: "2.0", id: 12, method: "tools/call",
+        params: { name: "exec_command", arguments: { workspaceId,
+          cmd: `type ${filename}`, yieldTimeMs: 10000 } } }, sessionId, protocolVersion);
+      assert.match(JSON.stringify(executed.body?.result || {}), /DEVSPACE_V0519_B/, "command readback failed");
+      disposableWriteReadEditCommandPassed = true;
+    } finally {
+      await unlink(path).catch(() => null);
+    }
+  }
+}
 
 if (holdSeconds > 0) {
   console.log(JSON.stringify({
@@ -173,6 +221,10 @@ console.log(JSON.stringify({
   gate: "v05-core-tool-surface-live",
   toolCount: names.size,
   requiredToolsPresent: true,
+  unboundWorkspaceAvailable,
+  unboundBlenderAvailable,
+  unboundConversationStateDenied,
+  disposableWriteReadEditCommandPassed,
   isolatedBlenderRuntimeSchema: true,
   corePort: port,
   requestBase: base,

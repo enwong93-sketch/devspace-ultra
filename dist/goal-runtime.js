@@ -79,8 +79,8 @@ function buildRoundRecoveryPrompt(goal, recoveryId) {
   return [
     "[DEVSPACE_GOAL_ROUND_RECOVERY]",
     `Resume DevSpace Goal ${goal.id} in the same working round ${goal.round}.`,
-    "The previous assistant turn ended before devspace_goal_turn_report. DevSpace resumed this exact conversation through a backend-owned hidden host continuation; no user message or composer draft was created. This is not new user intent and not a new Goal round.",
-    "Do not call devspace_goal_round_begin. Read the current Goal and Plan state, continue meaningful unfinished work for this same round, verify progress, then call devspace_goal_turn_report as the final tool call before one complete visible final report.",
+    "The previous exact-conversation assistant turn ended before the Goal was completed. DevSpace resumed this same conversation through a backend-owned hidden continuation; no user message or composer draft was created. This is not new user intent.",
+    "Do not call devspace_goal_round_begin. Read current Goal and Plan state, then continue unfinished work. No report tool or completed Plan is required to continue; if this Goal remains active when your assistant turn ends, the backend will continue it automatically.",
     "Do not stop after merely acknowledging this hidden recovery instruction. Do not send another recovery/follow-up turn. Preserve the full original Goal objective and success criteria.",
     `Recovery id: ${recoveryId}`,
   ].join("\n");
@@ -122,11 +122,11 @@ function pendingContinuation(round, continuationId = randomId("continuation")) {
 function buildContinuationPrompt(goal, continuationId) {
   return [
     "[DEVSPACE_GOAL_CONTINUATION]",
-    `Continue active DevSpace Goal ${goal.id} after reported round ${goal.round}.`,
+    `Continue active DevSpace Goal ${goal.id} after completed assistant turn ${goal.round}.`,
     "This prompt is a runtime continuation, not a new user request.",
-    `First call devspace_goal_round_begin with goalId=${goal.id} and continuationId=${continuationId}.`,
-    "Then read current Goal state, preserve the full original objective and success criteria, perform meaningful next work, and verify progress. Call devspace_goal_turn_report before the visible final report for this round. After that tool returns, give the user one complete visible final report as the final response.",
-    "Do not call any more or additional tools after devspace_goal_turn_report in that turn. Do not silently shrink the Goal to an easier sub-goal. If the Goal is already completed, paused, blocked, or stopped, do not continue work.",
+    `The backend reconciles continuation ${continuationId} into the next Goal round as part of exact-page delivery. Do not wait for or request a user action. Cached clients may call devspace_goal_round_begin idempotently, but it is not required.`,
+    "Read current Goal state, preserve the full original objective and success criteria, perform the next useful work, and verify it. A Plan and devspace_goal_turn_report are optional; neither is a condition for continuation. End the assistant turn normally when ready. If the Goal remains active/incomplete, DevSpace will automatically continue the exact conversation again.",
+    "Do not silently shrink the Goal to an easier sub-goal. If the Goal is completed, paused, blocked, or stopped, do not continue work.",
   ].join("\n");
 }
 
@@ -298,6 +298,7 @@ export class GoalRuntime {
       blockedAt: null,
       successCriteria: normalizeSuccessCriteria(successCriteria),
       lastRoundReport: null,
+      lastTurnCompletion: null,
       recentReports: [],
       completionEvidence: null,
       blocker: emptyBlocker(),
@@ -308,6 +309,29 @@ export class GoalRuntime {
     this.state.goals[goal.id] = goal;
     await this.save();
     return clone(goal);
+  }
+
+  async startOrResume({ objective, successCriteria, conversationId }) {
+    await this.ready;
+    const normalizedConversationId = normalizeConversationId(conversationId);
+    if (!normalizedConversationId) {
+      throw new Error("Exact-page Goal recovery requires a verified conversation id.");
+    }
+    const existing = nonterminalConversationGoals(this.state, normalizedConversationId);
+    if (existing.length > 1) {
+      throw new Error(`Conversation ${normalizedConversationId} has multiple nonterminal Goals; refusing an ambiguous recovery.`);
+    }
+    if (existing.length === 1) return { goal: clone(existing[0]), resumed: true };
+    try {
+      return {
+        goal: await this.start({ objective, successCriteria, conversationId: normalizedConversationId }),
+        resumed: false,
+      };
+    } catch (error) {
+      const raced = nonterminalConversationGoals(this.state, normalizedConversationId);
+      if (raced.length === 1) return { goal: clone(raced[0]), resumed: true };
+      throw error;
+    }
   }
 
   continuationExpiryIso(deltaMs) {
@@ -429,6 +453,7 @@ export class GoalRuntime {
     } else if (command === "stop") {
       goal.status = "stopped";
       goal.stoppedAt = this.nowIso();
+      goal.lastTurnCompletion = null;
       goal.continuation = idleContinuation();
       goal.roundRecovery = idleRoundRecovery(goal.round);
     } else {
@@ -458,6 +483,7 @@ export class GoalRuntime {
     };
 
     goal.lastRoundReport = report;
+    goal.lastTurnCompletion = null;
     goal.recentReports = [...(goal.recentReports ?? []), report].slice(-REPORT_HISTORY_LIMIT);
     goal.roundState = "reported";
     goal.roundRecovery = idleRoundRecovery(goal.round);
@@ -484,6 +510,56 @@ export class GoalRuntime {
     return clone(goal);
   }
 
+  async autoCompleteAssistantTurn({ goalId, nativeCompletion } = {}) {
+    await this.ready;
+    const goal = this.getGoal(goalId);
+    if (goal.status !== "active" || goal.roundState !== "working") {
+      return { continued: false, reason: "goal-no-longer-active", goal: clone(goal) };
+    }
+    const proof = nativeCompletion && typeof nativeCompletion === "object" ? nativeCompletion : null;
+    const sourceUserMessageId = String(proof?.sourceUserMessageId || "").trim();
+    const assistantMessageId = String(proof?.assistantMessageId || "").trim();
+    const assistantTextHash = String(proof?.assistantTextHash || "").trim().toLowerCase();
+    const runtimeKey = String(proof?.runtimeKey || "").trim().toLowerCase();
+    const pageTargetId = String(proof?.pageTargetId || "").trim();
+    const assistantCreatedAt = Date.parse(String(proof?.assistantCreatedAt || ""));
+    const roundBeganAt = Date.parse(String(goal.roundBeganAt || ""));
+    if (proof?.source !== "native-assistant-turn-final"
+      || !goal.conversationId
+      || proof?.conversationId !== goal.conversationId
+      || !/^main-(0[1-9]|[12][0-9]|3[0-2])$/.test(runtimeKey)
+      || !pageTargetId
+      || !sourceUserMessageId
+      || !assistantMessageId
+      || !/^[a-f0-9]{64}$/.test(assistantTextHash)
+      || !Number.isFinite(assistantCreatedAt)
+      || !Number.isFinite(roundBeganAt)
+      || assistantCreatedAt < roundBeganAt - 1_000
+      || assistantCreatedAt > this.now() + 60_000) {
+      throw new Error("Goal automatic continuation requires an exact native assistant-final receipt for this conversation.");
+    }
+
+    const completedAt = this.nowIso();
+    goal.lastTurnCompletion = {
+      round: goal.round,
+      source: "native-assistant-turn-final",
+      conversationId: goal.conversationId,
+      runtimeKey,
+      pageTargetId,
+      sourceUserMessageId,
+      assistantMessageId,
+      assistantTextHash,
+      assistantCreatedAt: new Date(assistantCreatedAt).toISOString(),
+      completedAt,
+    };
+    goal.roundState = "reported";
+    goal.roundRecovery = idleRoundRecovery(goal.round);
+    goal.continuation = pendingContinuation(goal.round);
+    this.touch(goal);
+    await this.save();
+    return { continued: true, goal: clone(goal) };
+  }
+
   async complete({ goalId, evidence }) {
     await this.ready;
     const goal = this.getGoal(goalId);
@@ -508,6 +584,7 @@ export class GoalRuntime {
 
     goal.status = "completed";
     goal.completedAt = this.nowIso();
+    goal.lastTurnCompletion = null;
     goal.completionEvidence = goal.successCriteria.map((criterion) => ({
       criterionId: criterion.id,
       evidence: supplied.get(criterion.id),
@@ -523,9 +600,6 @@ export class GoalRuntime {
     await this.ready;
     const goal = this.getGoal(goalId);
     if (goal.status !== "active") throw new Error(`Goal ${goal.id} cannot become blocked from ${goal.status}.`);
-    if ((goal.blocker?.consecutiveRounds ?? 0) < 3) {
-      throw new Error(`Goal ${goal.id} requires 3 consecutive no-progress rounds with the same blocker before it can become blocked.`);
-    }
     if (goal.roundState !== "working") {
       throw new Error(`Goal ${goal.id} can become blocked only during a working round.`);
     }
@@ -663,6 +737,7 @@ export class GoalRuntime {
     goal.round += 1;
     goal.roundState = "working";
     goal.roundBeganAt = observedRoundBeganAt || this.nowIso();
+    goal.lastTurnCompletion = null;
     goal.roundRecovery = idleRoundRecovery(goal.round);
     goal.continuation = idleContinuation();
     this.touch(goal);

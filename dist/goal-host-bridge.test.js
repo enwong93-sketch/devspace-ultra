@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 
 let moduleUnderTest = null;
 try {
@@ -11,6 +12,57 @@ assert.equal(typeof moduleUnderTest?.ClassicGoalHostBridge, "function", "Classic
 assert.equal(typeof moduleUnderTest?.defaultMainDebugPorts, "function", "defaultMainDebugPorts must exist");
 assert.equal(typeof moduleUnderTest?.waitForVisibleReportBoundary, "function", "waitForVisibleReportBoundary must exist");
 assert.equal(typeof moduleUnderTest?.probeClassicConversationPagePort, "function", "exact conversation page probe must exist");
+assert.equal(typeof moduleUnderTest?.matchesNativeGoalCompletionBoundary, "function", "native turn completion must be revalidated on the exact host page");
+
+{
+  const assistantText = "Exact completed assistant turn.";
+  const proof = {
+    source: "native-assistant-turn-final",
+    conversationId: "conversation-auto-final",
+    sourceUserMessageId: "user-source",
+    assistantMessageId: "assistant-final",
+    assistantTextHash: createHash("sha256").update(assistantText).digest("hex"),
+    assistantCreatedAt: "2026-09-29T01:00:00.000Z",
+  };
+  const snapshot = {
+    chatMode: true,
+    conversationId: proof.conversationId,
+    pageTargetId: "page-main-03",
+    generating: false,
+    streamStatus: "COMPLETE",
+    latestMessageRole: "assistant",
+    latestUserMessageId: proof.sourceUserMessageId,
+    latestAssistantMessageId: proof.assistantMessageId,
+    latestAssistantText: assistantText,
+    nativeContinuation: {
+      resolved: true,
+      currentNodeId: proof.assistantMessageId,
+      currentMessageId: proof.assistantMessageId,
+      currentRole: "assistant",
+      currentStatus: "finished_successfully",
+      currentEndTurn: true,
+      currentCreatedAt: proof.assistantCreatedAt,
+      latestAssistantMessageId: proof.assistantMessageId,
+      latestAssistantStatus: "finished_successfully",
+      latestAssistantEndTurn: true,
+      latestAssistantCreatedAt: proof.assistantCreatedAt,
+      latestUserMessageId: proof.sourceUserMessageId,
+    },
+  };
+  assert.equal(moduleUnderTest.matchesNativeGoalCompletionBoundary(snapshot, proof, {
+    conversationId: proof.conversationId,
+    pageTargetId: "page-main-03",
+  }), true);
+  assert.equal(moduleUnderTest.matchesNativeGoalCompletionBoundary(snapshot, proof, {
+    conversationId: "conversation-another-computer",
+    pageTargetId: "page-main-03",
+  }), false, "the automatic path cannot cross into another conversation or computer binding");
+  assert.equal(moduleUnderTest.matchesNativeGoalCompletionBoundary({
+    ...snapshot,
+    latestUserMessageId: "new-user-turn",
+  }, proof, { conversationId: proof.conversationId, pageTargetId: "page-main-03" }), false,
+  "a newer human turn supersedes automatic continuation");
+}
 
 {
   const snapshots = [

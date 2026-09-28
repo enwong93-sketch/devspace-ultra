@@ -35,6 +35,10 @@ assert.match(router, /persistent Codex node_repl imports @oai\/sky/i);
 assert.match(router, /ordinary Chrome and Edge browser-window automation/i);
 assert.match(router, /legacy custom Chrome-extension path has been removed/i);
 assert.match(router, /input\.release_control=true/i);
+assert.match(router, /ChatGPT Classic app windows may be controlled through native Computer Use/i);
+assert.match(router, /Do not automate terminals, authentication\/password\/security UI, or the Codex app UI/i);
+assert.doesNotMatch(router, /Do not automate terminals,[\s\S]{0,100}ChatGPT\/Codex app UI/i,
+  "the tool description must not blanket-prohibit ChatGPT Classic control");
 assert.match(router, /elicitation\/create/);
 assert.match(router, /ElicitResultSchema/);
 assert.match(router, /computerUseActivity:\s*computerUseOverlay/);
@@ -60,6 +64,8 @@ assert.match(adapter, /computerUseActivity\.end/);
 assert.match(adapter, /computerUseActivity\.release/);
 assert.match(adapter, /releaseHostUnsupportedApproval/);
 assert.match(adapter, /PROHIBITED_APP_PATTERN/);
+assert.match(adapter, /PROHIBITED_APP_PATTERN = \/\(\?:openai\\\.codex\|/,
+  "the runtime must preserve Codex and terminal app boundaries while allowing ChatGPT Classic");
 assert.doesNotMatch(adapter, /spawn\(|child_process|Selenium|Playwright|UIAutomation|SendInput/i,
   "the adapter may name prohibited apps, but must not implement a second GUI process or driver");
 assert.match(replCompat, /linked Codex runtime is used directly/i);
@@ -82,6 +88,8 @@ assert.match(skill, /shared persistent Codex `node_repl` importing `@oai\/sky`/)
 assert.match(skill, /ordinary Chrome or Edge browser window/);
 assert.match(skill, /obsolete custom Chrome-extension driver has been removed/);
 assert.match(skill, /release_control=true/);
+assert.match(skill, /ChatGPT Classic desktop windows may be controlled/i);
+assert.doesNotMatch(skill, /Do not automate .*ChatGPT desktop UI/i);
 assert.equal(packageJson.files.includes("capabilities"), true);
 assert.equal(packageJson.files.includes("browser-control-bridge"), false);
 for (const removed of [

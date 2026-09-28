@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { ClassicCdpClient } from "./classic-cdp-client.js";
 import { readComposerDraft } from "./classic-composer-draft.js";
 import { classicMainDebugPorts, runtimeLabelForClassicPort } from './classic-main-debug-ports.js';
@@ -12,6 +13,49 @@ const DEFAULT_VISIBLE_REPORT_POLL_MS = 150;
 const DEFAULT_VISIBLE_REPORT_SETTLE_MS = 400;
 const DEFAULT_HIDDEN_CONFIRM_TIMEOUT_MS = 15_000;
 const DEFAULT_HIDDEN_CONFIRM_POLL_MS = 200;
+
+function hashText(value) {
+  return createHash("sha256").update(String(value || "")).digest("hex");
+}
+
+function nativeTurnEnded(status) {
+  return Boolean(String(status || "").trim())
+    && !new Set(["IN_PROGRESS", "IS_STREAMING", "STREAMING", "RUNNING"])
+      .has(String(status).trim().toUpperCase());
+}
+
+export function matchesNativeGoalCompletionBoundary(snapshot, proof, {
+  conversationId = null,
+  pageTargetId = null,
+} = {}) {
+  const native = snapshot?.nativeContinuation;
+  return proof?.source === "native-assistant-turn-final"
+    && proof?.conversationId === conversationId
+    && snapshot?.chatMode === true
+    && snapshot?.conversationId === conversationId
+    && (!pageTargetId || snapshot?.pageTargetId === pageTargetId)
+    && snapshot?.generating === false
+    && String(snapshot?.streamStatus || "").toUpperCase() === "COMPLETE"
+    && snapshot?.latestMessageRole === "assistant"
+    && snapshot?.safetyCheckVisible !== true
+    && snapshot?.deliveryTimeoutVisible !== true
+    && snapshot?.retryVisible !== true
+    && String(snapshot?.latestUserMessageId || "").trim() === proof?.sourceUserMessageId
+    && String(snapshot?.latestAssistantMessageId || "").trim() === proof?.assistantMessageId
+    && hashText(snapshot?.latestAssistantText) === proof?.assistantTextHash
+    && native?.resolved === true
+    && native?.currentRole === "assistant"
+    && native?.currentEndTurn === true
+    && native?.latestAssistantEndTurn === true
+    && nativeTurnEnded(native?.currentStatus)
+    && nativeTurnEnded(native?.latestAssistantStatus)
+    && String(native?.currentNodeId || "").trim() === proof?.assistantMessageId
+    && String(native?.currentMessageId || "").trim() === proof?.assistantMessageId
+    && String(native?.latestAssistantMessageId || "").trim() === proof?.assistantMessageId
+    && String(native?.latestUserMessageId || "").trim() === proof?.sourceUserMessageId
+    && Date.parse(String(native?.latestAssistantCreatedAt || native?.currentCreatedAt || ""))
+      === Date.parse(String(proof?.assistantCreatedAt || ""));
+}
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -1342,7 +1386,7 @@ export class ClassicGoalHostBridge {
 
   async dispatch({ goalId, prompt, continuationId, leaseId, round, reportedAt,
     conversationId = null, runtimePort = null, expectedPageTargetId = null,
-    sourceUserId = null, assistantMessageId = null } = {}) {
+    sourceUserId = null, assistantMessageId = null, nativeCompletionProof = null } = {}) {
     if (typeof goalId !== "string" || !goalId.trim()) throw new Error("Goal host dispatch requires goalId.");
     if (typeof prompt !== "string" || !prompt.trim()) throw new Error("Goal host dispatch requires prompt.");
 
@@ -1391,7 +1435,30 @@ export class ClassicGoalHostBridge {
         round,
         reportedAt: reportedAt || null,
       };
-      const boundary = await this.waitForVisibleReport(matching, payload);
+      let boundary;
+      if (nativeCompletionProof) {
+        const nativeFinal = await inspectVisibleReportCommit(matching, {
+          recovery: true,
+          includeNativeBranch: true,
+          sourceUserMessageId: sourceUserId,
+          baselineAssistantMessageId: assistantMessageId,
+          timeoutMs: 45_000,
+          nativeSessionTimeoutMs: 5_000,
+          nativeConversationTimeoutMs: 30_000,
+        });
+        boundary = matchesNativeGoalCompletionBoundary(nativeFinal, nativeCompletionProof, {
+          conversationId: expectedConversationId,
+          pageTargetId: matching.pageTargetId,
+        })
+          ? { ok: true, committed: true, nativeCompleted: true }
+          : {
+            ok: false,
+            definiteFailure: true,
+            error: "The exact native assistant-final boundary changed before automatic Goal continuation.",
+          };
+      } else {
+        boundary = await this.waitForVisibleReport(matching, payload);
+      }
       if (boundary?.ok !== true) {
         return {
           ok: false,

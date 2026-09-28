@@ -31,7 +31,83 @@ const nativeStopped = status => {
   return Boolean(normalized) && !NATIVE_RUNNING_STATES.has(normalized);
 };
 
+function nativeCompletionProof(goal) {
+  const proof = goal?.lastTurnCompletion;
+  if (!proof || proof.source !== 'native-assistant-turn-final'
+    || proof.round !== goal?.round
+    || proof.conversationId !== goal?.conversationId
+    || !/^main-(0[1-9]|[12][0-9]|3[0-2])$/.test(String(proof.runtimeKey || ''))
+    || !String(proof.pageTargetId || '').trim()
+    || !String(proof.sourceUserMessageId || '').trim()
+    || !String(proof.assistantMessageId || '').trim()
+    || !/^[a-f0-9]{64}$/i.test(String(proof.assistantTextHash || ''))
+    || !Number.isFinite(Date.parse(String(proof.assistantCreatedAt || '')))
+    || !Number.isFinite(Date.parse(String(proof.completedAt || '')))) return null;
+  return proof;
+}
+
+function exactNativeCompletionBoundary(goal, pages) {
+  const expected = nativeCompletionProof(goal);
+  if (!pending(goal) || !expected || !Array.isArray(pages) || pages.length !== 1) return null;
+  const page = pages[0];
+  if (page?.conversationId !== goal.conversationId
+    || page?.runtimeKey !== expected.runtimeKey
+    || page?.pageTargetId !== expected.pageTargetId) return null;
+  const native = page?.nativeContinuation;
+  const nativeAssistantAt = timeMs(native?.latestAssistantCreatedAt || native?.currentCreatedAt);
+  const nativeUserAt = timeMs(native?.latestUserCreatedAt);
+  const expectedAssistantAt = timeMs(expected.assistantCreatedAt);
+  if (page.latestUserMessageId === expected.sourceUserMessageId
+    && page.latestAssistantMessageId === expected.assistantMessageId
+    && digest(page.latestAssistantText) === expected.assistantTextHash
+    && finalPage(page)
+    && native?.resolved === true
+    && native.currentRole === 'assistant'
+    && native.currentEndTurn === true
+    && native.latestAssistantEndTurn === true
+    && nativeStopped(native.currentStatus)
+    && nativeStopped(native.latestAssistantStatus)
+    && String(native.currentMessageId || '').trim() === expected.assistantMessageId
+    && String(native.latestAssistantMessageId || '').trim() === expected.assistantMessageId
+    && String(native.latestUserMessageId || '').trim() === expected.sourceUserMessageId
+    && nativeAssistantAt != null
+    && nativeAssistantAt === expectedAssistantAt
+    && nativeUserAt != null
+    && nativeUserAt <= expectedAssistantAt) {
+    return {
+      type: 'completed-final',
+      sourceUserId: expected.sourceUserMessageId,
+      finalAssistantId: expected.assistantMessageId,
+      finalAssistantHash: expected.assistantTextHash,
+    };
+  }
+  if (page.latestUserMessageId && page.latestUserMessageId !== expected.sourceUserMessageId
+    && native?.resolved === true
+    && String(page.assistantBeforeLatestUserMessageId || '').trim() === expected.assistantMessageId
+    && String(native.assistantBeforeLatestUserMessageId || '').trim() === expected.assistantMessageId
+    && String(page.previousUserMessageId || '').trim() === expected.sourceUserMessageId
+    && String(native.previousUserMessageId || '').trim() === expected.sourceUserMessageId
+    && native.assistantBeforeLatestUserEndTurn === true
+    && nativeStopped(native.assistantBeforeLatestUserStatus)) {
+    const newUserAtMs = timeMs(native.latestUserCreatedAt);
+    const priorAssistantAtMs = timeMs(native.assistantBeforeLatestUserCreatedAt);
+    if (newUserAtMs != null && priorAssistantAtMs != null && newUserAtMs > priorAssistantAtMs) {
+      return {
+        type: 'human-user',
+        sourceUserId: expected.sourceUserMessageId,
+        finalAssistantId: expected.assistantMessageId,
+        finalAssistantCreatedAt: new Date(priorAssistantAtMs).toISOString(),
+        newUserMessageId: page.latestUserMessageId,
+        newUserObservedAt: new Date(newUserAtMs).toISOString(),
+      };
+    }
+  }
+  return null;
+}
+
 function exactMissingArmBoundary(goal, pages, nowMs = Date.now()) {
+  const autoBoundary = exactNativeCompletionBoundary(goal, pages);
+  if (autoBoundary) return autoBoundary;
   if (!pending(goal) || !Array.isArray(pages) || !pages.length || pages.length > 4) return null;
   const reportedAtMs = timeMs(goal?.lastRoundReport?.reportedAt);
   if (reportedAtMs == null) return null;
@@ -203,24 +279,41 @@ export class GoalContinuationSupervisor {
     const id = goal.continuation.continuationId;
     if (this.records.has(id)) return { armed: this.records.get(id).state === 'waiting', state: this.records.get(id).state };
     // Never infer a source turn for old pending Goals merely found on disk.
-    const reportAge = this.now() - Date.parse(goal.lastRoundReport?.reportedAt || '');
+    const autoFinal = nativeCompletionProof(goal);
+    const boundaryAt = autoFinal?.completedAt || goal.lastRoundReport?.reportedAt || null;
+    const reportAge = this.now() - Date.parse(boundaryAt || '');
     if (!resume && (!Number.isFinite(reportAge) || reportAge < -1000 || reportAge > 120_000)) return { armed: false, reason: 'report-not-current' };
     // A live one-time receipt belonging to THIS report request can disambiguate
     // stale duplicate displays. Mere runtime preference can never do that.
-    const sourceRuntimeKey = reportAuthority?.pageVerified === true
+    const sourceRuntimeKey = autoFinal?.runtimeKey || (reportAuthority?.pageVerified === true
       && reportAuthority?.source === 'exact-progress-bootstrap-lease-page-verified'
       && reportAuthority?.conversationId === goal.conversationId
       && /^main-(0[1-9]|[12][0-9]|3[0-2])$/.test(reportAuthority?.runtimeKey || '')
-      ? reportAuthority.runtimeKey : null;
+      ? reportAuthority.runtimeKey : null);
     let pages;
     try {
-      pages = await this.pages(goal, { sourceOnly: true, runtimeKey: sourceRuntimeKey, allowDivergent: true });
+      pages = await this.pages(goal, {
+        sourceOnly: true,
+        runtimeKey: sourceRuntimeKey,
+        pageTargetId: autoFinal?.pageTargetId || null,
+        allowDivergent: true,
+      });
       this.lastArmError = null;
     } catch (error) {
       this.lastArmError = error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500);
       return { armed: false, reason: 'source-boundary-inspection-failed' };
     }
     if (!pages) return { armed: false, reason: 'source-page-unresolved' };
+    if (autoFinal && (!Array.isArray(pages) || pages.length !== 1
+      || pages[0]?.conversationId !== goal.conversationId
+      || pages[0]?.runtimeKey !== autoFinal.runtimeKey
+      || pages[0]?.pageTargetId !== autoFinal.pageTargetId
+      || pages[0]?.latestUserMessageId !== autoFinal.sourceUserMessageId
+      || pages[0]?.latestAssistantMessageId !== autoFinal.assistantMessageId
+      || digest(pages[0]?.latestAssistantText) !== autoFinal.assistantTextHash
+      || !finalPage(pages[0]))) {
+      return { armed: false, reason: 'native-final-page-not-current' };
+    }
     const current = await this.goalRuntime.status(goal.id);
     if (!pending(current) || current.continuation.continuationId !== id || this.closed) return { armed: false, reason: 'goal-changed' };
     if (this.records.has(id)) {
@@ -245,14 +338,20 @@ export class GoalContinuationSupervisor {
     }
     const row = {
       goalId: goal.id, continuationId: id, conversationId: goal.conversationId, round: goal.round,
-      reportedAt: goal.lastRoundReport.reportedAt, sourceUserId: pages[0].latestUserMessageId,
+      reportedAt: boundaryAt, sourceUserId: pages[0].latestUserMessageId,
       sourceRuntimeKey,
+      sourcePageTargetId: pages[0].pageTargetId || null,
+      nativeCompletionProof: autoFinal ? { ...autoFinal } : null,
+      recoveredMissingArm: Boolean(autoFinal),
+      nativeFinalVerified: Boolean(autoFinal),
+      finalAssistantId: autoFinal ? autoFinal.assistantMessageId : null,
+      finalAssistantHash: autoFinal ? autoFinal.assistantTextHash : null,
       causalDisplayProof,
       sourceCandidates: causalDisplayProof ? pages.map(p=>({pageTargetId:p.pageTargetId,
         userId:p.latestUserMessageId,assistantId:p.latestAssistantMessageId,hash:digest(p.latestAssistantText),
         awaitingAssistant:p.generating===true||p.latestMessageRole==='user'})) : null,
-      baseline: resume && !causalDisplayProof ? [] : pages.map(p => ({ id: p.latestAssistantMessageId || null, hash: digest(p.latestAssistantText) })),
-      state: 'waiting', reason: 'awaiting-visible-final', attempts: 0, createdAt: this.now(),
+      baseline: autoFinal ? [] : (resume && !causalDisplayProof ? [] : pages.map(p => ({ id: p.latestAssistantMessageId || null, hash: digest(p.latestAssistantText) }))),
+      state: 'waiting', reason: autoFinal ? 'verified-native-final-auto-continuation' : 'awaiting-visible-final', attempts: 0, createdAt: this.now(),
     };
     this.records.set(id, row);
     try { await this.save(); }
@@ -307,6 +406,11 @@ export class GoalContinuationSupervisor {
       if (!pending(goal)) continue;
       const continuationId = goal.continuation?.continuationId;
       if (!continuationId || this.records.has(continuationId)) continue;
+      if (typeof this.goalRuntime.hasConversationCollision === 'function'
+        && await this.goalRuntime.hasConversationCollision({ goalId: goal.id }).catch(() => true)) {
+        results.push({ goalId: goal.id, round: goal.round, recovered: false, reason: 'conversation-goal-conflict' });
+        continue;
+      }
       const retryAt = Number(this.missingArmRetryAt.get(continuationId) || 0);
       if (retryAt > this.now()) {
         results.push({ goalId: goal.id, round: goal.round, recovered: false, reason: 'missing-arm-retry-floor' });
@@ -314,9 +418,12 @@ export class GoalContinuationSupervisor {
       }
       let pages;
       try {
+        const nativeFinal = nativeCompletionProof(goal);
         pages = await this.pages(goal, {
           sourceOnly: true,
-          allowDivergent: true,
+          runtimeKey: nativeFinal?.runtimeKey || null,
+          pageTargetId: nativeFinal?.pageTargetId || null,
+          allowDivergent: !nativeFinal,
           includeNativeBranch: true,
         });
       } catch (error) {
@@ -350,7 +457,7 @@ export class GoalContinuationSupervisor {
           continuationId,
           conversationId: goal.conversationId,
           round: goal.round,
-          reportedAt: goal.lastRoundReport?.reportedAt || null,
+          reportedAt: nativeCompletionProof(goal)?.completedAt || goal.lastRoundReport?.reportedAt || null,
           sourceUserId: proof.sourceUserId || proof.newUserMessageId,
           sourceRuntimeKey: pages.length === 1 ? pages[0].runtimeKey || null : null,
           causalDisplayProof: false,
@@ -399,7 +506,7 @@ export class GoalContinuationSupervisor {
         continuationId,
         conversationId: goal.conversationId,
         round: goal.round,
-        reportedAt: goal.lastRoundReport?.reportedAt || null,
+        reportedAt: nativeCompletionProof(goal)?.completedAt || goal.lastRoundReport?.reportedAt || null,
         sourceUserId: proof.sourceUserId,
         sourceRuntimeKey: pages.length === 1 ? pages[0].runtimeKey || null : null,
         causalDisplayProof: false,
@@ -535,7 +642,10 @@ export class GoalContinuationSupervisor {
       && !row.baseline.some(b => b.id === pages[0].latestAssistantMessageId && b.hash === digest(pages[0].latestAssistantText));
   }
   async finalCandidates(goal,row) {
-    if (!row.causalDisplayProof) return {pages:await this.pages(goal,{runtimeKey:row.sourceRuntimeKey})};
+    if (!row.causalDisplayProof) return {pages:await this.pages(goal,{
+      runtimeKey:row.sourceRuntimeKey,
+      pageTargetId:row.sourcePageTargetId||row.dispatchPageTargetId||null,
+    })};
     const all=await this.pages(goal,{allowDivergent:true});
     if(!all)return {pages:null};
     const knownUsers=new Set(row.sourceCandidates.map(p=>p.userId));
@@ -798,11 +908,12 @@ export class GoalContinuationSupervisor {
     try {
       sent = await this.dispatch({ goal: current, page: pages[0], sourceUserId: row.sourceUserId,
         assistantMessageId: pages[0].latestAssistantMessageId,
+        nativeCompletionProof: row.nativeCompletionProof || null,
         prompt: claimed.claim.prompt,
         continuationId: claimed.claim.continuationId,
         leaseId: claimed.claim.leaseId,
         round: claimed.claim.round,
-        reportedAt: current.lastRoundReport?.reportedAt || null });
+        reportedAt: row.reportedAt || null });
     } catch (error) { sent = { ok: false, definiteFailure: false, error: error.message }; }
     if (sent?.ok === true && (sent.backgroundAccepted === true || sent.visibilityVerified === true)) {
       row.state = 'delivered'; row.reason = sent.backgroundAccepted === true

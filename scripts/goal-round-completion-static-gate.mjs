@@ -9,6 +9,12 @@ const continuation = await readFile(new URL("../dist/goal-continuation-superviso
 
 assert.match(server, /ClassicGoalRoundCompletionGuard/,
   "same-round recovery state remains durable for existing persisted Goals");
+assert.match(server, /continueIncompleteGoal:\s*async \(\{ goal, nativeCompletion \}\)/,
+  "a verified normal assistant end-turn advances an active Goal through the ordinary continuation supervisor");
+assert.match(runtime, /autoCompleteAssistantTurn/,
+  "native assistant completion closes the physical turn without a model-visible report");
+assert.match(guard, /native-turn-auto-continued/,
+  "normal assistant completion is distinct from interrupted-turn same-round rescue");
 assert.match(server, /if \(config\.goalRoundRecoveryEnabled\)[\s\S]{0,260}goalRoundCompletionGuard\.start\(/,
   "production starts same-round recovery only behind the explicit hidden-recovery feature flag");
 assert.match(server, /goalRoundCompletionGuard\.close\(\)/);
@@ -81,6 +87,10 @@ assert.match(continuation, /human-user-turn-started-next-round/,
 assert.match(continuation, /manualUserObservedAt/,
   "human continuation must persist its exact native start time for restart-safe same-round recovery");
 assert.match(continuation, /recoverMissingArms/);
+assert.match(continuation, /nativeCompletionProof/,
+  "a native-completion handoff survives restart without requiring a report-time arm");
+assert.match(continuation, /exactNativeCompletionBoundary/,
+  "restart repair revalidates the exact native final, page and source user turn");
 assert.match(continuation, /goalRuntime\.activeGoals\(\{ limit: 50 \}\)/,
   "the continuation owner must discover active reported Goals whose arm journal was never created");
 assert.match(continuation, /exactMissingArmBoundary/);

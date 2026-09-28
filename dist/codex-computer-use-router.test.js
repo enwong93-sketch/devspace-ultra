@@ -96,6 +96,9 @@ registerCodexComputerUseRouter({
 assert.deepEqual(registrations.map((entry) => entry.name), ["codex_computer_use_status", "codex_computer_use"]);
 assert.match(registrations[1].definition.description, /ordinary Chrome and Edge browser-window automation/i);
 assert.match(registrations[1].definition.description, /legacy custom Chrome-extension path has been removed/i);
+assert.match(registrations[1].definition.description, /ChatGPT Classic app windows may be controlled/i);
+assert.doesNotMatch(registrations[1].definition.description, /Do not automate[^.]*ChatGPT\/Codex app UI/i);
+assert.match(registrations[1].definition.description, /Do not automate terminals, authentication\/password\/security UI, or the Codex app UI/i);
 const status = await registrations[0].handler({});
 assert.equal(status.structuredContent.payload.target, "windows");
 assert.equal(status.structuredContent.nativeRuntimeEvidence.runtime, "@oai/sky");

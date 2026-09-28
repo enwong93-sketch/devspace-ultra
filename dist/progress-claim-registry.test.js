@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { ProgressClaimRegistry } from "./progress-claim-registry.js";
+import { OPENAI_CONVERSATION_PAGE_SOURCE } from "./openai-conversation-binding.js";
 
 let now = Date.parse("2026-09-13T08:00:00.000Z");
 let ids = 0;
@@ -79,6 +80,21 @@ await assert.rejects(
 );
 
 const cdpClaim = registry.create({ message: "Recovered from exact claim iframe", kind: "milestone" });
+await assert.rejects(
+  registry.claim({
+    claimId: cdpClaim.claimId,
+    authority: {
+      conversationId: "conversation-progress-cdp",
+      runtimeKey: "main-03",
+      observedAt: new Date(now).toISOString(),
+      source: OPENAI_CONVERSATION_PAGE_SOURCE,
+      pageVerified: true,
+    },
+    complete: async () => ({}),
+  }),
+  /exact page-verified/,
+  "an existing provider binding without the iframe claimId cannot redeem the pending report",
+);
 const cdpCompleted = await registry.claim({
   claimId: cdpClaim.claimId,
   authority: {

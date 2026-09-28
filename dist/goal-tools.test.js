@@ -109,10 +109,10 @@ try {
   });
   assert.equal(reportResult.structuredContent.goal.roundState, "reported");
   assert.equal(reportResult.structuredContent.goal.continuation.state, "pending");
-  assert.match(reportResult.content[0].text, /now.*complete visible.*report/i);
-  assert.match(reportResult.content[0].text, /final response/i);
-  assert.match(reportResult.content[0].text, /do not call.*(?:more|additional).*tool/i);
-  assert.doesNotMatch(reportResult.content[0].text, /End this turn now/i);
+  assert.match(reportResult.content[0].text, /checkpoint recorded/i);
+  assert.match(reportResult.content[0].text, /Continue the requested work normally/i);
+  assert.match(reportResult.content[0].text, /exact assistant turn ends.*continue it automatically/i);
+  assert.doesNotMatch(reportResult.content[0].text, /must.*(?:visible|final).*report/i);
 
   const claimResult = await continuation.handler({
     goalId: goal1.id,
@@ -203,13 +203,12 @@ try {
   assert.equal(finalReport.structuredContent.goal.continuation.state, "idle");
 
   const blockedGoalResult = await start.handler({
-    objective: "Verify blocked tool rejects early",
+    objective: "Verify a genuine blocked state has no arbitrary round-count threshold",
     successCriteria: ["Blocked guard enforced"],
   });
-  const blockedEarly = await blocked.handler({ goalId: blockedGoalResult.structuredContent.goal.id });
-  assert.equal(blockedEarly.isError, true);
-  assert.equal(blockedEarly.structuredContent, undefined);
-  assert.match(blockedEarly.content[0].text, /3 consecutive/i);
+  const blockedResult = await blocked.handler({ goalId: blockedGoalResult.structuredContent.goal.id });
+  assert.equal(blockedResult.isError, undefined);
+  assert.equal(blockedResult.structuredContent.goal.status, "blocked");
 
   await runtime.close();
 
@@ -262,6 +261,8 @@ try {
       assert.equal(JSON.stringify(unresolved.structuredContent.conversationStartClaim).includes("Must not become global"), false,
         "pending Goal claim must not expose the stored objective");
       const goalClaimId = unresolved.structuredContent.conversationStartClaim.claimId;
+      assert.deepEqual(unresolved.structuredContent.nextAction,
+        { tool: "devspace_goal_start", claimId: goalClaimId });
       const claimedGoal = await boundStart.handler({
         objective: "[exact-page-claim-relay]",
         successCriteria: ["[exact-page-claim-relay]"],

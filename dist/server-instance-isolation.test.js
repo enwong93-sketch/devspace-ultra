@@ -102,6 +102,13 @@ try {
   const sessionId = initialized.response.headers.get("mcp-session-id");
   const protocolVersion = initialized.body?.result?.protocolVersion || "2025-11-25";
   await post({ jsonrpc: "2.0", method: "notifications/initialized", params: {} }, sessionId, protocolVersion);
+  const listed = await post({ jsonrpc: "2.0", id: 10, method: "tools/list", params: {} }, sessionId, protocolVersion);
+  const reportTool = listed.body?.result?.tools?.find((tool) => tool.name === "devspace_progress_report");
+  assert.equal(reportTool?._meta?.ui?.resourceUri, "ui://devspace/progress-claim-relay.html",
+    "the existing report tool must mount its own exact-page bootstrap relay");
+  const legacyBindTool = listed.body?.result?.tools?.find((tool) => tool.name === "devspace_progress_bind");
+  assert.deepEqual(legacyBindTool?._meta?.ui?.visibility, ["app"],
+    "the legacy bind endpoint may remain callable for cached App relays but must not be model-visible");
 
   const resourceResult = await post({
     jsonrpc: "2.0", id: 2, method: "resources/read",
@@ -127,9 +134,46 @@ try {
   const rejectedProbe = await fetch(new URL(`${localProbe.pathname}?t=wrong`, base), { headers: { origin: "https://asdk_app_remote.web-sandbox.oaiusercontent.com" } });
   assert.equal(rejectedProbe.status, 404);
 
-  const denied = await post({
+  const workspace = await post({
     jsonrpc: "2.0", id: 3, method: "tools/call",
     params: { name: "open_workspace", arguments: { path: root } },
+  }, sessionId, protocolVersion);
+  assert.equal(workspace.body?.result?.structuredContent?.root, root,
+    "workspace tools must not require an unrelated progress-card claim");
+  const blender = await post({
+    jsonrpc: "2.0", id: 11, method: "tools/call",
+    params: { name: "blender_runtime", arguments: { action: "list" } },
+  }, sessionId, protocolVersion);
+  assert.notEqual(blender.body?.error?.code, -32031,
+    "a Blender runtime listing must not depend on a ChatGPT conversation claim");
+  const capabilityList = await post({
+    jsonrpc: "2.0", id: 12, method: "tools/call",
+    params: { name: "capability_list", arguments: {} },
+  }, sessionId, protocolVersion);
+  assert.equal(capabilityList.body?.result?.structuredContent?.ok, true,
+    "shared capability metadata must be usable before page binding");
+  const capabilityRoute = await post({
+    jsonrpc: "2.0", id: 15, method: "tools/call",
+    params: { name: "capability_route", arguments: { query: "local file workspace" } },
+  }, sessionId, protocolVersion);
+  assert.notEqual(capabilityRoute.body?.error?.code, -32031,
+    "a routed metadata next step must not stop at the conversation gate");
+  const staticInspect = await post({
+    jsonrpc: "2.0", id: 13, method: "tools/call",
+    params: { name: "capability_inspect", arguments: { pluginId: "missing-test-plugin", probeMcp: false } },
+  }, sessionId, protocolVersion);
+  assert.notEqual(staticInspect.body?.error?.code, -32031,
+    "static capability inspection must not require a conversation claim");
+  const liveInspect = await post({
+    jsonrpc: "2.0", id: 14, method: "tools/call",
+    params: { name: "capability_inspect", arguments: { pluginId: "missing-test-plugin", probeMcp: true } },
+  }, sessionId, protocolVersion);
+  assert.equal(liveInspect.body?.error?.code, -32031,
+    "live capability probing must retain conversation isolation");
+
+  const denied = await post({
+    jsonrpc: "2.0", id: 4, method: "tools/call",
+    params: { name: "devspace_goal_status", arguments: {} },
   }, sessionId, protocolVersion);
   assert.equal(denied.body?.error?.code, -32031);
   assert.equal(denied.body?.error?.data?.type, "devspace_instance_binding_required");
@@ -137,7 +181,14 @@ try {
   assert.equal(denied.body?.error?.data?.resource, resource.toString());
   assert.equal(denied.body?.error?.data?.bootstrapTools.includes("devspace_progress_report"), true);
 
-  console.log(JSON.stringify({ ok: true, gate: "server-instance-isolation", wrongComputerCallDenied: true, exactLocalInvocationRequired: true, tokenBoundAppOriginProbe: true }));
+  const existingGoal = await post({
+    jsonrpc: "2.0", id: 16, method: "tools/call",
+    params: { name: "devspace_goal_status", arguments: { goalId: "goal_aaaaaaaaaaaaaaaa" } },
+  }, sessionId, protocolVersion);
+  assert.equal(existingGoal.body?.error?.code, -32031,
+    "an opaque-looking but nonexistent Goal ID must never become conversation authority by itself");
+
+  console.log(JSON.stringify({ ok: true, gate: "server-instance-isolation", workspaceAvailableWithoutClaim: true, blenderAvailableWithoutClaim: true, capabilityMetadataAvailableWithoutClaim: true, liveCapabilityProbeRequiresExactPage: true, newConversationStateRequiresExactPage: true, opaqueGoalIdNotAuthority: true, legacyBindAppOnly: true, tokenBoundAppOriginProbe: true }));
 } finally {
   if (httpServer) {
     const closed = new Promise((resolve) => httpServer.close(resolve));

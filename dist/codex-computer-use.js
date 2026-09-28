@@ -34,7 +34,7 @@ const MUTATING_ACTIONS = new Set([
   "activate_window",
 ]);
 
-const PROHIBITED_APP_PATTERN = /(?:chatgpt|openai\.codex|\bcodex\b|windows\s*terminal|terminal|powershell|pwsh|cmd\.exe|command\s*prompt|conhost|wt\.exe)/i;
+const PROHIBITED_APP_PATTERN = /(?:openai\.codex|\bcodex\b|windows\s*terminal|terminal|powershell|pwsh|cmd\.exe|command\s*prompt|conhost|wt\.exe)/i;
 
 function boundedString(value, max, label) {
   if (value == null) return undefined;

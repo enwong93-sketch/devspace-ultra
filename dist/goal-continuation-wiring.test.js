@@ -22,7 +22,8 @@ test('real report handler arms backend owner and app relay delegates without a s
   const goal=await runtime.start({conversationId:'conversation-wiring',objective:'Goal integration test',successCriteria:['Remain single-owner']});
   const report=await tools.get('devspace_goal_turn_report').handler({goalId:goal.id,summary:'Completed this round',meaningfulProgress:true},{});
   assert.equal(report.isError,undefined);assert.equal(calls[0].goal.roundState,'reported');
-  assert.match(report.content[0].text,/backend will dispatch/);
+  assert.match(report.content[0].text,/Goal remains active\/incomplete.*continue it automatically/i);
+  assert.match(report.content[0].text,/armed for the exact conversation/i);
   const dispatched=await tools.get('devspace_goal_continuation').handler({goalId:goal.id,action:'dispatch'},{});
   assert.equal(dispatched.isError,undefined);assert.equal(dispatched.structuredContent.acknowledged,false);
   assert.equal(dispatched.structuredContent.hostDispatch.transport,'backend-exact-page-continuation');

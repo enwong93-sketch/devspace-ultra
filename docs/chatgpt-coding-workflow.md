@@ -204,17 +204,19 @@ immutable final objective plus explicit success criteria and mounts one compact
 Goal Dock. A Plan can be used underneath the Goal as the current execution
 route, but completing a Plan does not complete the Goal.
 
-Each physical Goal turn remains a normal user-visible ChatGPT turn. The agent
-does meaningful work and verifies progress, then calls
-`devspace_goal_turn_report` as the final **tool call** immediately before its
-visible final round report. After that tool returns it emits exactly one complete
-visible final response and calls no more tools in that physical turn.
+Each physical Goal turn is a normal user-visible ChatGPT turn. When the exact
+ChatGPT Classic assistant turn reaches its native completed end-turn, the
+backend checks the exact conversation's Goal state. If it remains active and
+incomplete, DevSpace closes that physical turn and automatically queues one
+hidden assistant continuation. No `devspace_goal_turn_report`, completed Plan,
+progress-card update, manual binding, or additional user prompt is required.
+Plans and progress cards help organize and explain work but never gate tools or
+Goal continuation.
 
-If the Goal remains active, the fresh zero-visual Relay for that report calls
-app-only `devspace_goal_continuation(action="dispatch")`. The backend owns the
-continuation lease and `ClassicGoalHostBridge` locates the matching Chat-mode
-Goal widget by `goalId`, then invokes ChatGPT Classic's raw native hidden Tool
-follow-up transport. The next turn begins by redeeming that continuation with
+The backend owns the continuation lease and `ClassicGoalHostBridge` locates the
+matching local Chat-mode page by exact conversation, Main runtime and page
+identity, then invokes ChatGPT Classic's raw native hidden Tool follow-up
+transport. The next turn begins by redeeming that continuation with
 `devspace_goal_round_begin`. Public background widget
 `window.openai.sendFollowUpMessage` is deliberately not used because third-party
 Chat-mode widgets require synchronous user activation. The backend bridge keeps
@@ -222,12 +224,12 @@ the native hidden-follow-up semantics without typing into the composer or
 inserting a synthetic user message into the visible transcript.
 
 Goal completion requires evidence for every stored success criterion. A Goal
-cannot be marked blocked until the runtime has observed three consecutive
-reported rounds with the same normalized blocker and no meaningful progress.
-The Goal Dock provides Pause, Resume, and Stop controls; pause/stop should not be
-used by the model unless the user explicitly requests them. Continuation leases
-are persisted and tolerate renderer reloads, send/ack races, bounded lease
-expiry, duplicate redemption attempts, and backend restart.
+may be marked blocked when a genuine external dependency or user decision
+prevents further useful work; missing reports or incomplete Plans are not
+blockers. The Goal Dock provides Pause, Resume, and Stop controls; pause/stop
+should not be used by the model unless the user explicitly requests them.
+Continuation leases are persisted and tolerate renderer reloads, send/ack
+races, bounded lease expiry, duplicate redemption attempts, and backend restart.
 
 The Goal Dock uses `devspace_goal_status` to refresh authoritative backend
 state and owns Pause/Resume/Stop only. Resume arms one backend `dispatch`;

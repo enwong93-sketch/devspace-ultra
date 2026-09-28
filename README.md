@@ -12,7 +12,7 @@ Every installation must follow the [ChatGPT Classic MCP installation contract](d
 
 One cloud ChatGPT Classic account may connect multiple DevSpace MCP servers, each exposing a different computer through its own stable DDNS/tunnel URL. Every installation persists a distinct `serverInstanceId`; its OAuth token audience remains the exact public `/mcp` resource; App relay ownership is bound to the Connector's proved `asdk_app_*` sandbox origin. Ordinary ChatGPT tool calls require either a current exact local invocation or an authenticated provider-conversation binding freshly checked against that computer's exact local Classic page. Matching tool names, conversation IDs or `ui://devspace/...` resources never authorize cross-server use.
 
-Therefore a Classic Runtime on computer A cannot silently execute computer B's DevSpace connection. If the wrong Connector is selected, the server returns `devspace_instance_binding_required` and permits only the one-time local claim bootstrap; without a matching local page the claim cannot complete. This is generic multi-server isolation, not a hard-coded exception for any particular hostname or connection name.
+Therefore a Classic Runtime on computer A cannot silently execute computer B's DevSpace connection. A normal local Agent does not need any manual bind step: workspace tools stay available, first-use progress ownership is confirmed by the hidden exact-page relay, and existing Goal/Plan state can recover only from its exact local Classic page. If the wrong Connector, another computer, a duplicate/ambiguous page, or another OAuth resource is selected, the server rejects the stateful call instead of falling back to a different DevSpace connection. This is generic multi-server isolation, not a hard-coded exception for any particular hostname or connection name.
 
 ## One-command Windows setup
 
@@ -21,11 +21,11 @@ DuckDNS/DDNS direct ingress is the recommended production route. It keeps the Lo
 For the most reliable guided path, install the setup Agent Skill first, then ask the Agent to use `devspace-ultra-setup`. The Skill lets the Agent execute local installation/repair commands and guide the user through the unavoidable DuckDNS-account and router-port-forwarding steps one at a time.
 
 ```powershell
-$p=Join-Path $env:TEMP 'devspace-ultra-install-skill.ps1'; iwr https://raw.githubusercontent.com/enwong93-sketch/devspace-ultra/v0.5.18/install-skill.ps1 -OutFile $p; & $p
+$p=Join-Path $env:TEMP 'devspace-ultra-install-skill.ps1'; iwr https://raw.githubusercontent.com/enwong93-sketch/devspace-ultra/v0.5.19/install-skill.ps1 -OutFile $p; & $p
 ```
 
 ```powershell
-$p=Join-Path $env:TEMP 'devspace-ultra-install.ps1'; iwr https://raw.githubusercontent.com/enwong93-sketch/devspace-ultra/v0.5.18/install.ps1 -OutFile $p; & $p -Network DuckDNS
+$p=Join-Path $env:TEMP 'devspace-ultra-install.ps1'; iwr https://raw.githubusercontent.com/enwong93-sketch/devspace-ultra/v0.5.19/install.ps1 -OutFile $p; & $p -Network DuckDNS
 ```
 
 Use the Cloudflare named-tunnel fallback only when DDNS/direct inbound access is unavailable. A Worker relay/free plan is quota-governed and must not be treated as unlimited. See [one-command setup](docs/ONE_COMMAND_SETUP.md) and [network ingress policy](docs/NETWORK_INGRESS.md).

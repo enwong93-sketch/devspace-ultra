@@ -24,7 +24,7 @@ Infrastructure checks are prerequisites, not the product goal. Resume at the ear
 2. Prepare or verify local Gateway/Core and the public OAuth-protected `/mcp` endpoint.
 3. In **ChatGPT Classic**, enable Developer mode, create the exact MCP connection and complete OAuth.
    - Confirm the connection URL is this machine's exact public `/mcp` resource and its reported `serverInstanceId` matches this installation. A similarly named connection for another computer is a separate authority.
-   - When a new conversation's first progress report returns a pending claim, have that Agent call the returned one-time `devspace_progress_bind` action. Later tools reuse the verified provider-conversation binding after a fresh exact-page check; the user need not pair each conversation manually.
+   - A new conversation's first `devspace_progress_report` may briefly return `pending=true` while the hidden exact-page relay confirms ownership. Do **not** ask the Agent or user to call `devspace_progress_bind`; continue unrelated safe workspace work and verify the narration card before claiming the report succeeded. The legacy bind handler exists only for cached hidden-App compatibility.
 4. Scan or refresh the authenticated tool catalogue and verify all required development tools.
 5. Enable the connection in a fresh ChatGPT Classic conversation.
 6. Run a real read test.
@@ -44,7 +44,7 @@ Follow [the canonical ChatGPT Classic MCP installation contract](../../docs/CHAT
 - Never write secrets to Git, `config.json`, logs, generated status JSON, shell history, Task Scheduler arguments, or progress narration.
 - Do not impose a Core heap cap, workspace limit, MCP-session count limit, or work timeout. Production Core uses the system-managed heap profile.
 - Keep `autoCompactEnabled=false`. Enable `goalRoundRecoveryEnabled=true` only when the installed release contains the exact-conversation page-composer recovery gate: one successful recovery per Goal round, no Primary repair, no window activation, no page navigation/reload, and duplicate conversations fail closed. Retain `DEVSPACE_GOAL_ROUND_RECOVERY=0` as the explicit operator hold.
-- Use `devspace_progress_report` before substantive work on a multi-step setup and after each meaningful medium-sized setup step, not after every command and not only at the very end. The Local Gateway may reject a second substantive tool, stale-report continuation, or Plan completion with `devspace_progress_preflight_required`; when that happens, author the progress update yourself, verify the current conversation owns it, and retry the blocked operation.
+- Use `devspace_progress_report` before substantive work on a multi-step setup and after each meaningful medium-sized setup step, not after every command and not only at the very end. Progress narration is advisory rather than a work-permission gate: a pending claim or late report must not stop ordinary reads, edits, commands, or Plan work. Author the update yourself, bind it to the exact current conversation when needed, and continue the requested safe work.
 
 ## Prerequisite A — inspect before changing anything
 
@@ -117,7 +117,7 @@ DuckDNS example:
 
 ```powershell
 $p = Join-Path $env:TEMP 'devspace-ultra-install.ps1'
-iwr 'https://raw.githubusercontent.com/enwong93-sketch/devspace-ultra/v0.5.18/install.ps1' -OutFile $p
+iwr 'https://raw.githubusercontent.com/enwong93-sketch/devspace-ultra/v0.5.19/install.ps1' -OutFile $p
 & $p -Network DuckDNS
 ```
 
@@ -125,7 +125,7 @@ Cloudflare named-tunnel fallback:
 
 ```powershell
 $p = Join-Path $env:TEMP 'devspace-ultra-install.ps1'
-iwr 'https://raw.githubusercontent.com/enwong93-sketch/devspace-ultra/v0.5.18/install.ps1' -OutFile $p
+iwr 'https://raw.githubusercontent.com/enwong93-sketch/devspace-ultra/v0.5.19/install.ps1' -OutFile $p
 & $p -Network Cloudflare -PublicHostname '<stable-hostname>'
 ```
 
@@ -158,9 +158,10 @@ A setup is not complete until all applicable checks pass:
 8. An unauthenticated `/mcp` request receives the expected OAuth challenge rather than a generic proxy error.
 9. The ChatGPT Classic connection exists for the exact stable `/mcp` URL and OAuth is complete.
 10. The authenticated catalogue contains `read`, `write`, `edit`, `apply_patch`, `exec_command`, `write_stdin`, and `devspace_progress_report`.
-11. A fresh ChatGPT Classic conversation can run verified read, disposable write/edit/command and read-back calls.
-12. A reconnect or second fresh conversation retains authenticated tool access without recreating the connection.
-13. Secrets are absent from logs, config, Scheduled Task command lines, evidence and Git status.
+11. A fresh ChatGPT Classic conversation can run verified read, disposable write/edit/command and read-back calls; several sequential stateful calls continue working when the host rotates MCP transport/session or provider-conversation aliases, without another manual progress claim.
+12. During active verified work, the fresh-chat claim/capability lease is renewed rather than expiring on a fixed timer; a reconnect or second fresh conversation retains authenticated tool access without recreating the connection.
+13. Duplicate pages, a reused session pointing at another conversation, and another computer/resource still fail closed.
+14. Secrets are absent from logs, config, Scheduled Task command lines, evidence and Git status.
 
 Report a pass/fail table for every prerequisite and core gate, the stable MCP URL, the ChatGPT Classic connection name, the required tool names observed, and the read/write/reconnect evidence. Never claim end-to-end success based only on local health, schemas, Codex access or an OAuth callback page.
 

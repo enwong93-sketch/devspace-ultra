@@ -85,7 +85,7 @@ Use the tagged one-command installer whenever possible:
 
 ```powershell
 $p=Join-Path $env:TEMP 'devspace-ultra-install.ps1'
-iwr https://raw.githubusercontent.com/enwong93-sketch/devspace-ultra/v0.5.18/install.ps1 -OutFile $p
+iwr https://raw.githubusercontent.com/enwong93-sketch/devspace-ultra/v0.5.19/install.ps1 -OutFile $p
 & $p -Network DuckDNS
 ```
 
@@ -118,7 +118,7 @@ Use only when direct DDNS ingress is unavailable or rejected by evidence.
 
 ```powershell
 $p=Join-Path $env:TEMP 'devspace-ultra-install.ps1'
-iwr https://raw.githubusercontent.com/enwong93-sketch/devspace-ultra/v0.5.18/install.ps1 -OutFile $p
+iwr https://raw.githubusercontent.com/enwong93-sketch/devspace-ultra/v0.5.19/install.ps1 -OutFile $p
 & $p -Network Cloudflare -PublicHostname 'devspace.example.com'
 ```
 
@@ -144,10 +144,11 @@ Do not declare success until all applicable checks pass:
 6. `/mcp` produces the expected OAuth challenge without exposing a bearer token.
 7. The ChatGPT Classic connection exists and OAuth completes for the exact stable MCP URL.
 8. Its authenticated catalogue contains `read`, `write`, `edit`, `apply_patch`, `exec_command`, `write_stdin`, and `devspace_progress_report`.
-9. A fresh Classic conversation completes verified read, disposable write/edit/command and read-back calls.
-10. A reconnect or second fresh Classic conversation retains authenticated access without recreating the connection.
-11. Gateway/Core/Application MCP ports remain loopback-only.
-12. No secret value appears in config, logs, task arguments, evidence, Git status, or generated status files.
+9. A fresh Classic conversation completes verified read, disposable write/edit/command and read-back calls; several sequential stateful calls survive host MCP/session and provider-conversation alias rotation without another manual claim.
+10. Active verified work renews the fresh-chat capability lease rather than losing tools on a fixed timer; a reconnect or second fresh Classic conversation retains authenticated access without recreating the connection.
+11. Duplicate pages, another conversation reusing one host session, and another computer/resource remain fail-closed.
+12. Gateway/Core/Application MCP ports remain loopback-only.
+13. No secret value appears in config, logs, task arguments, evidence, Git status, or generated status files.
 
 Write a progress report after the local installation phase, after public ingress verification, and after final ChatGPT connector acceptance when each is a meaningful medium-sized milestone. Do not report every command.
 
