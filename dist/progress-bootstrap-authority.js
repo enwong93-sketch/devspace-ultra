@@ -485,7 +485,9 @@ export async function resolveRequestCapabilityAuthority({
         Promise.resolve(requestConversation.authorityPromise).catch(() => null),
         new Promise((resolve) => {
           timer = setTimeout(() => resolve(null), timeoutMs);
-          timer.unref?.();
+          // This timer is the only settlement path when native correlation
+          // never arrives. Keep it referenced until the request finishes;
+          // Node 22 can otherwise exit with the Promise still pending.
         }),
       ]);
     } finally {
