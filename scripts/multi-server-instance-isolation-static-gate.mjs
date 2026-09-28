@@ -53,8 +53,10 @@ assert.match(server, /page\?\.duplicatePageObserved === true/,
   "even a uniquely active copy of a duplicated conversation remains rejected for provider authority");
 assert.match(server, /hasOpenaiProviderMetadata/,
   "authenticated OpenAI provider metadata, not only a mutable User-Agent, must activate the instance gate");
-assert.match(server, /bootstrapTools:\s*\["devspace_progress_report", "devspace_progress_bind"/,
-  "the binding error must expose the actual one-time progress bind action");
+assert.match(server, /bootstrapTools:\s*\["devspace_progress_report", "devspace_goal_start"/,
+  "the binding error must expose only tools available in older ChatGPT snapshots");
+assert.match(server, /!instanceBootstrapTool && !conversationStartClaimRelay && !instanceIndependentTool/,
+  "workspace and Blender tools must not require an unrelated progress claim");
 assert.match(providerBinding, /authority\?\.providerConversationKey === key/);
 assert.match(providerBinding, /authority\?\.pageVerified === true/);
 assert.match(providerBinding, /version:\s*this\.serverInstanceId \? 2 : 1/,

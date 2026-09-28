@@ -102,6 +102,10 @@ try {
   const sessionId = initialized.response.headers.get("mcp-session-id");
   const protocolVersion = initialized.body?.result?.protocolVersion || "2025-11-25";
   await post({ jsonrpc: "2.0", method: "notifications/initialized", params: {} }, sessionId, protocolVersion);
+  const listed = await post({ jsonrpc: "2.0", id: 10, method: "tools/list", params: {} }, sessionId, protocolVersion);
+  const reportTool = listed.body?.result?.tools?.find((tool) => tool.name === "devspace_progress_report");
+  assert.equal(reportTool?._meta?.ui?.resourceUri, "ui://devspace/progress-claim-relay.html",
+    "the existing report tool must mount its own exact-page bootstrap relay");
 
   const resourceResult = await post({
     jsonrpc: "2.0", id: 2, method: "resources/read",
@@ -127,9 +131,22 @@ try {
   const rejectedProbe = await fetch(new URL(`${localProbe.pathname}?t=wrong`, base), { headers: { origin: "https://asdk_app_remote.web-sandbox.oaiusercontent.com" } });
   assert.equal(rejectedProbe.status, 404);
 
-  const denied = await post({
+  const workspace = await post({
     jsonrpc: "2.0", id: 3, method: "tools/call",
     params: { name: "open_workspace", arguments: { path: root } },
+  }, sessionId, protocolVersion);
+  assert.equal(workspace.body?.result?.structuredContent?.root, root,
+    "workspace tools must not require an unrelated progress-card claim");
+  const blender = await post({
+    jsonrpc: "2.0", id: 11, method: "tools/call",
+    params: { name: "blender_runtime", arguments: { action: "list" } },
+  }, sessionId, protocolVersion);
+  assert.notEqual(blender.body?.error?.code, -32031,
+    "a Blender runtime listing must not depend on a ChatGPT conversation claim");
+
+  const denied = await post({
+    jsonrpc: "2.0", id: 4, method: "tools/call",
+    params: { name: "devspace_goal_status", arguments: {} },
   }, sessionId, protocolVersion);
   assert.equal(denied.body?.error?.code, -32031);
   assert.equal(denied.body?.error?.data?.type, "devspace_instance_binding_required");
@@ -137,7 +154,7 @@ try {
   assert.equal(denied.body?.error?.data?.resource, resource.toString());
   assert.equal(denied.body?.error?.data?.bootstrapTools.includes("devspace_progress_report"), true);
 
-  console.log(JSON.stringify({ ok: true, gate: "server-instance-isolation", wrongComputerCallDenied: true, exactLocalInvocationRequired: true, tokenBoundAppOriginProbe: true }));
+  console.log(JSON.stringify({ ok: true, gate: "server-instance-isolation", workspaceAvailableWithoutClaim: true, blenderAvailableWithoutClaim: true, conversationStateRequiresExactPage: true, tokenBoundAppOriginProbe: true }));
 } finally {
   if (httpServer) {
     const closed = new Promise((resolve) => httpServer.close(resolve));

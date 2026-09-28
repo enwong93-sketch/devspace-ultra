@@ -43,12 +43,12 @@ const progressBindEnd = server.indexOf('registerPlanTools(server, planRuntime', 
 assert.ok(progressReportStart >= 0 && progressBindStart > progressReportStart && progressBindEnd > progressBindStart);
 const progressReportBlock = server.slice(progressReportStart, progressBindStart);
 const progressBindBlock = server.slice(progressBindStart, progressBindEnd);
-assert.doesNotMatch(progressReportBlock, /resourceUri:\s*PROGRESS_CLAIM_RELAY_URI/,
-  "recurring progress reports must not mount one hidden MCP App iframe per update");
+assert.match(progressReportBlock, /resourceUri:\s*PROGRESS_CLAIM_RELAY_URI/,
+  "the existing report tool must bootstrap exact-page ownership without a newly scanned bind tool");
 assert.match(progressReportBlock, /visibility:\s*\["model",\s*"app"\]/,
   "the report tool must remain callable by the rare exact-page bootstrap relay");
 assert.match(progressBindBlock, /resourceUri:\s*PROGRESS_CLAIM_RELAY_URI/,
-  "only the explicit one-time bootstrap tool may mount the claim relay App");
+  "the compatibility bind tool may still mount the claim relay App");
 assert.match(progressBindBlock, /progressClaimRegistry\.pendingClaim\(claimId\)/);
 assert.match(server, /progressClaimRegistry\.create\(\{[\s\S]{0,260}message:\s*reportMessage,[\s\S]{0,180}kind,[\s\S]{0,260}requestBinding:[\s\S]{0,180}sessionFingerprint:\s*currentRequestContext\?\.sessionFingerprint/,
   "pending progress must retain only the hashed request session needed for a short-lived cached-schema bootstrap lease");
@@ -79,8 +79,8 @@ assert.match(server, /progressBootstrapAuthority\?\.consume\?\.\(\{[\s\S]{0,200}
   "Goal\/Plan bootstrap must consume the lease through the current request's hashed session only");
 assert.match(server, /outputSchema:[\s\S]{0,1200}progressClaim:\s*z\.object\(/,
   "progress tool must declare the structured claim output so ChatGPT can hydrate the relay App");
-assert.match(progressReportBlock, /nextAction:[\s\S]{0,220}tool:\s*z\.literal\("devspace_progress_bind"\)/,
-  "an unresolved report must tell the Agent to mount exactly one bootstrap relay");
+assert.doesNotMatch(progressReportBlock, /nextAction:[\s\S]{0,220}tool:\s*"devspace_progress_bind"/,
+  "an unresolved report must not depend on a newly scanned model-visible tool");
 assert.match(server, /"devspace\/progressClaim":\s*progressClaim/,
   "pending progress must mirror only the opaque claim descriptor into app-only result metadata");
 

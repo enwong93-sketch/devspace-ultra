@@ -38,9 +38,10 @@ assert.match(contract, /Reconnect or second fresh chat test/);
 assert.match(contract, /Report every step PASS/);
 assert.match(contract, /developers\.openai\.com\/plugins\/deploy\/connect-chatgpt/);
 assert.match(contract, /does not increase or bypass OpenAI context, token, account usage or rate limits/i);
-assert.match(contract, /wait for the bounded request-scoped exact-page correlation/i);
+assert.match(contract, /Ordinary workspace and Blender tools use that authenticated resource plus an explicit workspace ID or Blender runtime ID/i);
+assert.match(contract, /Goal, Plan and narration are conversation-owned and still require the exact local Classic page/i);
 assert.match(contract, /fixed timer must not make an active Agent periodically lose work tools/i);
-assert.match(contract, /Duplicate pages, another conversation reusing the same host session, another computer\/resource or missing exact-page proof must still fail closed/i);
+assert.match(contract, /Duplicate pages, another conversation reusing the same host session, another computer\/resource or missing exact-page proof must still be rejected for conversation-owned state/i);
 
 const requiredTools = ['read', 'write', 'edit', 'apply_patch', 'exec_command', 'write_stdin', 'devspace_progress_report'];
 for (const tool of requiredTools) {

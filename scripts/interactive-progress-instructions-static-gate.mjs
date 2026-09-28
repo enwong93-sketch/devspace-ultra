@@ -12,27 +12,26 @@ const [source, agents, toolProgress, gateway, productionJournal, livenessCdp, en
 ]);
 
 assert.match(source, /exactly one conversation-scoped floating progress narration card/i);
-assert.match(source, /MANDATORY INTERACTIVE PROGRESS PREFLIGHT/);
-assert.match(source, /call devspace_progress_report before the first substantive work tool/i);
-assert.match(source, /pending claim, unbound identity, unavailable recipient, timeout, or omitted tool is not proof that the card was updated/i);
-assert.match(source, /never falsely claim that the card was updated/i);
+assert.match(source, /INTERACTIVE PROGRESS:/);
+assert.match(source, /call devspace_progress_report with concise natural language/i);
+assert.match(source, /pending first report means the hidden exact-page claim is completing asynchronously/i);
+assert.match(source, /Verify the current conversation's card before claiming narration success/i);
 assert.match(source, /neither tool events nor timers may author visible narration/i);
 assert.match(source, /personally judge that a meaningful medium-sized step has completed/i);
 assert.match(source, /never leave more than ten minutes between Agent-authored reports/i);
 assert.match(source, /Ten minutes is a maximum silent interval for the working Agent, not a timer cadence/i);
-assert.match(source, /Before entering any external wait, process watch, CI watch/i);
-assert.match(source, /after the wait returns, report the material result before starting another long phase/i);
+assert.match(source, /Before entering a long external wait\/process\/CI watch/i);
+assert.match(source, /after that wait returns, report the meaningful result before beginning another long phase/i);
 assert.match(source, /rescue may emit only the exact visible text `- 繼續`/i);
 assert.match(source, /Write the card text yourself in natural language/i);
 assert.match(source, /never show generated step counters, heartbeat prose, generic program status/i);
 assert.match(source, /registerAppTool\(server, "devspace_progress_report"/);
 assert.match(source, /registerAppTool\(server, "devspace_progress_bind"/);
-assert.match(source, /Recurring reports update the single host overlay directly/,
-  "ordinary progress reports must not create one MCP App iframe per update");
-assert.match(source, /Call devspace_progress_bind once with claimId/,
-  "only unresolved first-use progress may request the one-time bootstrap relay");
+assert.match(source, /resourceUri: PROGRESS_CLAIM_RELAY_URI/,
+  "the first report must carry its own exact-page relay, even with an older host tool snapshot");
+assert.match(source, /Never ask the user to pair a conversation or rely on a separate devspace_progress_bind tool/);
 assert.match(source, /conversation-bound update to the floating DEV Space progress narration card in your own natural language/i);
-assert.match(source, /exact ChatGPT Classic page that received this result confirms a one-time claim/i);
+assert.match(source, /hidden exact-page claim completes automatically/i);
 assert.match(source, /Local Gateway progress guidance is advisory/);
 assert.match(source, /Exact local conversation authority, server-instance isolation, and cross-computer Connector isolation remain separate hard security gates/i,
   "advisory progress must never weaken the separate instance and exact-conversation security boundary");
@@ -62,6 +61,7 @@ assert.equal(
 assert.match(agents, /## Mandatory interactive progress preflight/);
 assert.match(agents, /call `devspace_progress_report` \*\*before the first substantive work tool\*\*/i);
 assert.match(agents, /A `pending` claim, unresolved or unbound conversation identity, unavailable recipient, omitted tool, or timeout is not proof/i);
+assert.match(agents, /a separate `devspace_progress_bind` call is not required/i);
 assert.match(agents, /never claim that the card was updated/i);
 assert.match(agents, /Call `devspace_progress_report` when a meaningful medium-sized step has completed/i);
 assert.match(agents, /ten minutes is an Agent reporting ceiling only/i);
