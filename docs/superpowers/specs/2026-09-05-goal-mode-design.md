@@ -1,5 +1,7 @@
 # DevSpace Ultra Goal Mode Design
 
+> Historical design note: this September 5 specification predates automatic native turn-completion continuation. Any requirement below for a visible `devspace_goal_turn_report`, completed Plan, or repeated-blocker count before continuation/blocking is superseded. Current behavior is in `docs/chatgpt-coding-workflow.md`: a native assistant end-turn automatically continues the exact conversation while the Goal remains active/incomplete; no user-visible report or Plan threshold is required.
+
 ## Goal
 
 Add a Codex-style persistent Goal Mode to ChatGPT Classic through DevSpace Ultra. A Goal survives across ordinary assistant turns, requires a visible user report at the end of every physical turn, and automatically starts the next assistant turn only after that report is durably recorded and the Goal remains active.

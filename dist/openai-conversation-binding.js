@@ -70,52 +70,6 @@ export async function inspectExactConversationPage(runtimeKey, conversationId, f
   } catch { return null; }
 }
 
-/** Recover an old Goal/Plan provider alias only when its owning conversation is
- * also the single active local Classic page. The state ID locates the expected
- * page; it never selects a different current conversation by itself. */
-export async function resolveExistingStateRecoveryPage({
-  target,
-  goalRuntime,
-  planRuntime,
-  progressLivenessAdapter,
-  inspectPage,
-} = {}) {
-  const kind = target?.kind;
-  const targetId = String(target?.id || "").trim();
-  const expectedPrefix = kind === "goal" ? "goal" : kind === "plan" ? "plan" : null;
-  if (!expectedPrefix || !new RegExp(`^${expectedPrefix}_[a-f0-9]{16,}$`, "i").test(targetId)) return null;
-
-  const runtime = kind === "goal" ? goalRuntime : planRuntime;
-  if (typeof runtime?.status !== "function"
-    || typeof progressLivenessAdapter?.find !== "function"
-    || typeof progressLivenessAdapter?.findUniqueActiveConversation !== "function"
-    || typeof inspectPage !== "function") return null;
-
-  const state = await runtime.status(targetId).catch(() => null);
-  const conversationId = String(state?.conversationId || "").trim();
-  if (!conversation(conversationId)) return null;
-
-  const located = await progressLivenessAdapter.find({ conversationId }).catch(() => null);
-  const runtimeKey = String(located?.runtimeKey || "").trim();
-  if (located?.exact !== true || located?.ambiguous === true
-    || located?.duplicatePageObserved === true || located?.conversationId !== conversationId
-    || !runtimeKey) return null;
-
-  const active = await progressLivenessAdapter.findUniqueActiveConversation({
-    requireGenerating: true,
-    allowIncompleteUserTurn: false,
-    requireProgressCard: false,
-  }).catch(() => null);
-  if (active?.exact !== true || active?.pageVerified !== true
-    || active?.uniqueActiveConversation !== true || active?.conversationId !== conversationId
-    || active?.runtimeKey !== runtimeKey || active?.generating !== true || active?.hasTurnError === true) return null;
-
-  const proof = await inspectPage(runtimeKey, conversationId).catch(() => null);
-  if (proof?.pageVerified !== true || proof?.conversationId !== conversationId
-    || proof?.runtimeKey !== runtimeKey) return null;
-  return { ...proof, existingStateRecovery: true };
-}
-
 /** Store only explicit URL bindings proved by a receipt or an owner-authorized
  * local bootstrap. A conflicting binding is quarantined, never silently moved.
  * Every reuse requires a fresh live page check. It is independent of transport
@@ -164,7 +118,7 @@ export class OpenaiConversationBindings {
   async bind(identity, proof, {
     operator = false,
     currentInvocation = false,
-    existingStateRecovery = false,
+    conversationStartClaimId = null,
   } = {}) {
     await this.ready;
     const id = cleanOpenaiIdentity(identity);
@@ -174,16 +128,11 @@ export class OpenaiConversationBindings {
       && proof?.currentInvocationVerified === true
       && hex(proof?.callFingerprint)
       && String(proof?.source || '').includes('page-verified');
-    // Older ChatGPT conversation snapshots can retain Goal/Plan tools but not
-    // the newer hidden claim relay descriptor. A server may bridge that one
-    // legacy state only after it has resolved the real saved state to one
-    // exact local Classic page. Both the internal caller and its proof must
-    // explicitly select this narrow recovery path; a Goal/Plan ID alone is
-    // never a binding credential.
-    const exactExistingStateRecovery = existingStateRecovery === true
-      && proof?.existingStateRecovery === true
-      && proof?.source === OPENAI_CONVERSATION_PAGE_SOURCE;
-    if (!operator && !exactProgressClaim && !exactCurrentInvocation && !exactExistingStateRecovery) return null;
+    const exactConversationStartClaim = typeof conversationStartClaimId === 'string'
+      && /^[A-Za-z0-9_-]{16,200}$/.test(conversationStartClaimId)
+      && proof?.source === 'classic-exact-page-start-claim-cdp-page-verified'
+      && proof?.claimId === conversationStartClaimId;
+    if (!operator && !exactProgressClaim && !exactCurrentInvocation && !exactConversationStartClaim) return null;
     if (operator && proof?.source !== OPENAI_CONVERSATION_PAGE_SOURCE) return null;
     const live = await this.inspect(proof.runtimeKey, proof.conversationId);
     if (!live?.pageVerified || live.conversationId !== proof.conversationId) return null;
@@ -199,8 +148,8 @@ export class OpenaiConversationBindings {
       ? 'owner-authorized-exact-page-bootstrap'
       : exactCurrentInvocation
         ? 'authenticated-current-invocation-exact-page'
-        : exactExistingStateRecovery
-          ? 'authenticated-existing-state-exact-page-recovery'
+        : exactConversationStartClaim
+          ? 'authenticated-conversation-start-claim-exact-page'
         : 'authenticated-receipt-exact-page';
     this.records.set(id.key, existing); await this.save();
     return { bound: true, conversationId: existing.conversationId };

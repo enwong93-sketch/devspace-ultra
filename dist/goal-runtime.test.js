@@ -163,11 +163,6 @@ try {
     }),
     /already reported/i,
   );
-  await assert.rejects(
-    () => reloaded.markBlocked({ goalId: reportedGoal.id }),
-    /3 consecutive|three consecutive|requires.*3/i,
-  );
-
   const progressGoal = await reloaded.start({
     objective: "Verify blocker reset on progress",
     successCriteria: ["Progress report resets blocker state"],
@@ -181,6 +176,80 @@ try {
   assert.equal(progressReported.blocker.fingerprint, null);
   assert.equal(progressReported.blocker.consecutiveRounds, 0);
   assert.equal(progressReported.blocker.lastSeenRound, null);
+
+  const autoContinueGoal = await reloaded.start({
+    conversationId: "conversation-auto-continuation",
+    objective: "Continue automatically after a completed assistant turn",
+    successCriteria: ["The active Goal remains resumable"],
+  });
+  const nativeCompletion = {
+    source: "native-assistant-turn-final",
+    conversationId: autoContinueGoal.conversationId,
+    runtimeKey: "main-03",
+    pageTargetId: "page-main-03",
+    sourceUserMessageId: "user-auto-turn-1",
+    assistantMessageId: "assistant-auto-turn-1",
+    assistantTextHash: "a".repeat(64),
+    assistantCreatedAt: new Date(nowMs).toISOString(),
+  };
+  const automaticallyContinued = await reloaded.autoCompleteAssistantTurn({
+    goalId: autoContinueGoal.id,
+    nativeCompletion,
+  });
+  assert.equal(automaticallyContinued.continued, true,
+    "a verified completed turn auto-queues continuation without a model-visible report or Plan gate");
+  assert.equal(automaticallyContinued.goal.roundState, "reported");
+  assert.equal(automaticallyContinued.goal.lastTurnCompletion.source, "native-assistant-turn-final");
+  assert.equal(automaticallyContinued.goal.lastTurnCompletion.round, autoContinueGoal.round);
+  assert.equal(automaticallyContinued.goal.lastRoundReport, null,
+    "automatic turn closure must not fabricate a model-authored Goal report");
+  assert.equal(automaticallyContinued.goal.recentReports.length, 0,
+    "native turn completion remains separate from explicit Goal checkpoint history");
+  assert.equal(automaticallyContinued.goal.continuation.state, "pending");
+  assert.equal(automaticallyContinued.goal.blocker.consecutiveRounds, 0,
+    "automatic continuation is not held behind blocker/no-progress thresholds");
+  assert.equal((await reloaded.autoCompleteAssistantTurn({ goalId: autoContinueGoal.id, nativeCompletion })).continued, false,
+    "the same completed turn cannot queue a duplicate continuation");
+  const crossConversationReplay = await reloaded.autoCompleteAssistantTurn({
+    goalId: autoContinueGoal.id,
+    nativeCompletion: { ...nativeCompletion, conversationId: "conversation-other-machine" },
+  });
+  assert.equal(crossConversationReplay.continued, false,
+    "the automatic completion receipt remains conversation-scoped");
+  assert.equal((await reloaded.status(autoContinueGoal.id)).conversationId, "conversation-auto-continuation");
+  const otherConversationGoal = await reloaded.start({
+    conversationId: "conversation-other-machine",
+    objective: "Keep another computer isolated",
+    successCriteria: ["No other conversation may redeem this turn"],
+  });
+  await assert.rejects(
+    () => reloaded.autoCompleteAssistantTurn({ goalId: otherConversationGoal.id, nativeCompletion }),
+    /exact native assistant-final receipt/i,
+    "a different conversation cannot use the completion receipt to advance its Goal",
+  );
+
+  const pausedAutoGoal = await reloaded.start({
+    conversationId: "conversation-auto-paused",
+    objective: "Respect explicit Goal pause",
+    successCriteria: ["Pause remains terminal to automatic continuation"],
+  });
+  await reloaded.control({ goalId: pausedAutoGoal.id, action: "pause" });
+  const pausedAutoResult = await reloaded.autoCompleteAssistantTurn({
+    goalId: pausedAutoGoal.id,
+    nativeCompletion: { ...nativeCompletion, conversationId: pausedAutoGoal.conversationId },
+  });
+  assert.equal(pausedAutoResult.continued, false, "explicit pause suppresses automatic continuation");
+  assert.equal(pausedAutoResult.goal.status, "paused");
+
+  const explicitlyBlockedGoal = await reloaded.start({
+    conversationId: "conversation-explicit-blocked",
+    objective: "Preserve an explicit genuine blocker",
+    successCriteria: ["The Goal can represent a real external blocker"],
+  });
+  const explicitlyBlocked = await reloaded.markBlocked({ goalId: explicitlyBlockedGoal.id });
+  assert.equal(explicitlyBlocked.status, "blocked",
+    "an explicit genuine blocker is not delayed behind an arbitrary report-count threshold");
+  assert.equal(explicitlyBlocked.continuation.state, "idle");
 
   const completionGoal = await reloaded.start({
     objective: "Verify strict completion audit",
@@ -274,10 +343,9 @@ try {
   assert.equal(claim1.claim.continuationId, leaseContinuationId);
   assert.match(claim1.claim.leaseId, /^lease_[a-f0-9]{16}$/);
   assert.match(claim1.claim.prompt, /DEVSPACE_GOAL_CONTINUATION/);
-  assert.match(claim1.claim.prompt, /devspace_goal_round_begin/);
-  assert.match(claim1.claim.prompt, /devspace_goal_turn_report/);
-  assert.match(claim1.claim.prompt, /devspace_goal_turn_report.*before.*visible.*final report/i);
-  assert.match(claim1.claim.prompt, /do not call.*(?:more|additional).*tool.*after.*devspace_goal_turn_report/i);
+  assert.match(claim1.claim.prompt, /devspace_goal_round_begin idempotently, but it is not required/i);
+  assert.match(claim1.claim.prompt, /devspace_goal_turn_report are optional/i);
+  assert.match(claim1.claim.prompt, /Goal remains active\/incomplete.*automatically continue/i);
   assert.match(claim1.claim.prompt, new RegExp(leaseGoal.id));
   assert.match(claim1.claim.prompt, new RegExp(leaseContinuationId));
 
@@ -401,7 +469,7 @@ try {
   assert.match(recovery1.claim.prompt, /DEVSPACE_GOAL_ROUND_RECOVERY/);
   assert.match(recovery1.claim.prompt, /same working round 2/i);
   assert.match(recovery1.claim.prompt, /do not call devspace_goal_round_begin/i);
-  assert.match(recovery1.claim.prompt, /devspace_goal_turn_report/i);
+  assert.match(recovery1.claim.prompt, /no report tool or completed Plan is required/i);
 
   const duplicateRecoveryClaim = await reloaded.claimRoundRecovery({ goalId: raceGoal.id });
   assert.equal(duplicateRecoveryClaim.claimed, false);
@@ -492,8 +560,8 @@ try {
   });
 
   const blockedGoal = await reloaded.start({
-    objective: "Verify strict repeated blocker guard",
-    successCriteria: ["Three reported rounds are required before blocked"],
+    objective: "Verify blocker diagnostics without a continuation threshold",
+    successCriteria: ["Repeated same-blocker rounds remain observable"],
   });
   const blockerText = "Dependency Service Offline";
   let blockedState = await reloaded.turnReport({
@@ -503,8 +571,6 @@ try {
     blockerFingerprint: blockerText,
   });
   assert.equal(blockedState.blocker.consecutiveRounds, 1);
-  await assert.rejects(() => reloaded.markBlocked({ goalId: blockedGoal.id }), /3 consecutive/i);
-
   for (let expectedRound = 2; expectedRound <= 3; expectedRound += 1) {
     const claim = await reloaded.continuation({ goalId: blockedGoal.id, action: "claim" });
     const begun = await reloaded.roundBegin({
@@ -519,9 +585,6 @@ try {
       blockerFingerprint: " dependency   service offline ",
     });
     assert.equal(blockedState.blocker.consecutiveRounds, expectedRound);
-    if (expectedRound < 3) {
-      await assert.rejects(() => reloaded.markBlocked({ goalId: blockedGoal.id }), /3 consecutive/i);
-    }
   }
 
   const blockerClaim = await reloaded.continuation({ goalId: blockedGoal.id, action: "claim" });

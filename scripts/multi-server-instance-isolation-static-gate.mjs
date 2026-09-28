@@ -57,10 +57,8 @@ assert.match(server, /bootstrapTools:\s*\["devspace_progress_report", "devspace_
   "the binding error must expose only tools available in older ChatGPT snapshots");
 assert.match(server, /!instanceBootstrapTool && !conversationStartClaimRelay && !instanceIndependentTool/,
   "workspace and Blender tools must not require an unrelated progress claim");
-assert.match(server, /recoverExistingStateProviderBinding[\s\S]{0,1000}inspectBoundProviderConversationPage/,
-  "an old Goal or Plan snapshot may recover only through a freshly inspected exact local page");
-assert.match(server, /resolveExistingStateRecoveryPage[\s\S]{0,300}progressLivenessAdapter/,
-  "existing Goal/Plan recovery must match the requesting turn to its own active page");
+assert.doesNotMatch(server, /recoverExistingStateProviderBinding|resolveExistingStateRecoveryPage/,
+  "a Goal or Plan ID plus an active page must never bind the current provider request");
 assert.match(server, /EXISTING_GOAL_STATE_TOOLS[\s\S]{0,800}devspace_goal_status/,
   "existing Goal IDs must remain usable without a separate model-visible progress bind");
 assert.match(server, /EXISTING_PLAN_STATE_TOOLS[\s\S]{0,400}devspace_plan_status/,
@@ -83,8 +81,12 @@ assert.match(server, /serverInstanceId:\s*config\.serverInstanceId[\s\S]{0,120}O
   "the live binding registry must receive the current server instance id");
 assert.match(providerBinding, /authenticated-current-invocation-exact-page/,
   "a late exact invocation must bind a rotated provider alias only after local page verification");
-assert.match(providerBinding, /authenticated-existing-state-exact-page-recovery/,
-  "an old Goal or Plan may bridge only after the exact active local page is verified");
+assert.match(providerBinding, /authenticated-conversation-start-claim-exact-page/,
+  "saved Goal/Plan recovery must use the provider identity captured by its own exact start claim");
+assert.match(server, /resolveProviderIdentity:\s*\(\)\s*=>\s*requestConversationContext\?\.current\?\.\(\)\?\.openaiIdentity/,
+  "the start claim must capture the current MCP request provider identity before page recovery");
+assert.match(server, /conversationStartClaimId:\s*claimId/,
+  "the recovered provider identity must be bound only through its matching exact-page claim id");
 assert.match(server, /serverInstanceId:\s*config\.serverInstanceId[\s\S]{0,200}resourceOrigin:/,
   "persisted App origins must be scoped by both server instance and public resource origin");
 assert.match(server, /providerBindings:\s*openaiBindings\.status\(\)/,

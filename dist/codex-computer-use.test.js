@@ -32,6 +32,9 @@ const fakeBridge = {
   async callTool(input, _ownerConversationId, executionOptions = {}) {
     calls.push({ input, executionOptions });
     const code = String(input.arguments.code || "");
+    const stateCode = code.match(/sky\.get_window_state\(([\s\S]*?)\);/);
+    const targetWindow = stateCode ? JSON.parse(stateCode[1]).window : { app: "app-a", id: 1, title: "Window" };
+    const targetApp = String(targetWindow?.app || "app-a");
     let payload = { ok: true };
     if (code.includes("sky.list_apps()")) payload = [{ id: "app-a", windows: [{ app: "app-a", id: 1, title: "Window" }] }];
     if (code.includes("runtime:")) payload = { ok: true, target: "windows", runtime: "@oai/sky", pluginId: CODEX_COMPUTER_USE_PLUGIN_ID };
@@ -44,13 +47,13 @@ const fakeBridge = {
             connector_id: "computer-use",
             connector_name: "Computer Use",
             riskLevel: "low",
-            tool_params: { app: "app-a" },
+            tool_params: { app: targetApp },
           },
         },
       });
       approvals.push(response);
       payload = {
-        window: { app: "app-a", id: 1, title: "Window" },
+        window: targetWindow,
         screenshots: [],
         accessibility: { tree: "[1] document Window" },
       };
@@ -126,9 +129,20 @@ assert.match(calls.at(-1).input.arguments.code, /sky\.click/);
 assert.match(calls.at(-1).input.arguments.code, /"element_index":7/);
 await assert.rejects(() => callCodexComputerUse(deps, { action: "click", input: { window: { app: "app-a", id: 1 } } }), /click requires/);
 await assert.rejects(() => callCodexComputerUse(deps, { action: "type_text", input: { window: { app: "app-a", id: 1 }, text: "" } }), /must not be empty/);
+const classicWindow = { app: "OpenAI.ChatGPT-Desktop_2p2nqsd0c76g0!ChatGPT", id: 5179264, title: "ChatGPT Classic" };
+const classicState = await callCodexComputerUse(deps, {
+  action: "get_window_state",
+  input: { window: classicWindow, include_text: true },
+});
+assert.equal(classicState.ok, true, "explicitly selected ChatGPT Classic desktop windows must be operable through native Computer Use");
+assert.equal(classicState.nativeRuntimeEvidence.approvalRelay.requestedApp, classicWindow.app);
 await assert.rejects(() => callCodexComputerUse(deps, {
   action: "get_window_state",
-  input: { window: { app: "OpenAI.ChatGPT-Desktop_2p2nqsd0c76g0!ChatGPT", id: 2 } },
+  input: { window: { app: "OpenAI.Codex", id: 2, title: "Codex" } },
+}), /prohibited app/i);
+await assert.rejects(() => callCodexComputerUse(deps, {
+  action: "get_window_state",
+  input: { window: { app: "WindowsTerminal.exe", id: 3, title: "Terminal" } },
 }), /prohibited app/i);
 assert.throws(() => validateComputerUseElicitation({
   method: "elicitation/create",

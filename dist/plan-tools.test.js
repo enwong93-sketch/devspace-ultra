@@ -188,10 +188,11 @@ try {
         steps: advancedA.structuredContent.plan.steps.map((step) => ({ ...step, status: "completed" })),
       });
       assert.equal(completedA.structuredContent.plan.status, "completed");
-      assert.match(completedA.content[0].text, /devspace_goal_turn_report.*final tool/i,
-        "Plan completion must tell the model how to close the active Goal round instead of ending the turn early");
-      assert.match(completedA.content[0].text, /fresh devspace_plan_start/i,
-        "the model may explicitly reopen execution only by starting a fresh turn Plan");
+      assert.match(completedA.content[0].text, /exact native assistant-turn end automatically continues an incomplete Goal/i,
+        "the native completed turn is the continuation boundary for an active Goal");
+      assert.match(completedA.content[0].text, /devspace_goal_turn_report is optional/i,
+        "a Goal round report must not be a continuation or end-turn prerequisite");
+      assert.doesNotMatch(completedA.content[0].text, /final tool|must.*report|fresh devspace_plan_start/i);
 
       const startedB = await boundStart.handler({
         title: "Conversation B tool plan",

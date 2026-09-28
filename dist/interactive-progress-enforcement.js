@@ -19,20 +19,6 @@ const SETUP_TOOLS = new Set([
   "request_user_input",
 ]);
 
-const GOAL_ROUND_CLOSURE_ALLOWED_TOOLS = new Set([
-  "devspace_goal_turn_report",
-  "devspace_progress_report",
-  "devspace_goal_status",
-  "devspace_plan_status",
-  "devspace_goal_complete",
-  "devspace_goal_blocked",
-  "devspace_goal_control",
-  "devspace_goal_mount",
-  "devspace_plan_mount",
-  "devspace_plan_start",
-  "request_user_input",
-]);
-
 function cleanText(value, max = 240) {
   const text = String(value ?? "").trim();
   return text ? text.slice(0, max) : null;
@@ -65,27 +51,6 @@ export function isProgressSetupTool(toolName, args) {
   if (isPlanCompletionCall(name, args)) return false;
   if (name === "devspace_update_plan") return true;
   return SETUP_TOOLS.has(name);
-}
-
-export function goalRoundClosureState({ activeGoal = null, activePlan = null, latestPlan = null } = {}) {
-  if (activePlan) return null;
-  if (activeGoal?.status !== "active" || activeGoal?.roundState !== "working") return null;
-  if (!Number.isInteger(activeGoal?.round) || activeGoal.round < 1) return null;
-  if (latestPlan?.status !== "completed" || !latestPlan?.completedAt) return null;
-  if (activeGoal?.conversationId && latestPlan?.conversationId !== activeGoal.conversationId) return null;
-  const roundBeganAtMs = timestampMs(activeGoal.roundBeganAt);
-  const planCreatedAtMs = timestampMs(latestPlan.createdAt);
-  const planCompletedAtMs = timestampMs(latestPlan.completedAt);
-  if (roundBeganAtMs == null || planCreatedAtMs == null || planCompletedAtMs == null) return null;
-  // A prior round's completed Plan must never close a newly begun round. Allow
-  // only a one-second clock-serialization tolerance for the current round.
-  if (planCreatedAtMs < roundBeganAtMs - 1_000 || planCompletedAtMs < roundBeganAtMs - 1_000) return null;
-  return {
-    goalId: cleanText(activeGoal.id, 200),
-    round: activeGoal.round,
-    planId: cleanText(latestPlan.id, 200),
-    planCompletedAt: latestPlan.completedAt,
-  };
 }
 
 function advisory(reason, message, extra = {}, activityAccepted = false) {
@@ -143,7 +108,6 @@ export class InteractiveProgressEnforcementGate {
     toolName,
     args = {},
     activePlan = null,
-    roundClosure = null,
   } = {}) {
     const id = cleanConversationId(conversationId);
     const runtime = cleanRuntimeKey(runtimeKey);
@@ -151,43 +115,6 @@ export class InteractiveProgressEnforcementGate {
     if (!id || !runtime) return { ok: true, enforced: false, activityAccepted: false, reason: "not-exact-main" };
     if (name === "devspace_progress_report") return { ok: true, enforced: true, activityAccepted: false, reason: "progress-tool" };
     const row = this.#ensureTurn(id);
-
-    if (name === "devspace_goal_turn_report" && activePlan) {
-      return advisory(
-        "goal-round-plan-incomplete",
-        `Active Plan ${activePlan.id || "for this turn"} is not completed. This call is continuing, but update every Plan step to completed before treating the Goal round as structurally closed.`,
-        {
-          errorType: "devspace_goal_round_plan_incomplete",
-          planId: activePlan.id || null,
-        },
-      );
-    }
-
-    if (roundClosure) {
-      if (GOAL_ROUND_CLOSURE_ALLOWED_TOOLS.has(name)) {
-        return {
-          ok: true,
-          enforced: true,
-          activityAccepted: false,
-          reason: name === "devspace_goal_turn_report"
-            ? "goal-round-report-tool"
-            : "goal-round-closure-control-tool",
-          ...roundClosure,
-        };
-      }
-      row.substantiveCalls += 1;
-      return advisory(
-        "goal-round-report-required",
-        `Plan ${roundClosure.planId || "for this turn"} is completed while Goal ${roundClosure.goalId || "for this conversation"} round ${roundClosure.round ?? "current"} is still working. Ordinary work continues. If the round is finished, call devspace_goal_turn_report as the final tool and then give one visible final report; if meaningful work remains, start a fresh devspace_plan_start to keep the next phase visible.`,
-        {
-          errorType: "devspace_goal_round_report_required",
-          goalId: roundClosure.goalId || null,
-          round: roundClosure.round ?? null,
-          planId: roundClosure.planId || null,
-        },
-        true,
-      );
-    }
 
     const nowMs = this.now();
     const persistedAtMs = timestampMs(await this.latestProgressAt(id).catch(() => null));
@@ -288,7 +215,6 @@ export class InteractiveProgressEnforcementGate {
 export const interactiveProgressEnforcementInternals = {
   DEFAULT_MAX_SILENT_MS,
   SETUP_TOOLS,
-  GOAL_ROUND_CLOSURE_ALLOWED_TOOLS,
   cleanConversationId,
   cleanRuntimeKey,
   timestampMs,

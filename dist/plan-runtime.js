@@ -177,6 +177,32 @@ export class PlanRuntime {
     return clone(plan);
   }
 
+  async startOrResume({ title, steps, conversationId }) {
+    await this.ready;
+    const normalizedConversationId = normalizeConversationId(conversationId);
+    if (!normalizedConversationId) {
+      throw new Error("Exact-page Plan recovery requires a verified conversation id.");
+    }
+    const active = Object.values(this.state.plans)
+      .filter((plan) => plan?.status === "active" && plan.conversationId === normalizedConversationId)
+      .sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")));
+    if (active.length > 1) {
+      throw new Error(`Conversation ${normalizedConversationId} has multiple active Plans; refusing an ambiguous recovery.`);
+    }
+    if (active.length === 1) return { plan: clone(active[0]), resumed: true };
+    try {
+      return {
+        plan: await this.start({ title, steps, conversationId: normalizedConversationId }),
+        resumed: false,
+      };
+    } catch (error) {
+      const raced = Object.values(this.state.plans)
+        .filter((plan) => plan?.status === "active" && plan.conversationId === normalizedConversationId);
+      if (raced.length === 1) return { plan: clone(raced[0]), resumed: true };
+      throw error;
+    }
+  }
+
   async update({ planId, explanation, steps }) {
     await this.ready;
     const id = String(planId ?? "");

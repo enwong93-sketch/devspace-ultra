@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import test from 'node:test';
 import { mkdtemp, rm, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -574,6 +575,78 @@ test('restart repairs the current human-started round boundary without replaying
   assert.equal(restarted.records.get(id).manualUserObservedAt,observedAt);
   assert.equal(h.sends(),1,'round-boundary repair must not replay hidden delivery');
   await restarted.close();
+});
+
+test('a native assistant turn end auto-arms next-round continuation without a visible report', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'devspace-goal-native-final-test-'));
+  let now = Date.parse('2026-09-29T01:00:00.000Z');
+  const runtime = new GoalRuntime({ stateDir: root, now: () => now });
+  const goal = await runtime.start({
+    conversationId: 'conversation-native-auto-final',
+    objective: 'Continue the active Goal after a completed assistant turn',
+    successCriteria: ['The Goal remains active until its criteria are met'],
+  });
+  const assistantText = 'Visible final response; the requested Goal is not yet complete.';
+  const nativeCompletion = {
+    source: 'native-assistant-turn-final',
+    conversationId: goal.conversationId,
+    runtimeKey: 'main-03',
+    pageTargetId: 'page-main-03',
+    sourceUserMessageId: 'user-native-final',
+    assistantMessageId: 'assistant-native-final',
+    assistantTextHash: createHash('sha256').update(assistantText).digest('hex'),
+    assistantCreatedAt: new Date(now).toISOString(),
+  };
+  const closed = await runtime.autoCompleteAssistantTurn({ goalId: goal.id, nativeCompletion });
+  assert.equal(closed.continued, true);
+  const page = {
+    conversationId: goal.conversationId,
+    runtimeKey: 'main-03',
+    pageTargetId: 'page-main-03',
+    latestUserMessageId: nativeCompletion.sourceUserMessageId,
+    latestMessageRole: 'assistant',
+    latestAssistantMessageId: nativeCompletion.assistantMessageId,
+    latestAssistantText: assistantText,
+    chatMode: true,
+    generating: false,
+    streamStatus: 'COMPLETE',
+    safetyCheckVisible: false,
+    deliveryTimeoutVisible: false,
+    retryVisible: false,
+  };
+  let sends = 0;
+  let sentProof = null;
+  const driver = new GoalContinuationSupervisor({
+    goalRuntime: runtime,
+    statePath: join(root, 'native-final-driver.json'),
+    now: () => now,
+    settleMs: 0,
+    inspect: async () => [structuredClone(page)],
+    dispatch: async payload => {
+      sends += 1;
+      sentProof = payload.nativeCompletionProof;
+      return {
+        ok: true,
+        dispatchCommitted: true,
+        backgroundAccepted: true,
+        visibilityVerified: false,
+        visibleUserMessage: false,
+        composerMutation: false,
+      };
+    },
+  });
+  t.after(async () => { await driver.close(); await runtime.close(); await rm(root, { recursive: true, force: true }); });
+  const armed = await driver.arm(closed.goal, { resume: true });
+  assert.equal(armed.armed, true);
+  await driver.pollOnce();
+  now += 1;
+  await driver.pollOnce();
+  assert.equal(sends, 1);
+  assert.equal(sentProof.assistantMessageId, nativeCompletion.assistantMessageId);
+  const continued = await runtime.status(goal.id);
+  assert.equal(continued.round, 2);
+  assert.equal(continued.roundState, 'working');
+  assert.equal(continued.status, 'active');
 });
 
 test('stale display syncing to an already captured user does not masquerade as new input',async t=>{

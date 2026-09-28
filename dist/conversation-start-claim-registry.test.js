@@ -19,6 +19,7 @@ const authority = {
   observedAt: new Date(now).toISOString(),
   pageVerified: true,
 };
+const providerIdentity = { version: 1, key: "c".repeat(64) };
 
 const created = registry.create({
   toolName: "devspace_goal_start",
@@ -26,22 +27,33 @@ const created = registry.create({
     objective: "Keep the real objective private inside the bounded claim registry",
     successCriteria: ["Bind to the exact page"],
   },
+  providerIdentity,
 });
 assert.equal(created.toolName, "devspace_goal_start");
 assert.equal(created.state, "pending");
 assert.equal(registry.pendingClaims()[0]?.claimId, created.claimId);
 assert.equal(JSON.stringify(created).includes("real objective"), false);
+assert.equal(JSON.stringify(created).includes(providerIdentity.key), false,
+  "the public claim must not expose its hashed provider identity");
 assert.equal(registry.inspect({ claimId: created.claimId, toolName: "devspace_plan_start" }), null,
   "a claim must never be redeemable through a different start tool");
+assert.equal(JSON.stringify(registry.pendingClaims()).includes(providerIdentity.key), false,
+  "pending claim diagnostics must not expose the provider identity hash");
 
+let claimedProviderIdentity = null;
 const completed = await registry.claim({
   claimId: created.claimId,
   toolName: "devspace_goal_start",
   authority,
-  complete: async ({ input, authority: owner }) => ({
-    goal: { id: "goal-a", conversationId: owner.conversationId, objective: input.objective },
-  }),
+  complete: async ({ input, authority: owner, providerIdentity: identity }) => {
+    claimedProviderIdentity = identity;
+    return {
+      goal: { id: "goal-a", conversationId: owner.conversationId, objective: input.objective },
+    };
+  },
 });
+assert.deepEqual(claimedProviderIdentity, providerIdentity,
+  "the exact-page completion callback may bind only the hashed identity captured by the original request");
 assert.equal(completed.goal.conversationId, "conversation-main-03");
 assert.equal(registry.pendingClaims().some((item) => item.claimId === created.claimId), false);
 assert.equal(registry.inspect({ claimId: created.claimId, toolName: "devspace_goal_start" }).completed, true);

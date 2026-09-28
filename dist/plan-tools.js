@@ -43,6 +43,7 @@ const planStartOutputSchema = {
   plan: planSchema.optional(),
   pending: z.boolean().optional(),
   claimed: z.boolean().optional(),
+  resumed: z.boolean().optional(),
   claimId: z.string().optional(),
   conversationStartClaim: conversationStartClaimSchema.optional(),
   nextAction: z.object({ tool: z.literal("devspace_plan_start"), claimId: z.string() }).optional(),
@@ -93,6 +94,8 @@ export function registerPlanTools(server, planRuntime, {
   startClaimRegistry = null,
   claimRelayResourceUri = null,
   resolveStartClaimPage = null,
+  completeStartClaim = null,
+  resolveProviderIdentity = null,
   resolveActiveGoal = null,
 } = {}) {
   if (!resourceUri) throw new Error("registerPlanTools requires resourceUri.");
@@ -143,8 +146,10 @@ export function registerPlanTools(server, planRuntime, {
         });
         if (!existing) throw new Error("Plan start claim is unavailable or expired.");
         if (existing.completed && existing.result?.plan) {
-          return textResult(existing.result.plan, `Started plan ${existing.result.plan.id}: ${existing.result.plan.title}`, {
+          const resumed = existing.result.resumed === true;
+          return textResult(existing.result.plan, `${resumed ? "Resumed" : "Started"} plan ${existing.result.plan.id}: ${existing.result.plan.title}`, {
             claimed: true,
+            resumed,
             claimId: relayClaimId,
           });
         }
@@ -153,20 +158,26 @@ export function registerPlanTools(server, planRuntime, {
           resolved = await resolveStartClaimPage(relayClaimId);
         }
         if (!resolved?.conversationId) return pendingStartResult(existing);
-        const claimed = await startClaimRegistry.claim({
-          claimId: relayClaimId,
-          toolName: "devspace_plan_start",
-          authority: resolved,
-          complete: async ({ input, authority }) => ({
-            plan: await planRuntime.start({
-              title: input.title,
-              steps: input.steps,
-              conversationId: authority.conversationId,
-            }),
-          }),
-        });
-        return textResult(claimed.plan, `Started plan ${claimed.plan.id}: ${claimed.plan.title}`, {
+        const claimed = typeof completeStartClaim === "function"
+          ? await completeStartClaim({ claimId: relayClaimId, toolName: "devspace_plan_start", authority: resolved })
+          : await startClaimRegistry.claim({
+              claimId: relayClaimId,
+              toolName: "devspace_plan_start",
+              authority: resolved,
+              complete: async ({ input, authority }) => {
+                const start = await planRuntime.startOrResume({
+                  title: input.title,
+                  steps: input.steps,
+                  conversationId: authority.conversationId,
+                });
+                return { plan: start.plan, resumed: start.resumed };
+              },
+            });
+        if (!claimed?.plan) throw new Error("Exact-page Plan recovery did not return a Plan.");
+        const resumed = claimed.resumed === true;
+        return textResult(claimed.plan, `${resumed ? "Resumed" : "Started"} plan ${claimed.plan.id}: ${claimed.plan.title}`, {
           claimed: true,
+          resumed,
           claimId: relayClaimId,
         });
       }
@@ -179,9 +190,13 @@ export function registerPlanTools(server, planRuntime, {
         if (!startClaimRegistry || !claimRelayResourceUri) {
           throw new Error("ChatGPT Classic conversation identity is unresolved; refusing to create an unbound Plan.");
         }
+        const providerIdentity = typeof resolveProviderIdentity === "function"
+          ? resolveProviderIdentity(extra)
+          : null;
         const claim = startClaimRegistry.create({
           toolName: "devspace_plan_start",
           input: { title, steps },
+          providerIdentity,
         });
         return pendingStartResult(claim);
       }
@@ -194,7 +209,7 @@ export function registerPlanTools(server, planRuntime, {
 
   registerAppTool(server, "devspace_update_plan", {
     title: "Update DevSpace Plan",
-    description: "Keep the current turn-scoped DevSpace execution plan current as work advances or scope changes. Mark the current in-progress step completed before moving the next step to in_progress, and complete every step before devspace_goal_turn_report in Goal Mode or before the final response in an ordinary turn. This updates backend state only and does not mount another card.",
+    description: "Keep the current turn-scoped DevSpace execution plan current as work advances or scope changes. Mark the current in-progress step completed before moving the next step to in_progress. In Goal Mode, devspace_goal_turn_report is an optional checkpoint, not a prerequisite for ending the turn or continuing the Goal. Complete ordinary-turn plans before the final response. This updates backend state only and does not mount another card.",
     inputSchema: {
       planId: z.string().min(1),
       explanation: z.string().min(1).max(2_000).optional(),
@@ -223,7 +238,7 @@ export function registerPlanTools(server, planRuntime, {
           && Number.isFinite(planCompletedAt)
           && planCompletedAt >= goalRoundBeganAt - 1_000
         ) {
-          message += ` Plan work is complete while Goal ${goal.id} round ${goal.round} remains working. If this round is finished, call devspace_goal_turn_report as the final tool now and then give one visible final report. If meaningful work remains, start a fresh devspace_plan_start before any other substantive tool.`;
+          message += ` Plan work is complete while Goal ${goal.id} round ${goal.round} remains active. The exact native assistant-turn end automatically continues an incomplete Goal; devspace_goal_turn_report is optional. Continue the requested work normally if anything remains.`;
         }
       }
       return textResult(plan, message);

@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { cleanOpenaiIdentity } from "./openai-conversation-binding.js";
 
 const DEFAULT_TTL_MS = 2 * 60_000;
 const DEFAULT_MAX_CLAIMS = 64;
@@ -96,7 +97,7 @@ export class ConversationStartClaimRegistry {
     this.rejected = 0;
   }
 
-  create({ toolName, input } = {}) {
+  create({ toolName, input, providerIdentity = null } = {}) {
     this.prune();
     const tool = cleanText(toolName, 220);
     if (!ALLOWED_TOOLS.has(tool)) throw new Error("Conversation start claim tool is not allowed.");
@@ -112,6 +113,7 @@ export class ConversationStartClaimRegistry {
       claimId,
       toolName: tool,
       input: clone(input),
+      providerIdentity: cleanOpenaiIdentity(providerIdentity),
       createdAtMs,
       expiresAtMs: createdAtMs + this.ttlMs,
       state: "pending",
@@ -168,6 +170,7 @@ export class ConversationStartClaimRegistry {
         toolName: record.toolName,
         input: originalInput,
         authority: clone(owner),
+        providerIdentity: clone(record.providerIdentity),
       }))
       .then((result) => {
         record.state = "completed";

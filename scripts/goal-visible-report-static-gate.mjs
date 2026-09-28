@@ -11,20 +11,24 @@ assert.match(bridge, /latestAssistantText/);
 assert.match(bridge, /streamStatus/);
 assert.match(bridge, /reportedAt/);
 assert.match(bridge, /minimumReportSettleMs/);
-assert.match(bridge, /await this\.waitForVisibleReport\(matching, payload\)/);
+assert.match(bridge, /matchesNativeGoalCompletionBoundary/);
+assert.match(bridge, /if \(nativeCompletionProof\)/,
+  "automatic continuation validates the persisted native final rather than demanding a model-authored report");
+assert.match(bridge, /boundary = await this\.waitForVisibleReport\(matching, payload\)/,
+  "the optional legacy report path remains available without being the automatic path");
 const normalDispatchStart = bridge.indexOf("async dispatch({ goalId");
 assert.ok(normalDispatchStart >= 0, "Normal Goal continuation dispatch method must exist.");
 const normalDispatch = bridge.slice(normalDispatchStart);
 assert.ok(
-  normalDispatch.indexOf("await this.waitForVisibleReport(matching, payload)") < normalDispatch.indexOf("await this.sendRaw(matching"),
-  "Visible report commit gate must run before raw hidden continuation dispatch.",
+  normalDispatch.indexOf("if (nativeCompletionProof)") < normalDispatch.indexOf("await this.sendRaw(matching"),
+  "the exact native-final path must validate its handoff before raw hidden continuation dispatch.",
 );
-assert.match(tools, /reportedAt:\s*claimed\.goal\?\.lastRoundReport\?\.reportedAt/);
+assert.match(tools, /Optional checkpoint for a Goal round/i);
 
 console.log(JSON.stringify({
   ok: true,
   gate: "goal-visible-report-static",
-  serverCompleteRequired: true,
-  visibleAssistantRequired: true,
-  reportTimestampPropagated: true,
+  nativeAssistantFinalRequired: true,
+  modelReportRequired: false,
+  optionalManualReportRetained: true,
 }));

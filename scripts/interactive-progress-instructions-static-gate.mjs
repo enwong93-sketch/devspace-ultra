@@ -42,8 +42,8 @@ assert.doesNotMatch(source, /serverInstructions\(config\)\.replace\(/,
   "published model instructions must contain the advisory contract directly rather than mutating it with a runtime regex");
 assert.doesNotMatch(source, /if \(progressGate\?\.ok === false && progressGate\?\.blocked === true\)/,
   "a late or pending narration must not reject an ordinary MCP tool call");
-assert.match(source, /goalRoundClosureState/,
-  "Goal round guidance still derives from persisted Goal and Plan state");
+assert.doesNotMatch(source, /goalRoundClosureState/,
+  "ordinary MCP tool calls no longer derive a Goal closure gate from Plan state");
 assert.match(source, /interactiveProgressGate\.beforeTool/);
 assert.match(source, /progressGate\?\.activityAccepted === true/,
   "actual substantive work advances the exact conversation rescue clock");
@@ -84,12 +84,8 @@ assert.match(enforcement, /second-substantive-tool-requires-progress/);
 assert.match(enforcement, /progress-preflight-required/);
 assert.match(enforcement, /final-progress-required/);
 assert.match(enforcement, /final-progress-stale/);
-assert.match(enforcement, /goal-round-plan-incomplete/);
-assert.match(enforcement, /goal-round-report-required/);
-assert.match(enforcement, /devspace_goal_round_report_required/,
-  "completed turn Plans still produce a Goal round advisory");
-assert.match(enforcement, /GOAL_ROUND_CLOSURE_ALLOWED_TOOLS/);
-assert.match(enforcement, /devspace_goal_turn_report as the final tool/);
+assert.doesNotMatch(enforcement, /goal-round-plan-incomplete|goal-round-report-required|GOAL_ROUND_CLOSURE_ALLOWED_TOOLS/,
+  "Goal turn reports and completed Plans no longer create a separate program gate");
 assert.match(enforcement, /maxSilentMs/);
 assert.match(enforcement, /activityAccepted:\s*false/,
   "setup/control calls stay outside rescue-clock activity");
