@@ -106,6 +106,9 @@ try {
   const reportTool = listed.body?.result?.tools?.find((tool) => tool.name === "devspace_progress_report");
   assert.equal(reportTool?._meta?.ui?.resourceUri, "ui://devspace/progress-claim-relay.html",
     "the existing report tool must mount its own exact-page bootstrap relay");
+  const legacyBindTool = listed.body?.result?.tools?.find((tool) => tool.name === "devspace_progress_bind");
+  assert.deepEqual(legacyBindTool?._meta?.ui?.visibility, ["app"],
+    "the legacy bind endpoint may remain callable for cached App relays but must not be model-visible");
 
   const resourceResult = await post({
     jsonrpc: "2.0", id: 2, method: "resources/read",
@@ -178,7 +181,14 @@ try {
   assert.equal(denied.body?.error?.data?.resource, resource.toString());
   assert.equal(denied.body?.error?.data?.bootstrapTools.includes("devspace_progress_report"), true);
 
-  console.log(JSON.stringify({ ok: true, gate: "server-instance-isolation", workspaceAvailableWithoutClaim: true, blenderAvailableWithoutClaim: true, capabilityMetadataAvailableWithoutClaim: true, liveCapabilityProbeRequiresExactPage: true, conversationStateRequiresExactPage: true, tokenBoundAppOriginProbe: true }));
+  const existingGoal = await post({
+    jsonrpc: "2.0", id: 16, method: "tools/call",
+    params: { name: "devspace_goal_status", arguments: { goalId: "goal_aaaaaaaaaaaaaaaa" } },
+  }, sessionId, protocolVersion);
+  assert.equal(existingGoal.body?.error?.code, -32031,
+    "an opaque-looking but nonexistent Goal ID must never become conversation authority by itself");
+
+  console.log(JSON.stringify({ ok: true, gate: "server-instance-isolation", workspaceAvailableWithoutClaim: true, blenderAvailableWithoutClaim: true, capabilityMetadataAvailableWithoutClaim: true, liveCapabilityProbeRequiresExactPage: true, newConversationStateRequiresExactPage: true, opaqueGoalIdNotAuthority: true, legacyBindAppOnly: true, tokenBoundAppOriginProbe: true }));
 } finally {
   if (httpServer) {
     const closed = new Promise((resolve) => httpServer.close(resolve));

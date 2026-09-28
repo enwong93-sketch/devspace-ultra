@@ -24,7 +24,7 @@ Infrastructure checks are prerequisites, not the product goal. Resume at the ear
 2. Prepare or verify local Gateway/Core and the public OAuth-protected `/mcp` endpoint.
 3. In **ChatGPT Classic**, enable Developer mode, create the exact MCP connection and complete OAuth.
    - Confirm the connection URL is this machine's exact public `/mcp` resource and its reported `serverInstanceId` matches this installation. A similarly named connection for another computer is a separate authority.
-   - When a new conversation's first progress report returns a pending claim, have that Agent call the returned one-time `devspace_progress_bind` action. Later tools reuse the verified provider-conversation binding after a fresh exact-page check; the user need not pair each conversation manually.
+   - A new conversation's first `devspace_progress_report` may briefly return `pending=true` while the hidden exact-page relay confirms ownership. Do **not** ask the Agent or user to call `devspace_progress_bind`; continue unrelated safe workspace work and verify the narration card before claiming the report succeeded. The legacy bind handler exists only for cached hidden-App compatibility.
 4. Scan or refresh the authenticated tool catalogue and verify all required development tools.
 5. Enable the connection in a fresh ChatGPT Classic conversation.
 6. Run a real read test.

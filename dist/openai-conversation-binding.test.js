@@ -4,7 +4,8 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openaiConversationIdentity as identity, OpenaiConversationBindings, localBindingAuthorized,
-  inspectExactConversationPage, OPENAI_CONVERSATION_PAGE_SOURCE, verifiedLocalProviderBinding } from './openai-conversation-binding.js';
+  inspectExactConversationPage, OPENAI_CONVERSATION_PAGE_SOURCE, resolveExistingStateRecoveryPage,
+  verifiedLocalProviderBinding } from './openai-conversation-binding.js';
 const request = { auth: { resource: 'https://owned.example/mcp', clientId: 'oauth-client' },
   meta: { 'openai/session': 'opaque-conversation-one', 'openai/subject': 'opaque-user-one', 'openai/organization': 'org-one' } };
 const proof = { conversationId: 'conversation-exact-a', runtimeKey: 'main-02', pageVerified: true,
@@ -86,6 +87,100 @@ test('a late exact invocation binds a rotated provider alias for the same physic
   })), null, 'another server resource cannot borrow this provider alias binding');
   const persisted = JSON.parse(await readFile(statePath, 'utf8'));
   assert.equal(persisted.bindings.some((row) => row.provenance === 'authenticated-current-invocation-exact-page'), true);
+});
+
+test('an old Goal or Plan can recover its own provider alias only from one exact local page', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'provider-existing-state-recovery-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  let exact = true;
+  const registry = new OpenaiConversationBindings({
+    statePath: join(root, 'bindings.json'),
+    inspect: async (runtimeKey, conversationId) => exact ? { runtimeKey, conversationId, pageVerified: true } : null,
+    serverInstanceId: serverInstanceA,
+  });
+  const id = identity(request);
+  const recoveryProof = {
+    conversationId: proof.conversationId,
+    runtimeKey: proof.runtimeKey,
+    pageVerified: true,
+    source: OPENAI_CONVERSATION_PAGE_SOURCE,
+    existingStateRecovery: true,
+  };
+  assert.equal(await registry.bind(id, recoveryProof), null,
+    'the public caller must explicitly select existing-state recovery');
+  assert.equal(await registry.bind(id, { ...recoveryProof, existingStateRecovery: false }, { existingStateRecovery: true }), null,
+    'the internal recovery caller cannot bind without the exact-state proof bit');
+  assert.equal((await registry.bind(id, recoveryProof, { existingStateRecovery: true }))?.bound, true);
+  assert.equal((await registry.resolve(id))?.conversationId, proof.conversationId);
+  const persisted = JSON.parse(await readFile(join(root, 'bindings.json'), 'utf8'));
+  assert.equal(persisted.bindings[0]?.provenance, 'authenticated-existing-state-exact-page-recovery');
+  exact = false;
+  assert.equal(await registry.resolve(id), null,
+    'the recovered provider alias stops working as soon as the exact local page disappears');
+});
+
+test('existing-state recovery also matches the one active page to the stored Goal or Plan', async () => {
+  const expected = { conversationId: proof.conversationId, runtimeKey: proof.runtimeKey };
+  let activePage = {
+    ...expected,
+    exact: true,
+    pageVerified: true,
+    uniqueActiveConversation: true,
+    generating: true,
+    hasTurnError: false,
+  };
+  let activeOptions = null;
+  const progressLivenessAdapter = {
+    find: async ({ conversationId }) => ({ ...expected, conversationId, exact: true }),
+    findUniqueActiveConversation: async (options) => {
+      activeOptions = options;
+      return activePage;
+    },
+  };
+  const common = {
+    target: { kind: 'goal', id: 'goal_aaaaaaaaaaaaaaaa' },
+    goalRuntime: { status: async () => ({ conversationId: proof.conversationId }) },
+    planRuntime: { status: async () => null },
+    progressLivenessAdapter,
+    inspectPage: async (runtimeKey, conversationId) => ({
+      runtimeKey, conversationId, pageVerified: true, source: OPENAI_CONVERSATION_PAGE_SOURCE,
+    }),
+  };
+
+  const recovered = await resolveExistingStateRecoveryPage(common);
+  assert.equal(recovered?.existingStateRecovery, true);
+  assert.equal(recovered?.conversationId, proof.conversationId);
+  assert.deepEqual(activeOptions, {
+    requireGenerating: true,
+    allowIncompleteUserTurn: false,
+    requireProgressCard: false,
+  });
+
+  activePage = { ...activePage, conversationId: 'conversation-other' };
+  assert.equal(await resolveExistingStateRecoveryPage(common), null,
+    'a different active Classic page cannot recover this Goal provider alias');
+
+  activePage = { ...activePage, conversationId: proof.conversationId, exact: false, ambiguous: true };
+  assert.equal(await resolveExistingStateRecoveryPage(common), null,
+    'ambiguous current Classic pages do not establish provider identity');
+
+  activePage = {
+    ...activePage,
+    exact: true,
+    ambiguous: false,
+    uniqueActiveConversation: true,
+    conversationId: proof.conversationId,
+    runtimeKey: proof.runtimeKey,
+    generating: true,
+  };
+  const recoveredPlan = await resolveExistingStateRecoveryPage({
+    ...common,
+    target: { kind: 'plan', id: 'plan_bbbbbbbbbbbbbbbb' },
+    goalRuntime: { status: async () => null },
+    planRuntime: { status: async () => ({ conversationId: proof.conversationId }) },
+  });
+  assert.equal(recoveredPlan?.existingStateRecovery, true,
+    'an existing Plan may use the same exact active-page recovery path');
 });
 
 test('conflicting provider-to-URL proof is quarantined, not last-writer-wins', async () => {

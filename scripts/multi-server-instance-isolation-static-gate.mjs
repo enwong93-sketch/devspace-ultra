@@ -57,6 +57,18 @@ assert.match(server, /bootstrapTools:\s*\["devspace_progress_report", "devspace_
   "the binding error must expose only tools available in older ChatGPT snapshots");
 assert.match(server, /!instanceBootstrapTool && !conversationStartClaimRelay && !instanceIndependentTool/,
   "workspace and Blender tools must not require an unrelated progress claim");
+assert.match(server, /recoverExistingStateProviderBinding[\s\S]{0,1000}inspectBoundProviderConversationPage/,
+  "an old Goal or Plan snapshot may recover only through a freshly inspected exact local page");
+assert.match(server, /resolveExistingStateRecoveryPage[\s\S]{0,300}progressLivenessAdapter/,
+  "existing Goal/Plan recovery must match the requesting turn to its own active page");
+assert.match(server, /EXISTING_GOAL_STATE_TOOLS[\s\S]{0,800}devspace_goal_status/,
+  "existing Goal IDs must remain usable without a separate model-visible progress bind");
+assert.match(server, /EXISTING_PLAN_STATE_TOOLS[\s\S]{0,400}devspace_plan_status/,
+  "existing Plan IDs must remain usable without a separate model-visible progress bind");
+assert.match(server, /const existingStateTarget = existingConversationStateTarget/,
+  "existing state recovery must be invoked only for the declared Goal/Plan tool shape");
+assert.match(server, /!instanceBootstrapTool && !conversationStartClaimRelay && !instanceIndependentTool\)/,
+  "new unowned state still requires exact page proof after existing-state recovery has been resolved");
 assert.match(server, /const staticCapabilityInspect = requestedToolName === "capability_inspect"[\s\S]{0,100}probeMcp !== true/,
   "static capability inspection must remain usable while live MCP probing stays conversation-scoped");
 assert.match(server, /"capability_list", "capability_search", "capability_read"/,
@@ -71,6 +83,8 @@ assert.match(server, /serverInstanceId:\s*config\.serverInstanceId[\s\S]{0,120}O
   "the live binding registry must receive the current server instance id");
 assert.match(providerBinding, /authenticated-current-invocation-exact-page/,
   "a late exact invocation must bind a rotated provider alias only after local page verification");
+assert.match(providerBinding, /authenticated-existing-state-exact-page-recovery/,
+  "an old Goal or Plan may bridge only after the exact active local page is verified");
 assert.match(server, /serverInstanceId:\s*config\.serverInstanceId[\s\S]{0,200}resourceOrigin:/,
   "persisted App origins must be scoped by both server instance and public resource origin");
 assert.match(server, /providerBindings:\s*openaiBindings\.status\(\)/,

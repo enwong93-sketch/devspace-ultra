@@ -86,7 +86,7 @@ import { registerToolchainTools } from "./toolchain-tools.js";
 import { registerUnifiedRoutingTool } from "./unified-routing-tools.js";
 import { retiredToolCallResult } from "./retired-tool-compat.js";
 import { EXACT_CONVERSATION_REQUEST_PROOF, EXACT_PAGE_CLAIM_PROOF, isProjectableProgressMessage } from "./progress-ownership-proof.js";
-import { OpenaiConversationBindings, openaiConversationIdentity, OPENAI_CONVERSATION_PAGE_SOURCE, inspectExactConversationPage, localBindingAuthorized, verifiedLocalProviderBinding } from './openai-conversation-binding.js';
+import { OpenaiConversationBindings, openaiConversationIdentity, OPENAI_CONVERSATION_PAGE_SOURCE, inspectExactConversationPage, localBindingAuthorized, resolveExistingStateRecoveryPage, verifiedLocalProviderBinding } from './openai-conversation-binding.js';
 import { ProgressClaimRegistry } from "./progress-claim-registry.js";
 import { workspaceDiscoveryView } from './workspace-discovery-view.js';
 import { ProgressBootstrapAuthorityRegistry, PROGRESS_CAPABILITY_PAGE_SOURCE, resolveRequestCapabilityAuthority } from "./progress-bootstrap-authority.js";
@@ -118,6 +118,25 @@ const CHAT_SWARM_UI_DIAGNOSTICS = {
     mcpMethodCounts: {},
 };
 const MCP_CONVERSATION_CORRELATION_TIMEOUT_MS = 6_000;
+const EXISTING_GOAL_STATE_TOOLS = new Set([
+    "devspace_goal_status", "devspace_goal_round_begin",
+    "devspace_goal_turn_report", "devspace_goal_complete",
+    "devspace_goal_blocked", "devspace_goal_control",
+    "devspace_goal_continuation", "devspace_goal_mount",
+]);
+const EXISTING_PLAN_STATE_TOOLS = new Set([
+    "devspace_update_plan", "devspace_plan_status", "devspace_plan_mount",
+]);
+function existingConversationStateTarget(toolName, args = {}) {
+    const name = String(toolName || "").trim();
+    const isGoal = EXISTING_GOAL_STATE_TOOLS.has(name);
+    const isPlan = EXISTING_PLAN_STATE_TOOLS.has(name);
+    if (!isGoal && !isPlan) return null;
+    const id = String(isGoal ? args?.goalId : args?.planId || "").trim();
+    const prefix = isGoal ? "goal" : "plan";
+    if (!new RegExp(`^${prefix}_[a-f0-9]{16,}$`, "i").test(id)) return null;
+    return { kind: isGoal ? "goal" : "plan", id };
+}
 function normalizeRelayAppSandboxOrigin(value) {
     try {
         const parsed = new URL(String(value || ""));
@@ -1368,7 +1387,7 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
     });
     registerAppTool(server, "devspace_progress_bind", {
         title: "Bind Pending Conversation Progress",
-        description: "Bootstrap exact ChatGPT Classic page ownership only when devspace_progress_report returns pending=true and explicitly requests this tool. Call once with that opaque claimId; ordinary progress reports must never call it because each bootstrap mounts one short-lived hidden relay App.",
+        description: "Legacy hidden-App compatibility endpoint for exact-page progress bootstrap. Agents and users must not call this tool manually; devspace_progress_report completes pending first-use ownership automatically. Older cached App relays may still invoke this handler with their opaque claimId.",
         inputSchema: {
             claimId: z.string().min(16).max(200),
         },
@@ -1390,7 +1409,7 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
         _meta: {
             ui: {
                 resourceUri: PROGRESS_CLAIM_RELAY_URI,
-                visibility: ["model"],
+                visibility: ["app"],
             },
         },
     }, async ({ claimId }) => {
@@ -2529,6 +2548,23 @@ export function createServer(config = loadConfig(), options = {}) {
         inspect: inspectBoundProviderConversationPage,
         serverInstanceId: config.serverInstanceId,
     });
+    const recoverExistingStateProviderBinding = async ({ providerIdentity, target } = {}) => {
+        if (!providerIdentity || !target?.id) return null;
+        const proof = await resolveExistingStateRecoveryPage({
+            target,
+            goalRuntime,
+            planRuntime,
+            progressLivenessAdapter,
+            inspectPage: inspectBoundProviderConversationPage,
+        });
+        if (!proof) return null;
+        const bound = await openaiBindings.bind(providerIdentity, {
+            ...proof,
+            existingStateRecovery: true,
+        }, { existingStateRecovery: true });
+        if (!bound) return null;
+        return await openaiBindings.resolve(providerIdentity);
+    };
     const progressBootstrapAuthority = new ProgressBootstrapAuthorityRegistry();
     const conversationStartClaimRegistry = new ConversationStartClaimRegistry();
     const conversationStartClaimCdp = new ConversationStartClaimCdpResolver({ ports: classicCdpOptions.ports });
@@ -3783,6 +3819,10 @@ export function createServer(config = loadConfig(), options = {}) {
                 "capability_list", "capability_search", "capability_read",
                 "toolchain_status", "current_time", "codex_mcp_catalog",
             ]).has(requestedToolName);
+            const existingStateTarget = existingConversationStateTarget(
+                requestedToolName,
+                req?.body?.params?.arguments || {},
+            );
             const conversationStartClaimRelay = Boolean(
                 (requestedToolName === "devspace_progress_bind")
                 || (["devspace_goal_start", "devspace_plan_start"].includes(requestedToolName)
@@ -3809,7 +3849,13 @@ export function createServer(config = loadConfig(), options = {}) {
                         observedAt: new Date().toISOString(),
                     });
                     const providerIdentity = requestProviderIdentity;
-                    const providerAuthority = await openaiBindings.resolve(providerIdentity);
+                    let providerAuthority = await openaiBindings.resolve(providerIdentity);
+                    if (!verifiedLocalProviderBinding(providerAuthority, providerIdentity) && existingStateTarget) {
+                        providerAuthority = await recoverExistingStateProviderBinding({
+                            providerIdentity,
+                            target: existingStateTarget,
+                        }) || providerAuthority;
+                    }
                     if (providerAuthority) providerAuthority.callFingerprint = requestCallFingerprint;
                     if (verifiedLocalProviderBinding(providerAuthority, providerIdentity)) return { conversationId: providerAuthority.conversationId,
                         capabilityAuthority: providerAuthority, progressAuthority: providerAuthority,

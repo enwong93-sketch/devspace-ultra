@@ -27,6 +27,9 @@ assert.match(source, /Write the card text yourself in natural language/i);
 assert.match(source, /never show generated step counters, heartbeat prose, generic program status/i);
 assert.match(source, /registerAppTool\(server, "devspace_progress_report"/);
 assert.match(source, /registerAppTool\(server, "devspace_progress_bind"/);
+assert.match(source, /registerAppTool\(server, "devspace_progress_bind"[\s\S]{0,2400}visibility:\s*\["app"\]/,
+  "the legacy progress-bind endpoint must remain hidden-App compatibility rather than a model-visible workflow requirement");
+assert.match(source, /Agents and users must not call this tool manually/i);
 assert.match(source, /resourceUri: PROGRESS_CLAIM_RELAY_URI/,
   "the first report must carry its own exact-page relay, even with an older host tool snapshot");
 assert.match(source, /Never ask the user to pair a conversation or rely on a separate devspace_progress_bind tool/);
