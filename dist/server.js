@@ -1275,9 +1275,15 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
                     && progressClaimRegistry.claimIdentity(relayClaimId)?.key !== resolved.providerConversationKey) {
                     throw new Error('A provider-bound request cannot redeem another conversation identity claim.');
                 }
-                const relayAuthority = resolved?.conversationId
-                    ? resolved
-                    : await resolveProgressClaimPage?.(relayClaimId);
+                // A provider binding identifies the conversation, but does
+                // not prove which tool-result iframe received this claim. In
+                // particular it has no claimId, so passing it to the claim
+                // registry strands a pending report after the first bind.
+                const relayAuthority = await resolveProgressClaimPage?.(relayClaimId);
+                if (resolved?.conversationId && relayAuthority?.conversationId
+                    && resolved.conversationId !== relayAuthority.conversationId) {
+                    throw new Error('The progress claim belongs to another Classic conversation page.');
+                }
                 const result = await progressClaimRegistry.claim({
                     claimId: relayClaimId,
                     authority: relayAuthority,

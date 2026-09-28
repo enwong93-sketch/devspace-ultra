@@ -57,6 +57,10 @@ assert.match(server, /progressClaimRegistry\.claim\(/);
 assert.match(server, /ConversationStartClaimCdpResolver/,
   "pending narration must recover exact page ownership from the mounted claim iframe when app callTool has no request correlation");
 assert.match(server, /resolveProgressClaimPage\?\.\(relayClaimId\)/);
+assert.match(progressReportBlock, /const relayAuthority = await resolveProgressClaimPage\?\.\(relayClaimId\)/,
+  "a provider-bound conversation must still prove the exact iframe that received this claim");
+assert.doesNotMatch(progressReportBlock, /resolved\?\.conversationId\s*\?\s*resolved\s*:/,
+  "provider authority without the claimId cannot redeem a pending progress report");
 assert.match(server, /EXACT_PAGE_CLAIM_PROOF/);
 assert.match(server, /claimPendingProgressFromExactPage/,
   "pending Agent narration must complete from exact iframe-parent authority even when app callTool fails");
