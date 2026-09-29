@@ -403,8 +403,8 @@ function Write-CaddyConfig {
     $customRoutes = ""
     if (Test-Path -LiteralPath $Path) {
         $existing = Get-Content -LiteralPath $Path -Raw
-        $beginPattern = '(?im)^[ \t]*# BEGIN (?:DevSpace custom routes|[A-Za-z0-9_-]+ shared infrastructure route - product backend stays separate)[ \t]*$'
-        $endPattern = '(?im)^[ \t]*# END (?:DevSpace custom routes|[A-Za-z0-9_-]+ shared infrastructure route - product backend stays separate)[ \t]*$'
+        $beginPattern = '(?im)^[ \t]*# BEGIN (?:DevSpace custom routes|[A-Za-z0-9_-]+ shared infrastructure route - product backend stays separate)[ \t]*\r?$'
+        $endPattern = '(?im)^[ \t]*# END (?:DevSpace custom routes|[A-Za-z0-9_-]+ shared infrastructure route - product backend stays separate)[ \t]*\r?$'
         $beginMatches = [regex]::Matches($existing, $beginPattern)
         $endMatches = [regex]::Matches($existing, $endPattern)
         $beginCount = $beginMatches.Count

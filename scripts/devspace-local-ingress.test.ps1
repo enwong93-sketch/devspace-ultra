@@ -61,7 +61,8 @@ Assert-True ($caddyText -match 'UTF8.GetBytes\(\$body\)') 'UPnP SOAP body must b
 
 $testFile = Join-Path ([IO.Path]::GetTempPath()) ("devspace-ingress-" + [guid]::NewGuid().ToString('N') + '.Caddyfile')
 try {
-    [IO.File]::WriteAllText($testFile, @'
+    $crlf = [string][char]13 + [string][char]10
+    $managedRouteFixture = @'
 your-own-subdomain.duckdns.org {
     route {
         # BEGIN DevSpace custom routes
@@ -69,19 +70,23 @@ your-own-subdomain.duckdns.org {
         # END DevSpace custom routes
     }
 }
-'@)
+'@
+    $managedRouteFixture = [regex]::Replace($managedRouteFixture, '\r?\n', $crlf)
+    [IO.File]::WriteAllText($testFile, $managedRouteFixture)
     Write-CaddyConfig -DomainName 'your-own-subdomain.duckdns.org' -UpstreamPort 7678 -LanIPv4 '192.168.50.10' -Path $testFile
     $updated = Get-Content -LiteralPath $testFile -Raw
     Assert-True ($updated -match 'reverse_proxy 127\.0\.0\.1:21841') 'Operator-managed custom routes must survive generated Caddyfile refresh'
     Assert-True ($updated -match 'bind 192\.168\.50\.10') 'Generated Caddyfile must bind LAN IP'
-    [IO.File]::WriteAllText($testFile, @'
+    $incompleteRouteFixture = @'
 your-own-subdomain.duckdns.org {
     route {
         # BEGIN DevSpace custom routes
         handle_path /partner/* { reverse_proxy 127.0.0.1:21841 }
     }
 }
-'@)
+'@
+    $incompleteRouteFixture = [regex]::Replace($incompleteRouteFixture, '\r?\n', $crlf)
+    [IO.File]::WriteAllText($testFile, $incompleteRouteFixture)
     $rejected = $false
     try { Write-CaddyConfig -DomainName 'your-own-subdomain.duckdns.org' -UpstreamPort 7678 -LanIPv4 '192.168.50.10' -Path $testFile }
     catch { $rejected = $true }
