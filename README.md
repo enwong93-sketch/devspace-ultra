@@ -30,7 +30,7 @@ $p=Join-Path $env:TEMP 'devspace-ultra-install.ps1'; iwr https://raw.githubuserc
 
 Use the Cloudflare named-tunnel fallback only when DDNS/direct inbound access is unavailable. A Worker relay/free plan is quota-governed and must not be treated as unlimited. See [one-command setup](docs/ONE_COMMAND_SETUP.md) and [network ingress policy](docs/NETWORK_INGRESS.md).
 
-The [v0.5.9 installation audit](docs/INSTALLATION_AUDIT_V0.5.9.md) records which current instructions were corrected, which dated documents remain historical, and the public Connector acceptance boundary that the newer Classic MCP contract makes fully explicit.
+The [ChatGPT Classic MCP installation contract](docs/CHATGPT_CLASSIC_MCP_INSTALLATION.md) is the current installation and acceptance guide.
 
 **DevSpace Ultra** is an MIT-licensed distribution of DevSpace with an elastic ChatGPT Classic multi-agent runtime layer.
 
@@ -43,7 +43,7 @@ It keeps the original DevSpace local MCP workspace capabilities — local files,
 - **Elastic worker pool** — the main agent can scale workers up or down according to the current workload instead of using a fixed worker count.
 - **Live Swarm resize** — backend capacity can grow or shrink without replacing the orchestrator or losing completed work. Shrink is safety-first and refuses to evict busy/tail workers.
 - **Independent ChatGPT Classic runtimes** — on Windows, worker packages use isolated package identities, profiles, sessions, and conversations.
-- **Multi-Main interactive runtimes** — Main-01 remains the canonical installed ChatGPT Primary; Main-02+ are separate visible `InteractiveNN` packages with independent profiles/processes and no Worker lifecycle ownership.
+- **Multiple interactive runtimes** — one canonical installed ChatGPT Primary can coexist with additional visible `InteractiveNN` packages, each with an independent profile/process and outside Worker lifecycle ownership.
 - **Same-worker context continuity** — a worker can be reopened at its exact saved ChatGPT conversation; ChatGPT workers are session-bound by the backend so fresh joins/continuations do not need to expose raw worker credentials in the transcript.
 - **Zero-copy bootstrap** — workers can be launched, minimized, sent into a configured `sub-agents` ChatGPT Project, joined to a Swarm, and parked without manual invite-code copy/paste.
 - **Backend-first routing** — normal work is always dispatched through the DevSpace Chat Swarm backend. UI/CDP automation is lifecycle/bootstrap/recovery only.
@@ -188,7 +188,7 @@ macOS/Linux users still receive the DevSpace coding/MCP core and Chat Swarm back
 | Manual/browser worker conversations | ✅ | ✅ | ✅ |
 | Elastic backend worker-slot resize | ✅ | ✅ | ✅ |
 | Automatic isolated ChatGPT Classic desktop runtime cloning | ✅ | — | — |
-| User-facing Multi-Main ChatGPT Classic runtimes (Main-02+) | ✅ | — | — |
+| Additional user-facing ChatGPT Classic runtimes | ✅ | — | — |
 | Automatic desktop worker recovery by package/profile identity | ✅ | — | — |
 | ChatGPT Classic canary/rolling package update manager | ✅ | — | — |
 | Managed ChatGPT Classic Auto Compact / cross-conversation continuation | ✅ | — | — |

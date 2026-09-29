@@ -64,21 +64,28 @@ try {
     [IO.File]::WriteAllText($testFile, @'
 your-own-subdomain.duckdns.org {
     route {
-        # BEGIN CTC shared infrastructure route - product backend stays separate
-        handle_path /ctc/* { reverse_proxy 127.0.0.1:19150 }
-        # END CTC shared infrastructure route - product backend stays separate
+        # BEGIN DevSpace custom routes
+        handle_path /partner/* { reverse_proxy 127.0.0.1:21841 }
+        # END DevSpace custom routes
     }
 }
 '@)
     Write-CaddyConfig -DomainName 'your-own-subdomain.duckdns.org' -UpstreamPort 7678 -LanIPv4 '192.168.50.10' -Path $testFile
     $updated = Get-Content -LiteralPath $testFile -Raw
-    Assert-True ($updated -match 'reverse_proxy 127\.0\.0\.1:19150') 'CTC shared route must survive generated Caddyfile refresh'
+    Assert-True ($updated -match 'reverse_proxy 127\.0\.0\.1:21841') 'Operator-managed custom routes must survive generated Caddyfile refresh'
     Assert-True ($updated -match 'bind 192\.168\.50\.10') 'Generated Caddyfile must bind LAN IP'
-    [IO.File]::WriteAllText($testFile, 'your-own-subdomain.duckdns.org { handle_path /ctc/* { reverse_proxy 127.0.0.1:19150 } }')
+    [IO.File]::WriteAllText($testFile, @'
+your-own-subdomain.duckdns.org {
+    route {
+        # BEGIN DevSpace custom routes
+        handle_path /partner/* { reverse_proxy 127.0.0.1:21841 }
+    }
+}
+'@)
     $rejected = $false
     try { Write-CaddyConfig -DomainName 'your-own-subdomain.duckdns.org' -UpstreamPort 7678 -LanIPv4 '192.168.50.10' -Path $testFile }
     catch { $rejected = $true }
-    Assert-True $rejected 'Unmarked CTC routes must never be erased silently'
+    Assert-True $rejected 'Incomplete custom-route marker pairs must not be rewritten'
 } finally {
     if (Test-Path -LiteralPath $testFile) { Remove-Item -LiteralPath $testFile -Force }
 }
