@@ -14,11 +14,15 @@ const { stdout } = await execFileAsync("git", ["ls-files", "-z"], {
 
 const files = stdout.split("\0").filter(Boolean);
 const findings = [];
+const placeholderProfileNames = new Set(["example", "example-user", "sample", "test", "user", "username"]);
+const profilePathPatterns = [
+  { id: "windows-user-profile", regex: /[A-Za-z]:[\\/]+Users[\\/]+([^\\/\s"'`<>]+)/gi },
+  { id: "posix-user-profile", regex: /\/(?:home|Users)\/([^/\s"'`<>]+)/gi },
+];
+const privateInstanceHost = /\bdevspace(?:-[a-z0-9-]+){1,4}(?:\.[a-z0-9-]+)?\.(?:duckdns\.org|workers\.dev)\b/gi;
+const placeholderEndpointLabel = /^(?:(?:devspace-)?(?:example|sample|test|placeholder)(?:-|$)|your(?:-|$))/i;
 const patterns = [
-  { id: "local-user-profile", regex: new RegExp(String.raw`C:\\Users\\` + "en" + "wong", "gi") },
-  { id: "local-scratch-drive", regex: new RegExp(String.raw`D:\\` + "Codex" + "Scratch", "gi") },
-  { id: "private-duckdns-host", regex: new RegExp("devspace-" + "enwong" + String.raw`\.duckdns\.org`, "gi") },
-  { id: "private-worker-host", regex: new RegExp("devspace-ultra-mcp-edge." + "enwong93" + String.raw`\.workers\.dev`, "gi") },
+  { id: "machine-specific-connector-label", regex: /\bEXP[\s_-]?\d{3,}\b/gi },
   { id: "literal-bearer", regex: /Bearer\s+[A-Za-z0-9._~+\/-]{24,}/g, allowTestFixtures: true },
 ];
 
@@ -27,6 +31,21 @@ for (const file of files) {
   let source;
   try { source = await readFile(resolve(root, file), "utf8"); }
   catch { continue; }
+  for (const pattern of profilePathPatterns) {
+    for (const match of source.matchAll(pattern.regex)) {
+      if (!placeholderProfileNames.has(String(match[1]).toLowerCase())) {
+        findings.push({ file, rule: pattern.id });
+        break;
+      }
+    }
+  }
+  for (const match of source.matchAll(privateInstanceHost)) {
+    const labels = String(match[0]).toLowerCase().split(".");
+    if (!labels.some((label) => placeholderEndpointLabel.test(label))) {
+      findings.push({ file, rule: "private-instance-host" });
+      break;
+    }
+  }
   for (const pattern of patterns) {
     if (pattern.allowTestFixtures && /(?:^|\/)(?:[^/]+\.)?test\.(?:js|mjs|cjs|ts)$/i.test(file)) continue;
     pattern.regex.lastIndex = 0;
@@ -41,5 +60,6 @@ console.log(JSON.stringify({
   trackedFilesScanned: files.length,
   privateMachinePaths: false,
   privateIngressHosts: false,
+  privateConnectorLabels: false,
   literalBearerTokens: false,
 }));

@@ -77,7 +77,7 @@ assert.equal(publicCatalog.find((server) => server.name === "safe").commandBasen
 const manifest = createCodexMcpBridgeManifest(safe, {
   nodePath: "C:\\Program Files\\nodejs\\node.exe",
   bridgeScriptPath: "C:\\devspace\\scripts\\codex-mcp-stdio-bridge.mjs",
-  configPath: "C:\\Users\\tester\\.codex\\config.toml",
+  configPath: "C:\\Users\\test\\.codex\\config.toml",
 });
 const manifestText = JSON.stringify(manifest);
 assert.equal(manifest.id, "codex-mcp-safe");
