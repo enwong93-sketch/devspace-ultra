@@ -51,7 +51,7 @@ function Normalize-Domain {
     param([string]$Value)
     $value = ([string]$Value).Trim().ToLowerInvariant()
     if ($value -notmatch '^[a-z0-9][a-z0-9-]{0,62}\.duckdns\.org$') {
-        throw "Domain must be one DuckDNS hostname such as devspace-example.duckdns.org."
+        throw "Domain must be one DuckDNS hostname such as your-own-subdomain.duckdns.org."
     }
     return $value
 }
@@ -400,34 +400,34 @@ function Get-DuckDnsResponseFirstLine {
 function Write-CaddyConfig {
     param([string]$DomainName, [int]$UpstreamPort, [string]$LanIPv4, [string]$Path)
     if ([string]::IsNullOrWhiteSpace($LanIPv4)) { throw "LAN IPv4 is required for the Caddy bind." }
-    $ctcBlock = ""
+    $customRoutes = ""
     if (Test-Path -LiteralPath $Path) {
         $existing = Get-Content -LiteralPath $Path -Raw
-        $begin = "# BEGIN CTC shared infrastructure route - product backend stays separate"
-        $end = "# END CTC shared infrastructure route - product backend stays separate"
-        $beginCount = ([regex]::Matches($existing, [regex]::Escape($begin))).Count
-        $endCount = ([regex]::Matches($existing, [regex]::Escape($end))).Count
+        $beginPattern = '(?im)^[ \t]*# BEGIN (?:DevSpace custom routes|[A-Za-z0-9_-]+ shared infrastructure route - product backend stays separate)[ \t]*\r?$'
+        $endPattern = '(?im)^[ \t]*# END (?:DevSpace custom routes|[A-Za-z0-9_-]+ shared infrastructure route - product backend stays separate)[ \t]*\r?$'
+        $beginMatches = [regex]::Matches($existing, $beginPattern)
+        $endMatches = [regex]::Matches($existing, $endPattern)
+        $beginCount = $beginMatches.Count
+        $endCount = $endMatches.Count
         if ($beginCount -ne $endCount -or $beginCount -gt 1) {
-            throw "Shared Caddyfile has ambiguous CTC route markers; existing configuration was preserved."
-        }
-        if ($beginCount -eq 0 -and $existing -match '(?i)/ctc(?:/|\*)|reverse_proxy\s+127\.0\.0\.1:19150') {
-            throw "Shared Caddyfile has an unmarked CTC route; refusing to overwrite it."
+            throw "Shared Caddyfile has ambiguous custom-route markers; existing configuration was preserved."
         }
         if ($beginCount -eq 1) {
-            $pattern = '(?ms)^[ \t]*' + [regex]::Escape($begin) + '[ \t]*\r?\n.*?^[ \t]*' +
-                [regex]::Escape($end) + '[ \t]*'
+            $begin = $beginMatches[0].Value.Trim()
+            $end = $endMatches[0].Value.Trim()
+            $pattern = '(?ms)^[ \t]*' + [regex]::Escape($begin) + '[ \t]*\r?\n.*?^[ \t]*' + [regex]::Escape($end) + '[ \t]*'
             $match = [regex]::Match($existing, $pattern)
-            if (-not $match.Success -or $match.Value -notmatch 'reverse_proxy 127\.0\.0\.1:19150') {
-                throw "Shared Caddyfile CTC route is not the expected bounded block; existing configuration was preserved."
+            if (-not $match.Success) {
+                throw "Shared Caddyfile custom routes are not a complete marked block; existing configuration was preserved."
             }
-            $ctcBlock = $match.Value.TrimEnd() + "`r`n"
+            $customRoutes = $match.Value.TrimEnd() + "`r`n"
         }
     }
     $text = @"
 $DomainName {
     bind $LanIPv4
     route {
-$ctcBlock
+$customRoutes
         @public path /healthz /mcp /.well-known/oauth-protected-resource/mcp /.well-known/oauth-authorization-server /authorize /token /register /revoke /mcp-app-assets/*
 
         handle @public {

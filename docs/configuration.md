@@ -184,6 +184,8 @@ Routing is part of the plugin product surface. `capability_route` ranks installe
 
 ## ChatGPT Classic Main safety — v0.5
 
+On Windows, canonical startup can optionally leave selected interactive runtime slots for another locally managed app. Configure the local file `%USERPROFILE%\.devspace-tailscale-bootstrap\interactive-runtime-reservations.json` with a JSON `reservedMainNumbers` array, for example `{ "reservedMainNumbers": [5] }`. This is a per-install setting; the product does not identify or connect to another app's server.
+
 User-facing ChatGPT Classic Main runtimes have four separate Chat-mode safety/continuity layers enabled by default:
 
 | Variable | Default | Persisted config key | Purpose |

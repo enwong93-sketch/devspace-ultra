@@ -43,10 +43,12 @@ DevSpace needs the exact stable `publicBaseUrl` so MCP clients can discover OAut
 The value should be the origin only:
 
 ```text
-https://your-name.duckdns.org
+https://your-own-subdomain.duckdns.org
 ```
 
 Do not include `/mcp` in `publicBaseUrl`; the Connector URL adds `/mcp` to that origin. The public hostname must match the OAuth resource and the Caddy or named-tunnel route.
+
+Each computer has its own `publicBaseUrl`, MCP Connector URL, OAuth resource, and server instance. Configure a ChatGPT Classic Connector with the URL for the computer it is meant to use; DevSpace does not substitute or fall back to another computer's endpoint. To connect another computer, configure its own independent endpoint and Connector.
 
 By default, DevSpace derives allowed Host headers from the local host and public
 URL. Use `DEVSPACE_ALLOWED_HOSTS=*` only for intentional local debugging.

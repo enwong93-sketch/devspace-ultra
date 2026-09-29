@@ -84,7 +84,7 @@ $p=Join-Path $env:TEMP 'devspace-ultra-install.ps1'
 iwr https://raw.githubusercontent.com/enwong93-sketch/devspace-ultra/v0.5.19/install.ps1 -OutFile $p
 & $p `
   -Network DuckDNS `
-  -DuckDnsDomain 'example.duckdns.org' `
+  -DuckDnsDomain 'your-own-subdomain.duckdns.org' `
   -AllowedRoot "$HOME" `
   -EnableRouterUpnp `
   -NonInteractive

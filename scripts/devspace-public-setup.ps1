@@ -148,6 +148,21 @@ function Normalize-Hostname([string] $Value) {
     return $text
 }
 
+function Normalize-DuckDnsHostname([string] $Value) {
+    if ([string]::IsNullOrWhiteSpace($Value)) { throw 'A DuckDNS subdomain or hostname is required for this computer.' }
+    $text = Normalize-Hostname $Value
+    $suffix = '.duckdns.org'
+    $subdomain = if ($text.EndsWith($suffix, [StringComparison]::OrdinalIgnoreCase)) {
+        $text.Substring(0, $text.Length - $suffix.Length)
+    } else {
+        $text
+    }
+    if ($subdomain -notmatch '^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$') {
+        throw 'Use a DuckDNS subdomain or its full DuckDNS hostname for this computer.'
+    }
+    return "$subdomain$suffix"
+}
+
 function Wait-ForGateway {
     $deadline = (Get-Date).AddSeconds(90)
     while ($true) {
@@ -184,8 +199,7 @@ if ($Network -eq "DuckDNS") {
         if ($NonInteractive) { throw "DuckDnsDomain is required in non-interactive DuckDNS mode." }
         $DuckDnsDomain = Read-Host "DuckDNS subdomain or hostname"
     }
-    $hostname = Normalize-Hostname $DuckDnsDomain
-    if ($hostname -notmatch '\.duckdns\.org$') { $hostname = "$hostname.duckdns.org" }
+    $hostname = Normalize-DuckDnsHostname $DuckDnsDomain
     $publicBaseUrl = "https://$hostname"
     if (-not $SkipCaddy) {
         if ($EnableRouterUpnp -and $ManualPortForward) { throw 'Choose either UPnP or manual router forwarding, not both.' }
