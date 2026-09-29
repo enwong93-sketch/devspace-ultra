@@ -51,7 +51,7 @@ function Normalize-Domain {
     param([string]$Value)
     $value = ([string]$Value).Trim().ToLowerInvariant()
     if ($value -notmatch '^[a-z0-9][a-z0-9-]{0,62}\.duckdns\.org$') {
-        throw "Domain must be one DuckDNS hostname such as devspace-example.duckdns.org."
+        throw "Domain must be one DuckDNS hostname such as your-own-subdomain.duckdns.org."
     }
     return $value
 }

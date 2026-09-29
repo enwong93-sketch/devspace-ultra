@@ -126,7 +126,7 @@ $edgeState = "local-only"
 
 switch ($Edge) {
     "duckdns" {
-        if (-not $Domain) { throw "DuckDNS setup requires -Domain <name.duckdns.org>." }
+        if (-not $Domain) { throw "DuckDNS setup requires -Domain <your-own-subdomain.duckdns.org>." }
         Ensure-WingetPackage -Command "caddy" -PackageId "CaddyServer.Caddy" -Label "Caddy"
         Write-Host "Configuring DuckDNS, Caddy HTTPS, Windows Firewall, and router port mappings..." -ForegroundColor Cyan
         $ingressArguments = @{

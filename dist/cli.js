@@ -163,10 +163,10 @@ async function runSetupCommand(args) {
     let domain = optionValue(args, "--domain");
     if (edge === "duckdns" && !domain) {
         if (nonInteractive)
-            throw new Error("Non-interactive DuckDNS setup requires --domain <name.duckdns.org>.");
+            throw new Error("Non-interactive DuckDNS setup requires --domain <your-own-subdomain.duckdns.org>.");
         domain = await textPrompt({
-            message: "DuckDNS hostname (for example devspace-example.duckdns.org)",
-            placeholder: "devspace-example.duckdns.org",
+            message: "DuckDNS hostname (for example your-own-subdomain.duckdns.org)",
+            placeholder: "your-own-subdomain.duckdns.org",
             defaultValue: "",
             validate: validateDuckDnsDomain,
         });
@@ -730,7 +730,7 @@ function printHelp() {
         "Usage:",
         "  devspace                 Run first-time setup if needed, then start the server",
         "  devspace setup           One-command Windows setup; DuckDNS+Caddy is primary, Cloudflare is fallback",
-        "    --edge duckdns --domain <name.duckdns.org> [--root <path>]",
+        "    --edge duckdns --domain <your-own-subdomain.duckdns.org> [--root <path>]",
         "    --edge cloudflare [--root <path>]",
         "  devspace serve           Start the server",
         "  devspace init            Create or update ~/.devspace/config.json and auth.json",
@@ -1019,7 +1019,7 @@ async function confirmPrompt(options) {
 function normalizeDuckDnsDomain(value) {
     const domain = String(value ?? "").trim().toLowerCase();
     if (!/^[a-z0-9][a-z0-9-]{0,62}\.duckdns\.org$/.test(domain))
-        throw new Error("DuckDNS hostname must look like devspace-example.duckdns.org.");
+        throw new Error("DuckDNS hostname must look like your-own-subdomain.duckdns.org.");
     return domain;
 }
 function validateDuckDnsDomain(value) {

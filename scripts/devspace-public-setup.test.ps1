@@ -7,6 +7,12 @@ function Assert-True($Condition, [string]$Message) {
     if (-not $Condition) { throw $Message }
 }
 
+Assert-True ((Normalize-DuckDnsHostname 'your-own-subdomain') -eq 'your-own-subdomain.duckdns.org') 'Bare DuckDNS subdomains must be completed with the DuckDNS suffix.'
+Assert-True ((Normalize-DuckDnsHostname 'your-own-subdomain.duckdns.org') -eq 'your-own-subdomain.duckdns.org') 'Full DuckDNS hostnames must remain unchanged.'
+$invalidDuckDnsRejected = $false
+try { $null = Normalize-DuckDnsHostname 'example.com' } catch { $invalidDuckDnsRejected = $true }
+Assert-True $invalidDuckDnsRejected 'A different public hostname must not be replaced by any shared default.'
+
 $config = [pscustomobject]@{}
 Set-Property $config 'allowedRoots' @('C:\Projects')
 Set-Property $config 'allowedRoots' @('D:\Projects')
