@@ -25,32 +25,32 @@ try {
     $httpResponse.Content = [System.Net.Http.StringContent]::new('<errorCode>714</errorCode>')
     Assert-Equal (Get-UpnpFaultCode -Content (Get-UpnpFaultResponseText -Response $httpResponse)) 714 'PowerShell 7 HTTP response faults must be readable'
 } finally { $httpResponse.Dispose() }
-Assert-True (Test-PrivateLanGateway -Address '192.168.0.1') 'Physical home-router gateway must be eligible'
-Assert-True (-not (Test-PrivateLanGateway -Address '26.0.0.1')) 'Radmin VPN gateway must not be chosen'
+Assert-True (Test-PrivateLanGateway -Address '192.168.50.1') 'Physical home-router gateway must be eligible'
+Assert-True (-not (Test-PrivateLanGateway -Address '198.51.100.1')) 'Non-LAN gateway must not be chosen'
 Assert-True (-not (Test-PrivateLanGateway -Address '0.0.0.0')) 'WireGuard default route must not be chosen'
-Assert-True (Test-PublicWanIPv4 -Address '118.141.153.99') 'Public router WAN IPv4 must be accepted'
-Assert-True (-not (Test-PublicWanIPv4 -Address '100.83.51.110')) 'CGNAT or Tailscale IP must be rejected as WAN'
-Assert-True (-not (Test-PublicWanIPv4 -Address '192.168.0.83')) 'LAN IPv4 must be rejected as WAN'
+Assert-True (Test-PublicWanIPv4 -Address '8.8.8.8') 'Public router WAN IPv4 must be accepted'
+Assert-True (-not (Test-PublicWanIPv4 -Address '100.64.0.8')) 'CGNAT or overlay IP must be rejected as WAN'
+Assert-True (-not (Test-PublicWanIPv4 -Address '192.168.50.10')) 'LAN IPv4 must be rejected as WAN'
 Assert-True (-not (Test-PublicWanIPv4 -Address '203.0.113.10')) 'Documentation-only IPv4 must be rejected as WAN'
 
 $unicode = "乙太網路 3"
 $roundTrip = [System.Text.Encoding]::UTF8.GetString([System.Text.Encoding]::UTF8.GetBytes($unicode))
 Assert-Equal $roundTrip $unicode "UTF-8 LAN interface aliases must round-trip"
 
-$tailscaleOnly = @( [pscustomobject]@{ LocalAddress = "100.83.51.110"; LocalPort = 443; OwningProcess = 1 } )
-$state = Get-LanIngressListenerState -Listeners $tailscaleOnly -LanIPv4 "192.168.0.83" -ProcessNames @{ 1 = "tailscaled" }
-Assert-Equal $state.Relevant.Count 0 "Tailscale-only listener must not conflict with LAN ingress"
+$overlayOnly = @( [pscustomobject]@{ LocalAddress = "100.64.0.8"; LocalPort = 443; OwningProcess = 1 } )
+$state = Get-LanIngressListenerState -Listeners $overlayOnly -LanIPv4 "192.168.50.10" -ProcessNames @{ 1 = "overlay" }
+Assert-Equal $state.Relevant.Count 0 "Overlay-only listener must not conflict with LAN ingress"
 
-$lanConflict = @( [pscustomobject]@{ LocalAddress = "192.168.0.83"; LocalPort = 443; OwningProcess = 2 } )
-$state = Get-LanIngressListenerState -Listeners $lanConflict -LanIPv4 "192.168.0.83" -ProcessNames @{ 2 = "httpd" }
+$lanConflict = @( [pscustomobject]@{ LocalAddress = "192.168.50.10"; LocalPort = 443; OwningProcess = 2 } )
+$state = Get-LanIngressListenerState -Listeners $lanConflict -LanIPv4 "192.168.50.10" -ProcessNames @{ 2 = "httpd" }
 Assert-Equal $state.NonCaddy.Count 1 "Non-Caddy listener on LAN must conflict"
 
 $wildcardConflict = @( [pscustomobject]@{ LocalAddress = "0.0.0.0"; LocalPort = 80; OwningProcess = 3 } )
-$state = Get-LanIngressListenerState -Listeners $wildcardConflict -LanIPv4 "192.168.0.83" -ProcessNames @{ 3 = "httpd" }
+$state = Get-LanIngressListenerState -Listeners $wildcardConflict -LanIPv4 "192.168.50.10" -ProcessNames @{ 3 = "httpd" }
 Assert-Equal $state.NonCaddy.Count 1 "Wildcard non-Caddy listener must conflict"
 
-$existingCaddy = @( [pscustomobject]@{ LocalAddress = "192.168.0.83"; LocalPort = 443; OwningProcess = 4 } )
-$state = Get-LanIngressListenerState -Listeners $existingCaddy -LanIPv4 "192.168.0.83" -ProcessNames @{ 4 = "caddy" }
+$existingCaddy = @( [pscustomobject]@{ LocalAddress = "192.168.50.10"; LocalPort = 443; OwningProcess = 4 } )
+$state = Get-LanIngressListenerState -Listeners $existingCaddy -LanIPv4 "192.168.50.10" -ProcessNames @{ 4 = "caddy" }
 Assert-Equal $state.NonCaddy.Count 0 "Existing Caddy must not conflict"
 Assert-Equal $state.Caddy.Count 1 "Existing Caddy must be reusable"
 
@@ -70,13 +70,13 @@ example.duckdns.org {
     }
 }
 '@)
-    Write-CaddyConfig -DomainName 'example.duckdns.org' -UpstreamPort 7678 -LanIPv4 '192.168.0.83' -Path $testFile
+    Write-CaddyConfig -DomainName 'example.duckdns.org' -UpstreamPort 7678 -LanIPv4 '192.168.50.10' -Path $testFile
     $updated = Get-Content -LiteralPath $testFile -Raw
     Assert-True ($updated -match 'reverse_proxy 127\.0\.0\.1:19150') 'CTC shared route must survive generated Caddyfile refresh'
-    Assert-True ($updated -match 'bind 192\.168\.0\.83') 'Generated Caddyfile must bind LAN IP'
+    Assert-True ($updated -match 'bind 192\.168\.50\.10') 'Generated Caddyfile must bind LAN IP'
     [IO.File]::WriteAllText($testFile, 'example.duckdns.org { handle_path /ctc/* { reverse_proxy 127.0.0.1:19150 } }')
     $rejected = $false
-    try { Write-CaddyConfig -DomainName 'example.duckdns.org' -UpstreamPort 7678 -LanIPv4 '192.168.0.83' -Path $testFile }
+    try { Write-CaddyConfig -DomainName 'example.duckdns.org' -UpstreamPort 7678 -LanIPv4 '192.168.50.10' -Path $testFile }
     catch { $rejected = $true }
     Assert-True $rejected 'Unmarked CTC routes must never be erased silently'
 } finally {

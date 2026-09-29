@@ -52,7 +52,7 @@
 - Launch future Main/Worker ChatGPT Classic processes from a stable LocalAppData working directory instead of a package directory, allowing later package retirement without closing user conversations.
 - Retain up to 48 Agent-authored progress messages per conversation under a bounded 256-message global cap, so one busy Main cannot evict every other Main's useful narration history.
 - Add a read-only live relay-retention gate reporting exact Main route, DOM relay count, target count, DOM nodes and JS heap without navigating or sending a turn.
-- Isolate relay cleanup by the exact ChatGPT App sandbox origin learned from this installation's one-time claim. A second Connector such as DevSpace EXP8740 cannot donate authority, satisfy a claim, or have its relay frames removed merely because it uses the same `ui://devspace/...` resource title.
+- Isolate relay cleanup by the exact ChatGPT App sandbox origin learned from this installation's one-time claim. Another Connector or computer cannot donate authority, satisfy a claim, or have its relay frames removed merely because it uses the same `ui://devspace/...` resource title.
 
 ## 0.5.12 — 2026-09-28
 

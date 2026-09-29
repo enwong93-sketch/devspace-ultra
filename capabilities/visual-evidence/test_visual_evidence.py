@@ -21,7 +21,7 @@ class VisualEvidenceTests(unittest.TestCase):
  def test_original_unchanged_and_valid_crop(self):
   before=v.digest((self.root/'model.png').read_bytes());r=self.prepare(crop=[0,0,200,300]);self.assertEqual(before,v.digest((self.root/'model.png').read_bytes()));self.assertEqual(r['preview_size'],[200,300])
  def test_reject_path_traversal(self):
-  for p in ('../model.png','C:/Users/test.png','/tmp/model.png','model.png:secret'):
+  for p in ('../model.png','C:/Users/test/model.png','/tmp/model.png','model.png:secret'):
    with self.assertRaises(v.EvidenceError):v.prepare({'project':'test','path':p},self.cfg)
  def test_missing_file(self):
   with self.assertRaises(FileNotFoundError):v.prepare({'project':'test','path':'none.png'},self.cfg)

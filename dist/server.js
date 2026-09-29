@@ -2583,6 +2583,21 @@ export function createServer(config = loadConfig(), options = {}) {
         inspect: inspectBoundProviderConversationPage,
         serverInstanceId: config.serverInstanceId,
     });
+    const bindCurrentInvocationProviderAlias = async ({ providerIdentity, authority } = {}) => {
+        const runtimeKey = Array.isArray(authority?.runtimeKeys) && authority.runtimeKeys.length === 1
+            ? authority.runtimeKeys[0]
+            : authority?.runtimeKey || null;
+        if (!providerIdentity
+            || authority?.currentInvocationVerified !== true
+            || !/^[a-f0-9]{64}$/i.test(String(authority?.callFingerprint || ""))
+            || !authority?.conversationId
+            || !/^main-(0[1-9]|[12][0-9]|3[0-2])$/i.test(String(runtimeKey || ""))) return null;
+        const proof = authority.runtimeKey ? authority : { ...authority, runtimeKey };
+        const bound = await openaiBindings.bind(providerIdentity, proof, { currentInvocation: true });
+        if (!bound?.bound) return null;
+        const verified = await openaiBindings.resolve(providerIdentity);
+        return verifiedLocalProviderBinding(verified, providerIdentity) ? verified : null;
+    };
     const progressBootstrapAuthority = new ProgressBootstrapAuthorityRegistry();
     const conversationStartClaimRegistry = new ConversationStartClaimRegistry();
     const conversationStartClaimCdp = new ConversationStartClaimCdpResolver({ ports: classicCdpOptions.ports });
@@ -3884,6 +3899,41 @@ export function createServer(config = loadConfig(), options = {}) {
                     runtimeKey: null,
                 }))
                 : null;
+            if (requestConversation?.openaiIdentity) {
+                const immediateAuthority = requestConversation.capabilityAuthority
+                    || (requestConversation.currentInvocationVerified === true ? requestConversation : null);
+                const verifiedAlias = await bindCurrentInvocationProviderAlias({
+                    providerIdentity: requestConversation.openaiIdentity,
+                    authority: immediateAuthority,
+                }).catch((error) => {
+                    logEvent(config.logging, "debug", "openai_provider_alias_bind_failed", {
+                        error: error instanceof Error ? error.message : String(error),
+                    });
+                    return null;
+                });
+                if (verifiedAlias) {
+                    requestConversation.capabilityAuthority = verifiedAlias;
+                    requestConversation.progressAuthority = verifiedAlias;
+                    requestConversation.conversationId = verifiedAlias.conversationId;
+                    requestConversation.runtimeKey = verifiedAlias.runtimeKey;
+                } else if (requestConversation.authorityPromise) {
+                    // Compatibility migration for cached Classic tool snapshots:
+                    // a normal workspace call may finish before late native
+                    // correlation settles. Persist the provider alias only when
+                    // that same request later resolves to an exact current page;
+                    // never infer it from a Goal/Plan ID or active-window guess.
+                    void Promise.resolve(requestConversation.authorityPromise)
+                        .then((authority) => bindCurrentInvocationProviderAlias({
+                            providerIdentity: requestConversation.openaiIdentity,
+                            authority,
+                        }))
+                        .catch((error) => {
+                            logEvent(config.logging, "debug", "openai_provider_alias_late_bind_failed", {
+                                error: error instanceof Error ? error.message : String(error),
+                            });
+                        });
+                }
+            }
             if (chatGptConnectorRequest && mcpMethod === "tools/call" && requestedToolName
                 && !instanceBootstrapTool && !conversationStartClaimRelay && !instanceIndependentTool) {
                 const requestSessionFingerprint = requestConversation?.sessionFingerprint
@@ -3923,7 +3973,7 @@ export function createServer(config = loadConfig(), options = {}) {
                     && exactAuthority.runtimeKeys.length === 1
                     ? exactAuthority.runtimeKeys[0]
                     : exactAuthority?.runtimeKey || null;
-            if (!exactAuthority?.conversationId || !/^main-\d{2}$/i.test(String(exactRuntimeKey || "")) || !exactLocalInvocation) {
+                if (!exactAuthority?.conversationId || !/^main-\d{2}$/i.test(String(exactRuntimeKey || "")) || !exactLocalInvocation) {
                     const recoveryTool = existingStateTarget?.kind === "goal"
                         ? "devspace_goal_start"
                         : existingStateTarget?.kind === "plan"
@@ -3969,14 +4019,11 @@ export function createServer(config = loadConfig(), options = {}) {
                 // rechecking the exact local page, so later stateful tools do
                 // not require another progress claim while cross-computer and
                 // duplicate-page ambiguity still fail closed.
-                if (requestConversation?.openaiIdentity
-                    && exactAuthority.currentInvocationVerified === true
-                    && exactAuthority.callFingerprint) {
-                    await openaiBindings?.bind?.(
-                        requestConversation.openaiIdentity,
-                        exactAuthority,
-                        { currentInvocation: true },
-                    ).catch((error) => {
+                if (requestConversation?.openaiIdentity) {
+                    await bindCurrentInvocationProviderAlias({
+                        providerIdentity: requestConversation.openaiIdentity,
+                        authority: exactAuthority,
+                    }).catch((error) => {
                         logEvent(config.logging, "debug", "openai_provider_alias_bind_failed", {
                             error: error instanceof Error ? error.message : String(error),
                         });

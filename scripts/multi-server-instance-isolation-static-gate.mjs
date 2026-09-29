@@ -81,6 +81,12 @@ assert.match(server, /serverInstanceId:\s*config\.serverInstanceId[\s\S]{0,120}O
   "the live binding registry must receive the current server instance id");
 assert.match(providerBinding, /authenticated-current-invocation-exact-page/,
   "a late exact invocation must bind a rotated provider alias only after local page verification");
+assert.match(server, /bindCurrentInvocationProviderAlias[\s\S]{0,900}currentInvocationVerified[\s\S]{0,900}callFingerprint/,
+  "provider alias migration must require the current MCP request's exact native invocation receipt");
+assert.match(server, /requestConversation\.authorityPromise[\s\S]{0,700}bindCurrentInvocationProviderAlias/,
+  "ordinary cached-tool calls may migrate their alias after bounded late correlation without a manual bind");
+assert.doesNotMatch(server, /bindCurrentInvocationProviderAlias[\s\S]{0,700}existingStateTarget/,
+  "Goal or Plan identifiers must never participate in provider alias migration authority");
 assert.match(providerBinding, /authenticated-conversation-start-claim-exact-page/,
   "saved Goal/Plan recovery must use the provider identity captured by its own exact start claim");
 assert.match(server, /resolveProviderIdentity:\s*\(\)\s*=>\s*requestConversationContext\?\.current\?\.\(\)\?\.openaiIdentity/,

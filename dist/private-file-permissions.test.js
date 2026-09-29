@@ -22,12 +22,12 @@ test('Windows private ACL removes inheritance and grants only owner/system/admin
 
 test('POSIX path receives mode 0600 without a subprocess', () => {
   const calls = [];
-  hardenPrivateFile('/home/u/auth.json', {
+  hardenPrivateFile('/home/test/auth.json', {
     platform: 'linux',
     chmod: (...args) => calls.push(args),
     execFile: () => { throw new Error('must not execute'); },
   });
-  assert.deepEqual(calls, [['/home/u/auth.json', 0o600]]);
+  assert.deepEqual(calls, [['/home/test/auth.json', 0o600]]);
 });
 
 test('untrusted Windows account text fails closed', () => {

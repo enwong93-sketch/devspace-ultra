@@ -27,7 +27,7 @@ assert.match(shellInstaller, /releases\/tags\/\$\{tag\}/, "shell installer must 
 assert.match(shellInstaller, /asset\.digest/, "shell installer must require the GitHub Release digest");
 assert.match(shellInstaller, /createHash\('sha256'\)/, "shell installer must verify the archive SHA-256");
 assert.match(shellInstaller, /npm rebuild better-sqlite3/, "shell installer must rebuild the native SQLite module");
-assert.doesNotMatch(shellInstaller, /github:enwong93-sketch\/devspace-ultra#main/, "shell installer must not install a moving Git branch");
+assert.doesNotMatch(shellInstaller, /github:[^\s'"#]+#main/i, "shell installer must not install a moving Git branch");
 assert.match(files["skills/devspace-ultra-setup/SKILL.md"], /DuckDNS\/DDNS \+ Caddy direct ingress/);
 assert.match(files["skills/devspace-ultra-setup/SKILL.md"], /Cloudflare named tunnel/);
 assert.match(setup, /stableGatewayCoreHeapProfile" "system"/);
@@ -45,11 +45,20 @@ assert.match(files["docs/NETWORK_INGRESS.md"], /Cloudflare named tunnel/);
 assert.match(files["docs/NETWORK_INGRESS.md"], /Workers plan/i);
 assert.match(files[".github/workflows/release.yml"], /npm run verify:setup/, "release publication must run Windows setup gates");
 assert.match(files[".github/workflows/release.yml"], /npm run verify:local-ingress/, "release publication must run direct-ingress gates");
-assert.doesNotMatch(files["scripts/devspace-stable-gateway.mjs"], /C:\\\\Users\\\\enwong/i);
+assert.doesNotMatch(files["scripts/devspace-stable-gateway.mjs"], /[A-Za-z]:[\\/]+Users[\\/]+[^\\/\s"'`<>]+/i);
 
+const privateProfilePath = /[A-Za-z]:[\\/]+Users[\\/]+[^\\/\s"'`<>]+/i;
+const machineConnectorLabel = /\bEXP[\s_-]?\d{3,}\b/i;
+const privateInstanceHost = /\bdevspace(?:-[a-z0-9-]+){1,4}(?:\.[a-z0-9-]+)?\.(?:duckdns\.org|workers\.dev)\b/gi;
+const placeholderEndpointLabel = /^(?:(?:devspace-)?(?:example|sample|test|placeholder)(?:-|$)|your(?:-|$))/i;
 for (const [path, source] of Object.entries(files)) {
   if (path === "install.ps1") continue;
-  assert.doesNotMatch(source, /devspace-enwong\.duckdns\.org|devspace-ultra-mcp-edge\.enwong93\.workers\.dev/i, `${path} must not ship a user-specific endpoint`);
+  assert.doesNotMatch(source, privateProfilePath, `${path} must not ship an absolute user-profile path`);
+  assert.doesNotMatch(source, machineConnectorLabel, `${path} must not name an installation-specific Connector`);
+  for (const match of source.matchAll(privateInstanceHost)) {
+    const labels = String(match[0]).toLowerCase().split(".");
+    assert.ok(labels.some((label) => placeholderEndpointLabel.test(label)), `${path} must not ship a concrete machine endpoint`);
+  }
   assert.doesNotMatch(source, /(?:api[_-]?key|token|secret)\s*[:=]\s*["'][A-Za-z0-9_\-.]{20,}["']/i, `${path} appears to contain a literal credential`);
 }
 
