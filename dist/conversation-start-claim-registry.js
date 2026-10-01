@@ -43,7 +43,7 @@ function verifiedAuthority(value, expectedClaimId) {
     && claimId
     && claimId === expectedClaimId
   ) {
-    return { conversationId, runtimeKey, claimId, source, observedAt };
+    return { conversationId, runtimeKey, claimId, source, observedAt, pageVerified: true };
   }
 
   const callFingerprint = cleanFingerprint(value?.callFingerprint);
@@ -56,6 +56,8 @@ function verifiedAuthority(value, expectedClaimId) {
     ...(invocationFingerprint ? { invocationFingerprint } : {}),
     source,
     observedAt,
+    pageVerified: true,
+    ...(value?.currentInvocationVerified === true ? { currentInvocationVerified: true } : {}),
   };
 }
 

@@ -91,6 +91,7 @@ import { ProgressClaimRegistry } from "./progress-claim-registry.js";
 import { workspaceDiscoveryView } from './workspace-discovery-view.js';
 import { ProgressBootstrapAuthorityRegistry, PROGRESS_CAPABILITY_PAGE_SOURCE, resolveRequestCapabilityAuthority } from "./progress-bootstrap-authority.js";
 import { ConversationStartClaimRegistry } from "./conversation-start-claim-registry.js";
+import { completeConversationStart } from "./conversation-start-completion.js";
 import { ConversationStartClaimCdpResolver } from "./conversation-start-claim-cdp.js";
 import { InteractiveProgressEnforcementGate } from "./interactive-progress-enforcement.js";
 // ChatGPT/OpenAI MCP clients may reconnect without sending DELETE. Core session
@@ -1084,39 +1085,11 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
             toolName,
             authority,
             complete: async ({ input, authority: claimedAuthority, toolName: claimedToolName, providerIdentity }) => {
-                let result;
-                if (claimedToolName === "devspace_goal_start") {
-                    const started = await goalRuntime.startOrResume({
-                            objective: input.objective,
-                            successCriteria: input.successCriteria,
-                            conversationId: claimedAuthority.conversationId,
-                        });
-                    result = { goal: started.goal, resumed: started.resumed };
-                }
-                else if (claimedToolName === "devspace_plan_start") {
-                    const started = await planRuntime.startOrResume({
-                            title: input.title,
-                            steps: input.steps,
-                            conversationId: claimedAuthority.conversationId,
-                        });
-                    result = { plan: started.plan, resumed: started.resumed };
-                }
-                else throw new Error(`Unsupported conversation start claim tool ${claimedToolName}.`);
-
-                if (providerIdentity) {
-                    const bound = await openaiBindings?.bind?.(providerIdentity, claimedAuthority, {
-                        conversationStartClaimId: claimId,
-                    });
-                    if (!bound?.bound) {
-                        throw new Error("The provider conversation could not be attached through its exact local start claim.");
-                    }
-                    const verified = await openaiBindings.resolve(providerIdentity);
-                    if (!verifiedLocalProviderBinding(verified, providerIdentity)
-                        || verified.conversationId !== claimedAuthority.conversationId) {
-                        throw new Error("The exact local provider binding did not survive live page verification.");
-                    }
-                }
-                return result;
+                return completeConversationStart({
+                    claimId, input, authority: claimedAuthority,
+                    toolName: claimedToolName, providerIdentity,
+                    openaiBindings, goalRuntime, planRuntime,
+                });
             },
         });
     };
