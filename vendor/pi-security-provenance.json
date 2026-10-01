@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "upstream": {
+    "name": "@earendil-works/pi-coding-agent",
+    "version": "0.86.1",
+    "registry": "https://registry.npmjs.org",
+    "archiveIntegrity": "sha512-vZBuNfJnruxZyemZ3O05V0S/Ylze08ahFTIQ1Mik++gVdOevPl89gt/Uv0U97BPAJaj9cj6Vf9rcIgKtUrd0BA==",
+    "license": "MIT"
+  },
+  "patchId": "devspace-security-20261002-brace-expansion",
+  "patchScope": "Only the upstream npm-shrinkwrap.json dependency entry; no implementation, manifest, or lifecycle script modifications.",
+  "changedPackage": "node_modules/brace-expansion",
+  "fromVersion": "5.0.9",
+  "toVersion": "5.0.12",
+  "patchIntegrity": "sha512-YovQ3rzhaLMIrDjNDMkNS01tea93qhEhG5xy8f6+R0l+dw3Ki+5sCoIoI942iuLZTHWogWktgwVDhU09iNEimQ==",
+  "patchedArchive": "pi-coding-agent-0.86.1-devspace.1.tgz",
+  "patchedArchiveSha256": "ddd890ffda16e872c9f27de7c3b78bb1626a847e40d6f441b59d06fac7510f12",
+  "patchedArchiveIntegrity": "sha512-k1KH3mSim5Ul94J2Nw8qmoyEZgYkVA1b5hF0Ql64TwcVhp4ttce8UW2DGaU8jw1XbDiTFceWzETepTnC/jFtRA==",
+  "originalShrinkwrapSha256": "1623229aa919e2fa944a4fc77ee93eae82154d5066ce94bf41ceb6c33df393a5",
+  "patchedShrinkwrapSha256": "f095eba4452301cc675f4fb6a8635d5141ee0fd269184f652d70a59cf8c7ca4f",
+  "advisory": "https://github.com/advisories/GHSA-q2hr-2g5m-vwhr",
+  "rationale": "Upstream npm-shrinkwrap pins the affected dependency even in 1.0.0. Root overrides and a modified root lock did not change a clean installed tree. This exact vendored shrinkwrap patch is exercised by native fresh archive installation."
+}
