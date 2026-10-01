@@ -1,0 +1,23 @@
+import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+import { parse } from 'yaml';
+
+const draft = await readFile(new URL('../.github/workflows/release.yml', import.meta.url), 'utf8');
+const promotion = await readFile(new URL('../.github/workflows/promote-stable.yml', import.meta.url), 'utf8');
+const draftWorkflow = parse(draft);
+const promotionWorkflow = parse(promotion);
+const publishStep = draftWorkflow.jobs.release.steps.find(step => step.uses?.startsWith('softprops/action-gh-release@'));
+assert.equal(publishStep?.with?.draft, true);
+assert.equal(publishStep?.with?.make_latest, false);
+assert.deepEqual(Object.keys(promotionWorkflow.on), ['workflow_dispatch']);
+assert.match(draft, /draft:\s*true\b/, 'tag packaging must create a draft');
+assert.match(draft, /make_latest:\s*false\b/, 'a candidate must not replace latest stable');
+assert.match(draft, /npm run verify:release-promotion/);
+assert.match(promotion, /workflow_dispatch:/, 'stable publication requires explicit owner dispatch');
+assert.match(promotion, /CONTINUITY_ACCEPTANCE\.json/);
+const gatePosition = promotion.indexOf('node scripts/stable-release-acceptance.mjs');
+const publishPosition = promotion.indexOf('gh release edit');
+assert.ok(gatePosition >= 0 && publishPosition > gatePosition, 'real evidence must pass before publication');
+assert.match(promotion.slice(gatePosition, publishPosition), /if \(\$LASTEXITCODE -ne 0\) \{ throw/);
+assert.doesNotMatch(promotion, /continue-on-error:\s*true|--force/);
+console.log(JSON.stringify({ ok: true, gate: 'stable-release-workflow', tagBuildsDraftOnly: true, promotionRequiresRealEvidence: true }));

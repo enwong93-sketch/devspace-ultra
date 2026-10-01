@@ -206,10 +206,43 @@ try {
   assert.equal(automaticallyContinued.goal.recentReports.length, 0,
     "native turn completion remains separate from explicit Goal checkpoint history");
   assert.equal(automaticallyContinued.goal.continuation.state, "pending");
+  assert.deepEqual(await reloaded.consumedNativeAssistantMessageIds(autoContinueGoal.id), [
+    nativeCompletion.assistantMessageId,
+  ]);
   assert.equal(automaticallyContinued.goal.blocker.consecutiveRounds, 0,
     "automatic continuation is not held behind blocker/no-progress thresholds");
   assert.equal((await reloaded.autoCompleteAssistantTurn({ goalId: autoContinueGoal.id, nativeCompletion })).continued, false,
     "the same completed turn cannot queue a duplicate continuation");
+  const automaticRound2 = await reloaded.roundBegin({
+    goalId: autoContinueGoal.id,
+    continuationId: automaticallyContinued.goal.continuation.continuationId,
+  });
+  assert.equal(automaticRound2.round, 2);
+  assert.deepEqual(await reloaded.consumedNativeAssistantMessageIds(autoContinueGoal.id), [nativeCompletion.assistantMessageId]);
+  const repeatedFinal = await reloaded.autoCompleteAssistantTurn({
+    goalId: autoContinueGoal.id,
+    nativeCompletion,
+  });
+  assert.equal(repeatedFinal.continued, false);
+  assert.equal(repeatedFinal.reason, "native-final-already-consumed",
+    "a later Goal round must never consume the same native assistant final again");
+  advance(1_000);
+  const nextNativeCompletion = {
+    ...nativeCompletion,
+    assistantMessageId: "assistant-auto-turn-2",
+    assistantTextHash: "b".repeat(64),
+    assistantCreatedAt: new Date(nowMs).toISOString(),
+  };
+  const nextAutomaticallyContinued = await reloaded.autoCompleteAssistantTurn({
+    goalId: autoContinueGoal.id,
+    nativeCompletion: nextNativeCompletion,
+  });
+  assert.equal(nextAutomaticallyContinued.continued, true,
+    "a genuinely new native assistant final remains eligible in the next Goal round");
+  assert.deepEqual(await reloaded.consumedNativeAssistantMessageIds(autoContinueGoal.id), [
+    nativeCompletion.assistantMessageId,
+    nextNativeCompletion.assistantMessageId,
+  ]);
   const crossConversationReplay = await reloaded.autoCompleteAssistantTurn({
     goalId: autoContinueGoal.id,
     nativeCompletion: { ...nativeCompletion, conversationId: "conversation-other-machine" },
@@ -217,6 +250,73 @@ try {
   assert.equal(crossConversationReplay.continued, false,
     "the automatic completion receipt remains conversation-scoped");
   assert.equal((await reloaded.status(autoContinueGoal.id)).conversationId, "conversation-auto-continuation");
+
+  const restartLedgerRoot = await mkdtemp(join(tmpdir(), "devspace-goal-native-ledger-"));
+  try {
+    const beforeRestart = new GoalRuntime({ stateDir: restartLedgerRoot, now });
+    await beforeRestart.ready;
+    const restartGoal = await beforeRestart.start({
+      conversationId: "conversation-native-ledger-restart",
+      objective: "Persist exact native-final consumption across Core restart",
+      successCriteria: ["The same assistant final remains consumed after restart"],
+    });
+    const restartReceipt = {
+      ...nativeCompletion,
+      conversationId: restartGoal.conversationId,
+      runtimeKey: "main-04",
+      pageTargetId: "page-main-04",
+      assistantMessageId: "assistant-native-ledger-restart",
+      assistantTextHash: "c".repeat(64),
+      assistantCreatedAt: new Date(nowMs).toISOString(),
+    };
+    const restartCompleted = await beforeRestart.autoCompleteAssistantTurn({
+      goalId: restartGoal.id,
+      nativeCompletion: restartReceipt,
+    });
+    await beforeRestart.close();
+
+    const afterRestart = new GoalRuntime({ stateDir: restartLedgerRoot, now });
+    await afterRestart.ready;
+    assert.deepEqual(await afterRestart.consumedNativeAssistantMessageIds(restartGoal.id), [restartReceipt.assistantMessageId]);
+    await afterRestart.roundBegin({
+      goalId: restartGoal.id,
+      continuationId: restartCompleted.goal.continuation.continuationId,
+    });
+    const replayAfterRestart = await afterRestart.autoCompleteAssistantTurn({
+      goalId: restartGoal.id,
+      nativeCompletion: restartReceipt,
+    });
+    assert.equal(replayAfterRestart.continued, false);
+    assert.equal(replayAfterRestart.reason, "native-final-already-consumed",
+      "restart must not reopen an already-consumed exact native final");
+    await afterRestart.close();
+  } finally {
+    await rm(restartLedgerRoot, { recursive: true, force: true });
+  }
+
+  const legacyLedgerRoot = await mkdtemp(join(tmpdir(), "devspace-goal-native-ledger-migration-"));
+  try {
+    const legacyWriter = new GoalRuntime({ stateDir: legacyLedgerRoot, now });
+    await legacyWriter.ready;
+    const legacyLedgerGoal = await legacyWriter.start({
+      conversationId: "conversation-native-ledger-legacy",
+      objective: "Load a pre-ledger persisted Goal",
+      successCriteria: ["Missing ledger field is migrated without losing the Goal"],
+    });
+    await legacyWriter.close();
+    const legacyStatePath = join(legacyLedgerRoot, "goal-state.json");
+    const legacyState = JSON.parse(await readFile(legacyStatePath, "utf8"));
+    delete legacyState.nativeCompletionLedger;
+    await writeFile(legacyStatePath, JSON.stringify(legacyState));
+    const migratedRuntime = new GoalRuntime({ stateDir: legacyLedgerRoot, now });
+    await migratedRuntime.ready;
+    assert.equal((await migratedRuntime.status(legacyLedgerGoal.id)).id, legacyLedgerGoal.id);
+    assert.deepEqual(await migratedRuntime.consumedNativeAssistantMessageIds(legacyLedgerGoal.id), [],
+      "pre-ledger Goal state must migrate in place instead of resetting successful history");
+    await migratedRuntime.close();
+  } finally {
+    await rm(legacyLedgerRoot, { recursive: true, force: true });
+  }
   const otherConversationGoal = await reloaded.start({
     conversationId: "conversation-other-machine",
     objective: "Keep another computer isolated",

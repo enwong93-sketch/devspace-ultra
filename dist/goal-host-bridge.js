@@ -12,7 +12,7 @@ const DEFAULT_VISIBLE_REPORT_TIMEOUT_MS = 30_000;
 const DEFAULT_VISIBLE_REPORT_POLL_MS = 150;
 const DEFAULT_VISIBLE_REPORT_SETTLE_MS = 400;
 const DEFAULT_HIDDEN_CONFIRM_TIMEOUT_MS = 15_000;
-const DEFAULT_HIDDEN_CONFIRM_POLL_MS = 200;
+const DEFAULT_HIDDEN_CONFIRM_POLL_MS = 2_000;
 
 function hashText(value) {
   return createHash("sha256").update(String(value || "")).digest("hex");
@@ -22,6 +22,24 @@ function nativeTurnEnded(status) {
   return Boolean(String(status || "").trim())
     && !new Set(["IN_PROGRESS", "IS_STREAMING", "STREAMING", "RUNNING"])
       .has(String(status).trim().toUpperCase());
+}
+
+export function retrySurfaceBlocksGoalBoundary({
+  visible = false,
+  text = "",
+  ancestorTexts = [],
+  belongsToLatestTurn = true,
+} = {}) {
+  if (visible !== true || belongsToLatestTurn !== true) return false;
+  if (!/^(重試|Retry|再試一次|Try again)$/i.test(String(text || "").trim())) return false;
+  const context = Array.isArray(ancestorTexts) ? ancestorTexts.join("\n") : "";
+  // A failed MCP App/template frame is local tool-rendering UI inside an
+  // otherwise completed assistant message. Its Retry button must not be
+  // mistaken for a failed ChatGPT assistant turn or block Goal continuation.
+  if (/(?:載入應用程式時發生錯誤|加载应用程序时发生错误|Failed to fetch template|Error loading (?:the )?app|Failed to load (?:the )?app)/i.test(context)) {
+    return false;
+  }
+  return true;
 }
 
 export function matchesNativeGoalCompletionBoundary(snapshot, proof, {
@@ -318,12 +336,27 @@ async function inspectRelayTarget(target, runtimePort, options) {
       contextId: context.id,
       expression: `(() => ({
         canFollowUp: typeof window.openai?.sendFollowUpMessage === 'function',
-        title: document.title || ''
+        title: document.title || '',
+        relayStatePresent: !!(window.__DEVSPACE_GOAL_RELAY_STATE__ && typeof window.__DEVSPACE_GOAL_RELAY_STATE__ === 'object'),
+        relayActive: window.__DEVSPACE_GOAL_RELAY_STATE__?.active === true,
+        relayGoalId: String(window.__DEVSPACE_GOAL_RELAY_STATE__?.goalId || ''),
+        relayConversationId: String(window.__DEVSPACE_GOAL_RELAY_STATE__?.conversationId || ''),
+        relayHeartbeatAt: Number(window.__DEVSPACE_GOAL_RELAY_STATE__?.heartbeatAt || 0),
+        relayStartedAt: Number(window.__DEVSPACE_GOAL_RELAY_STATE__?.startedAt || 0)
       }))()`,
       returnByValue: true,
     });
     const value = result.result?.value;
     if (value?.canFollowUp !== true) return null;
+    const pageConversationId = conversationIdFromPageUrl(options.pageUrl);
+    const expectedGoalId = String(options.goalId || "").trim();
+    if (expectedGoalId) {
+      if (value.relayStatePresent !== true || value.relayActive !== true) return null;
+      if (String(value.relayGoalId || "") !== expectedGoalId) return null;
+      if (String(value.relayConversationId || "") !== pageConversationId) return null;
+      const heartbeatAt = Number(value.relayHeartbeatAt || 0);
+      if (!Number.isFinite(heartbeatAt) || heartbeatAt <= 0 || Date.now() - heartbeatAt > 60_000) return null;
+    }
     return {
       runtimePort,
       runtimeLabel: runtimeLabelForPort(runtimePort),
@@ -332,9 +365,13 @@ async function inspectRelayTarget(target, runtimePort, options) {
       pageTargetId: options.pageTargetId || null,
       pageWebSocketDebuggerUrl: options.pageWebSocketDebuggerUrl || null,
       pageUrl: options.pageUrl || null,
-      conversationId: conversationIdFromPageUrl(options.pageUrl),
+      conversationId: pageConversationId,
       title: value.title || target.title || "",
-      goalId: null,
+      goalId: String(value.relayGoalId || "").trim() || null,
+      relayStatePresent: value.relayStatePresent === true,
+      relayActive: value.relayActive === true,
+      relayHeartbeatAt: Number(value.relayHeartbeatAt || 0) || null,
+      relayStartedAt: Number(value.relayStartedAt || 0) || null,
       chatMode: true,
       relayOnly: true,
     };
@@ -358,7 +395,25 @@ export async function inspectVisibleReportCommit(candidate, options = {}) {
         const workRadio = radios.find((el) => /^(工作|Work)$/i.test((el.innerText || el.textContent || '').trim()));
         const chatMode = !/[?&]surface=work(?:&|$)/i.test(href) && workRadio?.getAttribute('aria-checked') !== 'true';
         const generating = Boolean(document.querySelector('button[data-testid="stop-button"]'));
-        const retryButtons = [...document.querySelectorAll('button')].filter((button) => /^(重試|Retry|再試一次|Try again)$/i.test((button.innerText || button.textContent || '').trim()));
+        const messageNodes = [...document.querySelectorAll('[data-message-author-role]')];
+        const latestMessageNode = messageNodes.at(-1) || null;
+        const latestTurnRoot = latestMessageNode?.closest?.('[data-testid^="conversation-turn-"], article')
+          || latestMessageNode?.parentElement
+          || null;
+        const retrySurfaceBlocksGoalBoundary = ${retrySurfaceBlocksGoalBoundary.toString()};
+        const retryButtons = [...document.querySelectorAll('button')].filter((button) => {
+          const ancestorTexts = [];
+          let node = button;
+          for (let depth = 0; depth < 9 && node; depth += 1, node = node.parentElement) {
+            ancestorTexts.push(String(node.innerText || node.textContent || '').trim().slice(0, 1_000));
+          }
+          return retrySurfaceBlocksGoalBoundary({
+            visible: Boolean(button.offsetWidth || button.offsetHeight || button.getClientRects().length),
+            text: (button.innerText || button.textContent || '').trim(),
+            ancestorTexts,
+            belongsToLatestTurn: latestTurnRoot ? latestTurnRoot.contains(button) : true,
+          });
+        });
         const deliveryTimeoutVisible = retryButtons.some((button) => {
           let node = button;
           for (let depth = 0; depth < 5 && node; depth += 1, node = node.parentElement) {
@@ -372,8 +427,6 @@ export async function inspectVisibleReportCommit(candidate, options = {}) {
           if (!text || text.length > 260) return false;
           return /^(?:This request requires additional safety checks|Additional safety checks|此請求需要額外安全檢查|此请求需要额外安全检查|需要進行額外安全檢查|需要进行额外安全检查)/i.test(text);
         });
-        const messageNodes = [...document.querySelectorAll('[data-message-author-role]')];
-        const latestMessageNode = messageNodes.at(-1) || null;
         const latestUserNode = [...messageNodes].reverse().find((node) => node.getAttribute('data-message-author-role') === 'user') || null;
         const userNodes = messageNodes.filter(node => node.getAttribute('data-message-author-role') === 'user');
         const beforeLatestUser = messageNodes.slice(0, messageNodes.indexOf(latestUserNode));
@@ -639,6 +692,7 @@ export async function probeClassicRelayPort(port, conversationId, options = {}) 
     try {
       const candidate = await inspectRelayTarget(target, port, {
         ...options,
+        goalId: String(options.goalId || "").trim() || null,
         pageTargetId: page.id,
         pageWebSocketDebuggerUrl: page.webSocketDebuggerUrl,
         pageUrl: page.url,
@@ -880,7 +934,10 @@ export class ClassicGoalHostBridge {
       contextSettleMs,
     };
     this.probePort = probePort || ((port) => probeClassicMainPort(port, this.options));
-    this.probeRelayPort = probeRelayPort || ((port, conversationId) => probeClassicRelayPort(port, conversationId, this.options));
+    this.probeRelayPort = probeRelayPort || ((port, conversationId, relayOptions = {}) => probeClassicRelayPort(port, conversationId, {
+      ...this.options,
+      ...relayOptions,
+    }));
     this.probeConversationPage = probeConversationPage || ((port, conversationId) => probeClassicConversationPagePort(port, conversationId, this.options));
     this.sendRaw = sendRaw || ((candidate, payload) => sendRawHostFollowUp(candidate, payload, this.rawDispatchOptions));
     this.beforeDispatch = beforeDispatch;
@@ -942,6 +999,12 @@ export class ClassicGoalHostBridge {
         });
         const native = snapshot?.nativeContinuation;
         lastState = native?.state || lastState;
+        // A rate-limited branch read does not invalidate a committed send.
+        // Leave reconciliation to the supervisor's bounded backoff instead
+        // of amplifying ChatGPT 429 with another full fetch in 200 ms.
+        if (/429|rate.limit/i.test(lastState)) {
+          return { ok: false, state: lastState, definiteFailure: false };
+        }
         if (native?.resolved === true) {
           if (native.newUserAfterBaselineMessageId) {
             return {
@@ -993,7 +1056,7 @@ export class ClassicGoalHostBridge {
     return null;
   }
 
-  async findConversationRelay(conversationId, { runtimePort = null } = {}) {
+  async findConversationRelay(conversationId, { runtimePort = null, goalId = null } = {}) {
     const expectedConversationId = String(conversationId || "").trim();
     if (!expectedConversationId) return null;
     const orderedPorts = Number.isInteger(runtimePort)
@@ -1002,20 +1065,21 @@ export class ClassicGoalHostBridge {
     for (const port of orderedPorts) {
       let candidates = [];
       try {
-        candidates = await this.probeRelayPort(port, expectedConversationId);
+        candidates = await this.probeRelayPort(port, expectedConversationId, { goalId });
       } catch {
         continue;
       }
       const matching = (candidates || []).find((candidate) => (
         candidate?.chatMode === true
         && candidate?.conversationId === expectedConversationId
+        && (!goalId || candidate?.relayStatePresent === undefined || candidate?.goalId === goalId)
       )) || null;
       if (matching) return matching;
     }
     return null;
   }
 
-  async findExactConversationRelay(conversationId, { runtimePort = null } = {}) {
+  async findExactConversationRelay(conversationId, { runtimePort = null, goalId = null } = {}) {
     const expectedConversationId = String(conversationId || "").trim();
     if (!expectedConversationId) {
       return { candidate: null, ambiguous: false, matchCount: 0, error: "conversationId is required." };
@@ -1025,13 +1089,17 @@ export class ClassicGoalHostBridge {
     for (const port of ports) {
       let candidates = [];
       try {
-        candidates = await this.probeRelayPort(port, expectedConversationId);
+        candidates = await this.probeRelayPort(port, expectedConversationId, { goalId });
       } catch {
         continue;
       }
       for (const candidate of candidates || []) {
         if (candidate?.chatMode !== true) continue;
         if (candidate?.conversationId !== expectedConversationId) continue;
+        // Real CDP probes always return relayStatePresent. Preserve custom
+        // probe adapters used by tests/embedders, while production Goal sends
+        // require the live persistent relay's exact Goal marker.
+        if (goalId && candidate?.relayStatePresent !== undefined && candidate?.goalId !== goalId) continue;
         matches.push(candidate);
       }
     }
@@ -1058,7 +1126,9 @@ export class ClassicGoalHostBridge {
     const relays = [...pageGroups.values()][0];
     const score = (candidate) => /DevSpace Goal Relay/i.test(String(candidate?.title || "")) ? 2
       : /DevSpace Progress Claim Relay/i.test(String(candidate?.title || "")) ? 1 : 0;
-    relays.sort((left, right) => score(right) - score(left)
+    relays.sort((left, right) => Number(right?.relayHeartbeatAt || 0) - Number(left?.relayHeartbeatAt || 0)
+      || Number(right?.relayStartedAt || 0) - Number(left?.relayStartedAt || 0)
+      || score(right) - score(left)
       || String(left?.targetId || "").localeCompare(String(right?.targetId || "")));
     return {
       candidate: relays[0],
@@ -1162,7 +1232,7 @@ export class ClassicGoalHostBridge {
     });
     if (exactGoal) return { candidate: exactGoal, relayFallback: false };
     if (!conversation) return { candidate: null, relayFallback: false };
-    const relay = await this.findConversationRelay(conversation, { runtimePort });
+    const relay = await this.findConversationRelay(conversation, { runtimePort, goalId });
     return { candidate: relay, relayFallback: Boolean(relay) };
   }
 
@@ -1237,7 +1307,7 @@ export class ClassicGoalHostBridge {
         state: "invalid-hidden-goal-recovery-boundary",
       };
     }
-    const resolved = await this.findExactConversationRelay(expectedConversationId, { runtimePort });
+    const resolved = await this.findExactConversationRelay(expectedConversationId, { runtimePort, goalId });
     const matching = resolved.candidate;
     if (!matching) {
       return {
@@ -1401,7 +1471,7 @@ export class ClassicGoalHostBridge {
 
     const expectedConversationId = String(conversationId || "").trim();
     const resolved = expectedConversationId
-      ? await this.findExactConversationRelay(expectedConversationId, { runtimePort })
+      ? await this.findExactConversationRelay(expectedConversationId, { runtimePort, goalId })
       : { candidate: null, relayFallback: false, ambiguous: false, matchCount: 0,
           error: "Goal continuation requires an exact bound conversationId." };
     const matching = resolved.candidate;
@@ -1409,6 +1479,8 @@ export class ClassicGoalHostBridge {
       return {
         ok: false,
         definiteFailure: true,
+        dispatchCommitted: false,
+        state: "exact-goal-relay-unavailable",
         relayFallback: false,
         error: conversationId
           ? `No matching Chat-mode DevSpace relay was found for Goal ${goalId} in conversation ${conversationId}.`
@@ -1462,7 +1534,9 @@ export class ClassicGoalHostBridge {
       if (boundary?.ok !== true) {
         return {
           ok: false,
-          definiteFailure: boundary?.definiteFailure === true,
+          definiteFailure: true,
+          dispatchCommitted: false,
+          state: "native-final-preflight-unavailable",
           error: boundary?.error || "Visible Goal round report was not committed before continuation dispatch.",
         };
       }
@@ -1472,6 +1546,8 @@ export class ClassicGoalHostBridge {
           return {
             ok: false,
             definiteFailure: true,
+            dispatchCommitted: false,
+            state: "goal-continuation-preflight-blocked",
             error: guarded.error || guarded.reason || "Context Guardian blocked Goal continuation dispatch.",
           };
         }

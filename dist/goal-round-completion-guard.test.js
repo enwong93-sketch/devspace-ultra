@@ -391,6 +391,32 @@ const nativeFinalSnapshot = {
 assert.equal(moduleUnderTest.provesNativeCurrentRoundFinal(baseGoal, nativeFinalSnapshot, {
   nowMs: Date.parse("2026-09-05T03:00:12.000Z"),
 }), true, "exact native branch timing and IDs must prove a current-round final after Core restart");
+assert.equal(moduleUnderTest.provesNativeCurrentRoundFinal({
+  ...baseGoal,
+  consumedNativeAssistantMessageIds: [nativeFinalSnapshot.latestAssistantMessageId],
+}, nativeFinalSnapshot, {
+  nowMs: Date.parse("2026-09-05T03:00:12.000Z"),
+}), false, "an exact native assistant final already consumed by this Goal must remain ineligible in every later round");
+assert.equal(moduleUnderTest.provesNativeCurrentRoundFinal(baseGoal, {
+  ...nativeFinalSnapshot,
+  nativeContinuation: {
+    ...nativeFinalSnapshot.nativeContinuation,
+    latestUserCreatedAt: "2026-09-05T02:20:00.000Z",
+  },
+}, { nowMs: Date.parse("2026-09-05T03:00:12.000Z") }), true,
+"an exact continuation-round final must not depend on a fixed source-user-to-round time window");
+assert.equal(moduleUnderTest.provesNativeCurrentRoundFinal({
+  ...baseGoal,
+  round: 1,
+  lastConsumedContinuationId: null,
+}, {
+  ...nativeFinalSnapshot,
+  nativeContinuation: {
+    ...nativeFinalSnapshot.nativeContinuation,
+    latestUserCreatedAt: "2026-09-05T02:20:00.000Z",
+  },
+}, { nowMs: Date.parse("2026-09-05T03:00:12.000Z") }), false,
+"an initial human-request round must retain the bounded source-user lower window");
 assert.equal(moduleUnderTest.provesNativeCurrentRoundFinal(baseGoal, {
   ...nativeFinalSnapshot,
   streamStatus: "IN_PROGRESS",
@@ -414,6 +440,14 @@ assert.equal(moduleUnderTest.provesNativeCurrentRoundFinal(baseGoal, {
   },
 }, { nowMs: Date.parse("2026-09-05T03:00:12.000Z") }), false,
 "a native branch whose current node does not match the exact DOM final must remain blocked");
+assert.equal(moduleUnderTest.provesNativeCurrentRoundFinal(baseGoal, {
+  ...nativeFinalSnapshot,
+  nativeContinuation: {
+    ...nativeFinalSnapshot.nativeContinuation,
+    latestUserCreatedAt: "2026-09-05T03:00:05.000Z",
+  },
+}, { nowMs: Date.parse("2026-09-05T03:00:12.000Z") }), false,
+"a native branch whose source user is newer than its assistant final must remain blocked");
 
 let nativeFallbackClaims = 0;
 const nativeFallbackInspections = [];

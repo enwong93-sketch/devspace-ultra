@@ -9,10 +9,10 @@ assert.match(html, /aria-hidden="true"/);
 assert.match(html, /toolName:\s*"devspace_progress_report"/);
 assert.match(html, /startClaim\.toolName === "devspace_goal_start"/);
 assert.match(html, /startClaim\.toolName === "devspace_plan_start"/);
-assert.match(html, /window\.openai\.callTool\(action\.toolName, action\.arguments\)/);
+assert.match(html, /relayBridge\.callTool\(action\.toolName, action\.arguments\)/);
 assert.doesNotMatch(html, /requestClose/,
   "a hidden exact-page relay must not ask ChatGPT to close host UI");
-assert.match(html, /retireRelay/);
+assert.match(html, /retireClaimRelay/);
 assert.match(html, /removeEventListener/);
 assert.match(html, /window\.openai\?\.toolResponseMetadata/,
   "progress claim relay must consume tool-result metadata when toolOutput is unavailable");
@@ -22,15 +22,23 @@ assert.match(html, /devspace\/conversationStartClaim/,
   "the same hidden exact-page relay must recognize Goal/Plan start ownership claims");
 assert.match(html, /structured\?\.ok === true && structured\?\.claimed === true/);
 assert.match(html, /ui\/notifications\/tool-result/);
-assert.match(html, /dispatchStarted/);
-assert.doesNotMatch(html, /sendFollowUpMessage|location\.|parent\.location|composer|prompt-textarea/);
+assert.match(html, /claimDispatchStarted/);
+assert.match(html, /__DEVSPACE_GOAL_RELAY_STATE__/,
+  "a Goal start result must leave one persistent exact-Goal relay capability in its existing hidden App frame");
+assert.match(html, /devspace_goal_status/);
+assert.match(html, /devspace_goal_continuation/);
+assert.match(html, /goal\.roundState === "reported" && goal\.continuation\?\.state === "pending"/);
+assert.doesNotMatch(html, /sendFollowUpMessage\s*\(/,
+  "the persistent Goal relay may expose the native host capability for backend discovery but must not synthesize a user turn itself");
+assert.doesNotMatch(html, /location\.|parent\.location|composer|prompt-textarea/);
 
 console.log(JSON.stringify({
   ok: true,
   gate: "progress-claim-relay",
   hidden: true,
   noSyntheticUserTurn: true,
-  oneShot: true,
+  oneShotClaim: true,
+  persistentGoalRelay: true,
   localRetirement: true,
   hostUiClose: false,
 }));

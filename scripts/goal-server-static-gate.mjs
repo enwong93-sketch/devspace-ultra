@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { GOAL_RELAY_URI, readGoalRelayHtml } from "../dist/goal-relay-resource.js";
 
 const source = await readFile(new URL("../dist/server.js", import.meta.url), "utf8");
 
@@ -7,7 +8,9 @@ assert.match(source, /import \{ GoalRuntime \} from "\.\/goal-runtime\.js";/);
 assert.match(source, /import \{ registerGoalTools \} from "\.\/goal-tools\.js";/);
 assert.match(source, /import \{ ClassicGoalHostBridge, defaultMainDebugPorts, inspectGoalContinuationPages \} from "\.\/goal-host-bridge\.js";/);
 assert.match(source, /const GOAL_DOCK_URI = "ui:\/\/devspace\/goal-dock\.html";/);
-assert.match(source, /const GOAL_RELAY_URI = "ui:\/\/devspace\/goal-continuation-relay\.html";/);
+assert.equal(GOAL_RELAY_URI, "ui://devspace/goal-continuation-relay-v2.html");
+assert.match(source, /import \{ GOAL_RELAY_URI, PROGRESS_CLAIM_RELAY_URI, readGoalRelayHtml \} from "\.\/goal-relay-resource\.js";/,
+  "production must use the versioned resource with its bundled Apps bridge");
 assert.match(source, /new GoalRuntime\(\{\s*stateDir: config\.stateDir,?\s*\}\)/s);
 assert.match(source, /const configuredClassicPorts = Array\.isArray\(config\.classicMainDebugPorts\)[\s\S]{0,260}const classicCdpOptions = \{[\s\S]{0,220}configuredClassicPorts\.length[\s\S]{0,120}defaultMainDebugPorts\(\{ includeObserved: true, refresh: true \}\)/,
   "Goal Host Bridge must share explicit ports or the observed-process plus canonical fallback set");
@@ -31,8 +34,12 @@ assert.match(source, /goalHostBridge\.dispatchRoundRecovery\(\{[\s\S]{0,420}sour
   "hidden same-round recovery must retain the exact native branch boundary for acknowledgement reconciliation");
 assert.match(source, /registerAppResource\(server, "DevSpace Goal Dock", GOAL_DOCK_URI,/);
 assert.match(source, /new URL\("\.\/ui\/goal-dock\.html", import\.meta\.url\)/);
-assert.match(source, /registerAppResource\(server, "DevSpace Goal Continuation Relay", GOAL_RELAY_URI,/);
-assert.match(source, /new URL\("\.\/ui\/goal-continuation-relay\.html", import\.meta\.url\)/);
+assert.match(source, /for \(const uri of \[GOAL_RELAY_URI, "ui:\/\/devspace\/goal-continuation-relay\.html"\]\)/,
+  "new and cached tool snapshots must both retain their Goal relay resource");
+assert.match(source, /registerAppResource\(server, `DevSpace Goal Continuation Relay \$\{uri\}`, uri,/);
+assert.match(source, /readGoalRelayHtml\("goal-continuation-relay\.html"\)/);
+assert.match(readGoalRelayHtml("goal-continuation-relay.html"), /ui\/initialize/,
+  "the actual distributable Goal resource must contain the Apps handshake");
 assert.match(source, /const resolveCapabilityConversationAuthority = async \(extra\) => \{[\s\S]*requestContext\?\.capabilityAuthority/, "production Goal and capability tools must consume only request-scoped verified conversation authority");
 assert.doesNotMatch(source, /const resolveCapabilityConversationAuthority = async \(extra\) => \{[\s\S]*conversationAuthority\.resolveMcpExtra\(extra\)/, "Goal tools must not revive stale durable session authority inside the handler");
 assert.match(source, /mcpCallCorrelator\.noteGateway\(\{[\s\S]*callFingerprint[\s\S]*gatewayRequestId:\s*gatewayCorrelationId/, "the Core HTTP request must establish one exact canonical page-invocation join before entering Goal tools");
@@ -86,7 +93,7 @@ assert.match(source, /goalContinuation:\s*goalContinuationSupervisor\.status\(\)
 assert.match(source, /await goalRuntime\.close\(\)/);
 
 const resourceIndex = source.indexOf('registerAppResource(server, "DevSpace Goal Dock"');
-const relayResourceIndex = source.indexOf('registerAppResource(server, "DevSpace Goal Continuation Relay"');
+const relayResourceIndex = source.indexOf('registerAppResource(server, `DevSpace Goal Continuation Relay ${uri}`');
 const toolsIndex = source.indexOf("registerGoalTools(server, goalRuntime");
 assert.ok(resourceIndex >= 0 && toolsIndex > resourceIndex, "Goal Dock resource must be registered before Goal tools.");
 assert.ok(relayResourceIndex >= 0 && toolsIndex > relayResourceIndex, "Goal continuation relay resource must be registered before Goal tools.");

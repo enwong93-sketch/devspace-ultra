@@ -1,0 +1,51 @@
+name: Promote accepted stable release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing draft tag with owner-reviewed CONTINUITY_ACCEPTANCE.json asset
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: stable-release-promotion
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    runs-on: windows-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE_TAG: ${{ inputs.release_tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_tag }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Verify real-client evidence before stable publication
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          if ($env:RELEASE_TAG -ne "v$version") { throw 'Tag/package mismatch.' }
+          $sourceCommit = (git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot resolve source commit.' }
+          $evidenceDir = Join-Path $env:RUNNER_TEMP 'stable-release-acceptance'
+          New-Item -ItemType Directory -Path $evidenceDir -Force | Out-Null
+          $metadata = gh api "repos/$env:GH_REPO/releases/tags/$env:RELEASE_TAG"
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot read draft release.' }
+          $releasePath = Join-Path $evidenceDir 'release.json'
+          $metadata | Set-Content -LiteralPath $releasePath -Encoding utf8
+          gh release download $env:RELEASE_TAG --pattern "devspace-ultra-$version.tgz" --pattern 'CONTINUITY_ACCEPTANCE.json' --dir $evidenceDir
+          if ($LASTEXITCODE -ne 0) { throw 'Missing candidate archive or owner-reviewed client evidence.' }
+          node scripts/stable-release-acceptance.mjs (Join-Path $evidenceDir 'CONTINUITY_ACCEPTANCE.json') $releasePath (Join-Path $evidenceDir "devspace-ultra-$version.tgz") $version $sourceCommit
+          if ($LASTEXITCODE -ne 0) { throw 'Real-client acceptance failed; draft remains unpublished.' }
+          gh release edit $env:RELEASE_TAG --draft=false --prerelease=false --latest
+          if ($LASTEXITCODE -ne 0) { throw 'Stable publication failed.' }

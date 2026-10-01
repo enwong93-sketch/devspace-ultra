@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { runInNewContext } from "node:vm";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -155,6 +156,48 @@ assert.match(script, /retiredLegacyInlineErrors/);
 assert.match(script, /ui:\/\/devspace\/progress-claim-relay\.html/);
 assert.match(script, /PROGRESS_RELAY_MAX_LIVE_FRAMES = 8/);
 assert.match(script, /PROGRESS_RELAY_RETENTION_MS = 150000/);
+{
+  // Execute the actual cleanup functions, including a Goal older than the
+  // transient ownership-claim TTL. Do not substitute a UI Active label.
+  const ownedOrigin = "https://asdk_app_local123.web-sandbox.oaiusercontent.com";
+  const activeScript = buildProgressNarrationScript({}, {
+    relayAppOrigins: [ownedOrigin],
+    goalState: { goals: { g: { id: "g", status: "active", conversationId: "current-chat" } } },
+  });
+  assert.match(activeScript, /const hasActiveGoal = \["current-chat"\]\.includes\(conversationId\)/);
+  for (const cleanup of ["pruneGoalRelayFrames", "pruneProgressRelayFrames"]) {
+    const from = activeScript.indexOf(`const ${cleanup} = () => {`);
+    const to = activeScript.indexOf("\n    };", from) + "\n    };".length;
+    assert.ok(from >= 0 && to > from);
+    const title = cleanup === "pruneGoalRelayFrames"
+      ? "ui://devspace/goal-continuation-relay.html" : "ui://devspace/progress-claim-relay.html";
+    for (const resourceTitle of [title, title.replace('.html', '-v2.html')]) {
+    for (const active of [true, false]) {
+      let removed = false;
+      const frame = {
+        dataset: { devspaceGoalRelayFirstSeenAt: "1", devspaceProgressRelayFirstSeenAt: "1" },
+        getAttribute: () => resourceTitle,
+        remove: () => { removed = true; },
+      };
+      const result = runInNewContext(`${activeScript.slice(from, to)}; ${cleanup}();`, {
+        document: { querySelectorAll: () => [frame] },
+        Date: { now: () => 900_000 },
+        hasActiveGoal: active,
+        PROGRESS_RELAY_RESOURCE_TITLE: "ui://devspace/progress-claim-relay.html",
+        GOAL_RELAY_RESOURCE_TITLE: "ui://devspace/goal-continuation-relay.html",
+        PROGRESS_RELAY_MAX_LIVE_FRAMES: 8,
+        GOAL_RELAY_MAX_LIVE_FRAMES: 4,
+        PROGRESS_RELAY_RETENTION_MS: 150_000,
+        ownedRelayFrame: () => true,
+        frameShell: (f) => f,
+        retireNode: () => {},
+      });
+      assert.equal(removed, !active, `${cleanup}: active Goal must outlive a claim TTL`);
+      assert.equal(result.kept, active ? 1 : 0);
+    }
+    }
+  }
+}
 assert.match(script, /GOAL_RELAY_MAX_LIVE_FRAMES = 4/);
 assert.match(script, /pruneProgressRelayFrames/);
 assert.match(script, /const RELAY_APP_ORIGINS = \[\]/);
@@ -244,6 +287,9 @@ try {
   assert.equal(inspected.visible, true);
   await overlay.close();
   assert.equal(overlay.status().running, false);
+  assert.match(evaluations.at(-1).expression,
+    /const hasActiveGoal = \["conversation-a"\]\.includes\(conversationId\)/,
+    "Core handover must preserve the persisted active Goal's relay lifetime");
 
   const disabledOverlay = new ClassicProgressNarrationOverlay({ contextAdapter });
   const disabledStart = await disabledOverlay.start({ schedule: true });

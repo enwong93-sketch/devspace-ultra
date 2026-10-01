@@ -163,9 +163,14 @@ export function buildProgressNarrationScript(map, {
   producerId = "devspace-progress-default",
   producerPriority = 0,
   relayAppOrigins = [],
+  goalState = null,
 } = {}) {
   const serialized = serializeInline(map && typeof map === "object" ? map : {});
   const serializedRelayAppOrigins = serializeInline(normalizeRelayAppOrigins(relayAppOrigins));
+  // Transport lifetime follows persisted Goal state, not card age or DOM text.
+  const activeGoalConversations = [...new Set(Object.values(goalState?.goals || {})
+    .filter((goal) => goal?.status === "active" && goal?.conversationId)
+    .map((goal) => String(goal.conversationId)))];
   return `(() => {
     const ROOT_ID = ${JSON.stringify(ROOT_ID)};
     const STYLE_ID = ${JSON.stringify(STYLE_ID)};
@@ -183,6 +188,7 @@ export function buildProgressNarrationScript(map, {
     const RELAY_APP_ORIGINS = ${serializedRelayAppOrigins};
     const LEASE_MS = ${LEASE_MS};
     const conversationId = location.pathname.match(/\\/c\\/([^/?#]+)/)?.[1] || null;
+    const hasActiveGoal = ${serializeInline(activeGoalConversations)}.includes(conversationId);
     const lifecycleNow = Date.now();
     const documentLifecycleKey = '__devspaceClassicDocumentLifecycleV1';
     const routeLifecycleKey = '__devspaceClassicConversationLifecycleV1';
@@ -314,7 +320,8 @@ export function buildProgressNarrationScript(map, {
     };
     const pruneProgressRelayFrames = () => {
       const frames = [...document.querySelectorAll('iframe')]
-        .filter((frame) => (frame.getAttribute('title') || '') === PROGRESS_RELAY_RESOURCE_TITLE && ownedRelayFrame(frame));
+        .filter((frame) => [PROGRESS_RELAY_RESOURCE_TITLE, PROGRESS_RELAY_RESOURCE_TITLE.replace('.html', '-v2.html')]
+          .includes(frame.getAttribute('title') || '') && ownedRelayFrame(frame));
       const now = Date.now();
       const edge = Math.ceil(PROGRESS_RELAY_MAX_LIVE_FRAMES / 2);
       const keep = new Set([...frames.slice(0, edge), ...frames.slice(-edge)]);
@@ -322,7 +329,9 @@ export function buildProgressNarrationScript(map, {
       for (const frame of frames) {
         const firstSeen = Number(frame.dataset.devspaceProgressRelayFirstSeenAt || 0) || now;
         frame.dataset.devspaceProgressRelayFirstSeenAt = String(firstSeen);
-        const expired = now - firstSeen > PROGRESS_RELAY_RETENTION_MS;
+        // Goal start uses this claim resource too. Keep the bounded edge
+        // relays while the exact conversation's persisted Goal is active.
+        const expired = !hasActiveGoal && now - firstSeen > PROGRESS_RELAY_RETENTION_MS;
         const outsideBoundedEdges = frames.length > PROGRESS_RELAY_MAX_LIVE_FRAMES && !keep.has(frame);
         if (!expired && !outsideBoundedEdges) continue;
         retireNode(frameShell(frame), 'devspaceProgressRelayRetired');
@@ -333,7 +342,8 @@ export function buildProgressNarrationScript(map, {
     };
     const pruneGoalRelayFrames = () => {
       const frames = [...document.querySelectorAll('iframe')]
-        .filter((frame) => (frame.getAttribute('title') || '') === GOAL_RELAY_RESOURCE_TITLE && ownedRelayFrame(frame));
+        .filter((frame) => [GOAL_RELAY_RESOURCE_TITLE, GOAL_RELAY_RESOURCE_TITLE.replace('.html', '-v2.html')]
+          .includes(frame.getAttribute('title') || '') && ownedRelayFrame(frame));
       const now = Date.now();
       const edge = Math.ceil(GOAL_RELAY_MAX_LIVE_FRAMES / 2);
       const keep = new Set([...frames.slice(0, edge), ...frames.slice(-edge)]);
@@ -341,7 +351,9 @@ export function buildProgressNarrationScript(map, {
       for (const frame of frames) {
         const firstSeen = Number(frame.dataset.devspaceGoalRelayFirstSeenAt || 0) || now;
         frame.dataset.devspaceGoalRelayFirstSeenAt = String(firstSeen);
-        const expired = now - firstSeen > PROGRESS_RELAY_RETENTION_MS;
+        // The stable edge channels survive an active Goal; redundant middle
+        // frames remain bounded. Terminal Goals regain ordinary age cleanup.
+        const expired = !hasActiveGoal && now - firstSeen > PROGRESS_RELAY_RETENTION_MS;
         const outsideBoundedEdges = frames.length > GOAL_RELAY_MAX_LIVE_FRAMES && !keep.has(frame);
         if (!expired && !outsideBoundedEdges) continue;
         retireNode(frameShell(frame), 'devspaceGoalRelayRetired');
@@ -730,8 +742,8 @@ export function inspectProgressNarrationExpression() {
       retiredLegacyInlineErrors:Number(root?.dataset.retiredLegacyInlineErrors || 0),
       legacyInlineGoalDockFrames:document.querySelectorAll('iframe[title="ui://devspace/goal-dock.html"]').length,
       legacyInlinePlanCardFrames:document.querySelectorAll('iframe[title="ui://devspace/plan-card.html"]').length,
-      progressRelayFrames:document.querySelectorAll('iframe[title="ui://devspace/progress-claim-relay.html"]').length,
-      goalRelayFrames:document.querySelectorAll('iframe[title="ui://devspace/goal-continuation-relay.html"]').length,
+      progressRelayFrames:document.querySelectorAll('iframe[title="ui://devspace/progress-claim-relay.html"],iframe[title="ui://devspace/progress-claim-relay-v2.html"]').length,
+      goalRelayFrames:document.querySelectorAll('iframe[title="ui://devspace/goal-continuation-relay.html"],iframe[title="ui://devspace/goal-continuation-relay-v2.html"]').length,
       visibleLegacyInlineFrames:[...document.querySelectorAll('iframe[title="ui://devspace/goal-dock.html"],iframe[title="ui://devspace/plan-card.html"]')]
         .filter((frame)=>{const shell=frame.closest('[data-devspace-legacy-inline-retired="true"]') || frame.parentElement?.parentElement || frame;return getComputedStyle(shell).display !== 'none'}).length,
       visibleLegacyInlineErrors:[...document.querySelectorAll('aside')]
@@ -832,6 +844,7 @@ export class ClassicProgressNarrationOverlay {
         producerId: this.producerId,
         producerPriority: this.producerPriority,
         relayAppOrigins: this.getRelayAppOrigins(),
+        goalState,
       });
       const runtimes = this.contextAdapter.status()?.runtimes || [];
       const settled = await Promise.allSettled(runtimes.map(async (runtime) => ({
@@ -893,6 +906,9 @@ export class ClassicProgressNarrationOverlay {
       producerId: this.producerId,
       producerPriority: this.producerPriority,
       relayAppOrigins: this.getRelayAppOrigins(),
+      // Closing an overlay producer during Core handover does not close the
+      // user's Goal. Preserve its transport across the producer transition.
+      goalState: this.goalStatePath ? await readJson(this.goalStatePath) : null,
     });
     const runtimes = this.contextAdapter.status()?.runtimes || [];
     await Promise.allSettled(runtimes.map((runtime) => this.contextAdapter.evaluateRuntime(runtime.runtimeKey, script)));

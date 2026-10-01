@@ -233,7 +233,7 @@ export class ConversationProgressLivenessSupervisor {
       const startedAtMs = finiteTime(value?.startedAt) || 0;
       const interruptedAtMs = finiteTime(value?.interruptedAt) || 0;
       const latestEpisodeAt = Math.max(startedAtMs, interruptedAtMs);
-      const restorableState = ["running", "interrupted", "completion-pending", "uncertain"].includes(persistedTurnState);
+      const restorableState = ["running", "interrupted", "restart-interrupted", "completion-pending", "uncertain"].includes(persistedTurnState);
       const restorable = persistedVersion >= 4
         && value?.armed === true
         && Number(value?.continueAttempts || 0) === 0
@@ -243,7 +243,7 @@ export class ConversationProgressLivenessSupervisor {
         && startupNow - latestEpisodeAt <= this.armWindowMs;
       if (restorable) {
         const restartObservedAt = new Date(startupNow).toISOString();
-        const alreadyInterrupted = persistedTurnState === "interrupted";
+        const alreadyInterrupted = ["interrupted", "restart-interrupted"].includes(persistedTurnState);
         record.episodeRevision = Math.max(1, record.episodeRevision || 1);
         record.armed = true;
         // A replacement Core cannot continue an in-flight MCP/tool request
@@ -251,7 +251,7 @@ export class ConversationProgressLivenessSupervisor {
         // explicit interruption evidence. The exact page still has the full
         // twenty-minute grace period to complete normally, and any fresh
         // native turn replaces this episode before rescue.
-        record.turnState = alreadyInterrupted ? "interrupted" : "restart-interrupted";
+        record.turnState = alreadyInterrupted ? persistedTurnState : "restart-interrupted";
         record.startedAt = value?.startedAt || null;
         record.interruptedAt = value?.interruptedAt
           || value?.lastActivityAt

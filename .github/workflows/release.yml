@@ -24,6 +24,10 @@ jobs:
       - run: npm run verify:local-ingress
       - run: npm run verify:stable-gateway
       - run: npm run verify:capabilities
+      - run: npm run verify:goal
+      - run: npm run verify:progress-liveness
+      - run: npm run verify:continuity-regressions
+      - run: npm run verify:release-promotion
       - name: Build npm-compatible archive
         shell: pwsh
         run: |
@@ -41,6 +45,10 @@ jobs:
       - name: Publish release assets
         uses: softprops/action-gh-release@v2
         with:
+          # Packaging tests are not real Classic acceptance. Only the separate
+          # evidence-checked promotion workflow may expose a stable update.
+          draft: true
+          make_latest: false
           body_path: docs/releases/V0.5.19.md
           files: |
             install.ps1

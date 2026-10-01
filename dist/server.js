@@ -105,8 +105,7 @@ const WORKSPACE_APP_URI = "ui://devspace/workspace-app.html";
 const WORKSPACE_APP_MANIFEST_ENTRY = "workspace-app.html";
 const PLAN_CARD_URI = "ui://devspace/plan-card.html";
 const GOAL_DOCK_URI = "ui://devspace/goal-dock.html";
-const GOAL_RELAY_URI = "ui://devspace/goal-continuation-relay.html";
-const PROGRESS_CLAIM_RELAY_URI = "ui://devspace/progress-claim-relay.html";
+import { GOAL_RELAY_URI, PROGRESS_CLAIM_RELAY_URI, readGoalRelayHtml } from "./goal-relay-resource.js";
 const CHAT_SWARM_UI_DIAGNOSTICS = {
     resourceReads: 0,
     assetRequests: 0,
@@ -443,10 +442,10 @@ function goalDockHtml() {
     return readFileSync(new URL("./ui/goal-dock.html", import.meta.url), "utf8");
 }
 function goalContinuationRelayHtml() {
-    return readFileSync(new URL("./ui/goal-continuation-relay.html", import.meta.url), "utf8");
+    return readGoalRelayHtml("goal-continuation-relay.html");
 }
 function progressClaimRelayHtml(relayOriginProbeUrl) {
-    return readFileSync(new URL("./ui/progress-claim-relay.html", import.meta.url), "utf8")
+    return readGoalRelayHtml("progress-claim-relay.html")
         .replace("__DEVSPACE_RELAY_ORIGIN_PROBE_URL__", String(relayOriginProbeUrl || ""));
 }
 function appCsp(config) {
@@ -930,7 +929,10 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
             },
         ],
     }));
-    registerAppResource(server, "DevSpace Goal Continuation Relay", GOAL_RELAY_URI, {
+    // Old tool snapshots still address the unversioned resources. Serve both
+    // without forcing users to reconnect or interrupt existing conversations.
+    for (const uri of [GOAL_RELAY_URI, "ui://devspace/goal-continuation-relay.html"]) {
+    registerAppResource(server, `DevSpace Goal Continuation Relay ${uri}`, uri, {
         description: "Per-round hidden Goal continuation relay for Chat mode.",
         _meta: {
             ui: {
@@ -940,7 +942,7 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
     }, async () => ({
         contents: [
             {
-                uri: GOAL_RELAY_URI,
+                uri,
                 mimeType: RESOURCE_MIME_TYPE,
                 text: goalContinuationRelayHtml(),
                 _meta: {
@@ -951,7 +953,9 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
             },
         ],
     }));
-    registerAppResource(server, "DevSpace Progress Claim Relay", PROGRESS_CLAIM_RELAY_URI, {
+    }
+    for (const uri of [PROGRESS_CLAIM_RELAY_URI, "ui://devspace/progress-claim-relay.html"]) {
+    registerAppResource(server, `DevSpace Progress Claim Relay ${uri}`, uri, {
         description: "Hidden one-time relay that binds one pending progress report to the exact ChatGPT Classic page that received its tool result.",
         _meta: {
             ui: {
@@ -961,7 +965,7 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
     }, async () => ({
         contents: [
             {
-                uri: PROGRESS_CLAIM_RELAY_URI,
+                uri,
                 mimeType: RESOURCE_MIME_TYPE,
                 text: progressClaimRelayHtml(relayOriginProbeUrl),
                 _meta: {
@@ -972,6 +976,7 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
             },
         ],
     }));
+    }
     registerChatSwarmTools(server, chatSwarm, {
         workerStreamUrl: `${config.publicBaseUrl.replace(/\/+$/, "")}/chat-swarm/worker-events`,
     });

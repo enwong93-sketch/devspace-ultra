@@ -13,6 +13,29 @@ assert.equal(typeof moduleUnderTest?.defaultMainDebugPorts, "function", "default
 assert.equal(typeof moduleUnderTest?.waitForVisibleReportBoundary, "function", "waitForVisibleReportBoundary must exist");
 assert.equal(typeof moduleUnderTest?.probeClassicConversationPagePort, "function", "exact conversation page probe must exist");
 assert.equal(typeof moduleUnderTest?.matchesNativeGoalCompletionBoundary, "function", "native turn completion must be revalidated on the exact host page");
+assert.equal(typeof moduleUnderTest?.retrySurfaceBlocksGoalBoundary, "function", "Retry surfaces must be classified before they can block Goal continuation");
+
+{
+  const classify = moduleUnderTest.retrySurfaceBlocksGoalBoundary;
+  assert.equal(classify({ visible: true, text: "重試", belongsToLatestTurn: true }), true,
+    "a current-turn generic Retry surface remains blocking");
+  assert.equal(classify({ visible: false, text: "重試", belongsToLatestTurn: true }), false,
+    "hidden retained Retry controls must not block a completed turn");
+  assert.equal(classify({ visible: true, text: "重試", belongsToLatestTurn: false }), false,
+    "a historical turn Retry control must not block the latest assistant final");
+  assert.equal(classify({
+    visible: true,
+    text: "重試",
+    belongsToLatestTurn: true,
+    ancestorTexts: ["已調用工具", "載入應用程式時發生錯誤\nFailed to fetch template\n重試"],
+  }), false, "an MCP App template-render failure is not a failed ChatGPT assistant turn");
+  assert.equal(classify({
+    visible: true,
+    text: "Retry",
+    belongsToLatestTurn: true,
+    ancestorTexts: ["Message delivery timed out. Retry"],
+  }), true, "a current message-delivery Retry surface remains blocking and available to timeout recovery");
+}
 
 {
   const assistantText = "Exact completed assistant turn.";
@@ -175,6 +198,55 @@ assert.equal(ports.at(-1), 9762);
 assert.equal(ports.length, 32);
 assert.equal(new Set(ports).size, ports.length);
 
+{
+  const relayOptions = [];
+  const exactGoalRelayBridge = new moduleUnderTest.ClassicGoalHostBridge({
+    ports: [9732],
+    async probeRelayPort(port, conversationId, options) {
+      relayOptions.push({ port, conversationId, options });
+      return [
+        { runtimePort: port, runtimeLabel: "Main-02", targetId: "relay-other-goal",
+          pageTargetId: "page-exact-goal-relay", conversationId, chatMode: true,
+          goalId: "goal_other", relayStatePresent: true, relayActive: true,
+          relayHeartbeatAt: 900, relayStartedAt: 100, title: "DevSpace Goal Relay" },
+        { runtimePort: port, runtimeLabel: "Main-02", targetId: "relay-exact-old",
+          pageTargetId: "page-exact-goal-relay", conversationId, chatMode: true,
+          goalId: options.goalId, relayStatePresent: true, relayActive: true,
+          relayHeartbeatAt: 1_000, relayStartedAt: 200, title: "DevSpace Goal Relay" },
+        { runtimePort: port, runtimeLabel: "Main-02", targetId: "relay-exact-current",
+          pageTargetId: "page-exact-goal-relay", conversationId, chatMode: true,
+          goalId: options.goalId, relayStatePresent: true, relayActive: true,
+          relayHeartbeatAt: 2_000, relayStartedAt: 300, title: "DevSpace Goal Relay" },
+      ];
+    },
+  });
+  const exactRelay = await exactGoalRelayBridge.findExactConversationRelay(
+    "conversation-exact-goal-relay",
+    { runtimePort: 9732, goalId: "goal_exact_relay" },
+  );
+  assert.equal(relayOptions.length, 1);
+  assert.equal(relayOptions[0].options.goalId, "goal_exact_relay");
+  assert.equal(exactRelay.candidate.targetId, "relay-exact-current",
+    "Goal dispatch must choose the freshest live relay carrying the exact Goal marker");
+  assert.equal(exactRelay.redundantRelayCount, 1);
+
+  const missingExactRelayBridge = new moduleUnderTest.ClassicGoalHostBridge({
+    ports: [9732],
+    async probeRelayPort(port, conversationId) {
+      return [{ runtimePort: port, runtimeLabel: "Main-02", targetId: "relay-wrong-goal",
+        pageTargetId: "page-wrong-goal", conversationId, chatMode: true,
+        goalId: "goal_wrong", relayStatePresent: true, relayActive: true,
+        relayHeartbeatAt: Date.now(), relayStartedAt: Date.now(), title: "DevSpace Goal Relay" }];
+    },
+  });
+  const missingExactRelay = await missingExactRelayBridge.findExactConversationRelay(
+    "conversation-exact-goal-relay",
+    { runtimePort: 9732, goalId: "goal_exact_relay" },
+  );
+  assert.equal(missingExactRelay.candidate, null,
+    "a relay for another Goal on the same conversation page must fail closed");
+}
+
 const probeCalls = [];
 const rawCalls = [];
 const visibleBoundaryCalls = [];
@@ -263,6 +335,23 @@ assert.equal(normalHidden.ok, true);
 assert.equal(normalHidden.transport, "classic-hidden-continuation-native-confirmed");
 assert.equal(normalHidden.nativeBranchReconciled, true);
 assert.equal(normalHiddenInspections, 1);
+{
+  let branchReads = 0;
+  const rateLimitedBridge = new moduleUnderTest.ClassicGoalHostBridge({
+    inspectComposer: async () => ({ ok: true, state: "empty" }),
+    inspectVisibleReport: async () => {
+      branchReads += 1;
+      return { nativeContinuation: { resolved: false, state: "conversation-fetch-429" } };
+    },
+    sleep: async () => { throw new Error("429 must return to bounded supervisor reconciliation"); },
+  });
+  const rateLimited = await rateLimitedBridge.waitForHiddenAssistant({}, {
+    sourceUserMessageId: "source", baselineAssistantMessageId: "final",
+  });
+  assert.equal(branchReads, 1);
+  assert.equal(rateLimited.definiteFailure, false);
+  assert.equal(rateLimited.state, "conversation-fetch-429");
+}
 
 const supersededHiddenBridge = new moduleUnderTest.ClassicGoalHostBridge({
   ports: [9733],
@@ -706,7 +795,9 @@ const boundaryFail = await boundaryFailBridge.dispatch({
   expectedPageTargetId: "page-boundary",
 });
 assert.equal(boundaryFail.ok, false);
-assert.equal(boundaryFail.definiteFailure, false);
+assert.equal(boundaryFail.definiteFailure, true);
+assert.equal(boundaryFail.dispatchCommitted, false);
+assert.equal(boundaryFail.state, "native-final-preflight-unavailable");
 assert.match(boundaryFail.error, /visible report/i);
 
 const missingBridge = new moduleUnderTest.ClassicGoalHostBridge({
@@ -728,6 +819,8 @@ const missing = await missingBridge.dispatch({
 });
 assert.equal(missing.ok, false);
 assert.equal(missing.definiteFailure, true);
+assert.equal(missing.dispatchCommitted, false);
+assert.equal(missing.state, "exact-goal-relay-unavailable");
 assert.match(missing.error, /matching Chat-mode DevSpace relay|No exact Chat-mode relay/i);
 
 await assert.rejects(

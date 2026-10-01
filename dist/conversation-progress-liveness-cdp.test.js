@@ -11,6 +11,23 @@ assert.equal(isClassicTurnErrorText("已中断思考"), true);
 assert.equal(isClassicTurnErrorText("Thinking interrupted"), true);
 assert.equal(isClassicTurnErrorText("正常完成"), false);
 const previousAssistant = { id: "assistant-previous-turn" };
+const stopControl = (label, { form = false, nativeTestId = false, overlay = false } = {}) => ({
+  matches: () => nativeTestId,
+  closest: selector => selector === 'form' ? (form ? {} : null) : (overlay ? {} : null),
+  getAttribute: () => label,
+});
+for (const label of ['取消釘選 驗收進度綁定停止', '開啟 驗收進度綁定停止 的對話選項',
+  'Open Stop project options', '停止目標', 'Stop goal']) {
+  assert.equal(_test.isNativeGenerationStopControl(stopControl(label)), false);
+  assert.equal(_test.isNativeGenerationStopControl(stopControl(label, { form: true })), false);
+}
+assert.equal(_test.isNativeGenerationStopControl(stopControl('開啟語音', { form: true })), false);
+for (const label of ['Stop generating', 'Stop', '停止生成', '停止回應', '中止']) {
+  assert.equal(_test.isNativeGenerationStopControl(stopControl(label, { form: true })), true);
+  assert.equal(_test.isNativeGenerationStopControl(stopControl(label)), false);
+}
+assert.equal(_test.isNativeGenerationStopControl(stopControl('', { nativeTestId: true })), true);
+assert.equal(_test.isNativeGenerationStopControl(stopControl('Stop generating', { nativeTestId: true, overlay: true })), false);
 const currentAssistant = { id: "assistant-current-turn" };
 assert.equal(_test.selectCurrentTurnMessage(currentAssistant, previousAssistant, true), currentAssistant);
 assert.equal(_test.selectCurrentTurnMessage(null, previousAssistant, false), previousAssistant,

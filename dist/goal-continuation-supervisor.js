@@ -417,10 +417,14 @@ export class GoalContinuationSupervisor {
         continue;
       }
       let pages;
+      const nativeFinal = nativeCompletionProof(goal);
       try {
-        const nativeFinal = nativeCompletionProof(goal);
         pages = await this.pages(goal, {
-          sourceOnly: true,
+          // A persisted exact native-final receipt is revalidated with the
+          // authoritative stream_status endpoint as well as the native branch.
+          // sourceOnly skips that endpoint, leaving streamStatus=null and
+          // forcing a valid completion into the human-supersession fallback.
+          sourceOnly: !nativeFinal,
           runtimeKey: nativeFinal?.runtimeKey || null,
           pageTargetId: nativeFinal?.pageTargetId || null,
           allowDivergent: !nativeFinal,
@@ -522,6 +526,9 @@ export class GoalContinuationSupervisor {
         createdAt: this.now(),
         recoveredMissingArm: true,
         nativeFinalVerified: proof.type === 'completed-final',
+        nativeCompletionProof: proof.type === 'completed-final' && nativeFinal
+          ? { ...nativeFinal }
+          : null,
         finalAssistantId: proof.type === 'completed-final' ? proof.finalAssistantId : null,
         finalAssistantHash: proof.type === 'completed-final' ? proof.finalAssistantHash : null,
       };
@@ -796,7 +803,13 @@ export class GoalContinuationSupervisor {
       });
       if (this.closed || !pages || pages.length !== 1) return;
       const proof = pages[0].nativeContinuation;
-      if (!proof?.resolved || proof.sourceUserFound !== true || proof.baselineAssistantFound !== true) return;
+      if (!proof?.resolved || proof.sourceUserFound !== true || proof.baselineAssistantFound !== true) {
+        row.reconciliationAttempts = Number(row.reconciliationAttempts || 0) + 1;
+        row.retryAt = this.now() + Math.min(60_000, 5_000 * (2 ** Math.min(4, row.reconciliationAttempts - 1)));
+        row.reconciliationState = proof?.state || 'native-branch-unresolved';
+        await this.save();
+        return;
+      }
       const assistantIndex = Number(proof.newAssistantAfterBaselineIndex);
       const userIndex = Number(proof.newUserAfterBaselineIndex);
       const hiddenAssistantFirst = assistantIndex >= 0 && (userIndex < 0 || assistantIndex < userIndex);
@@ -915,6 +928,10 @@ export class GoalContinuationSupervisor {
         round: claimed.claim.round,
         reportedAt: row.reportedAt || null });
     } catch (error) { sent = { ok: false, definiteFailure: false, error: error.message }; }
+    row.dispatchCommitted = sent?.dispatchCommitted === true;
+    row.dispatchDefiniteFailure = sent?.definiteFailure === true;
+    row.dispatchState = sent?.state || null;
+    row.dispatchError = sent?.error || null;
     if (sent?.ok === true && (sent.backgroundAccepted === true || sent.visibilityVerified === true)) {
       row.state = 'delivered'; row.reason = sent.backgroundAccepted === true
         ? 'one-hidden-continuation'
@@ -931,8 +948,9 @@ export class GoalContinuationSupervisor {
     }
     if (sent?.definiteFailure === true && sent.dispatchCommitted === false) {
       await this.goalRuntime.continuation({ goalId: row.goalId, action: 'release', leaseId }).catch(() => {});
-      row.state = row.attempts >= 3 ? 'cancelled' : 'waiting';
-      row.retryAt = this.now() + 5000; row.reason = sent.state || 'definite-preflight-failure';
+      row.state = 'waiting';
+      row.retryAt = this.now() + Math.min(60_000, 5_000 * (2 ** Math.min(4, row.attempts - 1)));
+      row.reason = sent.state || 'definite-preflight-failure';
     } else {
       row.state = 'uncertain'; row.reason = sent?.state || 'delivery-acknowledgement-lost';
       // Never release an uncertain send for an automatic retry.

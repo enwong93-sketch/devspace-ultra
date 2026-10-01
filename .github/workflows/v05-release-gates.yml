@@ -25,3 +25,7 @@ jobs:
         run: npm run verify:stable-gateway
       - name: Capability, connection and routing gates
         run: npm run verify:capabilities
+      - run: npm run verify:goal
+      - run: npm run verify:progress-liveness
+      - run: npm run verify:continuity-regressions
+      - run: npm run verify:release-promotion
