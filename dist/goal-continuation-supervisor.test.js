@@ -368,6 +368,41 @@ test('a definite unsent failure may retry after bounded backoff', async t => {
   await h.tick(); assert.equal(h.sends(),1);
   h.advanceTime(5100); await h.tick(); assert.equal(h.sends(),2);
 });
+test('another active dispatch lease is uncertain ownership, not a stopped Goal', async t => {
+  const h = await harness(t); h.final(); await h.tick();
+  await h.runtime.continuation({ goalId: h.g.id, action: 'claim' });
+  await h.tick();
+  assert.equal(h.driver.status().records[0].state, 'uncertain');
+  assert.equal((await h.runtime.status(h.g.id)).status, 'active');
+  assert.equal(h.sends(), 0);
+  h.advanceTime(120_000); await h.tick();
+  assert.equal(h.sends(), 0, 'expiry alone cannot authorize replay of another owner');
+});
+test('legacy false-superseded row records the exact human-started round without sending', async t => {
+  const h = await harness(t, { send: () => ({ ok:false, definiteFailure:true,
+    dispatchCommitted:false, state:'exact-goal-relay-unavailable' }) });
+  h.final(); await h.tick(); await h.tick();
+  const id = h.reported.continuation.continuationId;
+  const row = h.driver.records.get(id);
+  row.state = 'superseded'; row.reason = 'goal-stopped-paused-or-consumed';
+  await h.driver.save(); await h.driver.close();
+  const observedAt = new Date(Date.parse(h.reported.lastRoundReport.reportedAt) + 1_000).toISOString();
+  await h.runtime.roundBegin({ goalId:h.g.id, continuationId:id, roundBeganAt:observedAt });
+  h.setPages([{ ...h.page(), nativeContinuation:{
+    resolved:true, sourceUserFound:true, baselineAssistantFound:true,
+    latestUserMessageId:'actual-human-resume',
+    newUserAfterBaselineMessageId:'actual-human-resume', newUserAfterBaselineIndex:0,
+    newUserAfterBaselineCreatedAt:observedAt,
+    newAssistantAfterBaselineMessageId:null, newAssistantAfterBaselineIndex:-1,
+  }}]);
+  const restarted = new GoalContinuationSupervisor(h.config);
+  await restarted.pollOnce();
+  assert.equal(restarted.status().records[0].state, 'delivered');
+  assert.equal(restarted.status().records[0].deliveryMode, 'human-user-continuation');
+  assert.equal(restarted.status().records[0].manualUserObservedAt, observedAt);
+  assert.equal(h.sends(), 1, 'the failed old attempt must never be replayed');
+  await restarted.close();
+});
 
 test('temporary unsent relay failures do not cancel an active Goal after three attempts', async t => {
   let attempts = 0;

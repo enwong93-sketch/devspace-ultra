@@ -445,15 +445,15 @@ export function registerGoalTools(server, goalRuntime, {
   }, async ({ goalId, action, leaseId }, extra) => {
     try {
       await bindOrVerifyActiveGoal(goalId, extra);
+      if ((action === "dispatch" || action === "claim") && hostBridge?.continuationSupervisor) {
+        const status = await hostBridge.continuationSupervisor.requestDispatch(goalId);
+        const goal = await goalRuntime.status(goalId);
+        return textResult(goal, `Goal continuation backend state: ${status.state}.`, {
+          acknowledged: status.dispatched,
+          hostDispatch: { ok: true, transport: 'backend-exact-page-continuation' },
+        });
+      }
       if (action === "dispatch") {
-        if (hostBridge?.continuationSupervisor) {
-          const status = await hostBridge.continuationSupervisor.requestDispatch(goalId);
-          const goal = await goalRuntime.status(goalId);
-          return textResult(goal, `Goal continuation backend state: ${status.state}.`, {
-            acknowledged: status.dispatched,
-            hostDispatch: { ok: true, transport: 'backend-exact-page-continuation' },
-          });
-        }
         if (!hostBridge || typeof hostBridge.dispatch !== "function") {
           throw new Error("ChatGPT Classic Goal host bridge is unavailable.");
         }

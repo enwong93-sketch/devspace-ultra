@@ -3,10 +3,10 @@ __pycache__/
 *.pyc
 *.before-*
 *.agent-authored.tmp
-*.tgz
 SHA256SUMS.txt
 *.log
 *.tgz
+!vendor/*.tgz
 *.bak*
 *.backup
 npm-debug.log*

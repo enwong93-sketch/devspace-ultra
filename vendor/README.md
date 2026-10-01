@@ -24,5 +24,12 @@ The root `npm-shrinkwrap.json` is identical to the reviewed `package-lock.json`
 and ships in the CLI release so native archive installs retain the tested
 dependency graph, rather than re-resolving unrelated transitive versions.
 
+The dependency URL is pinned to immutable repository commit
+`7d39a19173d3044adf656a0c6e93b91224f1ff73` with the same reviewed integrity.
+The original `file:vendor/...` experiment worked from a source checkout but
+failed a clean global archive install from an empty directory: npm tried to
+open the nested archive before extracting its parent. A source-checkout pass
+is therefore not evidence that the published archive can be installed.
+
 Sources: the official npm registry packages and
 <https://github.com/advisories/GHSA-q2hr-2g5m-vwhr>.

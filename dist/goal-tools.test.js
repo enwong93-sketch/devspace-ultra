@@ -114,6 +114,20 @@ try {
   assert.match(reportResult.content[0].text, /exact assistant turn ends.*continue it automatically/i);
   assert.doesNotMatch(reportResult.content[0].text, /must.*(?:visible|final).*report/i);
 
+  const coordinatedRequests = [];
+  hostBridge.continuationSupervisor = { async requestDispatch(goalId) {
+    coordinatedRequests.push(goalId); return { state:'waiting', dispatched:false };
+  } };
+  for (const action of ['claim', 'dispatch']) {
+    const coordinated = await continuation.handler({ goalId:goal1.id, action });
+    assert.equal(coordinated.structuredContent.claim, undefined,
+      'an App must not acquire a second raw lease when the backend owns continuation');
+    assert.equal(coordinated.structuredContent.goal.continuation.state, 'pending');
+  }
+  assert.deepEqual(coordinatedRequests, [goal1.id, goal1.id]);
+  assert.equal(hostDispatches.length, 0);
+  delete hostBridge.continuationSupervisor;
+
   const claimResult = await continuation.handler({
     goalId: goal1.id,
     action: "claim",

@@ -19,6 +19,7 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
+      - run: npm run verify:dependency-security-installed
       - run: npm run verify:public-release
       - run: npm run verify:setup
       - run: npm run verify:local-ingress
@@ -49,7 +50,7 @@ jobs:
           # evidence-checked promotion workflow may expose a stable update.
           draft: true
           make_latest: false
-          body_path: docs/releases/V0.5.19.md
+          body_path: docs/releases/V0.5.20.md
           files: |
             install.ps1
             install.sh

@@ -324,6 +324,22 @@ async function inspectWidgetTarget(target, runtimePort, options) {
   }
 }
 
+function noteRelayInspection(options, reason) {
+  try { options.onInspection?.(reason); } catch {}
+}
+
+export function relayOwnershipRejection(value, expectedGoalId, pageConversationId, now = Date.now()) {
+  if (value?.canFollowUp !== true) return 'follow-up-bridge-unavailable';
+  if (!expectedGoalId) return null;
+  if (value.relayStatePresent !== true) return 'relay-marker-missing';
+  if (value.relayActive !== true) return 'relay-inactive';
+  if (String(value.relayGoalId || '') !== expectedGoalId) return 'relay-goal-mismatch';
+  if (String(value.relayConversationId || '') !== pageConversationId) return 'relay-conversation-mismatch';
+  const heartbeatAt = Number(value.relayHeartbeatAt || 0);
+  if (!Number.isFinite(heartbeatAt) || heartbeatAt <= 0 || now - heartbeatAt > 60_000) return 'relay-heartbeat-stale';
+  return null;
+}
+
 async function inspectRelayTarget(target, runtimePort, options) {
   const client = new CdpClient(target.webSocketDebuggerUrl, options);
   await client.open();
@@ -331,7 +347,7 @@ async function inspectRelayTarget(target, runtimePort, options) {
     await client.call("Runtime.enable");
     await sleep(options.contextSettleMs ?? DEFAULT_CONTEXT_SETTLE_MS);
     const context = chooseInnerContext(client, target.id);
-    if (!context) return null;
+    if (!context) { noteRelayInspection(options, 'no-execution-context'); return null; }
     const result = await client.call("Runtime.evaluate", {
       contextId: context.id,
       expression: `(() => ({
@@ -347,16 +363,11 @@ async function inspectRelayTarget(target, runtimePort, options) {
       returnByValue: true,
     });
     const value = result.result?.value;
-    if (value?.canFollowUp !== true) return null;
     const pageConversationId = conversationIdFromPageUrl(options.pageUrl);
     const expectedGoalId = String(options.goalId || "").trim();
-    if (expectedGoalId) {
-      if (value.relayStatePresent !== true || value.relayActive !== true) return null;
-      if (String(value.relayGoalId || "") !== expectedGoalId) return null;
-      if (String(value.relayConversationId || "") !== pageConversationId) return null;
-      const heartbeatAt = Number(value.relayHeartbeatAt || 0);
-      if (!Number.isFinite(heartbeatAt) || heartbeatAt <= 0 || Date.now() - heartbeatAt > 60_000) return null;
-    }
+    const rejection = relayOwnershipRejection(value, expectedGoalId, pageConversationId);
+    noteRelayInspection(options, rejection || 'relay-accepted');
+    if (rejection) return null;
     return {
       runtimePort,
       runtimeLabel: runtimeLabelForPort(runtimePort),
@@ -674,13 +685,20 @@ export async function probeClassicRelayPort(port, conversationId, options = {}) 
   try {
     targets = await fetchJson(`http://127.0.0.1:${port}/json/list`, options);
   } catch {
+    noteRelayInspection(options, 'runtime-unavailable');
     return [];
   }
-  if (!Array.isArray(targets)) return [];
-  const page = targets.find((target) => target?.type === "page" && /chatgpt\.com/i.test(target.url || ""));
-  if (!page) return [];
-  if (/[?&]surface=work(?:&|$)/i.test(page.url || "")) return [];
-  if (conversationIdFromPageUrl(page.url) !== expectedConversationId) return [];
+  if (!Array.isArray(targets)) { noteRelayInspection(options, 'invalid-target-inventory'); return []; }
+  const exactPages = targets.filter(target => target?.type === 'page'
+    && conversationIdFromPageUrl(target.url) === expectedConversationId);
+  if (exactPages.length !== 1) {
+    noteRelayInspection(options, exactPages.length > 1 ? 'duplicate-exact-pages' : 'exact-page-unavailable');
+    return [];
+  }
+  const page = exactPages[0];
+  if (/[?&]surface=work(?:&|$)/i.test(page.url || "")) {
+    noteRelayInspection(options, 'unsupported-work-surface'); return [];
+  }
 
   const widgets = targets.filter((target) => (
     target?.type === "iframe" &&
@@ -688,6 +706,7 @@ export async function probeClassicRelayPort(port, conversationId, options = {}) 
     typeof target.webSocketDebuggerUrl === "string"
   ));
   const found = [];
+  if (!widgets.length) noteRelayInspection(options, 'no-widget-targets');
   for (const target of widgets) {
     try {
       const candidate = await inspectRelayTarget(target, port, {
@@ -700,6 +719,7 @@ export async function probeClassicRelayPort(port, conversationId, options = {}) 
       if (candidate?.conversationId === expectedConversationId) found.push(candidate);
     } catch {
       // A stale app iframe cannot invalidate another relay candidate.
+      noteRelayInspection(options, 'widget-inspection-error');
     }
   }
   return found;
@@ -1086,11 +1106,14 @@ export class ClassicGoalHostBridge {
     }
     const ports = Number.isInteger(runtimePort) ? [runtimePort] : this.ports;
     const matches = [];
+    const reasonCounts = {};
+    const note = reason => { reasonCounts[reason] = (reasonCounts[reason] || 0) + 1; };
     for (const port of ports) {
       let candidates = [];
       try {
-        candidates = await this.probeRelayPort(port, expectedConversationId, { goalId });
+        candidates = await this.probeRelayPort(port, expectedConversationId, { goalId, onInspection: note });
       } catch {
+        note('port-probe-error');
         continue;
       }
       for (const candidate of candidates || []) {
@@ -1113,6 +1136,8 @@ export class ClassicGoalHostBridge {
       pageGroups.set(key, group);
     }
     if (pageGroups.size !== 1) {
+      this.lastRelayLookup = { observedAt:new Date().toISOString(), goalBound:Boolean(goalId),
+        portsExamined:ports.length, matches:matches.length, pageMatches:pageGroups.size, reasonCounts };
       return {
         candidate: null,
         ambiguous: pageGroups.size > 1,
@@ -1124,6 +1149,8 @@ export class ClassicGoalHostBridge {
       };
     }
     const relays = [...pageGroups.values()][0];
+    this.lastRelayLookup = { observedAt:new Date().toISOString(), goalBound:Boolean(goalId),
+      portsExamined:ports.length, matches:matches.length, pageMatches:1, reasonCounts };
     const score = (candidate) => /DevSpace Goal Relay/i.test(String(candidate?.title || "")) ? 2
       : /DevSpace Progress Claim Relay/i.test(String(candidate?.title || "")) ? 1 : 0;
     relays.sort((left, right) => Number(right?.relayHeartbeatAt || 0) - Number(left?.relayHeartbeatAt || 0)
@@ -1138,6 +1165,10 @@ export class ClassicGoalHostBridge {
       redundantRelayCount: Math.max(0, relays.length - 1),
       error: null,
     };
+  }
+
+  relayDiagnostics() {
+    return this.lastRelayLookup ? structuredClone(this.lastRelayLookup) : null;
   }
 
   async findExactConversationPage(conversationId, { runtimePort = null } = {}) {
