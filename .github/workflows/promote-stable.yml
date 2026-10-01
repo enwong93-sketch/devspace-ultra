@@ -39,7 +39,13 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Cannot resolve source commit.' }
           $evidenceDir = Join-Path $env:RUNNER_TEMP 'stable-release-acceptance'
           New-Item -ItemType Directory -Path $evidenceDir -Force | Out-Null
-          $metadata = gh api "repos/$env:GH_REPO/releases/tags/$env:RELEASE_TAG"
+          # REST releases/tags only resolves published releases, not drafts.
+          # The CLI resolves the authenticated draft to its exact release ID.
+          $apiUrl = gh release view $env:RELEASE_TAG --json apiUrl --jq '.apiUrl'
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot resolve draft release ID.' }
+          $apiUrl = $apiUrl.Trim()
+          if (-not $apiUrl.StartsWith("https://api.github.com/repos/$env:GH_REPO/releases/", [StringComparison]::OrdinalIgnoreCase)) { throw 'Unexpected release API authority.' }
+          $metadata = gh api $apiUrl
           if ($LASTEXITCODE -ne 0) { throw 'Cannot read draft release.' }
           $releasePath = Join-Path $evidenceDir 'release.json'
           $metadata | Set-Content -LiteralPath $releasePath -Encoding utf8
