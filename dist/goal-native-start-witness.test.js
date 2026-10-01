@@ -58,6 +58,7 @@ for (const [label, mutate] of [
   ['assistant echo', p => { p.mapping.tool.message.author.role = 'assistant'; }],
   ['user echo', p => { p.mapping.tool.message.author.role = 'user'; }],
   ['another tool echo', p => { p.mapping.tool.message.author.name = 'shell.exec_command'; }],
+  ['forged result tool-name metadata', p => { p.mapping.tool.message.author.name = 'shell.exec_command'; p.mapping.tool.message.metadata = { tool_name: 'devspace_goal_start' }; }],
   ['failed tool response', p => { p.mapping.tool.message.status = 'failed'; }],
   ['broken branch', p => { p.mapping.tool.parent = 'missing'; }],
   ['cyclic branch', p => { p.mapping.tool.parent = 'final'; }],

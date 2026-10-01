@@ -29,7 +29,8 @@ export function nativeGoalStartWitness(payload, receipt, conversationId) {
     if (message.author?.role === 'user') sourceUser = message;
     if (message.author?.role !== 'tool' || message.status !== 'finished_successfully') continue;
     // The marker in an assistant/user echo or another tool is not authority.
-    const names = [message.author?.name, message.metadata?.tool_name];
+    // Do not accept a tool's arbitrary result metadata as its invocation name.
+    const names = [message.author?.name];
     let startTool = names.some(name => /^(?:[A-Za-z0-9_-]+\.)*devspace_goal_start$/.test(String(name || '')));
     if (!startTool && message.author?.name === 'api_tool') {
       const call = parent ? mapping[parent]?.message : null;
