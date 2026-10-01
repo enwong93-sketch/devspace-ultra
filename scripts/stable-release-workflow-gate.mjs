@@ -15,6 +15,8 @@ assert.match(draft, /make_latest:\s*false\b/, 'a candidate must not replace late
 assert.match(draft, /npm run verify:release-promotion/);
 assert.match(promotion, /workflow_dispatch:/, 'stable publication requires explicit owner dispatch');
 assert.match(promotion, /CONTINUITY_ACCEPTANCE\.json/);
+assert.match(promotion, /gh release view[^\r\n]*--json apiUrl/, 'resolve authenticated drafts by release ID');
+assert.doesNotMatch(promotion, /gh api[^\r\n]*releases\/tags\//, 'published-tag REST endpoint cannot resolve a draft');
 const gatePosition = promotion.indexOf('node scripts/stable-release-acceptance.mjs');
 const publishPosition = promotion.indexOf('gh release edit');
 assert.ok(gatePosition >= 0 && publishPosition > gatePosition, 'real evidence must pass before publication');
