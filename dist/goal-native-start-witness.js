@@ -1,7 +1,8 @@
 // A display is not a turn. Only a server-created start receipt in an exact
 // native tool result may connect a background request to a durable Goal.
 // This function is also serialized into the existing read-only host inspector;
-// keep it self-contained and never inspect assistant analysis or user text.
+// keep it self-contained. Never read reasoning or user text. A structured
+// tool-invocation envelope may identify an api_tool wrapper, but is not returned.
 export function nativeGoalStartWitness(payload, receipt, conversationId) {
   const failed = reason => ({ verified: false, reason });
   if (!receipt || receipt.source !== 'server-created-goal-start'
@@ -15,21 +16,35 @@ export function nativeGoalStartWitness(payload, receipt, conversationId) {
   let id = payload?.current_node;
   const seen = new Set(), reverse = [];
   while (id) {
-    if (!mapping?.[id] || seen.has(id) || reverse.length >= 4096) return failed('native-branch-incomplete');
+    if (!mapping?.[id] || seen.has(id) || seen.size >= 4096) return failed('native-branch-incomplete');
     seen.add(id);
     const node = mapping[id], message = node?.message;
-    if (message) reverse.push(message);
+    if (message) reverse.push({ message, parent: node?.parent });
     id = node?.parent;
   }
   const branch = reverse.reverse(), matches = [];
   const marker = `[DEVSPACE_NATIVE_GOAL_START:${receipt.goalId}:${receipt.receiptId}]`;
   let sourceUser = null;
-  for (const message of branch) {
+  for (const { message, parent } of branch) {
     if (message.author?.role === 'user') sourceUser = message;
     if (message.author?.role !== 'tool' || message.status !== 'finished_successfully') continue;
     // The marker in an assistant/user echo or another tool is not authority.
     const names = [message.author?.name, message.metadata?.tool_name];
-    if (!names.some(name => /^(?:[A-Za-z0-9_-]+\.)*devspace_goal_start$/.test(String(name || '')))) continue;
+    let startTool = names.some(name => /^(?:[A-Za-z0-9_-]+\.)*devspace_goal_start$/.test(String(name || '')));
+    if (!startTool && message.author?.name === 'api_tool') {
+      const call = parent ? mapping[parent]?.message : null;
+      if (call?.author?.role === 'assistant' && call.recipient === 'api_tool.call_tool'
+        && call.content?.content_type === 'text' && call.content.parts?.length === 1
+        && typeof call.content.parts[0] === 'string' && call.content.parts[0].length <= 65_536) {
+        try {
+          const envelope = JSON.parse(call.content.parts[0]);
+          startTool = typeof envelope?.path === 'string'
+            && /^[A-Za-z0-9_./-]{1,240}$/.test(envelope.path)
+            && /(?:^|\/)devspace_goal_start$/.test(envelope.path);
+        } catch { /* Free-form text is not a structured invocation. */ }
+      }
+    }
+    if (!startTool) continue;
     if (message.content?.content_type !== 'text' || !Array.isArray(message.content.parts)) continue;
     const found = message.content.parts.slice(0, 32).some(part => typeof part === 'string'
       && part.length <= 1_000_000 && part.includes(marker));

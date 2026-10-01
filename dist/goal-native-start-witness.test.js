@@ -75,6 +75,17 @@ test('assistant analysis content is never accessed to find a start receipt', () 
   p.mapping.final.parent = 'analysis';
   assert.equal(nativeGoalStartWitness(p, receipt, receipt.conversationId).verified, true);
 });
+test('an api_tool wrapper requires the exact structured start invocation, never an arbitrary echo', () => {
+  const p = payload();
+  p.mapping.call = { parent: 'user', message: { id: 'call', author: { role: 'assistant' }, recipient: 'api_tool.call_tool',
+    content: { content_type: 'text', parts: [JSON.stringify({ path: '/fixture/devspace_goal_start', args: {} })] } } };
+  p.mapping.tool.parent = 'call'; p.mapping.tool.message.author.name = 'api_tool';
+  assert.equal(nativeGoalStartWitness(p, receipt, receipt.conversationId).verified, true);
+  p.mapping.call.message.content.parts = [JSON.stringify({ path: '/fixture/exec_command', args: { echo: marker } })];
+  assert.equal(nativeGoalStartWitness(p, receipt, receipt.conversationId).verified, false);
+  p.mapping.call.message.content.parts = ['A free-form explanation mentioning /fixture/devspace_goal_start'];
+  assert.equal(nativeGoalStartWitness(p, receipt, receipt.conversationId).verified, false);
+});
 test('the witness extractor stays self-contained when serialized into the existing inspector', () => {
   const extract = new Function(`return (${nativeGoalStartWitness.toString()})`)();
   assert.deepEqual(extract(payload(), receipt, receipt.conversationId), nativeGoalStartWitness(payload(), receipt, receipt.conversationId));
@@ -142,5 +153,20 @@ test('server receipts survive restart; corruption discards evidence without disc
     assert.equal(await invalid.nativeStartReceipt(g.id), null);
     await invalid.rebindConversation({ goalId: g.id, oldConversationId: receipt.conversationId, newConversationId: 'new-native-conversation' });
     assert.equal((await new GoalRuntime({ stateDir: dir }).status(g.id)).conversationId, 'new-native-conversation');
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+test('a start retry flushes an earlier failed save before returning its receipt', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'devspace-start-save-retry-test-'));
+  try {
+    const runtime = new GoalRuntime({ stateDir: dir }); await runtime.ready;
+    const save = runtime.save.bind(runtime);
+    runtime.save = async () => { throw new Error('injected first start save failure'); };
+    const input = { objective: 'Anonymous retry fixture', successCriteria: ['Persist before receipt'], conversationId: receipt.conversationId };
+    await assert.rejects(runtime.start(input), /injected first start save failure/);
+    runtime.save = save;
+    const resumed = await runtime.startOrResume(input);
+    assert.equal(resumed.resumed, true);
+    assert.deepEqual(await new GoalRuntime({ stateDir: dir }).nativeStartReceipt(resumed.goal.id),
+      await runtime.nativeStartReceipt(resumed.goal.id));
   } finally { await rm(dir, { recursive: true, force: true }); }
 });

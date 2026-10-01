@@ -363,7 +363,12 @@ export class GoalRuntime {
     if (existing.length > 1) {
       throw new Error(`Conversation ${normalizedConversationId} has multiple nonterminal Goals; refusing an ambiguous recovery.`);
     }
-    if (existing.length === 1) return { goal: clone(existing[0]), resumed: true };
+    if (existing.length === 1) {
+      // A retry can observe the in-memory Goal after an earlier save failed.
+      // Never publish its native receipt until the durable state is restored.
+      await this.save();
+      return { goal: clone(existing[0]), resumed: true };
+    }
     try {
       return {
         goal: await this.start({ objective, successCriteria, conversationId: normalizedConversationId }),
@@ -371,7 +376,10 @@ export class GoalRuntime {
       };
     } catch (error) {
       const raced = nonterminalConversationGoals(this.state, normalizedConversationId);
-      if (raced.length === 1) return { goal: clone(raced[0]), resumed: true };
+      if (raced.length === 1) {
+        await this.save();
+        return { goal: clone(raced[0]), resumed: true };
+      }
       throw error;
     }
   }

@@ -24,6 +24,9 @@ acceptance evidence.
    a successful native start-tool response on the exact current conversation
    branch. User/assistant echoes, another tool, a broken branch, or a request
    created after receipt issue cannot establish the source.
+   An `api_tool` reply additionally needs its exact structured
+   `api_tool.call_tool` parent invocation naming `devspace_goal_start`; a
+   shell/tool echo or free-form assistant text is not a start invocation.
 4. Project native IDs and **public end-turn text only** into an inspection
    snapshot, without mutating the display, composer, focus or navigation.
    Preserve display IDs separately. Never attach old display text to a new ID.
