@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 
-const [config, server, setup, overlay, resolver, providerBinding, progressBootstrap] = await Promise.all([
+const [config, server, setup, overlay, resolver, providerBinding, progressBootstrap, startCompletion] = await Promise.all([
   readFile(new URL("../dist/config.js", import.meta.url), "utf8"),
   readFile(new URL("../dist/server.js", import.meta.url), "utf8"),
   readFile(new URL("./devspace-public-setup.ps1", import.meta.url), "utf8"),
@@ -9,6 +9,7 @@ const [config, server, setup, overlay, resolver, providerBinding, progressBootst
   readFile(new URL("../dist/conversation-start-claim-cdp.js", import.meta.url), "utf8"),
   readFile(new URL("../dist/openai-conversation-binding.js", import.meta.url), "utf8"),
   readFile(new URL("../dist/progress-bootstrap-authority.js", import.meta.url), "utf8"),
+  readFile(new URL("../dist/conversation-start-completion.js", import.meta.url), "utf8"),
 ]);
 
 assert.match(config, /serverInstanceId:\s*parseServerInstanceId/);
@@ -91,8 +92,12 @@ assert.match(providerBinding, /authenticated-conversation-start-claim-exact-page
   "saved Goal/Plan recovery must use the provider identity captured by its own exact start claim");
 assert.match(server, /resolveProviderIdentity:\s*\(\)\s*=>\s*requestConversationContext\?\.current\?\.\(\)\?\.openaiIdentity/,
   "the start claim must capture the current MCP request provider identity before page recovery");
-assert.match(server, /conversationStartClaimId:\s*claimId/,
+assert.match(server, /completeConversationStart\(\{/,
+  "the production start path must use the tested binding-first completion helper");
+assert.match(startCompletion, /conversationStartClaimId:\s*claimId/,
   "the recovered provider identity must be bound only through its matching exact-page claim id");
+assert.ok(startCompletion.indexOf('openaiBindings?.bind?.') < startCompletion.indexOf('goalRuntime.startOrResume'),
+  "a binding failure must not create an orphan active Goal");
 assert.match(server, /serverInstanceId:\s*config\.serverInstanceId[\s\S]{0,200}resourceOrigin:/,
   "persisted App origins must be scoped by both server instance and public resource origin");
 assert.match(server, /providerBindings:\s*openaiBindings\.status\(\)/,

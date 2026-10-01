@@ -47,7 +47,7 @@
     "verify:production-soak": "node scripts/production-core-soak.mjs 300 5",
     "verify:conversation-bridge": "node --check scripts/devspace-conversation-bridge.mjs && node --check scripts/devspace-conversation-bridge-static-gate.mjs && node scripts/devspace-conversation-bridge-static-gate.mjs && node dist/blender-runtime-manager.test.js",
     "build": "node -e \"console.log('DevSpace Ultra ships a prebuilt dist/ tree; validating the distributable instead of recompiling.')\" && npm run verify:ultra",
-    "verify:continuity-regressions": "node --test dist/conversation-progress-liveness-restart.test.js dist/goal-relay-app-bridge.test.js",
+    "verify:continuity-regressions": "node --test dist/conversation-progress-liveness-restart.test.js dist/goal-relay-app-bridge.test.js dist/conversation-start-provider-binding.test.js",
     "verify:release-promotion": "node --test scripts/stable-release-acceptance.test.mjs && node scripts/stable-release-workflow-gate.mjs",
     "dev": "node scripts/dev-server.mjs",
     "postinstall": "node scripts/fix-node-pty-permissions.mjs",

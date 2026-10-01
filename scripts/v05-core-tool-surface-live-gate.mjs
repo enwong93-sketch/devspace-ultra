@@ -5,6 +5,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { loadConfig } from "../dist/config.js";
 import { SingleUserOAuthProvider } from "../dist/oauth-provider.js";
+import { PROGRESS_CLAIM_RELAY_URI } from "../dist/goal-relay-resource.js";
 
 const configDir = process.env.DEVSPACE_CONFIG_DIR || join(homedir(), ".devspace-tailscale-bootstrap");
 const configPath = join(configDir, "config.json");
@@ -121,6 +122,7 @@ const sessionId = initialized.response.headers.get("mcp-session-id");
 assert.ok(sessionId);
 const protocolVersion = initialized.body?.result?.protocolVersion || "2025-11-25";
 
+try {
 await post({ jsonrpc: "2.0", method: "notifications/initialized", params: {} }, sessionId, protocolVersion);
 const listed = await post({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }, sessionId, protocolVersion);
 assert.equal(listed.response.ok, true, `tools/list failed: HTTP ${listed.response.status} ${JSON.stringify(listed.body)}`);
@@ -143,8 +145,8 @@ const progressReport = (listed.body?.result?.tools || []).find((tool) => tool.na
 const progressBind = (listed.body?.result?.tools || []).find((tool) => tool.name === "devspace_progress_bind");
 assert.ok(blenderRuntime?.inputSchema?.properties?.runtimeId, "blender_runtime must expose runtimeId ownership routing.");
 assert.ok(blenderMcp?.inputSchema?.properties?.runtimeId, "blender_mcp must expose runtimeId so one Agent cannot fall back to another Agent's Blender.");
-assert.equal(progressReport?._meta?.ui?.resourceUri, "ui://devspace/progress-claim-relay.html", "the existing report tool must bootstrap without a separate host snapshot refresh");
-assert.equal(progressBind?._meta?.ui?.resourceUri, "ui://devspace/progress-claim-relay.html", "the legacy bind tool remains compatible");
+assert.equal(progressReport?._meta?.ui?.resourceUri, PROGRESS_CLAIM_RELAY_URI, "the report tool must advertise the current relay resource");
+assert.equal(progressBind?._meta?.ui?.resourceUri, PROGRESS_CLAIM_RELAY_URI, "the legacy bind tool must advertise the current relay resource");
 
 let unboundWorkspaceAvailable = null;
 let unboundBlenderAvailable = null;
@@ -207,15 +209,6 @@ if (holdSeconds > 0) {
   await new Promise((resolvePromise) => setTimeout(resolvePromise, holdSeconds * 1_000));
 }
 
-await fetch(`${base}/mcp`, {
-  method: "DELETE",
-  headers: {
-    authorization: `Bearer ${token}`,
-    "mcp-session-id": sessionId,
-    "mcp-protocol-version": protocolVersion,
-  },
-}).catch(() => null);
-
 console.log(JSON.stringify({
   ok: true,
   gate: "v05-core-tool-surface-live",
@@ -232,3 +225,15 @@ console.log(JSON.stringify({
   heldSeconds: holdSeconds,
   secretsLogged: false,
 }));
+} finally {
+  // A failed assertion must retire only this probe's session, not leave another
+  // cached authorization behind or disturb any Classic conversation session.
+  await fetch(`${base}/mcp`, {
+    method: "DELETE",
+    headers: {
+      authorization: `Bearer ${token}`,
+      "mcp-session-id": sessionId,
+      "mcp-protocol-version": protocolVersion,
+    },
+  }).catch(() => null);
+}
