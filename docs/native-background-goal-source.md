@@ -36,6 +36,8 @@ acceptance evidence.
 6. The exclusive Goal lease, exact page/relay ownership, current native final,
    stream status, safety/error gates and post-send native reconciliation remain
    mandatory. A committed uncertain send must never be replayed.
+   A current native public safety-check response also blocks continuation and
+   same-round recovery when the existing display has not caught up.
 7. Missing start evidence cannot arm a stale display. Pending-Goal restart
    recovery uses the same native receipt. Invalid auxiliary receipt data is
    discarded without deleting Goals. Conversation migration clears the old

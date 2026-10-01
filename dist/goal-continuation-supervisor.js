@@ -12,7 +12,7 @@ const redeemable = goal => goal?.status === 'active' && goal.roundState === 'rep
 const finalPage = page => page?.chatMode === true && page.generating === false
   && page.streamStatus === 'COMPLETE' && page.latestMessageRole === 'assistant'
   && Boolean(page.latestAssistantMessageId) && Boolean(page.latestAssistantText?.trim())
-  && !page.safetyCheckVisible && !page.deliveryTimeoutVisible && !page.retryVisible;
+  && !page.safetyCheckVisible && !page.nativeSafetyBlocked && !page.deliveryTimeoutVisible && !page.retryVisible;
 const HUMAN_SUPERSESSION_REASONS = new Set([
   'new-user-turn-before-hidden-continuation',
   'new-user-turn-takes-precedence',
@@ -302,6 +302,7 @@ export class GoalContinuationSupervisor {
     if (Array.isArray(rows) && options.pageTargetId) rows = rows.filter(p => p.pageTargetId === options.pageTargetId);
     if (!Array.isArray(rows) || !rows.length || rows.length > 4) return null;
     if (rows.some(p => p?.conversationId !== goal.conversationId || !p.latestUserMessageId || p.chatMode !== true)) return null;
+    if (rows.some(p => p.nativeSafetyBlocked === true)) return null;
     if (rows.some(p => p.nativeGoalSourceRequired === true && p.boundarySource !== 'native-goal-start-tool-result')) return null;
     if (!options.allowDivergent && new Set(rows.map(p => p.latestUserMessageId)).size !== 1) return null;
     return rows;

@@ -90,6 +90,9 @@ export function projectNativeGoalSource(snapshot, goal) {
     && native.currentNodeId === native.currentMessageId
     && native.currentMessageId === native.latestAssistantMessageId
     && typeof native.latestPublicAssistantText === 'string' && native.latestPublicAssistantText.trim();
+  if (final && /^(?:This request requires additional safety checks|Additional safety checks|此請求需要額外安全檢查|此请求需要额外安全检查|需要進行額外安全檢查|需要进行额外安全检查)/i.test(native.latestPublicAssistantText.trim())) {
+    return { ...snapshot, nativeSafetyBlocked: true };
+  }
   // Keep stream_status as an independent gate; never turn a failed transport
   // or a safety surface into a completed turn. No DOM or composer is mutated.
   return { ...snapshot, boundarySource: 'native-goal-start-tool-result',

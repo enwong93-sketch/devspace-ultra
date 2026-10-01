@@ -57,6 +57,7 @@ export function matchesNativeGoalCompletionBoundary(snapshot, proof, {
     && String(snapshot?.streamStatus || "").toUpperCase() === "COMPLETE"
     && snapshot?.latestMessageRole === "assistant"
     && snapshot?.safetyCheckVisible !== true
+    && snapshot?.nativeSafetyBlocked !== true
     && snapshot?.deliveryTimeoutVisible !== true
     && snapshot?.retryVisible !== true
     && String(snapshot?.latestUserMessageId || "").trim() === proof?.sourceUserMessageId

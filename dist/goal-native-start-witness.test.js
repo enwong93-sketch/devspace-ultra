@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { GoalRuntime } from './goal-runtime.js';
 import { nativeGoalStartWitness, projectNativeGoalSource } from './goal-native-start-witness.js';
-import { provesNativeCurrentRoundFinal } from './goal-round-completion-guard.js';
+import { provesNativeCurrentRoundFinal, shouldRecoverWorkingRound } from './goal-round-completion-guard.js';
 import { inspectVisibleReportCommit } from './goal-host-bridge.js';
 
 const receipt = { source: 'server-created-goal-start', goalId: 'goal_0123456789abcdef',
@@ -133,6 +133,15 @@ test('missing or forged start evidence does not simply relax the initial 30-seco
   const s = projectNativeGoalSource(snapshot(), goal);
   s.nativeContinuation.goalStartWitness = { verified: true };
   assert.equal(provesNativeCurrentRoundFinal(goal, s, { nowMs: (epoch + 301) * 1000 }), false);
+});
+test('a native safety response on a stale display blocks continuation and same-round recovery', () => {
+  const s = snapshot();
+  s.nativeContinuation.latestPublicAssistantText = 'This request requires additional safety checks.';
+  const blocked = projectNativeGoalSource(s, goal);
+  assert.equal(blocked.nativeSafetyBlocked, true);
+  assert.equal(provesNativeCurrentRoundFinal(goal, blocked, { nowMs: (epoch + 301) * 1000 }), false);
+  assert.equal(shouldRecoverWorkingRound({ ...goal, status: 'active', roundState: 'working' }, blocked,
+    { nowMs: (epoch + 301) * 1000 }), false);
 });
 test('server receipts survive restart; corruption discards evidence without discarding Goals', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'devspace-start-witness-test-'));

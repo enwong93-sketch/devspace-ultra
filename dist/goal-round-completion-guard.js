@@ -51,6 +51,7 @@ export function shouldInspectNativeCurrentRoundFinal(snapshot) {
   return snapshot?.chatMode === true
     && snapshot?.generating === false
     && snapshot?.safetyCheckVisible !== true
+    && snapshot?.nativeSafetyBlocked !== true
     && snapshot?.deliveryTimeoutVisible !== true
     && snapshot?.latestMessageRole === "assistant"
     && Boolean(String(snapshot?.latestAssistantMessageId || "").trim())
@@ -106,6 +107,7 @@ export function shouldRecoverWorkingRound(goal, snapshot, {
   minimumRoundSettleMs = DEFAULT_ROUND_SETTLE_MS,
 } = {}) {
   if (!goal || goal.status !== "active" || goal.roundState !== "working") return false;
+  if (snapshot?.nativeSafetyBlocked === true) return false;
   if (!Number.isInteger(goal.round) || goal.round < 1) return false;
   if (!goal.roundBeganAt) return false;
   const beganAt = Date.parse(String(goal.roundBeganAt));
