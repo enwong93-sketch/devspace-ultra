@@ -369,6 +369,34 @@ test('a definite unsent failure may retry after bounded backoff', async t => {
   h.advanceTime(5100); await h.tick(); assert.equal(h.sends(),2);
 });
 
+test('temporary unsent relay failures do not cancel an active Goal after three attempts', async t => {
+  let attempts = 0;
+  const h = await harness(t, { send: () => ++attempts <= 4
+    ? {ok:false,definiteFailure:true,dispatchCommitted:false,state:'exact-goal-relay-unavailable',error:'relay not ready'}
+    : {ok:true,backgroundAccepted:true,dispatchCommitted:true} });
+  h.final(); await h.tick(); await h.tick();
+  for (let n = 0; n < 4; n++) { h.advanceTime(60_100); await h.tick(); }
+  assert.equal(h.sends(),5);
+  assert.equal((await h.runtime.status(h.g.id)).round,2);
+  assert.equal(h.driver.status().records[0].state,'delivered');
+});
+
+test('unresolved native acknowledgement checks back off without repeating the send', async t => {
+  const h = await harness(t,{send:()=>({ok:false,dispatchCommitted:true,definiteFailure:false,state:'ack-lost'})});
+  h.final(); await h.tick(); await h.tick();
+  h.setPages([{...h.page(),nativeContinuation:{resolved:false,state:'conversation-fetch-429'}}]);
+  await h.tick();
+  const row = h.driver.records.get(h.reported.continuation.continuationId);
+  assert.equal(row.reconciliationAttempts,1);
+  for (let n=0;n<10;n++) await h.tick();
+  assert.equal(row.reconciliationAttempts,1);
+  assert.equal(h.sends(),1);
+  h.advanceTime(5_100); await h.tick();
+  assert.equal(row.reconciliationAttempts,2);
+  assert.equal(row.dispatchCommitted,true);
+  assert.equal(row.reconciliationState,'conversation-fetch-429');
+});
+
 test('hidden acknowledgement loss reconciles from the native branch without a user message or resend', async t => {
   const h=await harness(t,{send:()=>({ok:false,dispatchCommitted:true,definiteFailure:false,state:'ack-lost'})});
   h.final(); await h.tick(); await h.tick(); assert.equal(h.sends(),1);
@@ -647,6 +675,99 @@ test('a native assistant turn end auto-arms next-round continuation without a vi
   assert.equal(continued.round, 2);
   assert.equal(continued.roundState, 'working');
   assert.equal(continued.status, 'active');
+});
+
+test('restart missing-arm recovery fetches stream status for a persisted native final', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'devspace-goal-native-final-restart-test-'));
+  let now = Date.parse('2026-09-29T01:30:00.000Z');
+  const runtime = new GoalRuntime({ stateDir: root, now: () => now });
+  const goal = await runtime.start({
+    conversationId: 'conversation-native-auto-final-restart',
+    objective: 'Recover a persisted native final after Core replacement',
+    successCriteria: ['The hidden continuation is dispatched once'],
+  });
+  const assistantText = 'Completed exact assistant turn before Core replacement.';
+  const nativeCompletion = {
+    source: 'native-assistant-turn-final',
+    conversationId: goal.conversationId,
+    runtimeKey: 'main-02',
+    pageTargetId: 'page-main-02',
+    sourceUserMessageId: 'user-native-final-restart',
+    assistantMessageId: 'assistant-native-final-restart',
+    assistantTextHash: createHash('sha256').update(assistantText).digest('hex'),
+    assistantCreatedAt: new Date(now).toISOString(),
+  };
+  const closed = await runtime.autoCompleteAssistantTurn({ goalId: goal.id, nativeCompletion });
+  const completedAt = closed.goal.lastTurnCompletion.completedAt;
+  const page = {
+    conversationId: goal.conversationId,
+    runtimeKey: 'main-02',
+    pageTargetId: 'page-main-02',
+    latestUserMessageId: nativeCompletion.sourceUserMessageId,
+    latestMessageRole: 'assistant',
+    latestAssistantMessageId: nativeCompletion.assistantMessageId,
+    latestAssistantText: assistantText,
+    chatMode: true,
+    generating: false,
+    streamStatus: 'COMPLETE',
+    safetyCheckVisible: false,
+    deliveryTimeoutVisible: false,
+    retryVisible: false,
+    nativeContinuation: {
+      resolved: true,
+      currentNodeId: nativeCompletion.assistantMessageId,
+      currentMessageId: nativeCompletion.assistantMessageId,
+      currentRole: 'assistant',
+      currentStatus: 'finished_successfully',
+      currentEndTurn: true,
+      currentCreatedAt: nativeCompletion.assistantCreatedAt,
+      latestUserMessageId: nativeCompletion.sourceUserMessageId,
+      latestUserCreatedAt: new Date(now - 60_000).toISOString(),
+      latestAssistantMessageId: nativeCompletion.assistantMessageId,
+      latestAssistantStatus: 'finished_successfully',
+      latestAssistantEndTurn: true,
+      latestAssistantCreatedAt: nativeCompletion.assistantCreatedAt,
+    },
+  };
+  const inspectOptions = [];
+  let sends = 0;
+  const restarted = new GoalContinuationSupervisor({
+    goalRuntime: runtime,
+    statePath: join(root, 'native-final-restart-driver.json'),
+    now: () => now,
+    settleMs: 0,
+    inspect: async (_goal, options = {}) => {
+      inspectOptions.push(structuredClone(options));
+      const snapshot = structuredClone(page);
+      if (options.sourceOnly === true) snapshot.streamStatus = null;
+      return [snapshot];
+    },
+    dispatch: async payload => {
+      sends += 1;
+      assert.equal(payload.nativeCompletionProof?.completedAt, completedAt);
+      return {
+        ok: true,
+        dispatchCommitted: true,
+        backgroundAccepted: true,
+        visibilityVerified: false,
+        visibleUserMessage: false,
+        composerMutation: false,
+      };
+    },
+  });
+  t.after(async () => { await restarted.close(); await runtime.close(); await rm(root, { recursive: true, force: true }); });
+  await restarted.pollOnce();
+  assert.equal(inspectOptions[0]?.sourceOnly, false,
+    'persisted native-final recovery must not suppress authoritative stream_status');
+  assert.equal(inspectOptions[0]?.includeNativeBranch, true);
+  now += 1;
+  await restarted.pollOnce();
+  assert.equal(sends, 1);
+  const continued = await runtime.status(goal.id);
+  assert.equal(continued.round, 2);
+  assert.equal(continued.roundState, 'working');
+  assert.equal(restarted.status().records[0].deliveryMode, 'hidden-assistant-continuation');
+  assert.equal(restarted.status().records[0].reason, 'one-hidden-continuation');
 });
 
 test('stale display syncing to an already captured user does not masquerade as new input',async t=>{

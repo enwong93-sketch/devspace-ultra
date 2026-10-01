@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { loadConfig } from "./config.js";
 import { SingleUserOAuthProvider } from "./oauth-provider.js";
 import { createServer } from "./server.js";
+import { PROGRESS_CLAIM_RELAY_URI } from "./goal-relay-resource.js";
 
 const root = mkdtempSync(join(tmpdir(), "devspace-instance-isolation-"));
 const ownerToken = "0123456789abcdef0123456789abcdef";
@@ -104,7 +105,7 @@ try {
   await post({ jsonrpc: "2.0", method: "notifications/initialized", params: {} }, sessionId, protocolVersion);
   const listed = await post({ jsonrpc: "2.0", id: 10, method: "tools/list", params: {} }, sessionId, protocolVersion);
   const reportTool = listed.body?.result?.tools?.find((tool) => tool.name === "devspace_progress_report");
-  assert.equal(reportTool?._meta?.ui?.resourceUri, "ui://devspace/progress-claim-relay.html",
+  assert.equal(reportTool?._meta?.ui?.resourceUri, PROGRESS_CLAIM_RELAY_URI,
     "the existing report tool must mount its own exact-page bootstrap relay");
   const legacyBindTool = listed.body?.result?.tools?.find((tool) => tool.name === "devspace_progress_bind");
   assert.deepEqual(legacyBindTool?._meta?.ui?.visibility, ["app"],
@@ -112,9 +113,19 @@ try {
 
   const resourceResult = await post({
     jsonrpc: "2.0", id: 2, method: "resources/read",
-    params: { uri: "ui://devspace/progress-claim-relay.html" },
+    params: { uri: PROGRESS_CLAIM_RELAY_URI },
   }, sessionId, protocolVersion);
   const relayHtml = resourceResult.body?.result?.contents?.[0]?.text || "";
+  assert.match(relayHtml, /ui\/initialize/);
+  assert.match(relayHtml, /ui\/notifications\/initialized/);
+  assert.doesNotMatch(relayHtml, /__DEVSPACE_RELAY_APP_BRIDGE__/);
+  const legacyResource = await post({
+    jsonrpc: "2.0", id: 102, method: "resources/read",
+    params: { uri: "ui://devspace/progress-claim-relay.html" },
+  }, sessionId, protocolVersion);
+  assert.equal(legacyResource.body?.result?.contents?.[0]?.uri, "ui://devspace/progress-claim-relay.html");
+  assert.match(legacyResource.body?.result?.contents?.[0]?.text || "", /ui\/initialize/,
+    "cached Classic tool descriptors must retain working resource compatibility");
   const probeMatch = relayHtml.match(/https:\/\/computer-a\.example\/__devspace\/relay-origin-probe\?t=[0-9a-f-]+/i);
   assert.ok(probeMatch, "relay resource must contain one unguessable instance-origin probe URL");
   const publicProbe = new URL(probeMatch[0]);

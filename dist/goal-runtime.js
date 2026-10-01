@@ -17,6 +17,7 @@ const MAX_REPORT_SUMMARY_CHARS = 4_000;
 const MAX_BLOCKER_FINGERPRINT_CHARS = 500;
 const MAX_EVIDENCE_CHARS = 4_000;
 const MAX_CONVERSATION_ID_CHARS = 240;
+const MAX_NATIVE_MESSAGE_ID_CHARS = 240;
 const REPORT_HISTORY_LIMIT = 32;
 const ROUND_BEGIN_TIMESTAMP_SLOP_MS = 5_000;
 const DEFAULT_DISPATCH_LEASE_MS = 45_000;
@@ -40,7 +41,7 @@ function cleanText(value, maxChars, label) {
 }
 
 function newState() {
-  return { version: STATE_VERSION, goals: {} };
+  return { version: STATE_VERSION, goals: {}, nativeCompletionLedger: {} };
 }
 
 function idleContinuation() {
@@ -105,6 +106,11 @@ function ensureRoundRecoveryShape(goal) {
     goal.roundRecovery = idleRoundRecovery(goal.round);
   }
   return goal;
+}
+
+function ensureNativeCompletionLedgerShape(state) {
+  if (!Object.hasOwn(state, "nativeCompletionLedger")) state.nativeCompletionLedger = {};
+  return state;
 }
 
 function pendingContinuation(round, continuationId = randomId("continuation")) {
@@ -211,9 +217,27 @@ function validateLoadedState(value) {
   if (!value || value.version !== STATE_VERSION || !value.goals || typeof value.goals !== "object") {
     throw new Error("unsupported goal state version");
   }
+  ensureNativeCompletionLedgerShape(value);
+  if (!value.nativeCompletionLedger || typeof value.nativeCompletionLedger !== "object"
+    || Array.isArray(value.nativeCompletionLedger)) {
+    throw new Error("invalid persisted native completion ledger");
+  }
   for (const goal of Object.values(value.goals)) {
     ensureRoundRecoveryShape(goal);
     validateGoalShape(goal);
+  }
+  for (const [goalId, values] of Object.entries(value.nativeCompletionLedger)) {
+    if (!value.goals[goalId] || !Array.isArray(values)) {
+      throw new Error("invalid persisted native completion ledger owner");
+    }
+    const consumedNativeAssistantIds = new Set();
+    for (const value of values) {
+      const id = cleanText(value, MAX_NATIVE_MESSAGE_ID_CHARS, "Native assistant message id");
+      if (id !== value || consumedNativeAssistantIds.has(id)) {
+        throw new Error("invalid persisted native completion ledger entry");
+      }
+      consumedNativeAssistantIds.add(id);
+    }
   }
   return value;
 }
@@ -307,6 +331,7 @@ export class GoalRuntime {
       lastConsumedLeaseId: null,
     };
     this.state.goals[goal.id] = goal;
+    this.state.nativeCompletionLedger[goal.id] = [];
     await this.save();
     return clone(goal);
   }
@@ -355,6 +380,12 @@ export class GoalRuntime {
       await this.save();
     }
     return clone(goal);
+  }
+
+  async consumedNativeAssistantMessageIds(goalId) {
+    await this.ready;
+    this.getGoal(goalId);
+    return [...(this.state.nativeCompletionLedger[goalId] || [])];
   }
 
   async activeGoals({ limit = 12, conversationId } = {}) {
@@ -538,6 +569,10 @@ export class GoalRuntime {
       || assistantCreatedAt > this.now() + 60_000) {
       throw new Error("Goal automatic continuation requires an exact native assistant-final receipt for this conversation.");
     }
+    const consumedNativeAssistantMessageIds = this.state.nativeCompletionLedger[goal.id] || [];
+    if (consumedNativeAssistantMessageIds.includes(assistantMessageId)) {
+      return { continued: false, reason: "native-final-already-consumed", goal: clone(goal) };
+    }
 
     const completedAt = this.nowIso();
     goal.lastTurnCompletion = {
@@ -552,6 +587,10 @@ export class GoalRuntime {
       assistantCreatedAt: new Date(assistantCreatedAt).toISOString(),
       completedAt,
     };
+    this.state.nativeCompletionLedger[goal.id] = [
+      ...consumedNativeAssistantMessageIds,
+      assistantMessageId,
+    ];
     goal.roundState = "reported";
     goal.roundRecovery = idleRoundRecovery(goal.round);
     goal.continuation = pendingContinuation(goal.round);
@@ -761,7 +800,12 @@ export class GoalRuntime {
         && Boolean(goal.roundBeganAt)
         && (!goal.conversationId || counts.get(goal.conversationId) === 1)
       ))
-      .map((goal) => clone(ensureRoundRecoveryShape(goal)));
+      .map((goal) => ({
+        ...clone(ensureRoundRecoveryShape(goal)),
+        consumedNativeAssistantMessageIds: [
+          ...(this.state.nativeCompletionLedger[goal.id] || []),
+        ],
+      }));
   }
 
   async hasConversationCollision({ goalId, conversationId } = {}) {

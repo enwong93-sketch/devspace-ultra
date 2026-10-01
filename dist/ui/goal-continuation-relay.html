@@ -22,23 +22,20 @@
 <body aria-hidden="true">
 <script>
 (() => {
-  let dispatchStarted = false;
-  let retired = false;
+  /*__DEVSPACE_RELAY_APP_BRIDGE__*/
+  const WORKING_POLL_MS = 10000;
+  const PENDING_POLL_MS = 1000;
+  const MAX_BACKOFF_MS = 30000;
+  let started = false;
+  let stopped = false;
+  let pollInFlight = false;
+  let timer = null;
+  let goalId = null;
+  let conversationId = null;
+  let backoffMs = 2000;
+  let lastRequestedContinuationId = null;
   let onGlobals = null;
   let onMessage = null;
-
-  const retire = () => {
-    if (retired) return;
-    retired = true;
-    if (onGlobals) window.removeEventListener("openai:set_globals", onGlobals);
-    if (onMessage) window.removeEventListener("message", onMessage);
-    onGlobals = null;
-    onMessage = null;
-    try {
-      document.body.replaceChildren();
-      document.documentElement.dataset.devspaceRelayReleased = "true";
-    } catch {}
-  };
 
   const goalFrom = (value) => {
     if (!value || typeof value !== "object") return null;
@@ -49,39 +46,148 @@
       null;
   };
 
-  const eligible = (goal) => (
-    goal?.status === "active" &&
-    goal?.roundState === "reported" &&
-    goal?.continuation?.state === "pending"
-  );
-
-  const callTool = async (name, args) => {
-    if (typeof window.openai?.callTool !== "function") {
-      throw new Error("Goal relay tool bridge unavailable.");
-    }
-    return await window.openai.callTool(name, args);
-  };
-
-  const dispatch = async (value) => {
-    const goal = goalFrom(value);
-    if (!eligible(goal) || dispatchStarted) return;
-
-    dispatchStarted = true;
+  const updateState = (patch = {}) => {
+    const previous = window.__DEVSPACE_GOAL_RELAY_STATE__;
+    const next = {
+      version: 1,
+      active: started && !stopped,
+      goalId,
+      conversationId,
+      heartbeatAt: Date.now(),
+      ...(previous && typeof previous === "object" ? previous : {}),
+      ...patch,
+    };
+    next.active = started && !stopped;
+    next.goalId = goalId;
+    next.conversationId = conversationId;
+    next.heartbeatAt = Date.now();
+    window.__DEVSPACE_GOAL_RELAY_STATE__ = next;
     try {
-      await callTool("devspace_goal_continuation", {
-        goalId: goal.id,
-        action: "dispatch",
+      document.documentElement.dataset.devspaceGoalRelayActive = next.active ? "true" : "false";
+      document.documentElement.dataset.devspaceGoalRelayGoalId = next.goalId || "";
+      document.title = next.active ? "DevSpace Goal Relay" : "DevSpace Goal Relay (stopped)";
+    } catch {}
+    return next;
+  };
+
+  const removeHydrationListeners = () => {
+    if (onGlobals) window.removeEventListener("openai:set_globals", onGlobals);
+    if (onMessage) window.removeEventListener("message", onMessage);
+    onGlobals = null;
+    onMessage = null;
+  };
+
+  const releaseDocument = () => {
+    removeHydrationListeners();
+    relayBridge.dispose();
+    try {
+      document.body.replaceChildren();
+      document.documentElement.dataset.devspaceRelayReleased = "true";
+    } catch {}
+  };
+
+  const stop = (reason) => {
+    if (stopped) return;
+    stopped = true;
+    if (timer) clearTimeout(timer);
+    timer = null;
+    updateState({ stoppedReason: String(reason || "stopped").slice(0, 120) });
+    releaseDocument();
+  };
+
+  const schedule = (delayMs) => {
+    if (!started || stopped) return;
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => { void poll(); }, Math.max(250, Number(delayMs) || 1000));
+  };
+
+  const start = (goal) => {
+    const nextGoalId = String(goal?.id || "").trim();
+    const nextConversationId = String(goal?.conversationId || "").trim();
+    if (!nextGoalId || !nextConversationId || goal?.status !== "active") return false;
+    if (started && (goalId !== nextGoalId || conversationId !== nextConversationId)) {
+      stop("different-goal-observed");
+      return false;
+    }
+    goalId = nextGoalId;
+    conversationId = nextConversationId;
+    started = true;
+    stopped = false;
+    backoffMs = 2000;
+    removeHydrationListeners();
+    updateState({
+      startedAt: window.__DEVSPACE_GOAL_RELAY_STATE__?.startedAt || Date.now(),
+      lastGoalRevision: Number(goal.revision || 0),
+      lastGoalRound: Number(goal.round || 0),
+      lastGoalRoundState: String(goal.roundState || ""),
+      lastContinuationState: String(goal.continuation?.state || ""),
+      lastError: null,
+    });
+    schedule(250);
+    return true;
+  };
+
+  const poll = async () => {
+    if (!started || stopped || pollInFlight) return;
+    pollInFlight = true;
+    try {
+      const statusResult = await relayBridge.callTool("devspace_goal_status", { goalId });
+      const goal = goalFrom(statusResult);
+      if (!goal || String(goal.id || "") !== goalId || String(goal.conversationId || "") !== conversationId) {
+        throw new Error("Exact Goal status unavailable.");
+      }
+      const continuationId = String(goal.continuation?.continuationId || "").trim();
+      updateState({
+        lastGoalRevision: Number(goal.revision || 0),
+        lastGoalRound: Number(goal.round || 0),
+        lastGoalRoundState: String(goal.roundState || ""),
+        lastContinuationState: String(goal.continuation?.state || ""),
+        lastStatusAt: Date.now(),
+        lastError: null,
       });
-    } catch {
-      // Backend lease/host-bridge recovery remains authoritative.
+      backoffMs = 2000;
+      if (goal.status !== "active") {
+        stop(`goal-${String(goal.status || "terminal")}`);
+        return;
+      }
+      if (goal.roundState === "reported" && goal.continuation?.state === "pending" && continuationId) {
+        if (lastRequestedContinuationId !== continuationId) {
+          const dispatched = await relayBridge.callTool("devspace_goal_continuation", {
+            goalId,
+            action: "dispatch",
+          });
+          const dispatchGoal = goalFrom(dispatched);
+          lastRequestedContinuationId = continuationId;
+          updateState({
+            lastDispatchAt: Date.now(),
+            lastDispatchRound: Number(goal.round || 0),
+            lastDispatchContinuationId: continuationId,
+            lastGoalRevision: Number(dispatchGoal?.revision || goal.revision || 0),
+            lastError: null,
+          });
+        }
+        schedule(PENDING_POLL_MS);
+        return;
+      }
+      if (goal.continuation?.state !== "pending") lastRequestedContinuationId = null;
+      schedule(WORKING_POLL_MS);
+    } catch (error) {
+      updateState({
+        lastError: String(error?.message || error || "Goal relay poll failed").slice(0, 240),
+      });
+      schedule(backoffMs);
+      backoffMs = Math.min(MAX_BACKOFF_MS, backoffMs * 2);
     } finally {
-      retire();
+      pollInFlight = false;
     }
   };
 
-  onGlobals = () => {
-    void dispatch(window.openai?.toolOutput);
+  const adopt = (value) => {
+    const goal = goalFrom(value);
+    if (goal) start(goal);
   };
+
+  onGlobals = () => { adopt(window.openai?.toolOutput); };
   window.addEventListener("openai:set_globals", onGlobals, { passive: true });
 
   onMessage = (event) => {
@@ -89,14 +195,12 @@
     const message = event.data;
     if (!message || message.jsonrpc !== "2.0") return;
     if (message.method === "ui/notifications/tool-result") {
-      void dispatch(message.params?.structuredContent ?? message.params);
+      adopt(message.params);
     }
   };
   window.addEventListener("message", onMessage, { passive: true });
 
-  setTimeout(retire, 150000);
-
-  void dispatch(window.openai?.toolOutput);
+  adopt(window.openai?.toolOutput);
 })();
 </script>
 </body>

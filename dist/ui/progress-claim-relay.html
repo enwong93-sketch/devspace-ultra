@@ -22,9 +22,21 @@
 <body aria-hidden="true">
 <script>
 (() => {
-  let dispatchStarted = false;
-  let relayRetired = false;
+  /*__DEVSPACE_RELAY_APP_BRIDGE__*/
+  let claimDispatchStarted = false;
+  let claimRelayRetired = false;
+  let claimExpiryTimer = null;
+  let goalRelayStarted = false;
+  let goalRelayStopped = false;
+  let goalRelayTimer = null;
+  let goalRelayPollInFlight = false;
+  let goalRelayGoalId = null;
+  let goalRelayConversationId = null;
+  let goalRelayBackoffMs = 2_000;
   const relayOriginProbeUrl = "__DEVSPACE_RELAY_ORIGIN_PROBE_URL__";
+  const GOAL_RELAY_WORKING_POLL_MS = 10_000;
+  const GOAL_RELAY_PENDING_POLL_MS = 1_000;
+  const GOAL_RELAY_MAX_BACKOFF_MS = 30_000;
 
   if (relayOriginProbeUrl.startsWith("https://")) {
     void fetch(relayOriginProbeUrl, {
@@ -55,6 +67,15 @@
       value?.["devspace/conversationStartClaim"] ??
       value?._meta?.["devspace/conversationStartClaim"] ??
       value?.conversationStartClaim ??
+      null;
+  };
+
+  const goalFrom = (value) => {
+    if (!value || typeof value !== "object") return null;
+    return value?.structuredContent?.goal ??
+      value?.structured_content?.goal ??
+      value?.toolResult?.structuredContent?.goal ??
+      value?.goal ??
       null;
   };
 
@@ -98,38 +119,158 @@
   };
 
   const dispatchGlobals = () => {
-    void dispatch(window.openai?.toolOutput);
+    void adopt(window.openai?.toolOutput);
     // Some ChatGPT Desktop builds expose tool-result _meta separately from
     // structuredContent. The claim id is intentionally duplicated there so
     // page-local ownership confirmation does not depend on one host binding.
-    void dispatch(window.openai?.toolResponseMetadata);
+    void adopt(window.openai?.toolResponseMetadata);
   };
 
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
   let onOpenAiGlobals = null;
   let onHostMessage = null;
-  const retireRelay = () => {
-    if (relayRetired) return;
-    relayRetired = true;
-    dispatchStarted = true;
+  const retireClaimRelay = () => {
+    if (claimRelayRetired) return;
+    claimRelayRetired = true;
+    claimDispatchStarted = true;
+    if (claimExpiryTimer) clearTimeout(claimExpiryTimer);
+    claimExpiryTimer = null;
     if (onOpenAiGlobals) window.removeEventListener?.("openai:set_globals", onOpenAiGlobals);
     if (onHostMessage) window.removeEventListener?.("message", onHostMessage);
     onOpenAiGlobals = null;
     onHostMessage = null;
   };
   const releaseRelayDocument = () => {
-    retireRelay();
+    retireClaimRelay();
+    if (goalRelayStarted && !goalRelayStopped) return;
+    relayBridge.dispose();
     try {
       document.body.replaceChildren();
       document.documentElement.dataset.devspaceRelayReleased = "true";
     } catch {}
   };
 
-  const dispatch = async (value) => {
+  const updateGoalRelayState = (patch = {}) => {
+    const previous = window.__DEVSPACE_GOAL_RELAY_STATE__;
+    const next = {
+      version: 1,
+      active: goalRelayStarted && !goalRelayStopped,
+      goalId: goalRelayGoalId,
+      conversationId: goalRelayConversationId,
+      heartbeatAt: Date.now(),
+      ...(previous && typeof previous === "object" ? previous : {}),
+      ...patch,
+    };
+    next.active = goalRelayStarted && !goalRelayStopped;
+    next.goalId = goalRelayGoalId;
+    next.conversationId = goalRelayConversationId;
+    next.heartbeatAt = Date.now();
+    window.__DEVSPACE_GOAL_RELAY_STATE__ = next;
+    try {
+      document.documentElement.dataset.devspaceGoalRelayActive = next.active ? "true" : "false";
+      document.documentElement.dataset.devspaceGoalRelayGoalId = next.goalId || "";
+      document.title = next.active ? "DevSpace Goal Relay" : "DevSpace Progress Claim Relay";
+    } catch {}
+    return next;
+  };
+
+  const scheduleGoalRelayPoll = (delayMs) => {
+    if (!goalRelayStarted || goalRelayStopped) return;
+    if (goalRelayTimer) clearTimeout(goalRelayTimer);
+    goalRelayTimer = setTimeout(() => { void pollGoalRelay(); }, Math.max(250, Number(delayMs) || 1_000));
+  };
+
+  const stopGoalRelay = (reason) => {
+    if (!goalRelayStarted || goalRelayStopped) return;
+    goalRelayStopped = true;
+    if (goalRelayTimer) clearTimeout(goalRelayTimer);
+    goalRelayTimer = null;
+    updateGoalRelayState({ active: false, stoppedReason: String(reason || "stopped").slice(0, 120) });
+    releaseRelayDocument();
+  };
+
+  const startGoalRelay = (goal) => {
+    const goalId = String(goal?.id || "").trim();
+    const conversationId = String(goal?.conversationId || "").trim();
+    if (!goalId || !conversationId || goal?.status !== "active") return false;
+    if (goalRelayStarted && (goalRelayGoalId !== goalId || goalRelayConversationId !== conversationId)) {
+      stopGoalRelay("different-goal-observed");
+      return false;
+    }
+    goalRelayStarted = true;
+    goalRelayStopped = false;
+    goalRelayGoalId = goalId;
+    goalRelayConversationId = conversationId;
+    goalRelayBackoffMs = 2_000;
+    retireClaimRelay();
+    updateGoalRelayState({
+      startedAt: window.__DEVSPACE_GOAL_RELAY_STATE__?.startedAt || Date.now(),
+      lastGoalRevision: Number(goal.revision || 0),
+      lastGoalRound: Number(goal.round || 0),
+      lastGoalRoundState: String(goal.roundState || ""),
+      lastContinuationState: String(goal.continuation?.state || ""),
+      lastError: null,
+    });
+    scheduleGoalRelayPoll(250);
+    return true;
+  };
+
+  const pollGoalRelay = async () => {
+    if (!goalRelayStarted || goalRelayStopped || goalRelayPollInFlight) return;
+    goalRelayPollInFlight = true;
+    try {
+      const result = await relayBridge.callTool("devspace_goal_status", { goalId: goalRelayGoalId });
+      const goal = goalFrom(result);
+      if (!goal || String(goal.id || "") !== goalRelayGoalId
+        || String(goal.conversationId || "") !== goalRelayConversationId) {
+        throw new Error("exact Goal status unavailable");
+      }
+      updateGoalRelayState({
+        lastGoalRevision: Number(goal.revision || 0),
+        lastGoalRound: Number(goal.round || 0),
+        lastGoalRoundState: String(goal.roundState || ""),
+        lastContinuationState: String(goal.continuation?.state || ""),
+        lastStatusAt: Date.now(),
+        lastError: null,
+      });
+      goalRelayBackoffMs = 2_000;
+      if (goal.status !== "active") {
+        stopGoalRelay(`goal-${String(goal.status || "terminal")}`);
+        return;
+      }
+      if (goal.roundState === "reported" && goal.continuation?.state === "pending") {
+        const dispatched = await relayBridge.callTool("devspace_goal_continuation", {
+          goalId: goalRelayGoalId,
+          action: "dispatch",
+        });
+        const dispatchGoal = goalFrom(dispatched);
+        updateGoalRelayState({
+          lastDispatchAt: Date.now(),
+          lastDispatchRound: Number(goal.round || 0),
+          lastDispatchContinuationId: String(goal.continuation?.continuationId || ""),
+          lastGoalRevision: Number(dispatchGoal?.revision || goal.revision || 0),
+          lastError: null,
+        });
+        scheduleGoalRelayPoll(GOAL_RELAY_PENDING_POLL_MS);
+        return;
+      }
+      scheduleGoalRelayPoll(GOAL_RELAY_WORKING_POLL_MS);
+    } catch (error) {
+      updateGoalRelayState({
+        lastError: String(error?.message || error || "goal relay poll failed").slice(0, 240),
+      });
+      scheduleGoalRelayPoll(goalRelayBackoffMs);
+      goalRelayBackoffMs = Math.min(GOAL_RELAY_MAX_BACKOFF_MS, goalRelayBackoffMs * 2);
+    } finally {
+      goalRelayPollInFlight = false;
+    }
+  };
+
+  const dispatchClaim = async (value) => {
     const action = relayActionFrom(value);
-    if (!action || dispatchStarted || relayRetired) return;
-    dispatchStarted = true;
+    if (!action || claimDispatchStarted || claimRelayRetired) return;
+    claimDispatchStarted = true;
     // The receipt is a live exact-page proof for subsequent Goal/Plan tools.
     // Retain it until its bounded expiry, then retire only this relay's local
     // listeners. A hidden ownership relay must never ask the ChatGPT host to
@@ -138,11 +279,11 @@
     const expiresAt = Date.parse(String(action.expiresAt || ''));
     const lifetimeMs = Number.isFinite(expiresAt)
       ? Math.max(0, Math.min(120000, expiresAt - Date.now())) : 120000;
-    setTimeout(() => { releaseRelayDocument(); }, lifetimeMs);
-    for (let attempt = 0; attempt < 3; attempt += 1) {
+    claimExpiryTimer = setTimeout(() => { releaseRelayDocument(); }, lifetimeMs);
+    for (let attempt = 0; !claimRelayRetired; attempt += 1) {
       try {
-        if (typeof window.openai?.callTool !== "function") throw new Error("tool bridge unavailable");
-        const result = await window.openai.callTool(action.toolName, action.arguments);
+        const result = await relayBridge.callTool(action.toolName, action.arguments);
+        if (claimRelayRetired) return;
         const structured = result?.structuredContent ?? result?.structured_content ?? result;
         if (action.toolName === "devspace_progress_report") {
           if (structured?.ok === true && structured?.claimed === true) {
@@ -151,16 +292,26 @@
           }
           throw new Error("progress claim was not completed");
         }
-        if (structured?.claimed === true && (structured?.goal || structured?.plan)) {
+        if (structured?.claimed === true && structured?.goal) {
+          if (!startGoalRelay(structured.goal)) releaseRelayDocument();
+          return;
+        }
+        if (structured?.claimed === true && structured?.plan) {
           releaseRelayDocument();
           return;
         }
         throw new Error("conversation start claim was not completed");
       } catch {
-        if (attempt < 2) await sleep(250 * (attempt + 1));
+        if (!claimRelayRetired) await sleep(Math.min(10_000, 250 * (2 ** Math.min(attempt, 6))));
       }
     }
     // The expiry timer, not the host RPC result, owns resource retirement.
+  };
+
+  const adopt = async (value) => {
+    const goal = goalFrom(value);
+    if (goal && startGoalRelay(goal)) return;
+    await dispatchClaim(value);
   };
 
   onOpenAiGlobals = () => {
@@ -173,7 +324,7 @@
     const message = event.data;
     if (!message || message.jsonrpc !== "2.0") return;
     if (message.method === "ui/notifications/tool-result") {
-      void dispatch(message.params?.structuredContent ?? message.params);
+      void adopt(message.params);
     }
   };
   window.addEventListener("message", onHostMessage, { passive: true });

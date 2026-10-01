@@ -8,11 +8,11 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { registerAppResource, RESOURCE_MIME_TYPE } from "@modelcontextprotocol/ext-apps/server";
 import { GoalRuntime } from "../dist/goal-runtime.js";
 import { registerGoalTools } from "../dist/goal-tools.js";
+import { GOAL_RELAY_URI, readGoalRelayHtml } from "../dist/goal-relay-resource.js";
 
 const GOAL_DOCK_URI = "ui://devspace/goal-dock.html";
-const GOAL_RELAY_URI = "ui://devspace/goal-continuation-relay.html";
 const dockHtml = await readFile(new URL("../dist/ui/goal-dock.html", import.meta.url), "utf8");
-const relayHtml = await readFile(new URL("../dist/ui/goal-continuation-relay.html", import.meta.url), "utf8");
+const relayHtml = readGoalRelayHtml("goal-continuation-relay.html");
 
 async function connectStack(stateDir, label) {
   const runtime = new GoalRuntime({ stateDir });
@@ -112,8 +112,11 @@ try {
   assert.match(resource.contents[0].text, /action:\s*["']dispatch["']/);
   const relayResource = await first.client.readResource({ uri: GOAL_RELAY_URI });
   assert.equal(relayResource.contents[0].mimeType, RESOURCE_MIME_TYPE);
-  assert.doesNotMatch(relayResource.contents[0].text, /sendFollowUpMessage/);
-  assert.match(relayResource.contents[0].text, /dispatchStarted/);
+  assert.doesNotMatch(relayResource.contents[0].text, /sendFollowUpMessage\s*\(/,
+    "the persistent Goal relay may verify native host capability but must not synthesize the follow-up itself");
+  assert.match(relayResource.contents[0].text, /__DEVSPACE_GOAL_RELAY_STATE__/);
+  assert.match(relayResource.contents[0].text, /lastRequestedContinuationId !== continuationId/);
+  assert.match(relayResource.contents[0].text, /devspace_goal_status/);
   assert.match(relayResource.contents[0].text, /action:\s*["']dispatch["']/);
 
   const startedResult = await first.client.callTool({

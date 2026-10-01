@@ -68,6 +68,8 @@ export function provesNativeCurrentRoundFinal(goal, snapshot, {
   const latestAssistantId = String(snapshot?.latestAssistantMessageId || "").trim();
   const latestUserId = String(snapshot?.latestUserMessageId || "").trim();
   if (!latestAssistantId || !latestUserId) return false;
+  if (Array.isArray(goal?.consumedNativeAssistantMessageIds)
+    && goal.consumedNativeAssistantMessageIds.includes(latestAssistantId)) return false;
   if (String(native?.currentNodeId || "").trim() !== latestAssistantId) return false;
   if (String(native?.currentMessageId || "").trim() !== latestAssistantId) return false;
   if (String(native?.latestAssistantMessageId || "").trim() !== latestAssistantId) return false;
@@ -80,7 +82,18 @@ export function provesNativeCurrentRoundFinal(goal, snapshot, {
   if (assistantCreatedAtMs !== currentCreatedAtMs) return false;
   if (assistantCreatedAtMs < roundBeganAtMs - DEFAULT_ASSISTANT_FINAL_SLOP_MS) return false;
   if (assistantCreatedAtMs > nowMs + 60_000) return false;
-  if (userCreatedAtMs < roundBeganAtMs - requestPreRoundSlopMs) return false;
+  // A continuation round may legitimately retain the previous exact source
+  // user while a hidden assistant continuation starts the next round. The
+  // cached model can also call devspace_goal_round_begin more than 30 seconds
+  // after that source user was created. Keep the bounded lower window for an
+  // initial/non-continuation round, but do not make a continuation round depend
+  // on model/tool startup latency. Its current-round authority instead comes
+  // from exact DOM/native message-id agreement, native end_turn status, exact
+  // conversation/page identity, and the assistant final being created after
+  // the durable round boundary.
+  const continuationRound = Number(goal?.round) > 1
+    && Boolean(String(goal?.lastConsumedContinuationId || "").trim());
+  if (!continuationRound && userCreatedAtMs < roundBeganAtMs - requestPreRoundSlopMs) return false;
   if (userCreatedAtMs > assistantCreatedAtMs) return false;
   return true;
 }

@@ -13,6 +13,12 @@ assert.match(server, /continueIncompleteGoal:\s*async \(\{ goal, nativeCompletio
   "a verified normal assistant end-turn advances an active Goal through the ordinary continuation supervisor");
 assert.match(runtime, /autoCompleteAssistantTurn/,
   "native assistant completion closes the physical turn without a model-visible report");
+assert.match(runtime, /consumedNativeAssistantMessageIds/,
+  "Goal state must retain a durable exactly-once ledger for native assistant finals");
+assert.match(runtime, /native-final-already-consumed/,
+  "a later Goal round must reject an exact native final already consumed by an earlier round");
+assert.match(guard, /goal\?\.consumedNativeAssistantMessageIds[\s\S]{0,160}includes\(latestAssistantId\)/,
+  "the working-round guard must fail closed before reusing a consumed native assistant id");
 assert.match(guard, /native-turn-auto-continued/,
   "normal assistant completion is distinct from interrupted-turn same-round rescue");
 assert.match(server, /if \(config\.goalRoundRecoveryEnabled\)[\s\S]{0,260}goalRoundCompletionGuard\.start\(/,
@@ -48,6 +54,12 @@ assert.match(rawHostBody, /awaitPromise:\s*false/,
   "hidden continuation host invocation must acknowledge synchronously instead of waiting for the whole assistant turn");
 assert.match(bridge, /classic-hidden-continuation-native-confirmed/,
   "normal Goal continuation must verify a native assistant branch before reporting acceptance");
+assert.match(bridge, /retrySurfaceBlocksGoalBoundary/,
+  "Retry controls must be classified before they can block an exact native Goal boundary");
+assert.match(bridge, /Failed to fetch template/,
+  "an MCP App template-render Retry must not masquerade as a failed ChatGPT assistant turn");
+assert.match(bridge, /latestTurnRoot[\s\S]{0,900}latestTurnRoot\.contains\(button\)/,
+  "historical Retry controls outside the latest conversation turn must be ignored");
 assert.match(bridge, /newUserAfterBaselineCreatedAt/,
   "native continuation inspection must retain the bounded new-user timestamp needed to repair round recovery after restart");
 assert.match(bridge, /previousUserMessageId/);
@@ -81,6 +93,12 @@ assert.match(guard, /sawCurrentRoundAssistant/,
   "a stale GUI stop control needs current-round assistant proof before recovery");
 assert.match(guard, /currentRoundTransportFinished/,
   "persisted exact request/finished evidence must restore same-round recovery after a Core restart");
+assert.match(guard, /const continuationRound = Number\(goal\?\.round\) > 1[\s\S]{0,220}lastConsumedContinuationId/,
+  "native-final recovery must recognize a redeemed continuation round without guessing from page activity");
+assert.match(guard, /if \(!continuationRound && userCreatedAtMs < roundBeganAtMs - requestPreRoundSlopMs\) return false/,
+  "the source-user lower window must remain for initial rounds but must not reject exact hidden continuation rounds because of model latency");
+assert.match(guard, /assistantCreatedAtMs < roundBeganAtMs - DEFAULT_ASSISTANT_FINAL_SLOP_MS/,
+  "the assistant final itself must still be created inside the durable Goal round boundary");
 assert.match(continuation, /redeemHumanContinuation/);
 assert.match(continuation, /human-user-turn-started-next-round/,
   "a real new user turn must redeem the pending Goal round instead of leaving Active\/Reported stuck forever");
@@ -89,6 +107,10 @@ assert.match(continuation, /manualUserObservedAt/,
 assert.match(continuation, /recoverMissingArms/);
 assert.match(continuation, /nativeCompletionProof/,
   "a native-completion handoff survives restart without requiring a report-time arm");
+assert.match(continuation, /sourceOnly:\s*!nativeFinal/,
+  "restart recovery with a persisted native final must fetch authoritative stream_status instead of suppressing it");
+assert.match(continuation, /nativeCompletionProof:\s*proof\.type === 'completed-final'[\s\S]{0,160}\{ \.\.\.nativeFinal \}/,
+  "a recovered missing-arm row must retain the exact native-final proof for dispatch-time revalidation");
 assert.match(continuation, /exactNativeCompletionBoundary/,
   "restart repair revalidates the exact native final, page and source user turn");
 assert.match(continuation, /goalRuntime\.activeGoals\(\{ limit: 50 \}\)/,

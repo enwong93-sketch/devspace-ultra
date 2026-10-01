@@ -13,6 +13,16 @@ export function selectCurrentTurnMessage(currentTurnMessage, previousGlobalMessa
   return currentTurnMessage || (!currentTurnSectionPresent ? previousGlobalMessage : null) || null;
 }
 
+// Generation controls belong to the native composer, not conversation titles,
+// sidebar menus or DevSpace's own Goal controls. Keep this helper serializable.
+export function isNativeGenerationStopControl(button) {
+  if (!button || button.closest('#devspace-progress-narration-root')) return false;
+  if (button.matches('[data-testid="stop-button"]')) return true;
+  if (!button.closest('form')) return false;
+  return /^(?:stop(?: generating| generation| responding| streaming)?|停止(?:生成|回應|回应|產生|产生)?|中止(?:生成|回應|回应)?)$/i
+    .test(String(button.getAttribute('aria-label') || '').trim());
+}
+
 function cleanConversationId(value) {
   const text = String(value ?? "").trim();
   return text && /^[A-Za-z0-9_-]{8,200}$/.test(text) ? text : null;
@@ -127,6 +137,7 @@ async function connectTarget(target) {
 
 function exactConversationExpression(conversationId) {
   return `(() => {
+    const isNativeGenerationStopControl = ${isNativeGenerationStopControl.toString()};
     const selectCurrentTurnMessage = ${selectCurrentTurnMessage.toString()};
     const expected = ${JSON.stringify(conversationId)};
     const match = location.pathname.match(/\\/c\\/([^/?#]+)/);
@@ -138,10 +149,7 @@ function exactConversationExpression(conversationId) {
       return rect.width > 5 && rect.height > 5 && style.display !== 'none' && style.visibility !== 'hidden';
     };
     const buttons = [...document.querySelectorAll('button')].filter(visible);
-    const generating = buttons.some((button) => (
-      button.matches('[data-testid="stop-button"]')
-      || /stop|停止|中止/i.test(String(button.getAttribute('aria-label') || ''))
-    ));
+    const generating = buttons.some(isNativeGenerationStopControl);
     const editors = [...document.querySelectorAll([
       '#prompt-textarea',
       'textarea',
@@ -230,12 +238,13 @@ function exactConversationExpression(conversationId) {
 // another conversation and is clearly marked in the returned diagnostics.
 function lightweightExactConversationExpression(conversationId) {
   return `(() => {
+    const isNativeGenerationStopControl = ${isNativeGenerationStopControl.toString()};
     const selectCurrentTurnMessage=${selectCurrentTurnMessage.toString()};
     const expected=${JSON.stringify(conversationId)};
     const actual=location.pathname.match(/\\/c\\/([^/?#]+)/)?.[1]||null;
     const editor=document.querySelector('#prompt-textarea, textarea, div.ProseMirror[contenteditable="true"], [data-lexical-editor="true"][contenteditable="true"], [contenteditable="true"][role="textbox"]');
     const composerText=editor?String(editor instanceof HTMLTextAreaElement?editor.value:editor.innerText||editor.textContent||'').replace(/\\u2060/g,'').trim():null;
-    const generating=Boolean(document.querySelector('[data-testid="stop-button"]'));
+    const generating=[...document.querySelectorAll('button')].some(isNativeGenerationStopControl);
     const turns=[...document.querySelectorAll('section[data-testid^="conversation-turn-"]')];
     const lastTurn=turns.at(-1)||null;
     const roleNodes=lastTurn?[...lastTurn.querySelectorAll('[data-message-author-role]')]:[];
@@ -482,6 +491,7 @@ export class ConversationProgressLivenessCdpAdapter {
     const page = await this.connect(resolved.target);
     try {
       const result = await page.evaluate(`(() => {
+        const isNativeGenerationStopControl = ${isNativeGenerationStopControl.toString()};
         const expected = ${JSON.stringify(resolved.conversationId)};
         const actual = location.pathname.match(/\\/c\\/([^/?#]+)/)?.[1] || null;
         const visible = (element) => {
@@ -493,7 +503,7 @@ export class ConversationProgressLivenessCdpAdapter {
         if (actual !== expected) return { ok:false, state:'route-changed' };
         const stop = [...document.querySelectorAll('button')]
           .filter(visible)
-          .find((button) => button.matches('[data-testid="stop-button"]') || /stop|停止|中止/i.test(String(button.getAttribute('aria-label') || '')));
+          .find(isNativeGenerationStopControl);
         if (!stop) return { ok:true, state:'already-idle', resetCommitted:false };
         stop.click();
         return { ok:true, state:'stale-generating-stop-clicked', resetCommitted:true };
@@ -573,6 +583,7 @@ export class ConversationProgressLivenessCdpAdapter {
     let submissionAttempted = false;
     try {
       const preflight = await page.evaluate(`(() => {
+        const isNativeGenerationStopControl = ${isNativeGenerationStopControl.toString()};
         const expected = ${JSON.stringify(resolved.conversationId)};
         const expectedText = ${JSON.stringify(text)};
         const allowNormalCompletion = ${allowNormalCompletion === true};
@@ -589,7 +600,7 @@ export class ConversationProgressLivenessCdpAdapter {
         };
         if (actual !== expected) return { ok:false, state:'route-changed' };
         const buttons = [...document.querySelectorAll('button')].filter(visible);
-        if (buttons.some((button) => button.matches('[data-testid="stop-button"]') || /stop|停止|中止/i.test(String(button.getAttribute('aria-label') || '')))) {
+        if (buttons.some(isNativeGenerationStopControl)) {
           return { ok:false, state:'still-generating' };
         }
         const messageNodes = [...document.querySelectorAll('[data-message-author-role]')].filter(visible);
@@ -914,6 +925,7 @@ export class ConversationProgressLivenessCdpAdapter {
 }
 
 export const _test = {
+  isNativeGenerationStopControl,
   runtimePort,
   runtimePorts,
   markerFor,

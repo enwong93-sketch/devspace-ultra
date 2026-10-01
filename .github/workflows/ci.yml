@@ -28,6 +28,8 @@ jobs:
       # incomplete node_modules tree and reports a false product failure.
       - run: npm ci --no-audit --no-fund
       - run: npm run build
+      - run: npm run verify:continuity-regressions
+      - run: npm run verify:release-promotion
       - run: npm pack --dry-run
       - name: Validate shell installer
         if: runner.os != 'Windows'

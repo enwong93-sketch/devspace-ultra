@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { readGoalRelayHtml } from "../dist/goal-relay-resource.js";
 
 const server = await readFile(new URL("../dist/server.js", import.meta.url), "utf8");
 const requestContext = await readFile(new URL("../dist/mcp-conversation-request-context.js", import.meta.url), "utf8");
@@ -13,6 +14,7 @@ const transportObserver = await readFile(new URL("../dist/classic-turn-transport
 const progressClaims = await readFile(new URL("../dist/progress-claim-registry.js", import.meta.url), "utf8");
 const startClaims = await readFile(new URL("../dist/conversation-start-claim-registry.js", import.meta.url), "utf8");
 const progressRelay = await readFile(new URL("../dist/ui/progress-claim-relay.html", import.meta.url), "utf8");
+const distributedProgressRelay = readGoalRelayHtml("progress-claim-relay.html");
 const claimCdp = await readFile(new URL("../dist/conversation-start-claim-cdp.js", import.meta.url), "utf8");
 
 assert.match(server, /classic-relay-app-origins-v1\.json/);
@@ -130,13 +132,20 @@ assert.match(progressClaims, /durableConversationOwners:\s*0/);
 assert.match(progressRelay, /toolName:\s*"devspace_progress_report"/);
 assert.match(progressRelay, /startClaim\.toolName === "devspace_goal_start"/);
 assert.match(progressRelay, /startClaim\.toolName === "devspace_plan_start"/);
-assert.match(progressRelay, /window\.openai\.callTool\(action\.toolName, action\.arguments\)/);
+assert.match(progressRelay, /relayBridge\.callTool\(action\.toolName, action\.arguments\)/,
+  "claim dispatch must use the shared standard/legacy Apps transport");
+assert.match(distributedProgressRelay, /ui\/initialize/,
+  "the distributed claim resource must include the standard Apps handshake");
+assert.match(distributedProgressRelay, /win\.openai\.callTool\(name, args\)/,
+  "existing Classic hosts must retain the legacy tool fallback");
 assert.match(progressRelay, /window\.openai\?\.toolResponseMetadata/,
   "claim relay must accept result metadata when toolOutput is null");
 assert.doesNotMatch(progressRelay, /requestClose/,
   "a hidden exact-page relay must never ask ChatGPT to close host UI");
-assert.match(progressRelay, /retireRelay/,
+assert.match(progressRelay, /retireClaimRelay/,
   "expired one-shot relays must retire their own listeners locally");
+assert.match(progressRelay, /releaseRelayDocument[\s\S]*relayBridge\.dispose\(\)/,
+  "terminal persistent relays must also release the shared Apps transport");
 assert.match(progressRelay, /removeEventListener/,
   "local relay retirement must detach host event listeners");
 assert.match(progressRelay, /document\.body\.replaceChildren\(\)/,
