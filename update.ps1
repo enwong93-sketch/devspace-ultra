@@ -575,6 +575,13 @@ function Invoke-StagePackage($Release, [string] $ArchivePath, [string] $Prefix) 
         if ($LASTEXITCODE -ne 0) { throw "Staged syntax check failed for $relative." }
     }
     if (-not $script:TestMode) {
+        if ([version]$Release.Version -ge [version]'0.5.20') {
+            $securityGate = Join-Path $root 'scripts\dependency-security-installed-gate.mjs'
+            if (-not (Test-Path -LiteralPath $securityGate)) { throw 'Staged release is missing its dependency-security gate.' }
+            $securityOutput = @(& node $securityGate 2>&1)
+            if ($LASTEXITCODE -ne 0) { throw 'Staged dependency-security verification failed before live replacement.' }
+            if (-not $Quiet) { foreach ($line in $securityOutput) { Write-Host ([string]$line) } }
+        }
         $reportedVersion = ((@(& node (Join-Path $root "dist\cli.js") version) -join "`n").Trim())
         if ($LASTEXITCODE -ne 0 -or $reportedVersion -notmatch [regex]::Escape($Release.Version)) {
             throw "Staged CLI could not report target version $($Release.Version)."

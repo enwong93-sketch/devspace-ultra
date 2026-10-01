@@ -27,6 +27,7 @@ jobs:
       # otherwise every platform reaches the OAuth tests with a deliberately
       # incomplete node_modules tree and reports a false product failure.
       - run: npm ci --no-audit --no-fund
+      - run: npm run verify:dependency-security-installed
       - run: npm run build
       - run: npm run verify:continuity-regressions
       - run: npm run verify:release-promotion

@@ -22,9 +22,9 @@ if (major < 22 || major >= 27 || (major === 22 && minor < 19)) {
 '
 
 echo "Node.js ${node_version} detected."
-release_tag="${DEVSPACE_RELEASE_TAG:-v0.5.19}"
+release_tag="${DEVSPACE_RELEASE_TAG:-v0.5.20}"
 if [[ ! "$release_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-  echo "DEVSPACE_RELEASE_TAG must be an exact stable tag such as v0.5.19." >&2
+  echo "DEVSPACE_RELEASE_TAG must be an exact stable tag such as v0.5.20." >&2
   exit 1
 fi
 install_tmp="$(mktemp -d)"
@@ -69,6 +69,11 @@ const { existsSync } = require('node:fs');
 const manifest = require(`${root}/package.json`);
 if (manifest.name !== 'devspace-ultra' || manifest.version !== expectedVersion || !existsSync(`${root}/dist/cli.js`)) {
   throw new Error('Installed package identity, version, or CLI is incomplete.');
+}
+const [major, minor, patch] = manifest.version.split('.').map(Number);
+if (major > 0 || minor > 5 || (minor === 5 && patch >= 20)) {
+  require('node:child_process').execFileSync(process.execPath,
+    [`${root}/scripts/dependency-security-installed-gate.mjs`], { stdio: 'inherit' });
 }
 NODE
 npm rebuild better-sqlite3 --prefix "$package_root" --ignore-scripts=false --no-audit --no-fund

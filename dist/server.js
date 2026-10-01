@@ -794,7 +794,7 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
     const server = new McpServer({
         name: "devspace",
         title: "DevSpace",
-         version: "0.5.19",
+         version: "0.5.20",
         description: "Secure local coding workspace for MCP clients. Provides workspace-scoped file, search, edit, write, process, capability, and Codex-parity tools.",
     }, {
         instructions: modelInstructions,
@@ -2347,6 +2347,7 @@ export function createServer(config = loadConfig(), options = {}) {
     let conversationProgressLiveness = null;
     const goalContinuationSupervisor = new GoalContinuationSupervisor({
         goalRuntime,
+        relayDiagnostics: () => goalHostBridge.relayDiagnostics(),
         statePath: join(config.stateDir, 'goal-continuation-driver.json'),
         enabled: !config.passiveCore,
         inspect: (goal, options = {}) => inspectGoalContinuationPages(goal, {

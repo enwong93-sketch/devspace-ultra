@@ -7,7 +7,7 @@ param(
     [string] $PublicHostname = $env:DEVSPACE_PUBLIC_HOSTNAME,
     [string] $AllowedRoot = $HOME,
     [string] $Repository = "https://github.com/enwong93-sketch/devspace-ultra.git",
-    [string] $Ref = "v0.5.19",
+    [string] $Ref = "v0.5.20",
     [switch] $NonInteractive,
     [switch] $SkipCaddy,
     [switch] $EnableRouterUpnp,
@@ -162,8 +162,14 @@ function Install-VerifiedReleaseArchive {
         Invoke-WebRequest -Uri $asset.Url -Headers $headers -OutFile $archive -UseBasicParsing
         $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLowerInvariant()
         if ($actual -ne $asset.Digest) { throw "Downloaded $Tag archive failed SHA-256 verification." }
-        & npm install --global $archive --ignore-scripts --no-audit --no-fund
-        if ($LASTEXITCODE -ne 0) { throw "Release archive installation failed with exit code $LASTEXITCODE." }
+        $previousErrorActionPreference = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = 'Continue'
+            $npmOutput = @(& npm install --global $archive --ignore-scripts --no-audit --no-fund 2>&1)
+            $npmExitCode = $LASTEXITCODE
+        } finally { $ErrorActionPreference = $previousErrorActionPreference }
+        if ($npmExitCode -ne 0) { throw "Release archive installation failed with exit code $npmExitCode." }
+        foreach ($line in $npmOutput) { Write-Host ([string]$line) }
         $root = Join-Path ((& npm root --global).Trim()) 'devspace-ultra'
         $manifestPath = Join-Path $root 'package.json'
         if (-not (Test-Path -LiteralPath $manifestPath)) { throw "Release installation is incomplete: package.json is missing." }
@@ -171,6 +177,13 @@ function Install-VerifiedReleaseArchive {
         if ($manifest.name -ne 'devspace-ultra' -or $manifest.version -ne $asset.Version -or
             -not (Test-Path -LiteralPath (Join-Path $root 'dist\cli.js'))) {
             throw "Release installation did not produce the exact package/CLI for $Tag."
+        }
+        if ([version]$asset.Version -ge [version]'0.5.20') {
+            $securityGate = Join-Path $root 'scripts\dependency-security-installed-gate.mjs'
+            if (-not (Test-Path -LiteralPath $securityGate)) { throw 'Installed release is missing its dependency-security gate.' }
+            $securityOutput = @(& node $securityGate 2>&1)
+            if ($LASTEXITCODE -ne 0) { throw 'Installed dependency-security verification failed.' }
+            foreach ($line in $securityOutput) { Write-Host ([string]$line) }
         }
         return $root
     }

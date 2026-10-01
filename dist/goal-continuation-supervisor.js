@@ -224,11 +224,12 @@ function exactMissingArmBoundary(goal, pages, nowMs = Date.now()) {
 export class GoalContinuationSupervisor {
   constructor({ goalRuntime, inspect, dispatch, statePath = null, enabled = true,
     now = () => Date.now(), pollMs = 1000, settleMs = 750, maxRecords = 128,
-    onHiddenContinuationStarted = null } = {}) {
+    onHiddenContinuationStarted = null, relayDiagnostics = null } = {}) {
     if (!goalRuntime || typeof inspect !== 'function' || typeof dispatch !== 'function') throw new Error('Goal continuation adapters are required');
     Object.assign(this, { goalRuntime, inspect, dispatch, statePath, enabled, now, pollMs, settleMs, maxRecords });
     this.onHiddenContinuationStarted = typeof onHiddenContinuationStarted === 'function'
       ? onHiddenContinuationStarted : null;
+    this.relayDiagnostics = typeof relayDiagnostics === 'function' ? relayDiagnostics : null;
     this.records = new Map(); this.timer = null; this.polling = null; this.closed = false;
     this.persistQueue = Promise.resolve(); this.lastError = null;
     this.missingArmRetryAt = new Map();
@@ -557,6 +558,12 @@ export class GoalContinuationSupervisor {
     catch (error) { cycleError = error instanceof Error ? error.message : String(error); }
     for (const row of this.records.values()) {
       if (this.closed) break;
+      if (row.state === 'superseded' && row.reason === 'goal-stopped-paused-or-consumed'
+        && row.dispatchCommitted === false) {
+        try { await this.repairLegacyLeaseSupersession(row); }
+        catch (error) { cycleError = error.message; }
+        continue;
+      }
       if (row.state === 'cancelled' && HUMAN_SUPERSESSION_REASONS.has(row.reason)) {
         try { await this.reconcileHumanSupersession(row); }
         catch (error) { cycleError = error.message; }
@@ -782,6 +789,28 @@ export class GoalContinuationSupervisor {
       reason: 'human-user-turn-started-next-round',
     });
   }
+  async repairLegacyLeaseSupersession(row) {
+    const goal = await this.goalRuntime.status(row.goalId).catch(() => null);
+    if (!goal || goal.status !== 'active' || goal.conversationId !== row.conversationId) return false;
+    const sameContinuation = redeemable(goal) && goal.round === row.round
+      && goal.continuation?.continuationId === row.continuationId;
+    const alreadyConsumed = goal.lastConsumedContinuationId === row.continuationId
+      && goal.round === Number(row.round) + 1 && goal.roundState === 'working';
+    if (!sameContinuation && !alreadyConsumed) return false;
+    // The old driver treated a temporarily foreign lease as a stopped Goal.
+    // A real human turn repairs accounting; it never becomes an automatic pass.
+    const proof = await this.humanSupersessionProof(row, goal);
+    if (proof?.userMessageId) return this.redeemHumanContinuation(row, {
+      ...proof, reason: 'human-user-turn-started-next-round',
+    });
+    if (!sameContinuation) return false;
+    // We cannot prove what that other lease owner sent. Do not replay it merely
+    // because the lease expired or because our own earlier attempt was unsent.
+    row.state = 'uncertain'; row.reason = 'legacy-active-lease-awaiting-native-reconciliation';
+    row.dispatchDefiniteFailure = false;
+    await this.save();
+    return true;
+  }
   async reconcile(row) {
     const goal = await this.goalRuntime.status(row.goalId);
     if (goal.status !== 'active' || this.closed) return;
@@ -853,6 +882,16 @@ export class GoalContinuationSupervisor {
   }
   async advance(row) {
     const goal = await this.goalRuntime.status(row.goalId);
+    if (redeemable(goal) && goal.round === row.round
+      && goal.continuation?.continuationId === row.continuationId
+      && ['dispatching', 'dispatched'].includes(goal.continuation.state)) {
+      row.state = 'uncertain'; row.reason = 'active-lease-awaiting-native-reconciliation';
+      row.deliveryMode = 'hidden-assistant-continuation';
+      row.leaseId = goal.continuation.leaseId || row.leaseId;
+      row.dispatchDefiniteFailure = false;
+      await this.save();
+      return;
+    }
     if (!pending(goal) || goal.continuation.continuationId !== row.continuationId || goal.round !== row.round) {
       row.state = 'superseded'; row.reason = 'goal-stopped-paused-or-consumed'; await this.save(); return;
     }
@@ -965,6 +1004,7 @@ export class GoalContinuationSupervisor {
   }
   status() {
     return { enabled: this.enabled, running: Boolean(this.timer), lastError: this.lastError,
+      relayLookup: this.relayDiagnostics?.() ?? null,
       lastArmError: this.lastArmError,
       lastPersistError: this.lastPersistError || null,
       persistFailureCount: Number(this.persistFailureCount || 0),

@@ -24,7 +24,7 @@ DuckDNS account creation, router login, WAN/CGNAT checks, and port forwarding ca
 
 ```powershell
 $p=Join-Path $env:TEMP 'devspace-ultra-install-skill.ps1'
-iwr https://raw.githubusercontent.com/enwong93-sketch/devspace-ultra/v0.5.19/install-skill.ps1 -OutFile $p
+iwr https://raw.githubusercontent.com/enwong93-sketch/devspace-ultra/v0.5.20/install-skill.ps1 -OutFile $p
 & $p
 ```
 
@@ -35,7 +35,7 @@ Then ask the Agent to **use `devspace-ultra-setup` to install or repair DevSpace
 Run the following from a normal PowerShell window. The installer requests elevation only for the machine-level operations that need it. It prompts before requesting router UPnP mappings for TCP 80/443; declining makes **no router change** and stops before public ingress setup.
 
 ```powershell
-$p=Join-Path $env:TEMP 'devspace-ultra-install.ps1'; iwr https://raw.githubusercontent.com/enwong93-sketch/devspace-ultra/v0.5.19/install.ps1 -OutFile $p; & $p -Network DuckDNS
+$p=Join-Path $env:TEMP 'devspace-ultra-install.ps1'; iwr https://raw.githubusercontent.com/enwong93-sketch/devspace-ultra/v0.5.20/install.ps1 -OutFile $p; & $p -Network DuckDNS
 ```
 
 The installer prompts for the DuckDNS subdomain and token. The token is protected with Windows DPAPI for the current user; it is not written to `config.json`, Task Scheduler arguments, logs, or Git. It then:
@@ -61,7 +61,7 @@ Create a stable named Cloudflare Tunnel route to `http://127.0.0.1:7678`, then r
 ```powershell
 $env:DEVSPACE_CLOUDFLARE_TUNNEL_TOKEN = '<one-time tunnel token>'
 $p=Join-Path $env:TEMP 'devspace-ultra-install.ps1'
-iwr https://raw.githubusercontent.com/enwong93-sketch/devspace-ultra/v0.5.19/install.ps1 -OutFile $p
+iwr https://raw.githubusercontent.com/enwong93-sketch/devspace-ultra/v0.5.20/install.ps1 -OutFile $p
 & $p `
   -Network Cloudflare `
   -PublicHostname 'devspace.example.com'
@@ -81,7 +81,7 @@ Set secrets in process-scoped environment variables and pass the remaining value
 ```powershell
 $env:DEVSPACE_DUCKDNS_TOKEN = '<token>'
 $p=Join-Path $env:TEMP 'devspace-ultra-install.ps1'
-iwr https://raw.githubusercontent.com/enwong93-sketch/devspace-ultra/v0.5.19/install.ps1 -OutFile $p
+iwr https://raw.githubusercontent.com/enwong93-sketch/devspace-ultra/v0.5.20/install.ps1 -OutFile $p
 & $p `
   -Network DuckDNS `
   -DuckDnsDomain 'your-own-subdomain.duckdns.org' `
