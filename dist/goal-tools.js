@@ -188,6 +188,14 @@ export function registerGoalTools(server, goalRuntime, {
     return String(resolved?.conversationId || "").trim() || null;
   };
 
+  const startResult = async (goal, text, extra = {}) => {
+    const result = textResult(goal, text, extra);
+    const receipt = await goalRuntime.nativeStartReceipt?.(goal.id);
+    if (receipt) result.content.push({ type: 'text',
+      text: `[DEVSPACE_NATIVE_GOAL_START:${goal.id}:${receipt.receiptId}]` });
+    return result;
+  };
+
   const bindOrVerifyActiveGoal = async (goalId, extra) => {
     let goal = await goalRuntime.status(goalId);
     const conversationId = await resolveConversationId(extra);
@@ -241,7 +249,7 @@ export function registerGoalTools(server, goalRuntime, {
         if (existing.completed && existing.result?.goal) {
           const resumed = existing.result.resumed === true;
           return {
-            ...textResult(existing.result.goal, `${resumed ? "Resumed" : "Started"} Goal ${existing.result.goal.id} at round ${existing.result.goal.round}.`, {
+            ...await startResult(existing.result.goal, `${resumed ? "Resumed" : "Started"} Goal ${existing.result.goal.id} at round ${existing.result.goal.round}.`, {
               claimed: true,
               resumed,
               claimId: relayClaimId,
@@ -270,7 +278,7 @@ export function registerGoalTools(server, goalRuntime, {
             });
         if (!claimed?.goal) throw new Error("Exact-page Goal recovery did not return a Goal.");
         const resumed = claimed.resumed === true;
-        return textResult(claimed.goal, `${resumed ? "Resumed" : "Started"} Goal ${claimed.goal.id} at round ${claimed.goal.round}.`, {
+        return await startResult(claimed.goal, `${resumed ? "Resumed" : "Started"} Goal ${claimed.goal.id} at round ${claimed.goal.round}.`, {
           claimed: true,
           resumed,
           claimId: relayClaimId,
@@ -296,7 +304,7 @@ export function registerGoalTools(server, goalRuntime, {
         return pendingStartResult(claim);
       }
       const goal = await goalRuntime.start({ objective, successCriteria, conversationId });
-      return textResult(goal, `Started Goal ${goal.id} at round ${goal.round}.`);
+      return await startResult(goal, `Started Goal ${goal.id} at round ${goal.round}.`);
     } catch (error) {
       return errorResult(error);
     }

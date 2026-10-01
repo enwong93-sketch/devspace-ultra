@@ -17,8 +17,10 @@ assert.match(source, /const configuredClassicPorts = Array\.isArray\(config\.cla
 assert.match(source, /new ClassicGoalHostBridge\(\{\s*\.\.\.classicCdpOptions,\s*beforeDispatch:\s*config\.passiveCore\s*\|\|\s*!primaryDebugGuard\s*\?\s*undefined\s*:\s*\(\) => primaryDebugGuard\.pollOnce\(\),?\s*\}\)/s);
 assert.doesNotMatch(source, /sendExactGoalRecovery|progressLivenessAdapter\.sendGoalRecovery|progressLivenessAdapter\.sendGoalContinuation/,
   "Goal continuation and same-round recovery must never be wired to the visible composer transport");
-assert.match(source, /dispatch:\s*\(\{ goal, page,[\s\S]{0,500}return goalHostBridge\.dispatch\(\{/,
+assert.match(source, /dispatch:\s*(?:async\s+)?\(\{ goal, page,[\s\S]{0,500}return goalHostBridge\.dispatch\(\{/,
   "the Goal continuation supervisor must dispatch through the hidden host bridge");
+assert.match(source, /nativeGoalStartReceipt:\s*await goalRuntime\.nativeStartReceipt\(goal\.id\)/,
+  "native start evidence must come from durable server state, never caller arguments");
 assert.match(source, /expectedPageTargetId:\s*candidate\.pageTargetId/,
   "hidden continuation must remain bound to the exact page proven at the visible-final boundary");
 assert.match(source, /onHiddenContinuationStarted:\s*async \(\{ conversationId, continuationId, sourceUserMessageId, runtimeKey, observedAtMs \}\)/,

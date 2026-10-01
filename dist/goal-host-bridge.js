@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { nativeGoalStartWitness, projectNativeGoalSource } from './goal-native-start-witness.js';
 import { ClassicCdpClient } from "./classic-cdp-client.js";
 import { readComposerDraft } from "./classic-composer-draft.js";
 import { classicMainDebugPorts, runtimeLabelForClassicPort } from './classic-main-debug-ports.js';
@@ -483,6 +484,14 @@ export async function inspectVisibleReportCommit(candidate, options = {}) {
                     role: String(node.message.author?.role || '').trim().toLowerCase() || null,
                     status: String(node.message.status || '').trim() || null,
                     endTurn: node.message.end_turn === true,
+                    publicFinalText: node.message.author?.role === 'assistant'
+                      && node.message.end_turn === true
+                      && (node.message.channel == null || node.message.channel === 'final')
+                      && (node.message.recipient == null || node.message.recipient === 'all')
+                      && node.message.content?.content_type === 'text'
+                      && Array.isArray(node.message.content.parts)
+                      ? node.message.content.parts.filter(part => typeof part === 'string').join('\\n').slice(0, 100_000)
+                      : null,
                     createTime: Number.isFinite(Number(node.message.create_time))
                       ? Number(node.message.create_time)
                       : null,
@@ -511,6 +520,8 @@ export async function inspectVisibleReportCommit(candidate, options = {}) {
               const current = branch.at(-1) || null;
               nativeContinuation = {
                 resolved: true,
+                goalStartWitness: (${nativeGoalStartWitness.toString()})(payload,
+                  ${JSON.stringify(options.nativeGoalStartReceipt || null)}, conversationId),
                 currentNodeId,
                 currentMessageId: current?.id || null,
                 currentRole: current?.role || null,
@@ -539,6 +550,7 @@ export async function inspectVisibleReportCommit(candidate, options = {}) {
                 latestAssistantMessageId: latestAssistant?.id || null,
                 latestAssistantStatus: latestAssistant?.status || null,
                 latestAssistantEndTurn: latestAssistant?.endTurn === true,
+                latestPublicAssistantText: latestAssistant?.publicFinalText || null,
                 latestAssistantCreatedAt: latestAssistant?.createTime != null
                   ? new Date(latestAssistant.createTime * 1000).toISOString()
                   : null,
@@ -633,11 +645,19 @@ export async function inspectVisibleReportCommit(candidate, options = {}) {
       throw new Error(result.exceptionDetails.text || "Goal visible-report inspection failed.");
     }
     const value = result.result?.value || null;
-    return value ? {
+    const snapshot = value ? {
       ...value,
       pageTargetId: candidate.pageTargetId || null,
       relayTargetId: candidate.targetId || null,
     } : null;
+    const receipt = options.nativeGoalStartReceipt;
+    const native = snapshot?.nativeContinuation;
+    const displayMatchesNative = native?.resolved === true
+      && snapshot?.latestUserMessageId === native.latestUserMessageId
+      && snapshot?.latestAssistantMessageId === native.latestAssistantMessageId;
+    return receipt ? projectNativeGoalSource({ ...snapshot, nativeGoalSourceRequired: !displayMatchesNative }, {
+      id: receipt.goalId, conversationId: receipt.conversationId, nativeStartReceipt: receipt,
+    }) : snapshot;
   } finally {
     client.close();
   }
@@ -768,6 +788,7 @@ export async function inspectGoalContinuationPages(goal, {
   runtimeKey = null,
   pageTargetId = null,
   includeNativeBranch = false,
+  nativeGoalStartReceipt = null,
   sourceUserMessageId = null,
   baselineAssistantMessageId = null,
 } = {}) {
@@ -787,6 +808,7 @@ export async function inspectGoalContinuationPages(goal, {
       nativeConversationTimeoutMs: includeNativeBranch ? 30_000 : undefined,
       skipNativeStatus,
       includeNativeBranch,
+      nativeGoalStartReceipt,
       sourceUserMessageId,
       baselineAssistantMessageId,
     });
@@ -1296,8 +1318,9 @@ export class ClassicGoalHostBridge {
     const snapshot = await this.inspectVisibleReport(matching, {
       goalId,
       recovery: true,
-      includeNativeBranch: includeNativeBranch === true,
-      ...(includeNativeBranch === true ? {
+      includeNativeBranch: includeNativeBranch === true || Boolean(goal?.nativeStartReceipt),
+      nativeGoalStartReceipt: goal?.nativeStartReceipt || null,
+      ...(includeNativeBranch === true || goal?.nativeStartReceipt ? {
         timeoutMs: 45_000,
         nativeSessionTimeoutMs: 5_000,
         nativeConversationTimeoutMs: 30_000,
@@ -1487,7 +1510,8 @@ export class ClassicGoalHostBridge {
 
   async dispatch({ goalId, prompt, continuationId, leaseId, round, reportedAt,
     conversationId = null, runtimePort = null, expectedPageTargetId = null,
-    sourceUserId = null, assistantMessageId = null, nativeCompletionProof = null } = {}) {
+    sourceUserId = null, assistantMessageId = null, nativeCompletionProof = null,
+    nativeGoalStartReceipt = null } = {}) {
     if (typeof goalId !== "string" || !goalId.trim()) throw new Error("Goal host dispatch requires goalId.");
     if (typeof prompt !== "string" || !prompt.trim()) throw new Error("Goal host dispatch requires prompt.");
 
@@ -1543,6 +1567,7 @@ export class ClassicGoalHostBridge {
         const nativeFinal = await inspectVisibleReportCommit(matching, {
           recovery: true,
           includeNativeBranch: true,
+          nativeGoalStartReceipt,
           sourceUserMessageId: sourceUserId,
           baselineAssistantMessageId: assistantMessageId,
           timeoutMs: 45_000,

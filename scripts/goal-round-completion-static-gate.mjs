@@ -95,7 +95,7 @@ assert.match(guard, /currentRoundTransportFinished/,
   "persisted exact request/finished evidence must restore same-round recovery after a Core restart");
 assert.match(guard, /const continuationRound = Number\(goal\?\.round\) > 1[\s\S]{0,220}lastConsumedContinuationId/,
   "native-final recovery must recognize a redeemed continuation round without guessing from page activity");
-assert.match(guard, /if \(!continuationRound && userCreatedAtMs < roundBeganAtMs - requestPreRoundSlopMs\) return false/,
+assert.match(guard, /if \(!continuationRound && !matchesNativeGoalStartWitness\(goal, native\)[\s\S]{0,120}userCreatedAtMs < roundBeganAtMs - requestPreRoundSlopMs\) return false/,
   "the source-user lower window must remain for initial rounds but must not reject exact hidden continuation rounds because of model latency");
 assert.match(guard, /assistantCreatedAtMs < roundBeganAtMs - DEFAULT_ASSISTANT_FINAL_SLOP_MS/,
   "the assistant final itself must still be created inside the durable Goal round boundary");
@@ -109,7 +109,7 @@ assert.match(continuation, /nativeCompletionProof/,
   "a native-completion handoff survives restart without requiring a report-time arm");
 assert.match(continuation, /sourceOnly:\s*!nativeFinal/,
   "restart recovery with a persisted native final must fetch authoritative stream_status instead of suppressing it");
-assert.match(continuation, /nativeCompletionProof:\s*proof\.type === 'completed-final'[\s\S]{0,160}\{ \.\.\.nativeFinal \}/,
+assert.match(continuation, /nativeCompletionProof:\s*proof\.type === 'completed-final'[\s\S]{0,160}\{ \.\.\.\(proof\.nativeCompletionProof \|\| nativeFinal\) \}/,
   "a recovered missing-arm row must retain the exact native-final proof for dispatch-time revalidation");
 assert.match(continuation, /exactNativeCompletionBoundary/,
   "restart repair revalidates the exact native final, page and source user turn");

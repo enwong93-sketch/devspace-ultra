@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { matchesNativeGoalStartWitness } from './goal-native-start-witness.js';
 
 const DEFAULT_POLL_MS = 2_000;
 const DEFAULT_ROUND_SETTLE_MS = 2_000;
@@ -63,6 +64,7 @@ export function provesNativeCurrentRoundFinal(goal, snapshot, {
 } = {}) {
   if (!shouldInspectNativeCurrentRoundFinal(snapshot)) return false;
   const native = snapshot?.nativeContinuation;
+  if (snapshot?.nativeGoalSourceRequired === true && !matchesNativeGoalStartWitness(goal, native)) return false;
   if (native?.resolved !== true || native?.currentRole !== "assistant" || native?.currentEndTurn !== true) return false;
   if (ACTIVE_STREAM_STATES.has(upper(native?.currentStatus))) return false;
   const latestAssistantId = String(snapshot?.latestAssistantMessageId || "").trim();
@@ -93,7 +95,8 @@ export function provesNativeCurrentRoundFinal(goal, snapshot, {
   // the durable round boundary.
   const continuationRound = Number(goal?.round) > 1
     && Boolean(String(goal?.lastConsumedContinuationId || "").trim());
-  if (!continuationRound && userCreatedAtMs < roundBeganAtMs - requestPreRoundSlopMs) return false;
+  if (!continuationRound && !matchesNativeGoalStartWitness(goal, native)
+    && userCreatedAtMs < roundBeganAtMs - requestPreRoundSlopMs) return false;
   if (userCreatedAtMs > assistantCreatedAtMs) return false;
   return true;
 }

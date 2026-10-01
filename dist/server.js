@@ -2350,16 +2350,20 @@ export function createServer(config = loadConfig(), options = {}) {
         relayDiagnostics: () => goalHostBridge.relayDiagnostics(),
         statePath: join(config.stateDir, 'goal-continuation-driver.json'),
         enabled: !config.passiveCore,
-        inspect: (goal, options = {}) => inspectGoalContinuationPages(goal, {
+        inspect: async (goal, options = {}) => {
+            const receipt = await goalRuntime.nativeStartReceipt(goal.id);
+            return inspectGoalContinuationPages(goal, {
             ...classicCdpOptions,
-            skipNativeStatus: options.sourceOnly === true,
+            skipNativeStatus: options.sourceOnly === true && !receipt,
             runtimeKey: options.runtimeKey || null,
             pageTargetId: options.pageTargetId || null,
-            includeNativeBranch: options.includeNativeBranch === true,
+            includeNativeBranch: options.includeNativeBranch === true || Boolean(receipt),
+            nativeGoalStartReceipt: receipt,
             sourceUserMessageId: options.sourceUserMessageId || null,
             baselineAssistantMessageId: options.baselineAssistantMessageId || null,
-        }),
-        dispatch: ({ goal, page, sourceUserId, assistantMessageId, nativeCompletionProof, prompt, continuationId, leaseId, round, reportedAt }) => {
+            });
+        },
+        dispatch: async ({ goal, page, sourceUserId, assistantMessageId, nativeCompletionProof, prompt, continuationId, leaseId, round, reportedAt }) => {
             const candidate = page.candidate;
             return goalHostBridge.dispatch({
                 goalId: goal.id,
@@ -2374,6 +2378,7 @@ export function createServer(config = loadConfig(), options = {}) {
                 sourceUserId,
                 assistantMessageId,
                 nativeCompletionProof,
+                nativeGoalStartReceipt: await goalRuntime.nativeStartReceipt(goal.id),
             });
         },
         onHiddenContinuationStarted: async ({ conversationId, continuationId, sourceUserMessageId, runtimeKey, observedAtMs }) => {

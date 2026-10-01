@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { GoalRuntime } from './goal-runtime.js';
 import { GoalContinuationSupervisor } from './goal-continuation-supervisor.js';
+import { projectNativeGoalSource, nativeGoalStartWitness } from './goal-native-start-witness.js';
 
 async function harness(t, options = {}) {
   const root = await mkdtemp(join(tmpdir(), 'devspace-goal-driver-test-'));
@@ -37,6 +38,62 @@ async function harness(t, options = {}) {
     final: () => { pages = pages.map(p => ({...p,generating:false,latestMessageRole:'assistant',latestAssistantMessageId:'assistant-new',latestAssistantText:'New final report'})); },
     tick: async () => { now += 100; return driver.pollOnce(); }, advanceTime: n => { now += n; } };
 }
+
+async function receiptPage(h) {
+  const receipt = await h.runtime.nativeStartReceipt(h.g.id);
+  const userAt = Date.parse(receipt.issuedAt) - 240_000;
+  const finalAt = Date.parse(receipt.issuedAt) + 50;
+  const payload = { id: h.g.conversationId, current_node: 'receipt-final', mapping: {
+    'native-source': { parent: null, message: { id: 'native-source', author: { role: 'user' }, create_time: userAt / 1000 } },
+    'start-tool': { parent: 'native-source', message: { id: 'start-tool', author: { role: 'tool', name: 'devspace_goal_start' },
+      status: 'finished_successfully', create_time: (finalAt - 10) / 1000,
+      content: { content_type: 'text', parts: [`[DEVSPACE_NATIVE_GOAL_START:${h.g.id}:${receipt.receiptId}]`] } } },
+    'receipt-final': { parent: 'start-tool', message: { id: 'receipt-final', author: { role: 'assistant' } } },
+  } };
+  const s = { ...h.page(), runtimeKey: 'main-05', nativeGoalSourceRequired: true,
+    latestUserMessageId: 'old-display-user', latestAssistantMessageId: 'old-display-final',
+    nativeContinuation: { resolved: true, currentNodeId: 'receipt-final', currentMessageId: 'receipt-final',
+      currentRole: 'assistant', currentEndTurn: true, currentStatus: 'finished_successfully',
+      currentCreatedAt: new Date(finalAt).toISOString(),
+      latestUserMessageId: 'native-source', latestUserCreatedAt: new Date(userAt).toISOString(),
+      latestAssistantMessageId: 'receipt-final', latestAssistantEndTurn: true,
+      latestAssistantStatus: 'finished_successfully', latestAssistantCreatedAt: new Date(finalAt).toISOString(),
+      latestPublicAssistantText: 'Native public final after a delayed Goal start.',
+      goalStartWitness: nativeGoalStartWitness(payload, receipt, h.g.conversationId) } };
+  return projectNativeGoalSource(s, { ...h.g, nativeStartReceipt: receipt });
+}
+
+test('a stale display cannot arm before the native start witness is available', async t => {
+  const h = await harness(t, { skipArm: true });
+  h.setPages([{ ...h.page(), nativeGoalSourceRequired: true }]);
+  assert.equal((await h.driver.arm(h.reported)).armed, false);
+  assert.equal(h.driver.status().records.length, 0);
+  await h.tick();
+  assert.equal(h.sends(), 0);
+  assert.equal((await h.runtime.status(h.g.id)).round, 1);
+});
+
+test('native receipt reconciles a stale display without counting it as human continuation', async t => {
+  const h = await harness(t, { skipArm: true });
+  h.setPages([await receiptPage(h)]);
+  assert.equal((await h.driver.arm(h.reported)).armed, true);
+  await h.tick(); await h.tick();
+  assert.equal(h.sends(), 1);
+  assert.equal(h.sentPayloads[0].sourceUserId, 'native-source');
+  assert.equal(h.sentPayloads[0].nativeCompletionProof.assistantMessageId, 'receipt-final');
+  assert.equal((await h.runtime.status(h.g.id)).round, 2);
+  await h.tick(); assert.equal(h.sends(), 1);
+  assert.notEqual(h.driver.status().records[0].deliveryMode, 'human-user-continuation');
+});
+
+test('missing-arm restart uses the durable native receipt instead of an old display baseline', async t => {
+  const h = await harness(t, { skipArm: true });
+  h.setPages([await receiptPage(h)]);
+  await h.tick(); await h.tick(); await h.tick();
+  assert.equal(h.sends(), 1);
+  assert.equal(h.driver.status().records[0].nativeFinalVerified, true);
+  assert.equal(h.sentPayloads[0].nativeCompletionProof.sourceUserMessageId, 'native-source');
+});
 
 function nativePageForReported(h, overrides = {}) {
   const reportedAtMs = Date.parse(h.reported.lastRoundReport.reportedAt);

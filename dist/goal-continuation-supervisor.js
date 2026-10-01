@@ -46,6 +46,35 @@ function nativeCompletionProof(goal) {
   return proof;
 }
 
+function receiptNativeFinalProof(goal, page, nowMs) {
+  const native = page?.nativeContinuation, witness = native?.goalStartWitness;
+  const assistantAt = timeMs(native?.latestAssistantCreatedAt);
+  const beganAt = timeMs(goal?.roundBeganAt);
+  if (page?.boundarySource !== 'native-goal-start-tool-result' || !finalPage(page)
+    || page.conversationId !== goal.conversationId || witness?.verified !== true
+    || witness.goalId !== goal.id || witness.conversationId !== goal.conversationId
+    || witness.sourceUserMessageId !== page.latestUserMessageId
+    || witness.sourceUserMessageId !== native.latestUserMessageId
+    || native.currentRole !== 'assistant' || native.currentEndTurn !== true
+    || native.latestAssistantEndTurn !== true || native.currentStatus !== 'finished_successfully'
+    || native.latestAssistantStatus !== 'finished_successfully'
+    || native.currentMessageId !== page.latestAssistantMessageId
+    || native.currentNodeId !== page.latestAssistantMessageId
+    || native.latestAssistantMessageId !== page.latestAssistantMessageId
+    || digest(native.latestPublicAssistantText?.trim()) !== digest(page.latestAssistantText)
+    || timeMs(native.currentCreatedAt) !== assistantAt
+    || timeMs(witness.toolCreatedAt) == null || timeMs(witness.toolCreatedAt) > assistantAt
+    || !/^main-(0[1-9]|[12][0-9]|3[0-2])$/.test(String(page.runtimeKey || ''))
+    || !page.pageTargetId || assistantAt == null || beganAt == null
+    || assistantAt < beganAt - 1000 || assistantAt > nowMs + 60_000) return null;
+  return { source: 'native-assistant-turn-final', round: goal.round,
+    conversationId: goal.conversationId, runtimeKey: page.runtimeKey,
+    pageTargetId: page.pageTargetId, sourceUserMessageId: page.latestUserMessageId,
+    assistantMessageId: page.latestAssistantMessageId,
+    assistantTextHash: digest(page.latestAssistantText),
+    assistantCreatedAt: native.latestAssistantCreatedAt, completedAt: new Date(nowMs).toISOString() };
+}
+
 function exactNativeCompletionBoundary(goal, pages) {
   const expected = nativeCompletionProof(goal);
   if (!pending(goal) || !expected || !Array.isArray(pages) || pages.length !== 1) return null;
@@ -108,6 +137,12 @@ function exactNativeCompletionBoundary(goal, pages) {
 function exactMissingArmBoundary(goal, pages, nowMs = Date.now()) {
   const autoBoundary = exactNativeCompletionBoundary(goal, pages);
   if (autoBoundary) return autoBoundary;
+  if (pages?.length === 1 && pages[0].nativeGoalSourceRequired === true) {
+    const proof = receiptNativeFinalProof(goal, pages[0], nowMs);
+    return proof ? { type: 'completed-final', sourceUserId: proof.sourceUserMessageId,
+      finalAssistantId: proof.assistantMessageId, finalAssistantHash: proof.assistantTextHash,
+      finalAssistantCreatedAt: proof.assistantCreatedAt, nativeCompletionProof: proof } : null;
+  }
   if (!pending(goal) || !Array.isArray(pages) || !pages.length || pages.length > 4) return null;
   const reportedAtMs = timeMs(goal?.lastRoundReport?.reportedAt);
   if (reportedAtMs == null) return null;
@@ -267,6 +302,7 @@ export class GoalContinuationSupervisor {
     if (Array.isArray(rows) && options.pageTargetId) rows = rows.filter(p => p.pageTargetId === options.pageTargetId);
     if (!Array.isArray(rows) || !rows.length || rows.length > 4) return null;
     if (rows.some(p => p?.conversationId !== goal.conversationId || !p.latestUserMessageId || p.chatMode !== true)) return null;
+    if (rows.some(p => p.nativeGoalSourceRequired === true && p.boundarySource !== 'native-goal-start-tool-result')) return null;
     if (!options.allowDivergent && new Set(rows.map(p => p.latestUserMessageId)).size !== 1) return null;
     return rows;
   }
@@ -280,7 +316,7 @@ export class GoalContinuationSupervisor {
     const id = goal.continuation.continuationId;
     if (this.records.has(id)) return { armed: this.records.get(id).state === 'waiting', state: this.records.get(id).state };
     // Never infer a source turn for old pending Goals merely found on disk.
-    const autoFinal = nativeCompletionProof(goal);
+    let autoFinal = nativeCompletionProof(goal);
     const boundaryAt = autoFinal?.completedAt || goal.lastRoundReport?.reportedAt || null;
     const reportAge = this.now() - Date.parse(boundaryAt || '');
     if (!resume && (!Number.isFinite(reportAge) || reportAge < -1000 || reportAge > 120_000)) return { armed: false, reason: 'report-not-current' };
@@ -294,7 +330,7 @@ export class GoalContinuationSupervisor {
     let pages;
     try {
       pages = await this.pages(goal, {
-        sourceOnly: true,
+        sourceOnly: !autoFinal,
         runtimeKey: sourceRuntimeKey,
         pageTargetId: autoFinal?.pageTargetId || null,
         allowDivergent: true,
@@ -305,6 +341,7 @@ export class GoalContinuationSupervisor {
       return { armed: false, reason: 'source-boundary-inspection-failed' };
     }
     if (!pages) return { armed: false, reason: 'source-page-unresolved' };
+    if (!autoFinal && pages.length === 1) autoFinal = receiptNativeFinalProof(goal, pages[0], this.now());
     if (autoFinal && (!Array.isArray(pages) || pages.length !== 1
       || pages[0]?.conversationId !== goal.conversationId
       || pages[0]?.runtimeKey !== autoFinal.runtimeKey
@@ -527,8 +564,8 @@ export class GoalContinuationSupervisor {
         createdAt: this.now(),
         recoveredMissingArm: true,
         nativeFinalVerified: proof.type === 'completed-final',
-        nativeCompletionProof: proof.type === 'completed-final' && nativeFinal
-          ? { ...nativeFinal }
+        nativeCompletionProof: proof.type === 'completed-final' && (proof.nativeCompletionProof || nativeFinal)
+          ? { ...(proof.nativeCompletionProof || nativeFinal) }
           : null,
         finalAssistantId: proof.type === 'completed-final' ? proof.finalAssistantId : null,
         finalAssistantHash: proof.type === 'completed-final' ? proof.finalAssistantHash : null,
@@ -916,6 +953,12 @@ export class GoalContinuationSupervisor {
       return;
     }
     if (!this.matchesFinal(row, pages)) { row.reason = 'awaiting-current-final'; row.candidateKey = null; return; }
+    if (pages.length === 1 && pages[0].boundarySource === 'native-goal-start-tool-result') {
+      const nativeProof = receiptNativeFinalProof(goal, pages[0], this.now());
+      if (!nativeProof) { row.reason = 'native-start-final-proof-unavailable'; row.candidateKey = null; return; }
+      row.nativeCompletionProof = nativeProof;
+      row.nativeFinalVerified = true;
+    }
     const key = pages.map(p => `${p.pageTargetId}:${p.latestAssistantMessageId}:${digest(p.latestAssistantText)}`).join('|');
     if (row.candidateKey !== key) { row.candidateKey = key; row.settledAt = this.now(); return; }
     if (this.now() - row.settledAt < this.settleMs || this.closed) return;
@@ -1021,6 +1064,7 @@ export class GoalContinuationSupervisor {
         reason: r.reason, attempts: r.attempts, redeemed: r.redeemed === true,
         deliveryMode: r.deliveryMode || null,
         recoveredMissingArm: r.recoveredMissingArm === true,
+        nativeFinalVerified: r.nativeFinalVerified === true,
         manualUserObservedAt: r.manualUserObservedAt || null,
         manualTimestampResolution: r.manualTimestampResolution || null,
         manualTimestampAttempts: Number(r.manualTimestampAttempts || 0),

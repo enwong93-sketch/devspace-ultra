@@ -41,7 +41,7 @@ function cleanText(value, maxChars, label) {
 }
 
 function newState() {
-  return { version: STATE_VERSION, goals: {}, nativeCompletionLedger: {} };
+  return { version: STATE_VERSION, goals: {}, nativeCompletionLedger: {}, nativeStartReceipts: {} };
 }
 
 function idleContinuation() {
@@ -110,6 +110,7 @@ function ensureRoundRecoveryShape(goal) {
 
 function ensureNativeCompletionLedgerShape(state) {
   if (!Object.hasOwn(state, "nativeCompletionLedger")) state.nativeCompletionLedger = {};
+  if (!Object.hasOwn(state, "nativeStartReceipts")) state.nativeStartReceipts = {};
   return state;
 }
 
@@ -218,6 +219,17 @@ function validateLoadedState(value) {
     throw new Error("unsupported goal state version");
   }
   ensureNativeCompletionLedgerShape(value);
+  // Auxiliary evidence corruption must discard that evidence, not reset Goals.
+  if (!value.nativeStartReceipts || typeof value.nativeStartReceipts !== 'object'
+    || Array.isArray(value.nativeStartReceipts)) value.nativeStartReceipts = {};
+  for (const [goalId, receipt] of Object.entries(value.nativeStartReceipts)) {
+    const goal = value.goals[goalId];
+    if (!goal || receipt?.source !== 'server-created-goal-start' || receipt.goalId !== goalId
+      || !goal.conversationId || receipt.conversationId !== goal.conversationId
+      || receipt.issuedAt !== goal.createdAt || !/^[a-f0-9]{48}$/.test(String(receipt.receiptId || ''))) {
+      delete value.nativeStartReceipts[goalId];
+    }
+  }
   if (!value.nativeCompletionLedger || typeof value.nativeCompletionLedger !== "object"
     || Array.isArray(value.nativeCompletionLedger)) {
     throw new Error("invalid persisted native completion ledger");
@@ -332,6 +344,11 @@ export class GoalRuntime {
     };
     this.state.goals[goal.id] = goal;
     this.state.nativeCompletionLedger[goal.id] = [];
+    if (goal.conversationId) this.state.nativeStartReceipts[goal.id] = {
+      source: 'server-created-goal-start', goalId: goal.id,
+      conversationId: goal.conversationId, issuedAt: goal.createdAt,
+      receiptId: randomBytes(24).toString('hex'),
+    };
     await this.save();
     return clone(goal);
   }
@@ -386,6 +403,13 @@ export class GoalRuntime {
     await this.ready;
     this.getGoal(goalId);
     return [...(this.state.nativeCompletionLedger[goalId] || [])];
+  }
+
+  async nativeStartReceipt(goalId) {
+    await this.ready;
+    const goal = this.getGoal(goalId), receipt = this.state.nativeStartReceipts[goalId];
+    // A conversation migration cannot reuse an old native branch witness.
+    return receipt?.conversationId === goal.conversationId ? clone(receipt) : null;
   }
 
   async activeGoals({ limit = 12, conversationId } = {}) {
@@ -446,6 +470,7 @@ export class GoalRuntime {
     const collision = nonterminalConversationGoals(this.state, next, goal.id)[0] || null;
     if (collision) throw new Error(`Target conversation ${next} is already bound to nonterminal Goal ${collision.id} (${collision.status}).`);
     goal.conversationId = next;
+    delete this.state.nativeStartReceipts[goal.id];
     goal.conversationContinuity = [
       ...(Array.isArray(goal.conversationContinuity) ? goal.conversationContinuity : []),
       { from: prior, to: next, at: this.nowIso(), reason: cleanText(reason, 240, "Conversation rebind reason") },
@@ -805,6 +830,8 @@ export class GoalRuntime {
         consumedNativeAssistantMessageIds: [
           ...(this.state.nativeCompletionLedger[goal.id] || []),
         ],
+        nativeStartReceipt: this.state.nativeStartReceipts[goal.id]?.conversationId === goal.conversationId
+          ? clone(this.state.nativeStartReceipts[goal.id]) : null,
       }));
   }
 
