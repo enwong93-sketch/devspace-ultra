@@ -3847,7 +3847,7 @@ export function createServer(config = loadConfig(), options = {}) {
             const staticCapabilityInspect = requestedToolName === "capability_inspect"
                 && req?.body?.params?.arguments?.probeMcp !== true;
             const instanceIndependentTool = staticCapabilityInspect || new Set([
-                "open_workspace", "read", "write", "edit", "apply_patch",
+                "open_workspace", "read", "view_image", "write", "edit", "apply_patch",
                 "exec_command", "write_stdin", "bash", "grep", "glob", "ls",
                 "show_changes", "blender_runtime", "blender_mcp",
                 "devspace_route", "tool_search", "capability_route",
