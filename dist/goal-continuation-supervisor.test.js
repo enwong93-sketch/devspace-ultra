@@ -885,6 +885,38 @@ test('a native assistant turn end auto-arms next-round continuation without a vi
   assert.equal(continued.status, 'active');
 });
 
+test('a retry clears the previous failed receipt before persisting a new transport attempt', async t => {
+  let calls = 0;
+  let beforeSecondTransport;
+  const h = await harness(t, { send: async () => {
+    calls++;
+    if (calls === 1) return { ok: false, dispatchCommitted: false,
+      definiteFailure: true, state: 'exact-goal-relay-unavailable', error: 'prior failed preflight' };
+    const journal = JSON.parse(await readFile(h.config.statePath, 'utf8'));
+    beforeSecondTransport = journal.records[0];
+    throw new Error('acknowledgement lost during second attempt');
+  } });
+  h.final(); await h.tick(); await h.tick();
+  assert.equal(h.sends(), 1);
+  assert.equal(h.driver.status().records[0].state, 'waiting');
+  h.advanceTime(60_000);
+  await h.tick();
+  assert.equal(h.sends(), 2);
+  assert.equal(beforeSecondTransport.state, 'dispatching');
+  assert.equal(beforeSecondTransport.attempts, 2);
+  assert.equal(beforeSecondTransport.dispatchCommitted, null);
+  assert.equal(beforeSecondTransport.dispatchDefiniteFailure, null);
+  assert.equal(beforeSecondTransport.dispatchState, null);
+  assert.equal(beforeSecondTransport.dispatchError, null);
+  await h.driver.close();
+  const restarted = new GoalContinuationSupervisor(h.config);
+  t.after(() => restarted.close());
+  await restarted.pollOnce();
+  assert.equal(restarted.status().records[0].state, 'uncertain');
+  assert.equal(h.sends(), 2, 'an acknowledgement-lost attempt must not be replayed');
+  assert.equal((await h.runtime.status(h.g.id)).round, 1);
+});
+
 test('restart missing-arm recovery fetches stream status for a persisted native final', async t => {
   const root = await mkdtemp(join(tmpdir(), 'devspace-goal-native-final-restart-test-'));
   let now = Date.parse('2026-09-29T01:30:00.000Z');

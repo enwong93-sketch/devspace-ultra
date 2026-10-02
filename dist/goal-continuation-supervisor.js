@@ -1026,6 +1026,10 @@ export class GoalContinuationSupervisor {
       row.state = 'cancelled'; row.reason = 'pre-send-boundary-changed'; await this.save(); return;
     }
     row.state = 'dispatching'; row.attempts += 1; row.leaseId = leaseId; row.sentAt = this.now();
+    // Receipts describe one attempt only. A crash during this new transport
+    // must never retain an earlier preflight's definite-unsent result.
+    row.dispatchCommitted = null; row.dispatchDefiniteFailure = null;
+    row.dispatchState = null; row.dispatchError = null;
     row.finalAssistantId = pages[0].latestAssistantMessageId;
     row.deliveryMode = 'hidden-assistant-continuation';
     row.dispatchRuntimeKey = pages[0].runtimeKey || row.sourceRuntimeKey || null;
