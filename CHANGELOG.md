@@ -2,6 +2,14 @@
 
 Version-specific release notes are published with each [GitHub Release](https://github.com/enwong93-sketch/devspace-ultra/releases). They describe the reusable product, not any customer's machine or live installation.
 
+## 0.5.22 - in preparation
+
+- Carry forward the native-final Goal continuation and Rescue ordering fixes from the immutable v0.5.21 draft.
+- Defer package retirement for retained Core process sessions, invalid/missing diagnostics, wrong PID, active tools or concurrent handover.
+- Recheck after staging; -Force cannot override work preservation. A deferral never triggers rollback task restart.
+- Retain verified offline installation and rollback paths. Readiness checks are not an atomic live admission barrier.
+- Stable promotion still requires exact-archive real Classic acceptance.
+
 ## 0.5.21 — in preparation
 
 - Replace the unsupported hidden-only Goal sender with authorized public component messages, gated by native assistant final events and durable exact-owner claims.

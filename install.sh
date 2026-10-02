@@ -22,9 +22,9 @@ if (major < 22 || major >= 27 || (major === 22 && minor < 19)) {
 '
 
 echo "Node.js ${node_version} detected."
-release_tag="${DEVSPACE_RELEASE_TAG:-v0.5.21}"
+release_tag="${DEVSPACE_RELEASE_TAG:-v0.5.22}"
 if [[ ! "$release_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-  echo "DEVSPACE_RELEASE_TAG must be an exact stable tag such as v0.5.21." >&2
+  echo "DEVSPACE_RELEASE_TAG must be an exact stable tag such as v0.5.22." >&2
   exit 1
 fi
 install_tmp="$(mktemp -d)"
