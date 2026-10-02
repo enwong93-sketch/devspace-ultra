@@ -13,8 +13,8 @@ assert.match(html, /relayBridge\.callTool\("devspace_goal_status"/,
   "the persistent Goal relay must refresh current backend state rather than trust historical tool output");
 assert.match(html, /relayBridge\.callTool\("devspace_goal_continuation"/,
   "the persistent Goal relay must delegate pending continuation dispatch to the backend supervisor");
-assert.doesNotMatch(html, /sendFollowUpMessage\s*\(/,
-  "the App relay must expose host capability for backend discovery but never synthesize a user-visible turn itself");
+assert.match(html, /relayBridge\.dispatchPublicMessage\(goalId, conversationId\)/,
+  "public messages must be delegated to the one-shot backend-authorized component bridge");
 assert.doesNotMatch(html, /action:\s*["']claim["']/);
 assert.doesNotMatch(html, /action:\s*["']ack["']/);
 assert.doesNotMatch(html, /action:\s*["']release["']/);
@@ -49,8 +49,7 @@ assert.match(claimRelay, /relayBridge\.callTool\("devspace_goal_continuation"/,
   "the persistent relay must request backend-owned dispatch only for a pending continuation");
 assert.match(claimRelay, /goal\.roundState === "reported" && goal\.continuation\?\.state === "pending"/,
   "working Goal rounds must never trigger hidden dispatch");
-assert.doesNotMatch(claimRelay, /sendFollowUpMessage\s*\(/,
-  "the App relay must never synthesize the hidden assistant turn itself");
+assert.match(claimRelay, /relayBridge\.dispatchPublicMessage\(goalRelayGoalId, goalRelayConversationId\)/);
 assert.doesNotMatch(claimRelay, /location\.|parent\.location|prompt-textarea|composer/,
   "persistent Goal relay maintenance must not navigate or mutate the visible composer");
 assert.match(hostBridge, /relayStatePresent/);
@@ -68,6 +67,6 @@ console.log(JSON.stringify({
   persistentCheckpointRelay: true,
   persistentStartRelay: true,
   exactGoalMarkerRequired: true,
-  syntheticUserMessage: false,
+  authorizedPublicComponentMessage: true,
   pageNavigation: false,
 }));

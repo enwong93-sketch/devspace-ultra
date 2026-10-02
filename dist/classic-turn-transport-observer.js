@@ -1,5 +1,6 @@
 import { ClassicCdpClient } from "./classic-cdp-client.js";
 import { StringDecoder } from "node:string_decoder";
+import { createHash } from 'node:crypto';
 import { nativeFinalFromStreamBlock, nativeConversationFromStreamBlock } from './classic-native-final-ingress.js';
 import { ClassicTurnIdentityCorrelator, parseClassicTurnRequest } from "./context-guardian-cdp.js";
 import { sessionFingerprintFromClassicRequest } from "./classic-conversation-authority.js";
@@ -119,7 +120,20 @@ export class ClassicTurnTransportTracker {
     if (!requestId) return null;
     this.prune();
     const firstSeenAt = this.now();
+    // Retain only the exact source-message hash and native parent ID, never
+    // user prose. They reconcile public Goal delivery without a DOM heuristic.
+    let publicCorrelation = {};
+    try {
+      const body = JSON.parse(params.request.postData);
+      const user = body.messages?.find(message => message?.id === metadata.sourceUserMessageId && message.author?.role === 'user');
+      if (user?.content?.content_type === 'text' && Array.isArray(user.content.parts)
+        && user.content.parts.every(part => typeof part === 'string')) {
+        publicCorrelation = { sourceUserTextHash: createHash('sha256').update(user.content.parts.join('\n')).digest('hex'),
+          parentMessageId: typeof body.parent_message_id === 'string' ? body.parent_message_id : null };
+      }
+    } catch {}
     this.pending.set(requestId, {
+      ...publicCorrelation,
       conversationId: metadata.conversationId,
       transportKind: metadata.transportKind,
       sourceUserMessageId: metadata.sourceUserMessageId || null,
@@ -380,7 +394,8 @@ export class ClassicTurnTransportTracker {
     if (!event) return;
     entry.finalAssistantMessageId = event.assistantMessageId;
     try {
-      const result = this.onAssistantFinal(event);
+      const result = this.onAssistantFinal({ ...event, sourceUserTextHash: entry.sourceUserTextHash || null,
+        parentMessageId: entry.parentMessageId || null });
       result?.catch?.(() => {});
     } catch {}
   }

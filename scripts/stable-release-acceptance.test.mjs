@@ -50,7 +50,7 @@ const rejected = [
   ['future evidence', e => { e.observedAt = '2030-01-01T00:00:00Z'; }],
   ['manual Goal continuation', e => { e.checks.normalGoal.additionalHumanMessages = 1; }],
   ['manual bind dependency', e => { e.checks.normalGoal.manualBindCalls = 1; }],
-  ['visible Goal continuation', e => { e.checks.normalGoal.hiddenContinuation = false; }],
+  ['unattested visible Goal continuation', e => { e.checks.normalGoal.hiddenContinuation = false; }],
   ['no actual next rounds', e => { e.checks.normalGoal.observedAssistantTurns = 1; }],
   ['manual Rescue', e => { e.checks.automaticRescue.manualContinueCount = 1; }],
   ['duplicate Rescue', e => { e.checks.automaticRescue.automaticDispatchCount = 2; }],
@@ -70,6 +70,23 @@ for (const [label, mutate] of rejected) {
 test('GitHub must confirm the immutable candidate archive digest', () => {
   const { evidence, context } = fixture(); context.release.assets[0].digest = 'sha256:' + 'd'.repeat(64);
   assert.throws(() => validateAcceptance(evidence, context));
+});
+
+test('authorized public component messages satisfy the updated no-frontend contract', () => {
+  const { evidence, context } = fixture();
+  Object.assign(evidence.checks.normalGoal, { hiddenContinuation: false,
+    continuationTransport: 'public-component-message', publicMessagesAuthorized: true,
+    nativeFinalTriggered: true, foregroundInputUsed: false, focusChanged: false,
+    composerMutated: false, automaticScroll: false, duplicateDispatches: 0 });
+  assert.equal(validateAcceptance(evidence, context).ok, true);
+  for (const key of ['foregroundInputUsed', 'focusChanged', 'composerMutated', 'automaticScroll']) {
+    const invalid = structuredClone(evidence); invalid.checks.normalGoal[key] = true;
+    assert.throws(() => validateAcceptance(invalid, context), key);
+  }
+  for (const key of ['publicMessagesAuthorized', 'nativeFinalTriggered']) {
+    const invalid = structuredClone(evidence); invalid.checks.normalGoal[key] = false;
+    assert.throws(() => validateAcceptance(invalid, context), key);
+  }
 });
 test('already-public or wrong-tag release is refused', () => {
   const { evidence, context } = fixture(); context.release.draft = false;

@@ -50,21 +50,33 @@ to infer a completed round from DOM text, idle, Stop controls, or a report.
   or observer disconnection invalidates that live boundary;
   unavailable evidence cannot fall back to a rendered summary.
 
-Transport target discovery still requires the exact legacy relay for the
-injected sender and its acknowledgement. Removing the UI completion gate does
-not supply a production sender or eliminate that remaining relay dependency.
+### User-authorized public continuation (2026-10-03)
 
-This parser currently accepts complete native message envelopes. Actual
-delta-only, resumed/background and cold-client variants require real supported
-client validation. Fixture coverage is not evidence that every host variant
-emits that envelope or that original Classic hidden delivery is available.
+The owner explicitly accepted automatically posted native/component messages;
+hidden-only delivery is no longer a product requirement. The production
+supervisor queues a durable `awaiting-app` job only after the exact native final.
+A conversation-authenticated App call atomically claims it once. The component
+uses the documented `window.openai.sendFollowUpMessage` with
+`scrollToBottom:false`, without input, focus, navigation or private SDK access.
+No public API capability means no claim; a host denial is not bypassed.
 
-OpenAI's documented component `sendFollowUpMessage` publishes a message and
-does not establish this hidden-assistant continuation contract. The documented
-MCP Events surface is scoped to Work/Cloud/dots; it must not be substituted for
-the original Classic client. A supported hidden sender must be supplied by a
-trusted host through an explicit integration; default private SDK closure
-access, guessed RPCs, credential extraction and activation bypass are retired.
+The prompt carries the existing Goal/continuation IDs. An authenticated Agent
+round-begin receipt or a matching native assistant final reconciles delivery.
+The latter requires the exact outgoing message hash, native parent assistant,
+conversation, Main and page; a Promise resolution, timeout, user-only history
+item or rendered summary never proves a successful working round. An issued
+job is never replayed after a lost response or Core restart. A never-issued
+job can renew its expired lease. Goal semantics remain active/AI-owned while
+transport evidence is unavailable.
+
+The new relay resource is v3; an existing v2 frame is not silently injected or
+reloaded. Real acceptance must show the v3 component in the original client and
+actual automatic subsequent work. The fixture suite alone does not prove this.
+The parser currently accepts complete native message envelopes; delta-only,
+resumed/background and cold-client variants still require real-client evidence.
+MCP Events for Work/Cloud/dots are not a substitute for Classic. Private SDK
+closure access, guessed RPCs, credential extraction and gesture bypass remain
+retired.
 
 Primary references consulted:
 - https://developers.openai.com/plugins/reference#openaisendfollowupmessage
@@ -142,10 +154,10 @@ branch, with no reasoning, raw user text or credentials returned. That first
 QA work cycle failed an ordinary edit tool chain; it is not three-turn acceptance.
 Unsupported host formats fail closed; they must not be accepted by
 loosening receipt/origin checks. A direct native read/message tool is used for
-QA coordination; it is not counted as the hidden continuation under test.
+QA coordination; an operator message is not counted as automatic continuation.
 
 The initial request must be followed by three independently completed native
-assistant turns, actual read/write/edit/command/readback, no additional user
-prompt, no manual bind, no foreground input, and a completed Goal. A separate
+assistant turns, actual read/write/edit/command/readback, no additional human
+prompt (authorized automatic component messages are allowed), no manual bind, no foreground input, and a completed Goal. A separate
 genuine interrupted-turn Rescue test is also required. Existing GitHub draft
 assets and immutable tags are not rewritten for this source candidate.

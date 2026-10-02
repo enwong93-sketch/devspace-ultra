@@ -124,6 +124,8 @@ const hostDispatchSchema = z.object({
 });
 const continuationOutputSchema = {
   goal: goalSchema,
+  publicMessage: z.object({ goalId: z.string(), conversationId: z.string(), continuationId: z.string(),
+    leaseId: z.string(), prompt: z.string(), round: z.number().int().positive() }).optional(),
   claim: continuationClaimSchema.optional(),
   acknowledged: z.boolean().optional(),
   released: z.boolean().optional(),
@@ -441,10 +443,10 @@ export function registerGoalTools(server, goalRuntime, {
 
   registerAppTool(server, "devspace_goal_continuation", {
     title: "Goal Continuation Lease",
-    description: "App-only Goal control for dispatching one hidden continuation through the local ChatGPT Classic host bridge, plus low-level lease claim/ack/release recovery actions.",
+    description: "App-only Goal control. Public component messages require a backend-verified native final and an exclusive, durable one-shot delivery claim. RPC success is not proof of a new working round.",
     inputSchema: {
       goalId: z.string().min(1),
-      action: z.enum(["dispatch", "claim", "ack", "release"]),
+      action: z.enum(["dispatch", "claim", "ack", "release", "public_message"]),
       leaseId: z.string().min(1).optional(),
     },
     outputSchema: continuationOutputSchema,
@@ -453,6 +455,15 @@ export function registerGoalTools(server, goalRuntime, {
   }, async ({ goalId, action, leaseId }, extra) => {
     try {
       await bindOrVerifyActiveGoal(goalId, extra);
+      if (action === 'public_message') {
+        const conversationId = await resolveConversationId(extra);
+        const goal = await goalRuntime.status(goalId);
+        if (!conversationId || conversationId !== goal.conversationId) throw new Error('Public continuation requires exact authenticated conversation ownership.');
+        const publicMessage = await hostBridge?.continuationSupervisor?.claimPublicMessage?.(goalId);
+        return textResult(await goalRuntime.status(goalId), publicMessage
+          ? 'One public component message authorized; await native continuation receipt.'
+          : 'No public component message currently authorized.', publicMessage ? { publicMessage } : {});
+      }
       if ((action === "dispatch" || action === "claim") && hostBridge?.continuationSupervisor) {
         const status = await hostBridge.continuationSupervisor.requestDispatch(goalId);
         const goal = await goalRuntime.status(goalId);

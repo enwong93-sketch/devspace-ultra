@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { atomicWriteJson } from './atomic-file.js';
 import { enqueueRecoverablePersist } from './recoverable-persist-queue.js';
+import { isNativeStreamFinalReceipt } from './classic-native-final-ingress.js';
 
 const digest = text => createHash('sha256').update(String(text || '')).digest('hex');
 const pending = goal => goal?.status === 'active' && goal.roundState === 'reported'
@@ -260,7 +261,7 @@ export class GoalContinuationSupervisor {
   constructor({ goalRuntime, inspect, dispatch, statePath = null, enabled = true,
     now = () => Date.now(), pollMs = 1000, settleMs = 750, maxRecords = 128,
     onHiddenContinuationStarted = null, relayDiagnostics = null, inspectNativeFinal = null,
-    nativeFinalIngressOnly = false } = {}) {
+    nativeFinalIngressOnly = false, publicMessageContinuation = false } = {}) {
     if (!goalRuntime || typeof inspect !== 'function' || typeof dispatch !== 'function') throw new Error('Goal continuation adapters are required');
     Object.assign(this, { goalRuntime, inspect, dispatch, statePath, enabled, now, pollMs, settleMs, maxRecords });
     this.onHiddenContinuationStarted = typeof onHiddenContinuationStarted === 'function'
@@ -268,6 +269,8 @@ export class GoalContinuationSupervisor {
     this.relayDiagnostics = typeof relayDiagnostics === 'function' ? relayDiagnostics : null;
     this.inspectNativeFinal = typeof inspectNativeFinal === 'function' ? inspectNativeFinal : null;
     this.nativeFinalIngressOnly = nativeFinalIngressOnly === true;
+    this.publicMessageContinuation = publicMessageContinuation === true;
+    this.publicClaimQueue = Promise.resolve();
     this.records = new Map(); this.timer = null; this.polling = null; this.closed = false;
     this.persistQueue = Promise.resolve(); this.lastError = null;
     this.missingArmRetryAt = new Map();
@@ -926,6 +929,9 @@ export class GoalContinuationSupervisor {
       await this.notifyHiddenContinuationStarted(row);
       return;
     }
+    // Public delivery is reconciled only by Agent redemption or a correlated
+    // native final. Never enter the legacy DOM/native-page inspection path.
+    if (row.deliveryMode === 'public-component-message') return;
     if (goal.continuation?.continuationId !== row.continuationId || !row.finalAssistantId) return;
     if (row.deliveryMode === 'hidden-assistant-continuation') {
       const inspectionOutcome = {};
@@ -1038,6 +1044,9 @@ export class GoalContinuationSupervisor {
       return;
     }
     if (!this.matchesFinal(row, pages)) { row.reason = 'awaiting-current-final'; row.candidateKey = null; return; }
+    if (this.publicMessageContinuation && row.nativeCompletionProof?.ingress !== 'native-response-stream') {
+      row.reason = 'awaiting-native-final-ingress'; return;
+    }
     if (pages.length === 1 && pages[0].boundarySource === 'native-goal-start-tool-result') {
       const nativeProof = receiptNativeFinalProof(goal, pages[0], this.now());
       if (!nativeProof) { row.reason = 'native-start-final-proof-unavailable'; row.candidateKey = null; return; }
@@ -1088,6 +1097,14 @@ export class GoalContinuationSupervisor {
     row.deliveryMode = 'hidden-assistant-continuation';
     row.dispatchRuntimeKey = pages[0].runtimeKey || row.sourceRuntimeKey || null;
     row.dispatchPageTargetId = pages[0].pageTargetId || null;
+    if (this.publicMessageContinuation) {
+      row.deliveryMode = 'public-component-message';
+      row.publicPrompt = claimed.claim.prompt + '\nAt the start of this automatic round, call devspace_goal_round_begin with '
+        + JSON.stringify({ goalId: row.goalId, continuationId: row.continuationId })
+        + '. This reconciles delivery only; it is not a prerequisite for ordinary work tools.';
+      row.publicPromptHash = digest(row.publicPrompt);
+      row.state = 'awaiting-app'; row.reason = 'awaiting-public-component-message';
+    }
     if(row.causalDisplayProof)row.sourceRuntimeKey=pages[0].runtimeKey||null;
     try {
       await this.save(); // durable before any possible transport side effect
@@ -1110,6 +1127,8 @@ export class GoalContinuationSupervisor {
       row.state='cancelled'; row.reason='control-change-before-transport';
       await this.save(); return;
     }
+    // Durable public job is pulled by the App, never by a CDP SDK invocation.
+    if (this.publicMessageContinuation) return;
     let sent;
     try {
       sent = await this.dispatch({ goal: current, page: pages[0], sourceUserId: row.sourceUserId,
@@ -1156,6 +1175,100 @@ export class GoalContinuationSupervisor {
     const row = rows.at(-1);
     return { ok: true, backendOwned: true, state: row?.state || 'unarmed', dispatched: row?.state === 'delivered' };
   }
+  async claimPublicMessage(goalId) {
+    // Serialize competing old/new App frames. Persist issued state BEFORE
+    // returning the prompt: a lost tools/call reply must never issue it twice.
+    const task = this.publicClaimQueue.then(async () => {
+      await this.pollOnce();
+      if (!this.publicMessageContinuation || !this.enabled || this.closed) return null;
+      const row = [...this.records.values()].find(r => r.goalId === goalId && r.state === 'awaiting-app');
+      if (!row) return null;
+      const goal = await this.goalRuntime.status(goalId);
+      if (await this.goalRuntime.hasConversationCollision({ goalId })) return null;
+      if (!redeemable(goal) || goal.round !== row.round || goal.continuation.continuationId !== row.continuationId) {
+        row.state = 'superseded'; row.reason = 'goal-stopped-paused-or-consumed'; await this.save(); return null;
+      }
+      // A never-issued job can safely renew an expired lease. Issued/unknown
+      // jobs never enter this branch and cannot be replayed after expiration.
+      if (goal.continuation.state === 'pending') {
+        const renewal = await this.goalRuntime.continuation({ goalId, action: 'claim' });
+        row.leaseId = renewal.claim.leaseId;
+      } else if (goal.continuation.leaseId !== row.leaseId) return null;
+      const boundary = await this.finalCandidates(goal, row);
+      if (boundary.newUser) {
+        await this.redeemHumanContinuation(row, { userMessageId: boundary.newUserMessageId });
+        return null;
+      }
+      if (!this.matchesFinal(row, boundary.pages)) return null;
+      const current = await this.goalRuntime.status(goalId);
+      if (this.closed || current.status !== 'active' || current.round !== row.round
+        || current.continuation?.leaseId !== row.leaseId) return null;
+      row.state = 'uncertain'; row.reason = 'public-message-issued-awaiting-native-receipt';
+      row.publicIssuedAt = this.now();
+      try { await this.save(); }
+      catch (error) {
+        // The prompt has not left this method; no host side effect is possible.
+        row.state = 'awaiting-app'; row.publicIssuedAt = null;
+        row.reason = 'public-message-claim-persist-failed';
+        throw error;
+      }
+      const latest = await this.finalCandidates(await this.goalRuntime.status(goalId), row);
+      const stillActive = await this.goalRuntime.status(goalId);
+      if (this.closed || stillActive.status !== 'active' || stillActive.continuation?.leaseId !== row.leaseId
+        || latest.newUser || !this.matchesFinal(row, latest.pages)) {
+        // Still before returning the prompt. Unlike a lost App reply, this is
+        // definitely unsent and may be revalidated later, not quarantined.
+        row.state = 'awaiting-app'; row.publicIssuedAt = null;
+        row.reason = 'public-message-boundary-changed-before-issue';
+        await this.save(); return null;
+      }
+      return { goalId, conversationId: row.conversationId, continuationId: row.continuationId,
+        leaseId: row.leaseId, prompt: row.publicPrompt, round: row.round };
+    });
+    this.publicClaimQueue = task.catch(() => {});
+    return task;
+  }
+  async notePublicMessageFinal(event) {
+    await this.ready;
+    if (!isNativeStreamFinalReceipt(event)) return false;
+    const row = [...this.records.values()].find(r => r.deliveryMode === 'public-component-message'
+      && r.publicIssuedAt && r.state === 'uncertain' && r.conversationId === event.conversationId
+      && r.dispatchRuntimeKey === event.runtimeKey && r.dispatchPageTargetId === event.pageTargetId
+      && r.publicPromptHash === event.sourceUserTextHash && r.finalAssistantId === event.parentMessageId
+      && r.sourceUserId !== event.sourceUserMessageId && event.observedAtMs >= r.publicIssuedAt);
+    if (!row) return false;
+    const goal = await this.goalRuntime.status(row.goalId);
+    if (goal.status !== 'active' || await this.goalRuntime.hasConversationCollision({ goalId: row.goalId })) return false;
+    await this.goalRuntime.roundBegin({ goalId: row.goalId, continuationId: row.continuationId,
+      roundBeganAt: new Date(row.publicIssuedAt).toISOString() });
+    row.state = 'delivered'; row.redeemed = true;
+    row.reason = 'public-message-confirmed-by-native-assistant-final';
+    row.publicUserMessageId = event.sourceUserMessageId;
+    row.publicAssistantMessageId = event.assistantMessageId;
+    await this.save();
+    return true;
+  }
+  async noteNativeFinalSupersession(event) {
+    await this.ready;
+    if (!isNativeStreamFinalReceipt(event)) return false;
+    // Reboot can move the SAME conversation to another local Main. A fresh
+    // native completed turn with a new source user supersedes an old unknown
+    // send; it is human/external progress, never an automatic-delivery pass.
+    for (const row of this.records.values()) {
+      if (!['waiting', 'awaiting-app', 'dispatching', 'uncertain'].includes(row.state)
+        || row.conversationId !== event.conversationId || row.sourceUserId === event.sourceUserMessageId
+        || (row.publicPromptHash && row.publicPromptHash === event.sourceUserTextHash)) continue;
+      const after = Math.max(Number(row.sentAt || row.createdAt || 0), Date.parse(row.reportedAt || '') || 0);
+      if (!after || Date.parse(event.assistantCreatedAt) < after || event.observedAtMs < after) continue;
+      const goal = await this.goalRuntime.status(row.goalId);
+      if (await this.goalRuntime.hasConversationCollision({ goalId: row.goalId })) return false;
+      if (!redeemable(goal) || goal.conversationId !== event.conversationId
+        || goal.round !== row.round || goal.continuation.continuationId !== row.continuationId) continue;
+      return await this.redeemHumanContinuation(row, { userMessageId: event.sourceUserMessageId,
+        observedAt: event.assistantCreatedAt, reason: 'native-final-proves-external-user-continuation' });
+    }
+    return false;
+  }
   status() {
     return { enabled: this.enabled, running: Boolean(this.timer), lastError: this.lastError,
       relayLookup: this.relayDiagnostics?.() ?? null,
@@ -1187,7 +1300,8 @@ export class GoalContinuationSupervisor {
     this.missingArmRetryAt.clear();
     this.missingArmAttempts.clear();
     this.missingArmErrors.clear();
-    await this.polling?.catch(() => {}); await this.persistQueue.catch(() => {});
+    await this.polling?.catch(() => {}); await this.publicClaimQueue.catch(() => {});
+    await this.persistQueue.catch(() => {});
   }
 }
 

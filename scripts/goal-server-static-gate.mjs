@@ -8,7 +8,7 @@ assert.match(source, /import \{ GoalRuntime \} from "\.\/goal-runtime\.js";/);
 assert.match(source, /import \{ registerGoalTools \} from "\.\/goal-tools\.js";/);
 assert.match(source, /import \{ ClassicGoalHostBridge, defaultMainDebugPorts, inspectGoalContinuationPages \} from "\.\/goal-host-bridge\.js";/);
 assert.match(source, /const GOAL_DOCK_URI = "ui:\/\/devspace\/goal-dock\.html";/);
-assert.equal(GOAL_RELAY_URI, "ui://devspace/goal-continuation-relay-v2.html");
+assert.equal(GOAL_RELAY_URI, "ui://devspace/goal-continuation-relay-v3.html");
 assert.match(source, /import \{ GOAL_RELAY_URI, PROGRESS_CLAIM_RELAY_URI, readGoalRelayHtml \} from "\.\/goal-relay-resource\.js";/,
   "production must use the versioned resource with its bundled Apps bridge");
 assert.match(source, /new GoalRuntime\(\{\s*stateDir: config\.stateDir,?\s*\}\)/s);

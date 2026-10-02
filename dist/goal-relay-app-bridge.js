@@ -1,6 +1,6 @@
 // Small transport-only implementation of the MCP Apps postMessage contract.
 // Keep initialization separate from Goal state: a late host never denies tools
-// or marks a Goal complete. No component-authored follow-up messages are sent.
+// or marks a Goal complete. Public messages need a backend native-final claim.
 export function installGoalRelayAppBridge(win) {
   const parent = win.parent;
   const requests = new Map();
@@ -63,6 +63,30 @@ export function installGoalRelayAppBridge(win) {
     return connecting;
   };
   const bridge = {
+    async dispatchPublicMessage(goalId, conversationId) {
+      // ChatGPT's documented extension supplies scrollToBottom:false. Do not
+      // fall back to a transport that may move the user's viewport or input.
+      const send = win.openai?.sendFollowUpMessage;
+      if (disposed || typeof send !== 'function') return false;
+      const result = await bridge.callTool('devspace_goal_continuation', { goalId, action: 'public_message' });
+      if (result?.isError) throw new Error('Public continuation authorization unavailable');
+      const message = (result?.structuredContent ?? result?.structured_content)?.publicMessage;
+      if (!message) return false;
+      if (disposed || message.goalId !== goalId || message.conversationId !== conversationId
+        || !message.continuationId || !message.leaseId || !message.prompt) {
+        throw new Error('Public continuation ownership changed');
+      }
+      // The backend persisted the one-shot claim before exposing this prompt.
+      // Never retry/fallback after invocation, even when its reply is lost.
+      let timer;
+      try {
+        await Promise.race([
+          Promise.resolve().then(() => send.call(win.openai, { prompt: message.prompt, scrollToBottom: false })),
+          new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('Public message reply unavailable; awaiting native receipt')), 30_000); }),
+        ]);
+      } finally { if (timer) clearTimeout(timer); }
+      return true; // Submission attempt only, never round-completion evidence.
+    },
     async callTool(name, args) {
       if (disposed) throw new Error("relay transport retired");
       if (connected) return request("tools/call", { name, arguments: args }, 30_000);
