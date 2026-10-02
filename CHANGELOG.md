@@ -2,6 +2,15 @@
 
 Version-specific release notes are published with each [GitHub Release](https://github.com/enwong93-sketch/devspace-ultra/releases). They describe the reusable product, not any customer's machine or live installation.
 
+## 0.5.21 — in preparation
+
+- Replace the unsupported hidden-only Goal sender with authorized public component messages, gated by native assistant final events and durable exact-owner claims.
+- Correlate new work with native receipts instead of treating a send acknowledgement as success; retain manual-versus-automatic provenance across rebooted Main identities.
+- Preserve authenticated workspace image reads when the live page claim is unavailable, without relaxing workspace containment.
+- Refuse Core handover while background process sessions or unconsumed output remain; recheck inside the admission barrier.
+- Preserve archive byte identity through npm executable installation; use a new release identity instead of overwriting v0.5.20.
+- Keep stable promotion contingent on exact original-client and installation evidence, not fixtures or CI alone.
+
 ## 0.5.20 — in preparation
 
 - Preserve the validated exact-page proof when completing a fresh Classic Goal or Plan start claim.
