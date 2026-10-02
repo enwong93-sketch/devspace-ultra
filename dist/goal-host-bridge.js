@@ -15,6 +15,7 @@ const DEFAULT_VISIBLE_REPORT_SETTLE_MS = 400;
 const DEFAULT_HIDDEN_CONFIRM_TIMEOUT_MS = 15_000;
 const DEFAULT_HIDDEN_CONFIRM_POLL_MS = 2_000;
 let nativeBranchBackoffUntilMs = 0;
+let nativeBranchBackoffState = 'native-branch-rate-limit-backoff';
 let nativeBranchInspectionActive = false;
 
 export function nativeInspectionRetryDelayMs(retryAfter, nowMs = Date.now()) {
@@ -408,6 +409,7 @@ export async function inspectVisibleReportCommit(candidate, options = {}) {
   const client = new CdpClient(candidate.pageWebSocketDebuggerUrl, options);
   await client.open();
   let ownsNativeInspection = false;
+  let nativeInspectionAcknowledged = false;
   try {
     await client.call("Runtime.enable");
     const nativeBranchRateLimited = Date.now() < nativeBranchBackoffUntilMs;
@@ -473,7 +475,7 @@ export async function inspectVisibleReportCommit(candidate, options = {}) {
         const match = location.pathname.match(/\\/c\\/([^/?#]+)/);
         const conversationId = match?.[1] || null;
         let nativeContinuation = ${nativeBranchBlocked}
-          ? { resolved: false, state: ${JSON.stringify(nativeBranchRateLimited ? 'native-branch-rate-limit-backoff' : 'native-branch-inspection-busy')} } : null;
+          ? { resolved: false, state: ${JSON.stringify(nativeBranchRateLimited ? nativeBranchBackoffState : 'native-branch-inspection-busy')} } : null;
         if (conversationId && ${options.includeNativeBranch === true && !nativeBranchBlocked}) {
           const expectedSourceUserId = ${JSON.stringify(String(options.sourceUserMessageId || "").trim())};
           const baselineAssistantMessageId = ${JSON.stringify(String(options.baselineAssistantMessageId || "").trim())};
@@ -667,10 +669,12 @@ export async function inspectVisibleReportCommit(candidate, options = {}) {
     if (result.exceptionDetails) {
       throw new Error(result.exceptionDetails.text || "Goal visible-report inspection failed.");
     }
+    nativeInspectionAcknowledged = true;
     const value = result.result?.value || null;
     if (value?.nativeContinuation?.state === 'conversation-fetch-429') {
       nativeBranchBackoffUntilMs = Math.max(nativeBranchBackoffUntilMs,
         Date.now() + nativeInspectionRetryDelayMs(value.nativeContinuation.retryAfter));
+      nativeBranchBackoffState = 'native-branch-rate-limit-backoff';
     }
     const snapshot = value ? {
       ...value,
@@ -686,6 +690,17 @@ export async function inspectVisibleReportCommit(candidate, options = {}) {
       id: receipt.goalId, conversationId: receipt.conversationId, nativeStartReceipt: receipt,
     }) : snapshot;
   } finally {
+    if (ownsNativeInspection && !nativeInspectionAcknowledged) {
+      // A lost CDP response is not proof that the in-page read stopped. Keep
+      // unavailable evidence and a bounded quiet period instead of admitting
+      // another native read immediately. Never shorten provider Retry-After,
+      // and never label a transport timeout itself as an observed HTTP 429.
+      const quietUntil = Date.now() + 60_000;
+      if (quietUntil > nativeBranchBackoffUntilMs) {
+        nativeBranchBackoffUntilMs = quietUntil;
+        nativeBranchBackoffState = 'native-branch-observation-unconfirmed-backoff';
+      }
+    }
     if (ownsNativeInspection) nativeBranchInspectionActive = false;
     client.close();
   }
