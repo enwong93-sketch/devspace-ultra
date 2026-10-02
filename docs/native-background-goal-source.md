@@ -45,11 +45,17 @@ acceptance evidence.
    same-round recovery when the existing display has not caught up.
 7. Use the shared observed-runtime mapping for both canonical and legacy Main
    ports. Never turn port 19735 into an invented main-10005 or constrain a
-   known main-05 to only its static fallback 9735.
+   known main-05 to only its static fallback 9735. The automatic round guard
+   must use that same mapping when recording its native completion proof.
 8. Missing start evidence cannot arm a stale display. Pending-Goal restart
    recovery uses the same native receipt. Invalid auxiliary receipt data is
    discarded without deleting Goals. Conversation migration clears the old
    receipt rather than transferring it to a different native branch.
+9. A native API 429 is unavailable evidence, not completion. Honor Retry-After
+   (seconds or HTTP date) and use a 60-second fallback without a busy retry
+   loop. The guard's ordinary observation does not force a native branch read
+   merely because a receipt exists; its explicit retry floor still applies.
+   Do not cache a positive native boundary for dispatch revalidation.
 
 ## Verification boundary
 

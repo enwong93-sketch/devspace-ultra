@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { matchesNativeGoalStartWitness } from './goal-native-start-witness.js';
+import { runtimeKeyForClassicPort } from './classic-main-debug-ports.js';
 
 const DEFAULT_POLL_MS = 2_000;
 const DEFAULT_ROUND_SETTLE_MS = 2_000;
@@ -36,11 +37,8 @@ function recoveryPageIdentity(snapshot) {
 }
 
 function runtimeKeyForPort(port) {
-  if (port === 9721) return "main-01";
-  if (Number.isInteger(port) && port >= 9731 && port <= 9762) {
-    return `main-${String(port - 9730).padStart(2, "0")}`;
-  }
-  return null;
+  const key = Number.isInteger(port) ? runtimeKeyForClassicPort(port) : null;
+  return /^main-(0[1-9]|[12][0-9]|3[0-2])$/.test(String(key || '')) ? key : null;
 }
 
 function hashText(value) {

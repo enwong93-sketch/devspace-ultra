@@ -625,6 +625,32 @@ assert.match(autoContinuationCalls[0].nativeCompletion.assistantTextHash, /^[a-f
 assert.equal(autoRoundRecoveryClaims, 0,
   "normal final completion must not be classified as an interrupted-turn rescue");
 
+// The observed legacy port is the same owner, not an invented extra Main.
+const portMapping = await import('./classic-main-debug-ports.js');
+portMapping.observedClassicMainPortEntries({ rows: [{ port: 19735, mainNumber: 5 }] });
+const legacyContinueCalls = [];
+const legacyFinalGuard = new moduleUnderTest.ClassicGoalRoundCompletionGuard({
+  goalRuntime: { async recoverableWorkingRounds() { return [autoFinalGoal]; },
+    async claimRoundRecovery() { throw new Error('a native final must not enter Rescue'); } },
+  now: () => Date.parse('2026-09-05T03:00:12.000Z'), pollMs: 0,
+  dispatch: async () => { throw new Error('completed native rounds must not dispatch same-round recovery'); },
+  inspect: async () => ({ ...stablePageRoute, runtimePort: 19735,
+    chatMode: true, generating: false, streamStatus: 'COMPLETE', latestMessageRole: 'assistant',
+    latestAssistantText: 'Finished fixture round.', latestAssistantMessageId: autoFinalAssistantId,
+    latestUserMessageId: 'user-auto-final',
+    nativeContinuation: { resolved: true, currentNodeId: autoFinalAssistantId, currentMessageId: autoFinalAssistantId,
+      currentRole: 'assistant', currentStatus: 'finished_successfully', currentEndTurn: true,
+      currentCreatedAt: autoFinalAssistantAt, latestAssistantMessageId: autoFinalAssistantId,
+      latestAssistantStatus: 'finished_successfully', latestAssistantEndTurn: true,
+      latestAssistantCreatedAt: autoFinalAssistantAt, latestUserMessageId: 'user-auto-final',
+      latestUserCreatedAt: '2026-09-05T03:00:01.000Z' } }),
+  continueIncompleteGoal: async ({ nativeCompletion }) => { legacyContinueCalls.push(nativeCompletion); return { continued: true }; },
+});
+try {
+  assert.equal((await legacyFinalGuard.pollOnce()).autoContinued, 1);
+  assert.equal(legacyContinueCalls[0].runtimeKey, 'main-05');
+} finally { await legacyFinalGuard.close(); portMapping.observedClassicMainPortEntries({ rows: [] }); }
+
 await guard.close();
 await prematureCompleteGuard.close();
 await failedGuard.close();

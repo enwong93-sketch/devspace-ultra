@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { GoalRuntime } from './goal-runtime.js';
 import { nativeGoalStartWitness, projectNativeGoalSource } from './goal-native-start-witness.js';
 import { provesNativeCurrentRoundFinal, shouldRecoverWorkingRound } from './goal-round-completion-guard.js';
-import { inspectVisibleReportCommit, inspectGoalContinuationPages } from './goal-host-bridge.js';
+import { inspectVisibleReportCommit, inspectGoalContinuationPages, nativeInspectionRetryDelayMs } from './goal-host-bridge.js';
 import { observedClassicMainPortEntries } from './classic-main-debug-ports.js';
 
 const receipt = { source: 'server-created-goal-start', goalId: 'goal_0123456789abcdef',
@@ -187,6 +187,13 @@ test('legacy Main port inspection uses observed runtime ownership without contac
   } finally {
     globalThis.fetch = savedFetch; globalThis.WebSocket = savedSocket; observedClassicMainPortEntries({ rows: [] });
   }
+});
+test('native throttling honors Retry-After seconds and HTTP dates without a busy retry loop', () => {
+  assert.equal(nativeInspectionRetryDelayMs('120', 0), 120_000);
+  assert.equal(nativeInspectionRetryDelayMs('Thu, 01 Oct 2026 12:01:00 GMT', Date.parse('2026-10-01T12:00:00Z')), 60_000);
+  assert.equal(nativeInspectionRetryDelayMs('invalid', 0), 60_000);
+  assert.equal(nativeInspectionRetryDelayMs('-1', Date.now()), 60_000);
+  assert.equal(nativeInspectionRetryDelayMs('0', 0), 1000);
 });
 test('the witness extractor stays self-contained when serialized into the existing inspector', () => {
   const extract = new Function(`return (${nativeGoalStartWitness.toString()})`)();

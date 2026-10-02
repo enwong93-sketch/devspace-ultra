@@ -14,6 +14,13 @@ const DEFAULT_VISIBLE_REPORT_POLL_MS = 150;
 const DEFAULT_VISIBLE_REPORT_SETTLE_MS = 400;
 const DEFAULT_HIDDEN_CONFIRM_TIMEOUT_MS = 15_000;
 const DEFAULT_HIDDEN_CONFIRM_POLL_MS = 2_000;
+let nativeBranchBackoffUntilMs = 0;
+
+export function nativeInspectionRetryDelayMs(retryAfter, nowMs = Date.now()) {
+  const value = String(retryAfter || '').trim();
+  const delay = /^\d+$/.test(value) ? Number(value) * 1000 : Date.parse(value) - nowMs;
+  return Number.isFinite(delay) && delay >= 0 ? Math.max(1000, delay) : 60_000;
+}
 
 function hashText(value) {
   return createHash("sha256").update(String(value || "")).digest("hex");
@@ -401,6 +408,7 @@ export async function inspectVisibleReportCommit(candidate, options = {}) {
   await client.open();
   try {
     await client.call("Runtime.enable");
+    const nativeBranchBlocked = Date.now() < nativeBranchBackoffUntilMs;
     const result = await client.call("Runtime.evaluate", {
       expression: `(async () => {
         const href = location.href;
@@ -452,8 +460,9 @@ export async function inspectVisibleReportCommit(candidate, options = {}) {
         const latestAssistantText = String(latestAssistantNode?.innerText || '').trim();
         const match = location.pathname.match(/\\/c\\/([^/?#]+)/);
         const conversationId = match?.[1] || null;
-        let nativeContinuation = null;
-        if (conversationId && ${options.includeNativeBranch === true}) {
+        let nativeContinuation = ${nativeBranchBlocked}
+          ? { resolved: false, state: 'native-branch-rate-limit-backoff' } : null;
+        if (conversationId && ${options.includeNativeBranch === true && !nativeBranchBlocked}) {
           const expectedSourceUserId = ${JSON.stringify(String(options.sourceUserMessageId || "").trim())};
           const baselineAssistantMessageId = ${JSON.stringify(String(options.baselineAssistantMessageId || "").trim())};
           try {
@@ -564,7 +573,8 @@ export async function inspectVisibleReportCommit(candidate, options = {}) {
                 newAssistantAfterBaselineIndex: newAssistantIndex,
               };
             } else {
-              nativeContinuation = { resolved: false, state: 'conversation-fetch-' + conversationResponse.status };
+              nativeContinuation = { resolved: false, state: 'conversation-fetch-' + conversationResponse.status,
+                ...(conversationResponse.status === 429 ? { retryAfter: conversationResponse.headers.get('retry-after') } : {}) };
             }
           } catch {
             nativeContinuation = { resolved: false, state: 'native-branch-unavailable' };
@@ -595,7 +605,7 @@ export async function inspectVisibleReportCommit(candidate, options = {}) {
         routeLifecycle.hydratedSinceMs = routeHydrated ? (routeLifecycle.hydratedSinceMs || lifecycleNow) : null;
         routeLifecycle.lastSeenAtMs = lifecycleNow;
         let streamStatus = null;
-        if (conversationId && ${options.skipNativeStatus !== true}) {
+        if (conversationId && ${options.skipNativeStatus !== true && !nativeBranchBlocked}) {
           try {
             const response = await fetch('/backend-api/conversation/' + conversationId + '/stream_status', {
               credentials: 'include',
@@ -646,6 +656,10 @@ export async function inspectVisibleReportCommit(candidate, options = {}) {
       throw new Error(result.exceptionDetails.text || "Goal visible-report inspection failed.");
     }
     const value = result.result?.value || null;
+    if (value?.nativeContinuation?.state === 'conversation-fetch-429') {
+      nativeBranchBackoffUntilMs = Math.max(nativeBranchBackoffUntilMs,
+        Date.now() + nativeInspectionRetryDelayMs(value.nativeContinuation.retryAfter));
+    }
     const snapshot = value ? {
       ...value,
       pageTargetId: candidate.pageTargetId || null,
@@ -1319,9 +1333,9 @@ export class ClassicGoalHostBridge {
     const snapshot = await this.inspectVisibleReport(matching, {
       goalId,
       recovery: true,
-      includeNativeBranch: includeNativeBranch === true || Boolean(goal?.nativeStartReceipt),
+      includeNativeBranch: includeNativeBranch === true,
       nativeGoalStartReceipt: goal?.nativeStartReceipt || null,
-      ...(includeNativeBranch === true || goal?.nativeStartReceipt ? {
+      ...(includeNativeBranch === true ? {
         timeoutMs: 45_000,
         nativeSessionTimeoutMs: 5_000,
         nativeConversationTimeoutMs: 30_000,
