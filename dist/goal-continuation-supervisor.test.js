@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { GoalRuntime } from './goal-runtime.js';
 import { GoalContinuationSupervisor } from './goal-continuation-supervisor.js';
+import { ClassicGoalHostBridge } from './goal-host-bridge.js';
 import { projectNativeGoalSource, nativeGoalStartWitness } from './goal-native-start-witness.js';
 
 async function harness(t, options = {}) {
@@ -532,6 +533,37 @@ test('uncertain committed delivery is never retried, including after lease expir
   await restarted.pollOnce(); await restarted.close();
   assert.equal(h.sends(),1);
   assert.equal(restarted.status().records[0].state,'uncertain');
+});
+
+test('unconfigured native hidden transport preserves the Goal and backs off across restart', async t => {
+  let effects = 0;
+  const forbidden = async () => { effects++; throw Error('unexpected native side effect'); };
+  const bridge = new ClassicGoalHostBridge({ beforeDispatch: forbidden, probeRelayPort: forbidden });
+  const h = await harness(t, { send: payload => bridge.dispatch({
+    ...payload, goalId: payload.goal.id, conversationId: payload.goal.conversationId,
+  }) });
+  h.final(); await h.tick(); await h.tick();
+  assert.equal(h.sends(), 1);
+  assert.equal(effects, 0);
+  const row = h.driver.records.get(h.reported.continuation.continuationId);
+  assert.equal(row.state, 'waiting');
+  assert.equal(row.dispatchCommitted, false);
+  assert.equal(row.dispatchState, 'supported-native-hidden-transport-unavailable');
+  const goal = await h.runtime.status(h.g.id);
+  assert.equal(goal.status, 'active');
+  assert.equal(goal.round, 1);
+  assert.equal(goal.continuation.state, 'pending');
+  assert.equal(goal.continuation.leaseId, null);
+  await h.driver.close();
+  const restarted = new GoalContinuationSupervisor(h.config);
+  t.after(() => restarted.close());
+  await restarted.pollOnce();
+  assert.equal(h.sends(), 1, 'restart must retain the unsent retry floor');
+  h.advanceTime(5100); await restarted.pollOnce();
+  h.advanceTime(100); await restarted.pollOnce();
+  assert.equal(h.sends(), 2);
+  assert.equal(effects, 0, 'another unavailable check is never a host dispatch');
+  assert.equal((await h.runtime.status(h.g.id)).round, 1);
 });
 
 test('a definite unsent failure may retry after bounded backoff', async t => {

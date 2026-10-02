@@ -845,119 +845,22 @@ export async function inspectGoalContinuationPages(goal, {
   return snapshots;
 }
 
-async function findRawHostObject(client, contextId) {
-  const fn = (await client.call("Runtime.evaluate", {
-    contextId,
-    expression: "window.openai?.sendFollowUpMessage",
-    returnByValue: false,
-  })).result;
-  if (!fn?.objectId) throw new Error("Goal widget public follow-up function is unavailable.");
-
-  const fnProps = await client.call("Runtime.getProperties", {
-    objectId: fn.objectId,
-    ownProperties: false,
-    accessorPropertiesOnly: false,
-    generatePreview: false,
-  });
-  const scopesObjectId = fnProps.internalProperties?.find((property) => property.name === "[[Scopes]]")?.value?.objectId;
-  if (!scopesObjectId) throw new Error("Goal widget follow-up closure scopes are unavailable.");
-
-  const scopeList = await client.call("Runtime.getProperties", { objectId: scopesObjectId, ownProperties: true });
-  for (const scopeEntry of (scopeList.result || []).filter((property) => /^\d+$/.test(property.name))) {
-    const scopeObjectId = scopeEntry.value?.objectId;
-    if (!scopeObjectId) continue;
-    const scope = await client.call("Runtime.getProperties", { objectId: scopeObjectId, ownProperties: true });
-    for (const property of scope.result || []) {
-      const objectId = property.value?.objectId;
-      if (!objectId) continue;
-      const candidate = await client.call("Runtime.getProperties", { objectId, ownProperties: true });
-      const send = (candidate.result || []).find((item) => item.name === "sendFollowUpMessage" && item.value?.type === "function");
-      const callTool = (candidate.result || []).find((item) => item.name === "callTool" && item.value?.type === "function");
-      if (send && callTool) return { objectId };
-    }
-  }
-  throw new Error("Raw ChatGPT Classic Goal host API was not found in widget bridge closure.");
+function nativeHiddenTransportUnavailable() {
+  return {
+    ok: false,
+    definiteFailure: true,
+    dispatchCommitted: false,
+    backgroundAccepted: false,
+    state: "supported-native-hidden-transport-unavailable",
+    error: "No supported native hidden sender is configured for ChatGPT Classic. Private SDK closure access and activation-gate bypass are not supported.",
+  };
 }
 
-export async function sendRawHostFollowUp(candidate, payload, options = {}) {
-  const client = new CdpClient(candidate.webSocketDebuggerUrl, options);
-  let dispatchCommitted = false;
-  let dispatchAttempted = false;
-  await client.open();
-  try {
-    await client.call("Runtime.enable");
-    await client.call("Debugger.enable");
-    await sleep(options.contextSettleMs ?? DEFAULT_CONTEXT_SETTLE_MS);
-    const context = chooseInnerContext(client, candidate.targetId);
-    if (!context) throw new Error("Goal widget execution context is unavailable.");
-    const rawHost = await findRawHostObject(client, context.id);
-    dispatchAttempted = true;
-    let result;
-    try {
-      result = await client.call("Runtime.callFunctionOn", {
-        objectId: rawHost.objectId,
-        // Do not await the host promise. In current ChatGPT builds that promise
-        // can remain pending for the entire assistant turn, which is much
-        // longer than a safe CDP acknowledgement window. Successful return
-        // proves the host function was synchronously invoked; native branch
-        // confirmation remains the downstream authority for Goal advancement.
-        functionDeclaration: `function(message){
-          const pending=this.sendFollowUpMessage(message);
-          if(pending&&typeof pending.catch==='function')pending.catch(()=>{});
-          return {invoked:true,thenable:Boolean(pending&&typeof pending.then==='function')};
-        }`,
-        arguments: [{ value: { prompt: payload.prompt, scrollToBottom: false } }],
-        awaitPromise: false,
-        returnByValue: true,
-        userGesture: false,
-      });
-    } catch (error) {
-      // Once Runtime.callFunctionOn has been issued, losing the acknowledgement
-      // is not proof that the host rejected the hidden continuation. Return an
-      // uncertain committed result so no caller can retry and create a second
-      // hidden assistant turn.
-      return {
-        ok: false,
-        definiteFailure: false,
-        dispatchCommitted: true,
-        backgroundAccepted: false,
-        state: "raw-host-acknowledgement-lost",
-        error: errorMessage(error),
-      };
-    }
-    if (result.exceptionDetails) {
-      return {
-        ok: false,
-        definiteFailure: false,
-        dispatchCommitted: true,
-        backgroundAccepted: false,
-        state: "raw-host-exception-after-dispatch",
-        error: result.exceptionDetails.text || "Raw ChatGPT Classic follow-up RPC failed.",
-      };
-    }
-    if (result?.result?.value?.invoked !== true) {
-      return {
-        ok: false,
-        definiteFailure: false,
-        dispatchCommitted: true,
-        backgroundAccepted: false,
-        state: "raw-host-invocation-unconfirmed",
-      };
-    }
-    dispatchCommitted = true;
-    return { ok: true, dispatchCommitted: true, backgroundAccepted: true };
-  } catch (error) {
-    return {
-      ok: false,
-      definiteFailure: dispatchAttempted !== true,
-      dispatchCommitted: dispatchAttempted,
-      backgroundAccepted: false,
-      state: dispatchAttempted ? "raw-host-acknowledgement-lost" : "raw-host-preflight-failed",
-      error: errorMessage(error),
-    };
-  } finally {
-    client.close();
-  }
+// Compatibility export only: never inspect private SDK scopes or issue a host
+// RPC. A supported sender must be explicitly supplied by the trusted embedder;
+// the bridge still verifies exact ownership, native boundaries and receipts.
+export async function sendRawHostFollowUp(_candidate, _payload, _options = {}) {
+  return nativeHiddenTransportUnavailable();
 }
 
 export class ClassicGoalHostBridge {
@@ -1009,7 +912,8 @@ export class ClassicGoalHostBridge {
       ...relayOptions,
     }));
     this.probeConversationPage = probeConversationPage || ((port, conversationId) => probeClassicConversationPagePort(port, conversationId, this.options));
-    this.sendRaw = sendRaw || ((candidate, payload) => sendRawHostFollowUp(candidate, payload, this.rawDispatchOptions));
+    this.nativeHiddenTransportConfigured = typeof sendRaw === "function";
+    this.sendRaw = this.nativeHiddenTransportConfigured ? sendRaw : sendRawHostFollowUp;
     this.beforeDispatch = beforeDispatch;
     this.beforeRawDispatch = beforeRawDispatch;
     this.inspectVisibleReport = inspectVisibleReport || ((candidate, payload = {}) => inspectVisibleReportCommit(candidate, { ...this.pageInspectionOptions, ...payload }));
@@ -1260,6 +1164,7 @@ export class ClassicGoalHostBridge {
     const expectedConversationId = String(conversationId || "").trim();
     if (!expectedConversationId) throw new Error("Conversation follow-up dispatch requires conversationId.");
     if (typeof prompt !== "string" || !prompt.trim()) throw new Error("Conversation follow-up dispatch requires prompt.");
+    if (!this.nativeHiddenTransportConfigured) return nativeHiddenTransportUnavailable();
     const resolved = await this.findExactConversationRelay(expectedConversationId, { runtimePort });
     if (!resolved.candidate) {
       return {
@@ -1389,6 +1294,7 @@ export class ClassicGoalHostBridge {
         state: "invalid-hidden-goal-recovery-boundary",
       };
     }
+    if (!this.nativeHiddenTransportConfigured) return nativeHiddenTransportUnavailable();
     const resolved = await this.findExactConversationRelay(expectedConversationId, { runtimePort, goalId });
     const matching = resolved.candidate;
     if (!matching) {
@@ -1542,6 +1448,7 @@ export class ClassicGoalHostBridge {
     nativeGoalStartReceipt = null } = {}) {
     if (typeof goalId !== "string" || !goalId.trim()) throw new Error("Goal host dispatch requires goalId.");
     if (typeof prompt !== "string" || !prompt.trim()) throw new Error("Goal host dispatch requires prompt.");
+    if (!this.nativeHiddenTransportConfigured) return nativeHiddenTransportUnavailable();
 
     if (typeof this.beforeDispatch === "function") {
       try {

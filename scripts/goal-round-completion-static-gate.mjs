@@ -50,8 +50,26 @@ assert.match(bridge, /DEFAULT_PAGE_INSPECTION_TIMEOUT_MS\s*=\s*12_000/,
 const rawHostStart = bridge.indexOf("export async function sendRawHostFollowUp");
 const rawHostEnd = bridge.indexOf("export class ClassicGoalHostBridge", rawHostStart);
 const rawHostBody = bridge.slice(rawHostStart, rawHostEnd);
-assert.match(rawHostBody, /awaitPromise:\s*false/,
-  "hidden continuation host invocation must acknowledge synchronously instead of waiting for the whole assistant turn");
+assert.match(rawHostBody, /return nativeHiddenTransportUnavailable\(\)/,
+  "legacy default sender must be definitely unavailable, not invoke a private SDK RPC");
+assert.doesNotMatch(rawHostBody, /CdpClient|Runtime\.|Debugger\.|userGesture/);
+assert.doesNotMatch(bridge, /findRawHostObject|\[\[Scopes\]\]|Debugger\.enable/,
+  "private SDK closure access is never an authorized Goal transport");
+assert.match(bridge, /nativeHiddenTransportConfigured = typeof sendRaw === "function"/);
+for (const [method, next] of [
+  ["async dispatchConversationFollowUp", "async dispatchRoundRecovery"],
+  ["async dispatchRoundRecovery", "setBeforeRawDispatch"],
+  ["async dispatch({", null],
+]) {
+  const start = bridge.indexOf(method);
+  const end = next ? bridge.indexOf(next, start) : bridge.length;
+  assert.ok(start >= 0 && end > start);
+  const body = bridge.slice(start, end);
+  const guardIndex = body.indexOf("if (!this.nativeHiddenTransportConfigured) return nativeHiddenTransportUnavailable();");
+  assert.ok(guardIndex >= 0 && guardIndex < body.indexOf("findExactConversationRelay"),
+    method + " must fail closed before discovery without a supported sender");
+  if (method === "async dispatch({") assert.ok(guardIndex < body.indexOf("this.beforeDispatch"));
+}
 assert.match(bridge, /classic-hidden-continuation-native-confirmed/,
   "normal Goal continuation must verify a native assistant branch before reporting acceptance");
 assert.match(bridge, /retrySurfaceBlocksGoalBoundary/,
@@ -139,8 +157,10 @@ console.log(JSON.stringify({
   chatModeOnly: true,
   legacyStateReadable: true,
   guiAloneNeverAuthoritative: true,
-  hiddenHostRecoveryTransport: true,
+  injectedHiddenRecoveryFlow: true,
+  defaultNativeHiddenTransportAvailable: false,
+  privateSdkClosureTransportRetired: true,
   visibleComposerTransport: false,
-  hostRpcDispatch: true,
+  injectedSenderReceiptVerification: true,
   unjournaledPendingSelfHeal: true,
 }));
