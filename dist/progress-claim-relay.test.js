@@ -28,15 +28,16 @@ assert.match(html, /__DEVSPACE_GOAL_RELAY_STATE__/,
 assert.match(html, /devspace_goal_status/);
 assert.match(html, /devspace_goal_continuation/);
 assert.match(html, /goal\.roundState === "reported" && goal\.continuation\?\.state === "pending"/);
-assert.doesNotMatch(html, /sendFollowUpMessage\s*\(/,
-  "the persistent Goal relay may expose the native host capability for backend discovery but must not synthesize a user turn itself");
+assert.match(html, /relayBridge\.dispatchPublicMessage\(goalRelayGoalId, goalRelayConversationId\)/,
+  "only the backend-authorized bridge may submit a public continuation");
 assert.doesNotMatch(html, /location\.|parent\.location|composer|prompt-textarea/);
 
 console.log(JSON.stringify({
   ok: true,
   gate: "progress-claim-relay",
   hidden: true,
-  noSyntheticUserTurn: true,
+  authorizedPublicComponentMessages: true,
+  noForegroundInput: true,
   oneShotClaim: true,
   persistentGoalRelay: true,
   localRetirement: true,

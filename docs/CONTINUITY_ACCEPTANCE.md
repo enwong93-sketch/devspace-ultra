@@ -9,7 +9,7 @@ This checklist controls release claims, never ordinary Agent tool access.
 
 | Path | Authoritative boundary | Expected behavior |
 | --- | --- | --- |
-| Normal Goal continuation | The exact native assistant turn has ended; its Goal is active and incomplete | Queue exactly one hidden next round without a manual bind, progress report, completed Plan or another human prompt. |
+| Normal Goal continuation | The exact native assistant turn has ended; its Goal is active and incomplete | Queue exactly one user-authorized automatic next round without a manual bind, progress report, completed Plan or another human prompt. |
 | Rescue | The current exact physical turn has interrupted or failed, with its original episode still monitored | Recover that episode once; do not compete with hidden Goal recovery or replay a committed send. |
 | Core replacement | Persisted episode, Goal state and dispatch journal | Preserve unfinished work, original clocks and committed delivery across more than one replacement. |
 
@@ -51,7 +51,7 @@ hostnames, Connector names, credentials or another user's machine information.
 Run `verify:ultra`, `verify:public-release` and
 `verify:continuity-regressions` against the same candidate tree. The Goal
 in-memory MCP harness and VM Apps-host tests validate contracts and regressions;
-they do not drive a real Classic desktop or prove its hidden continuation
+they do not drive a real Classic desktop or prove its automatic continuation
 channel. A manually resumed original conversation proves only recovery of that
 conversation, not automatic Rescue or fresh-Agent Goal stability.
 
@@ -70,7 +70,11 @@ an ISO observedAt, and these check records (each with result `pass` and a privat
 evidenceSha256):
 
 - normalGoal: observedAssistantTurns at least 3, additionalHumanMessages 0,
-  manualBindCalls 0, hiddenContinuation true.
+  manualBindCalls 0. Either hiddenContinuation true, or the owner-authorized
+  public route: continuationTransport `public-component-message`,
+  publicMessagesAuthorized true, nativeFinalTriggered true, foregroundInputUsed
+  false, focusChanged false, composerMutated false, automaticScroll false,
+  duplicateDispatches 0. These fields attest observed behavior, not source intent.
 - ordinaryTools: disposableReadWriteEditCommandReadback true.
 - automaticRescue: automaticDispatchCount 1, manualContinueCount 0,
   observedAgentWork true.

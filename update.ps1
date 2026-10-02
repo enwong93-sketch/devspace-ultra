@@ -30,6 +30,8 @@ if ($env:OS -ne "Windows_NT") {
 
 $script:UpdaterSchemaVersion = 1
 $script:TestMode = $env:DEVSPACE_UPDATE_TEST_MODE -eq "1"
+$script:RuntimeRetirementStarted = $false
+$script:RuntimeRetirementDeferred = $false
 $script:AutoTaskName = "DevSpace-Ultra-Auto-Update"
 $script:KnownPackageNames = @("devspace-ultra", "@waishnav/devspace")
 $script:KnownShimNames = @(
@@ -332,30 +334,74 @@ function Restore-RuntimeTaskActions([object[]] $TaskSnapshot) {
     }
 }
 
+function Test-UpdateCounter($Value) {
+    return (($Value -is [int] -or $Value -is [long]) -and $Value -ge 0)
+}
+
+function Test-UpdateRuntimeAbsent {
+    # An offline install is permitted; failed diagnostics on a live runtime
+    # are not evidence of inactivity. Never print process command lines.
+    try {
+        $listeners = @(Get-NetTCPConnection -State Listen -ErrorAction Stop | Where-Object { $_.LocalPort -in @(7678,7688,7689) })
+        if ($listeners.Count) { return $false }
+        $runtime = @(Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object {
+            $_.ProcessId -ne $PID -and [string]$_.CommandLine -match 'devspace-(?:stable-gateway|fixed-backend|local-ingress)|dist[\\/]cli\.js\s+serve'
+        })
+        return $runtime.Count -eq 0
+    } catch { return $false }
+}
+
 function Get-GatewayBusyState {
     if ($script:TestMode) { return [pscustomobject]@{ Known = $true; Busy = $false; HttpActive = 0; ToolActive = 0 } }
+    $unknown = [pscustomobject]@{ Known = $false; Busy = $true; Reason = 'runtime-readiness-unavailable' }
     $controlPath = Join-Path $HOME ".devspace-tailscale-bootstrap\logs\stable-gateway-control.json"
-    if (-not (Test-Path -LiteralPath $controlPath)) { return [pscustomobject]@{ Known = $false; Busy = $false } }
+    if (-not (Test-Path -LiteralPath $controlPath)) {
+        if (Test-UpdateRuntimeAbsent) { return [pscustomobject]@{ Known = $true; Busy = $false; Reason = 'verified-offline' } }
+        return $unknown
+    }
     try {
         $control = Get-Content -LiteralPath $controlPath -Raw | ConvertFrom-Json
         $port = [int]$control.gatewayPort
         $token = [string]$control.controlToken
-        if ($port -lt 1 -or -not $token) { return [pscustomobject]@{ Known = $false; Busy = $false } }
+        if ($port -lt 1 -or $port -gt 65535 -or -not $token) { return $unknown }
         $headers = @{ "x-devspace-gateway-control" = $token }
         $status = Invoke-RestMethod -Uri "http://127.0.0.1:$port/__devspace/gateway/status" -Headers $headers -Method Get -UseBasicParsing
-        $httpActive = if ($status.admission -and $status.admission.PSObject.Properties.Name -contains "activeRequests") { [int]$status.admission.activeRequests } else { 0 }
-        $toolActive = if ($status.sessions -and $status.sessions.PSObject.Properties.Name -contains "totalNonStreamActiveRequests") { [int]$status.sessions.totalNonStreamActiveRequests } else { 0 }
+        $core = Invoke-RestMethod -Uri "http://127.0.0.1:$port/__devspace/memory/status" -Method Get -UseBasicParsing
+        # Re-read after the Core probe. A controller migration or new tool call
+        # between observations invalidates the earlier readiness snapshot.
+        $after = Invoke-RestMethod -Uri "http://127.0.0.1:$port/__devspace/gateway/status" -Headers $headers -Method Get -UseBasicParsing
+        foreach ($gateway in @($status, $after)) {
+            if ($gateway.ok -ne $true -or -not (Test-UpdateCounter $gateway.activePid) -or $gateway.activePid -eq 0 -or
+                $gateway.activePid -ne $core.pid -or $gateway.handoverInProgress -ne $false -or
+                $gateway.coreRecoveryInProgress -ne $false -or $gateway.runtimeIdentityMismatch -or $gateway.fatalHandoverError -or
+                -not (Test-UpdateCounter $gateway.sessions.totalNonStreamActiveRequests)) { return $unknown }
+        }
+        if ($core.ok -ne $true -or -not (Test-UpdateCounter $core.pid) -or
+            -not (Test-UpdateCounter $core.registries.processSessions)) { return $unknown }
+        $httpActive = if (Test-UpdateCounter $after.admission.activeRequests) { $after.admission.activeRequests } else { 0 }
+        $toolActive = [Math]::Max($status.sessions.totalNonStreamActiveRequests, $after.sessions.totalNonStreamActiveRequests)
+        $processSessions = $core.registries.processSessions
         # Admission includes this status probe and replayable SSE connections,
         # neither of which is active Agent/tool work. The session registry owns
         # the authoritative non-stream counter used by Gateway quiet/drain logic.
         $otherHttpActive = [Math]::Max(0, $httpActive - 1)
-        return [pscustomobject]@{ Known = $true; Busy = ($toolActive -gt 0); HttpActive = $httpActive; OtherHttpActive = $otherHttpActive; ToolActive = $toolActive }
+        return [pscustomobject]@{ Known = $true; Busy = ($toolActive -gt 0 -or $processSessions -gt 0); HttpActive = $httpActive; OtherHttpActive = $otherHttpActive; ToolActive = $toolActive; ProcessSessions = $processSessions; CorePid = $core.pid }
     }
-    catch { return [pscustomobject]@{ Known = $false; Busy = $false } }
+    catch {
+        if (Test-UpdateRuntimeAbsent) { return [pscustomobject]@{ Known = $true; Busy = $false; Reason = 'verified-offline' } }
+        return $unknown
+    }
 }
 
 function Stop-DevSpaceRuntime([object[]] $PackageRecords, [object[]] $TaskSnapshot) {
     if ($script:TestMode) { return }
+    # Staging can take minutes. Check again before the first process/task side
+    # effect; -Force is a version/repair override, not permission to kill work.
+    $readiness = Get-GatewayBusyState
+    if (-not $readiness.Known -or $readiness.Busy) {
+        $script:RuntimeRetirementDeferred = $true
+        throw 'Runtime retirement deferred: active or unverified Core work must be preserved.'
+    }
     $roots = @($PackageRecords | ForEach-Object { [string]$_.Root })
     $devspaceCaddyConfigs = @(
         (Join-Path $HOME 'DevSpaceIngress\Caddyfile'),
@@ -391,6 +437,7 @@ function Stop-DevSpaceRuntime([object[]] $PackageRecords, [object[]] $TaskSnapsh
     } while ($added)
     $descendantProcessIds = @($processTreeIds | Where-Object { $ownedProcessIds -notcontains $_ })
 
+    $script:RuntimeRetirementStarted = $true
     foreach ($task in $TaskSnapshot) {
         if ($task.WasEnabled) {
             try { Disable-ScheduledTask -TaskName $task.Name -ErrorAction Stop | Out-Null } catch {}
@@ -418,6 +465,13 @@ function Stop-DevSpaceRuntime([object[]] $PackageRecords, [object[]] $TaskSnapsh
         throw "DevSpace package-owning process tree did not exit before package swap: $($remaining -join ', ')"
     }
     Start-Sleep -Milliseconds 500
+}
+
+function Restore-RetiredUpdateRuntime([object[]] $TaskSnapshot) {
+    # A pre-retirement deferral must not restart or rewrite still-running tasks.
+    if (-not $script:RuntimeRetirementStarted) { return }
+    Restore-RuntimeTaskActions -TaskSnapshot $TaskSnapshot
+    Restart-PreviousRuntime -TaskSnapshot $TaskSnapshot
 }
 
 function Restart-PreviousRuntime([object[]] $TaskSnapshot) {
@@ -681,12 +735,12 @@ if ($decision -eq "newer-local") {
 }
 
 $busy = Get-GatewayBusyState
-if ($busy.Known -and $busy.Busy -and -not $Force) {
+if (-not $busy.Known -or $busy.Busy) {
     $extra = @{} + $checkPayload
-    $extra["reason"] = "active-work"
+    $extra["reason"] = if ($busy.Known) { "active-work" } else { "runtime-readiness-unavailable" }
     $status = Write-UpdateStatus -State $(if ($Automatic) { "deferred" } else { "busy" }) -Extra $extra
     if ($Automatic) { exit 0 }
-    throw "DevSpace has active non-stream work. Retry when the current Agent/tool call finishes, or use -Force only if interruption is intentional."
+    throw "DevSpace has active or unverified runtime work. Retry at a verified maintenance boundary; -Force does not override work preservation."
 }
 
 $archivePath = $null
@@ -804,6 +858,11 @@ try {
 }
 catch {
     $failure = $_
+    if ($script:RuntimeRetirementDeferred -and -not $script:RuntimeRetirementStarted) {
+        Write-UpdateStatus -State $(if ($Automatic) { "deferred" } else { "busy" }) -Extra (@{} + $checkPayload + @{ reason = "work-resumed-before-retirement" }) | Out-Null
+        if ($Automatic) { exit 0 }
+        throw 'DevSpace update deferred before retirement; existing work and runtime tasks were left untouched.'
+    }
     try {
         $canonicalRoot = Join-Path $globalRoot "devspace-ultra"
         if ($canonicalPromoted -and (Test-Path -LiteralPath $canonicalRoot)) {
@@ -817,8 +876,7 @@ catch {
             }
         }
         if ($shimBackupDirectory) { Restore-Shims -Prefix $prefix -Directory $shimBackupDirectory -OriginallyPresent $shimPresent }
-        Restore-RuntimeTaskActions -TaskSnapshot $taskSnapshot
-        Restart-PreviousRuntime -TaskSnapshot $taskSnapshot
+        Restore-RetiredUpdateRuntime -TaskSnapshot $taskSnapshot
     }
     catch {}
     Write-UpdateStatus -State "rolled-back" -Extra (@{} + $checkPayload + @{ error = $failure.Exception.Message }) | Out-Null

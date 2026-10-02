@@ -45,6 +45,7 @@ async function createCandidateCore({
   issuer = `${PUBLIC_BASE}/`,
   tools = EXPECTED_TOOLS,
   pid = 45678,
+  processSessions = 0,
 } = {}) {
   const observed = [];
   const server = createServer(async (req, res) => {
@@ -60,6 +61,7 @@ async function createCandidateCore({
       res.setHeader("content-type", "application/json");
       res.end(JSON.stringify({
         pid,
+        registries: { processSessions },
         features: { passiveCore: false, autoCompactEnabled: false },
       }));
       return;
@@ -329,6 +331,18 @@ async function testExplicitSchemaChangeRejectsEmptyToolSurface() {
   }
 }
 
+async function testProcessReadinessUsesOnlyValidatedAggregateCounts() {
+  for (const count of [0, 1, null, -1, 0.5, "0"]) {
+    const core = await createCandidateCore({ processSessions: count });
+    try {
+      const result = await readCoreRuntimeIdentity({ coreBaseUrl: core.baseUrl, includeProcessSessions: true });
+      assert.equal(result.processSessions, Number.isInteger(count) && count >= 0 ? count : null);
+      assert.equal(Object.hasOwn(result, "sessions"), false, "readiness does not expose command contents");
+    } finally { await close(core.server); }
+  }
+}
+
+await testProcessReadinessUsesOnlyValidatedAggregateCounts();
 await testReadsBaselineSchemaFromExistingSession();
 await testReadsExactCoreRuntimeIdentity();
 await testReadsBaselineSchemaFromFreshEphemeralSession();

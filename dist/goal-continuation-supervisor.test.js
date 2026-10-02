@@ -6,6 +6,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { GoalRuntime } from './goal-runtime.js';
 import { GoalContinuationSupervisor } from './goal-continuation-supervisor.js';
+import { ClassicGoalHostBridge } from './goal-host-bridge.js';
+import { projectNativeGoalSource, nativeGoalStartWitness } from './goal-native-start-witness.js';
 
 async function harness(t, options = {}) {
   const root = await mkdtemp(join(tmpdir(), 'devspace-goal-driver-test-'));
@@ -37,6 +39,178 @@ async function harness(t, options = {}) {
     final: () => { pages = pages.map(p => ({...p,generating:false,latestMessageRole:'assistant',latestAssistantMessageId:'assistant-new',latestAssistantText:'New final report'})); },
     tick: async () => { now += 100; return driver.pollOnce(); }, advanceTime: n => { now += n; } };
 }
+
+async function receiptPage(h) {
+  const receipt = await h.runtime.nativeStartReceipt(h.g.id);
+  const userAt = Date.parse(receipt.issuedAt) - 240_000;
+  const finalAt = Date.parse(receipt.issuedAt) + 50;
+  const payload = { id: h.g.conversationId, current_node: 'receipt-final', mapping: {
+    'native-source': { parent: null, message: { id: 'native-source', author: { role: 'user' }, create_time: userAt / 1000 } },
+    'start-tool': { parent: 'native-source', message: { id: 'start-tool', author: { role: 'tool', name: 'devspace_goal_start' },
+      status: 'finished_successfully', create_time: (finalAt - 10) / 1000,
+      content: { content_type: 'text', parts: [`[DEVSPACE_NATIVE_GOAL_START:${h.g.id}:${receipt.receiptId}]`] } } },
+    'receipt-final': { parent: 'start-tool', message: { id: 'receipt-final', author: { role: 'assistant' } } },
+  } };
+  const s = { ...h.page(), runtimeKey: 'main-05', nativeGoalSourceRequired: true,
+    latestUserMessageId: 'old-display-user', latestAssistantMessageId: 'old-display-final',
+    nativeContinuation: { resolved: true, currentNodeId: 'receipt-final', currentMessageId: 'receipt-final',
+      currentRole: 'assistant', currentEndTurn: true, currentStatus: 'finished_successfully',
+      currentCreatedAt: new Date(finalAt).toISOString(),
+      latestUserMessageId: 'native-source', latestUserCreatedAt: new Date(userAt).toISOString(),
+      latestAssistantMessageId: 'receipt-final', latestAssistantEndTurn: true,
+      latestAssistantStatus: 'finished_successfully', latestAssistantCreatedAt: new Date(finalAt).toISOString(),
+      latestPublicAssistantText: 'Native public final after a delayed Goal start.',
+      goalStartWitness: nativeGoalStartWitness(payload, receipt, h.g.conversationId) } };
+  return projectNativeGoalSource(s, { ...h.g, nativeStartReceipt: receipt });
+}
+
+test('a stale display cannot arm before the native start witness is available', async t => {
+  const h = await harness(t, { skipArm: true });
+  h.setPages([{ ...h.page(), nativeGoalSourceRequired: true }]);
+  assert.equal((await h.driver.arm(h.reported)).armed, false);
+  assert.equal(h.driver.status().records.length, 0);
+  await h.tick();
+  assert.equal(h.sends(), 0);
+  assert.equal((await h.runtime.status(h.g.id)).round, 1);
+});
+
+test('missing-arm diagnostics distinguish unavailable exact page from native rate-limit evidence', async t => {
+  const h = await harness(t, { skipArm: true });
+  h.setPages([]);
+  await h.tick();
+  assert.equal(h.driver.status().missingArmErrors[0].error, 'no-exact-page');
+  h.advanceTime(5100);
+  h.setPages([{ conversationId: h.g.conversationId, latestUserMessageId: 'stale-user',
+    chatMode: true, nativeGoalSourceRequired: true,
+    nativeContinuation: { resolved: false, state: 'native-branch-rate-limit-backoff' } }]);
+  await h.tick();
+  assert.equal(h.driver.status().missingArmErrors[0].error,
+    'native-source-unavailable:native-branch-rate-limit-backoff');
+  assert.equal(h.sends(), 0);
+  assert.equal((await h.runtime.status(h.g.id)).round, 1);
+});
+
+test('native receipt reconciles a stale display without counting it as human continuation', async t => {
+  const h = await harness(t, { skipArm: true });
+  h.setPages([await receiptPage(h)]);
+  assert.equal((await h.driver.arm(h.reported)).armed, true);
+  await h.tick(); await h.tick();
+  assert.equal(h.sends(), 1);
+  assert.equal(h.sentPayloads[0].sourceUserId, 'native-source');
+  assert.equal(h.sentPayloads[0].nativeCompletionProof.assistantMessageId, 'receipt-final');
+  assert.equal((await h.runtime.status(h.g.id)).round, 2);
+  await h.tick(); assert.equal(h.sends(), 1);
+  assert.notEqual(h.driver.status().records[0].deliveryMode, 'human-user-continuation');
+});
+
+test('armed native backoff is diagnosed and never sends from an earlier positive snapshot', async t => {
+  const h = await harness(t, { skipArm: true });
+  const current = await receiptPage(h);
+  h.setPages([current]); await h.driver.arm(h.reported); await h.tick();
+  h.setPages([{ ...current, boundarySource: null, nativeGoalSourceRequired: true,
+    nativeContinuation: { resolved: false, state: 'native-branch-rate-limit-backoff' } }]);
+  await h.tick();
+  assert.equal(h.driver.status().records[0].reason,
+    'native-source-unavailable:native-branch-rate-limit-backoff');
+  assert.equal(h.sends(), 0);
+  h.setPages([current]); await h.tick();
+  assert.equal(h.sends(), 0, 'the retry floor remains mandatory');
+  h.advanceTime(5100); await h.tick(); await h.tick();
+  assert.equal(h.sends(), 1, 'only a fresh settled boundary permits delivery');
+});
+
+test('missing-arm restart uses the durable native receipt instead of an old display baseline', async t => {
+  const h = await harness(t, { skipArm: true });
+  h.setPages([await receiptPage(h)]);
+  await h.tick(); await h.tick(); await h.tick();
+  assert.equal(h.sends(), 1);
+  assert.equal(h.driver.status().records[0].nativeFinalVerified, true);
+  assert.equal(h.sentPayloads[0].nativeCompletionProof.sourceUserMessageId, 'native-source');
+});
+
+test('native rate-limit unavailability after claim releases the unsent lease and retries a fresh boundary', async t => {
+  const h = await harness(t, { skipArm: true });
+  h.setPages([await receiptPage(h)]);
+  await h.driver.arm(h.reported);
+  await h.tick();
+  const inspect = h.driver.inspect;
+  let unavailable = true;
+  h.driver.inspect = async (...args) => {
+    const current = await h.runtime.status(h.g.id);
+    if (unavailable && current.continuation.state === 'dispatching') {
+      return [{ ...h.page(), boundarySource: null, nativeGoalSourceRequired: true,
+        nativeContinuation: { resolved: false, state: 'native-branch-rate-limit-backoff' } }];
+    }
+    return inspect(...args);
+  };
+  await h.tick();
+  assert.equal(h.sends(), 0);
+  assert.equal(h.driver.status().records[0].state, 'waiting');
+  assert.equal(h.driver.status().records[0].reason, 'pre-send-boundary-unavailable');
+  assert.equal(h.driver.status().records[0].attempts, 0);
+  assert.equal((await h.runtime.status(h.g.id)).continuation.state, 'pending');
+  await h.tick(); assert.equal(h.sends(), 0, 'no busy retry during the floor');
+  unavailable = false;
+  h.advanceTime(5100);
+  await h.tick(); await h.tick();
+  assert.equal(h.sends(), 1);
+  assert.equal((await h.runtime.status(h.g.id)).round, 2);
+  await h.tick(); assert.equal(h.sends(), 1, 'a delivered turn is never replayed');
+});
+
+test('a pre-send inspection exception releases its lease and remains recoverable after Core replacement', async t => {
+  const h = await harness(t);
+  h.final(); await h.tick();
+  const inspect = h.driver.inspect;
+  h.driver.inspect = async (...args) => {
+    if ((await h.runtime.status(h.g.id)).continuation.state === 'dispatching') {
+      throw new Error('injected native inspection timeout');
+    }
+    return inspect(...args);
+  };
+  await h.tick();
+  assert.equal(h.sends(), 0);
+  assert.equal((await h.runtime.status(h.g.id)).continuation.state, 'pending');
+  assert.equal(h.driver.status().records[0].state, 'waiting');
+  await h.driver.close(); h.advanceTime(5100);
+  const restarted = new GoalContinuationSupervisor(h.config);
+  t.after(() => restarted.close());
+  await restarted.pollOnce(); h.advanceTime(100); await restarted.pollOnce();
+  assert.equal(h.sends(), 1);
+  assert.equal((await h.runtime.status(h.g.id)).round, 2);
+});
+
+test('an actually changed native final after claim cancels rather than falling through to a fresh final', async t => {
+  const h = await harness(t, { skipArm: true });
+  h.setPages([await receiptPage(h)]);
+  await h.driver.arm(h.reported); await h.tick();
+  const inspect = h.driver.inspect;
+  h.driver.inspect = async (...args) => {
+    const pages = await inspect(...args);
+    return (await h.runtime.status(h.g.id)).continuation.state === 'dispatching'
+      ? pages.map(page => ({ ...page, latestAssistantMessageId: 'different-native-final',
+        latestAssistantText: 'A different native final must not replace the captured one.' })) : pages;
+  };
+  await h.tick();
+  assert.equal(h.sends(), 0);
+  assert.equal(h.driver.status().records[0].state, 'cancelled');
+  assert.equal(h.driver.status().records[0].reason, 'pre-send-boundary-changed');
+});
+
+test('a new human source after claim wins without dispatch or automatic redemption', async t => {
+  const h = await harness(t);
+  h.final(); await h.tick();
+  const inspect = h.driver.inspect;
+  h.driver.inspect = async (...args) => {
+    const pages = await inspect(...args);
+    return (await h.runtime.status(h.g.id)).continuation.state === 'dispatching'
+      ? pages.map(page => ({ ...page, latestUserMessageId: 'new-human-source' })) : pages;
+  };
+  await h.tick();
+  assert.equal(h.sends(), 0);
+  assert.equal(h.driver.status().records[0].state, 'cancelled');
+  assert.equal((await h.runtime.status(h.g.id)).round, 1);
+});
 
 function nativePageForReported(h, overrides = {}) {
   const reportedAtMs = Date.parse(h.reported.lastRoundReport.reportedAt);
@@ -361,6 +535,37 @@ test('uncertain committed delivery is never retried, including after lease expir
   assert.equal(restarted.status().records[0].state,'uncertain');
 });
 
+test('unconfigured native hidden transport preserves the Goal and backs off across restart', async t => {
+  let effects = 0;
+  const forbidden = async () => { effects++; throw Error('unexpected native side effect'); };
+  const bridge = new ClassicGoalHostBridge({ beforeDispatch: forbidden, probeRelayPort: forbidden });
+  const h = await harness(t, { send: payload => bridge.dispatch({
+    ...payload, goalId: payload.goal.id, conversationId: payload.goal.conversationId,
+  }) });
+  h.final(); await h.tick(); await h.tick();
+  assert.equal(h.sends(), 1);
+  assert.equal(effects, 0);
+  const row = h.driver.records.get(h.reported.continuation.continuationId);
+  assert.equal(row.state, 'waiting');
+  assert.equal(row.dispatchCommitted, false);
+  assert.equal(row.dispatchState, 'supported-native-hidden-transport-unavailable');
+  const goal = await h.runtime.status(h.g.id);
+  assert.equal(goal.status, 'active');
+  assert.equal(goal.round, 1);
+  assert.equal(goal.continuation.state, 'pending');
+  assert.equal(goal.continuation.leaseId, null);
+  await h.driver.close();
+  const restarted = new GoalContinuationSupervisor(h.config);
+  t.after(() => restarted.close());
+  await restarted.pollOnce();
+  assert.equal(h.sends(), 1, 'restart must retain the unsent retry floor');
+  h.advanceTime(5100); await restarted.pollOnce();
+  h.advanceTime(100); await restarted.pollOnce();
+  assert.equal(h.sends(), 2);
+  assert.equal(effects, 0, 'another unavailable check is never a host dispatch');
+  assert.equal((await h.runtime.status(h.g.id)).round, 1);
+});
+
 test('a definite unsent failure may retry after bounded backoff', async t => {
   let attempts = 0;
   const h = await harness(t, { send: () => ++attempts === 1 ? {ok:false,definiteFailure:true,dispatchCommitted:false,state:'composer-not-empty'} : {ok:true,visibilityVerified:true,dispatchCommitted:true} });
@@ -430,6 +635,53 @@ test('unresolved native acknowledgement checks back off without repeating the se
   assert.equal(row.reconciliationAttempts,2);
   assert.equal(row.dispatchCommitted,true);
   assert.equal(row.reconciliationState,'conversation-fetch-429');
+});
+
+test('filtered native-source unavailability backs off uncertain reconciliation across restart', async t => {
+  const h = await harness(t, { send: () => ({ok:false,dispatchCommitted:true,definiteFailure:false,state:'ack-lost'}) });
+  h.final(); await h.tick(); await h.tick();
+  h.setPages([{ ...h.page(), nativeGoalSourceRequired:true,
+    nativeContinuation:{resolved:false,state:'native-branch-rate-limit-backoff'} }]);
+  const inspect = h.driver.inspect;
+  let inspections = 0;
+  h.driver.inspect = async (...args) => { inspections++; return inspect(...args); };
+  await h.tick();
+  const row = h.driver.records.get(h.reported.continuation.continuationId);
+  assert.equal(row.reconciliationAttempts, 1);
+  assert.equal(row.reconciliationState, 'native-source-unavailable:native-branch-rate-limit-backoff');
+  assert.equal(row.state, 'uncertain');
+  assert.equal(row.dispatchCommitted, true);
+  for (let n=0; n<10; n++) await h.tick();
+  assert.equal(inspections, 1, 'filtered unavailable evidence must obey the reconciliation retry floor');
+  await h.driver.close();
+  const restarted = new GoalContinuationSupervisor({...h.config, inspect:h.driver.inspect});
+  t.after(() => restarted.close());
+  await restarted.pollOnce();
+  assert.equal(inspections, 1, 'the retry deadline is durable across a Core restart');
+  h.advanceTime(5100); await restarted.pollOnce();
+  assert.equal(inspections, 2);
+  assert.equal(h.sends(), 1, 'unavailable evidence never authorizes another send');
+  assert.equal((await h.runtime.status(h.g.id)).round, 1);
+});
+
+test('an uncertain exact-page inspection exception backs off without releasing its lease', async t => {
+  const h = await harness(t, { send: () => ({ok:false,dispatchCommitted:true,definiteFailure:false,state:'ack-lost'}) });
+  h.final(); await h.tick(); await h.tick();
+  let inspections = 0;
+  h.driver.inspect = async () => { inspections++; throw Error('bounded observation timeout'); };
+  await h.tick();
+  const row = h.driver.records.get(h.reported.continuation.continuationId);
+  assert.equal(row.reconciliationAttempts, 1);
+  assert.equal(row.reconciliationState, 'exact-page-inspection-failed');
+  assert.equal(row.state, 'uncertain');
+  assert.equal(row.dispatchCommitted, true);
+  for (let n=0; n<10; n++) await h.tick();
+  assert.equal(inspections, 1);
+  assert.equal((await h.runtime.status(h.g.id)).continuation.leaseId, row.leaseId);
+  h.advanceTime(5100); await h.tick();
+  assert.equal(inspections, 2);
+  assert.equal(row.reconciliationAttempts, 2);
+  assert.equal(h.sends(), 1);
 });
 
 test('hidden acknowledgement loss reconciles from the native branch without a user message or resend', async t => {
@@ -710,6 +962,38 @@ test('a native assistant turn end auto-arms next-round continuation without a vi
   assert.equal(continued.round, 2);
   assert.equal(continued.roundState, 'working');
   assert.equal(continued.status, 'active');
+});
+
+test('a retry clears the previous failed receipt before persisting a new transport attempt', async t => {
+  let calls = 0;
+  let beforeSecondTransport;
+  const h = await harness(t, { send: async () => {
+    calls++;
+    if (calls === 1) return { ok: false, dispatchCommitted: false,
+      definiteFailure: true, state: 'exact-goal-relay-unavailable', error: 'prior failed preflight' };
+    const journal = JSON.parse(await readFile(h.config.statePath, 'utf8'));
+    beforeSecondTransport = journal.records[0];
+    throw new Error('acknowledgement lost during second attempt');
+  } });
+  h.final(); await h.tick(); await h.tick();
+  assert.equal(h.sends(), 1);
+  assert.equal(h.driver.status().records[0].state, 'waiting');
+  h.advanceTime(60_000);
+  await h.tick();
+  assert.equal(h.sends(), 2);
+  assert.equal(beforeSecondTransport.state, 'dispatching');
+  assert.equal(beforeSecondTransport.attempts, 2);
+  assert.equal(beforeSecondTransport.dispatchCommitted, null);
+  assert.equal(beforeSecondTransport.dispatchDefiniteFailure, null);
+  assert.equal(beforeSecondTransport.dispatchState, null);
+  assert.equal(beforeSecondTransport.dispatchError, null);
+  await h.driver.close();
+  const restarted = new GoalContinuationSupervisor(h.config);
+  t.after(() => restarted.close());
+  await restarted.pollOnce();
+  assert.equal(restarted.status().records[0].state, 'uncertain');
+  assert.equal(h.sends(), 2, 'an acknowledgement-lost attempt must not be replayed');
+  assert.equal((await h.runtime.status(h.g.id)).round, 1);
 });
 
 test('restart missing-arm recovery fetches stream status for a persisted native final', async t => {

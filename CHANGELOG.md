@@ -2,6 +2,31 @@
 
 Version-specific release notes are published with each [GitHub Release](https://github.com/enwong93-sketch/devspace-ultra/releases). They describe the reusable product, not any customer's machine or live installation.
 
+## 0.5.23 — in preparation
+
+- Recover omitted native request bodies from the already observed allowlisted POST, without replaying a request or inferring the source from UI.
+- Invalidate earlier final authority immediately and preserve response/EOF ordering during asynchronous source admission.
+- Discard late admission after failure, navigation, disconnect, newer requests, malformed bodies or bounded metadata overflow.
+- Carry forward the v0.5.22 work-preserving updater, Rescue ordering and authorized public continuation route.
+- Keep prior drafts immutable; source/package tests alone do not authorize stable promotion.
+
+## 0.5.22 — in preparation
+
+- Carry forward the native-final Goal continuation and Rescue ordering fixes from the immutable v0.5.21 draft.
+- Defer package retirement for retained Core process sessions, invalid/missing diagnostics, wrong PID, active tools or concurrent handover.
+- Recheck after staging; -Force cannot override work preservation. A deferral never triggers rollback task restart.
+- Retain verified offline installation and rollback paths. Readiness checks are not an atomic live admission barrier.
+- Stable promotion still requires exact-archive real Classic acceptance.
+
+## 0.5.21 — in preparation
+
+- Replace the unsupported hidden-only Goal sender with authorized public component messages, gated by native assistant final events and durable exact-owner claims.
+- Correlate new work with native receipts instead of treating a send acknowledgement as success; retain manual-versus-automatic provenance across rebooted Main identities.
+- Preserve authenticated workspace image reads when the live page claim is unavailable, without relaxing workspace containment.
+- Refuse Core handover while background process sessions or unconsumed output remain; recheck inside the admission barrier.
+- Preserve archive byte identity through npm executable installation; use a new release identity instead of overwriting v0.5.20.
+- Keep stable promotion contingent on exact original-client and installation evidence, not fixtures or CI alone.
+
 ## 0.5.20 — in preparation
 
 - Preserve the validated exact-page proof when completing a fresh Classic Goal or Plan start claim.

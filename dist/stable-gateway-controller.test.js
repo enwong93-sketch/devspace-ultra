@@ -217,7 +217,7 @@ async function createHarness({
       }
       const handle = [...handles].reverse().find((item) => item.baseUrl === input?.coreBaseUrl && item.server?.listening);
       return handle
-        ? { ok: true, baseUrl: input.coreBaseUrl, pid: handle.pid, passiveCore: false, autoCompactEnabled: false }
+        ? { ok: true, baseUrl: input.coreBaseUrl, pid: handle.pid, passiveCore: false, autoCompactEnabled: false, processSessions: 0 }
         : { ok: false, baseUrl: input?.coreBaseUrl || null, pid: null, stage: "health", status: 503 };
     },
   };
@@ -569,10 +569,11 @@ async function testFatalRollbackAdoptsOnlyKnownLiveListenerHandle() {
   const h = await createHarness({
     failReplacementProbe: true,
     failRollbackProbe: true,
-    runtimeIdentityResolver: ({ handles, coreBaseUrl }) => {
-      const rollbackHandle = [...handles].reverse().find((handle) => handle.id === "core-a-restarted" && handle.server?.listening);
+    runtimeIdentityResolver: ({ handles, coreBaseUrl, includeProcessSessions }) => {
+      const rollbackHandle = [...handles].reverse().find((handle) =>
+        (includeProcessSessions ? handle.baseUrl === coreBaseUrl : handle.id === "core-a-restarted") && handle.server?.listening);
       return rollbackHandle
-        ? { ok: true, baseUrl: coreBaseUrl, pid: rollbackHandle.pid, passiveCore: false, autoCompactEnabled: false }
+        ? { ok: true, baseUrl: coreBaseUrl, pid: rollbackHandle.pid, passiveCore: false, autoCompactEnabled: false, processSessions: 0 }
         : { ok: false, baseUrl: coreBaseUrl, pid: null, stage: "health", status: 503 };
     },
   });
@@ -602,6 +603,48 @@ async function testFatalRollbackAdoptsOnlyKnownLiveListenerHandle() {
   }
 }
 
+async function testProcessSessionsDeferHandoverWithoutStoppingWork() {
+  for (const invalid of [1, null, -1, 0.5, "0", "wrong-pid"]) {
+    let current = invalid;
+    const h = await createHarness({ runtimeIdentityResolver: ({ handles, coreBaseUrl }) => {
+      const handle = handles.find((item) => item.baseUrl === coreBaseUrl);
+      return { ok: true, pid: current === "wrong-pid" ? handle.pid + 1 : handle.pid,
+        processSessions: current === "wrong-pid" ? 0 : current };
+    } });
+    try {
+      await initializeSession(h);
+      await assert.rejects(() => h.controller.handover(), /process.session.*deferred/i);
+      assert.deepEqual(h.starts, [], "no candidate or replacement starts before verified readiness");
+      assert.deepEqual(h.stops, [], "HTTP quiet must not authorize killing retained process sessions");
+      assert.equal(h.initial.server.listening, true);
+      assert.equal(h.controller.status().admission.closed, false);
+      assert.equal(h.controller.status().fatal, false);
+      current = 0;
+      assert.equal((await h.controller.handover()).ok, true, "temporary deferral must remain recoverable");
+    } finally { await h.close(); }
+  }
+}
+
+async function testProcessSessionStartedDuringCandidateIsPreserved() {
+  let checks = 0;
+  const h = await createHarness({ runtimeIdentityResolver: ({ handles, coreBaseUrl, includeProcessSessions }) => {
+    const handle = handles.find((item) => item.baseUrl === coreBaseUrl);
+    if (includeProcessSessions) checks += 1;
+    return { ok: true, pid: handle.pid, processSessions: checks >= 2 ? 1 : 0 };
+  } });
+  try {
+    await initializeSession(h);
+    await assert.rejects(() => h.controller.handover(), /retains 1 process session/);
+    assert.equal(checks, 2, "readiness must be rechecked inside the admission barrier");
+    assert.deepEqual(h.stops, ["core-b-candidate"]);
+    assert.equal(h.initial.server.listening, true);
+    assert.equal(h.controller.status().admission.closed, false);
+    assert.equal(h.controller.status().fatal, false);
+  } finally { await h.close(); }
+}
+
+await testProcessSessionsDeferHandoverWithoutStoppingWork();
+await testProcessSessionStartedDuringCandidateIsPreserved();
 await testClientCloseBeforeAdmissionContinuationDoesNotLeak();
 await testLongLivedEventStreamDoesNotBlockHandoverDrain();
 await testEventStreamWithoutAcceptHeaderDoesNotBlockHandoverDrain();

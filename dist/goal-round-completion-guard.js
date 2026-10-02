@@ -1,4 +1,7 @@
 import { createHash } from "node:crypto";
+import { isNativeStreamFinalReceipt } from './classic-native-final-ingress.js';
+import { matchesNativeGoalStartWitness } from './goal-native-start-witness.js';
+import { runtimeKeyForClassicPort } from './classic-main-debug-ports.js';
 
 const DEFAULT_POLL_MS = 2_000;
 const DEFAULT_ROUND_SETTLE_MS = 2_000;
@@ -35,11 +38,8 @@ function recoveryPageIdentity(snapshot) {
 }
 
 function runtimeKeyForPort(port) {
-  if (port === 9721) return "main-01";
-  if (Number.isInteger(port) && port >= 9731 && port <= 9762) {
-    return `main-${String(port - 9730).padStart(2, "0")}`;
-  }
-  return null;
+  const key = Number.isInteger(port) ? runtimeKeyForClassicPort(port) : null;
+  return /^main-(0[1-9]|[12][0-9]|3[0-2])$/.test(String(key || '')) ? key : null;
 }
 
 function hashText(value) {
@@ -50,6 +50,7 @@ export function shouldInspectNativeCurrentRoundFinal(snapshot) {
   return snapshot?.chatMode === true
     && snapshot?.generating === false
     && snapshot?.safetyCheckVisible !== true
+    && snapshot?.nativeSafetyBlocked !== true
     && snapshot?.deliveryTimeoutVisible !== true
     && snapshot?.latestMessageRole === "assistant"
     && Boolean(String(snapshot?.latestAssistantMessageId || "").trim())
@@ -63,6 +64,7 @@ export function provesNativeCurrentRoundFinal(goal, snapshot, {
 } = {}) {
   if (!shouldInspectNativeCurrentRoundFinal(snapshot)) return false;
   const native = snapshot?.nativeContinuation;
+  if (snapshot?.nativeGoalSourceRequired === true && !matchesNativeGoalStartWitness(goal, native)) return false;
   if (native?.resolved !== true || native?.currentRole !== "assistant" || native?.currentEndTurn !== true) return false;
   if (ACTIVE_STREAM_STATES.has(upper(native?.currentStatus))) return false;
   const latestAssistantId = String(snapshot?.latestAssistantMessageId || "").trim();
@@ -93,7 +95,8 @@ export function provesNativeCurrentRoundFinal(goal, snapshot, {
   // the durable round boundary.
   const continuationRound = Number(goal?.round) > 1
     && Boolean(String(goal?.lastConsumedContinuationId || "").trim());
-  if (!continuationRound && userCreatedAtMs < roundBeganAtMs - requestPreRoundSlopMs) return false;
+  if (!continuationRound && !matchesNativeGoalStartWitness(goal, native)
+    && userCreatedAtMs < roundBeganAtMs - requestPreRoundSlopMs) return false;
   if (userCreatedAtMs > assistantCreatedAtMs) return false;
   return true;
 }
@@ -103,6 +106,7 @@ export function shouldRecoverWorkingRound(goal, snapshot, {
   minimumRoundSettleMs = DEFAULT_ROUND_SETTLE_MS,
 } = {}) {
   if (!goal || goal.status !== "active" || goal.roundState !== "working") return false;
+  if (snapshot?.nativeSafetyBlocked === true) return false;
   if (!Number.isInteger(goal.round) || goal.round < 1) return false;
   if (!goal.roundBeganAt) return false;
   const beganAt = Date.parse(String(goal.roundBeganAt));
@@ -177,6 +181,7 @@ export class ClassicGoalRoundCompletionGuard {
     inspect,
     dispatch,
     continueIncompleteGoal = null,
+    nativeFinalIngressOnly = false,
     pollMs = DEFAULT_POLL_MS,
     minimumRoundSettleMs = DEFAULT_ROUND_SETTLE_MS,
     routeSettleMs = DEFAULT_ROUTE_SETTLE_MS,
@@ -192,6 +197,8 @@ export class ClassicGoalRoundCompletionGuard {
     }
     this.goalRuntime = goalRuntime;
     this.inspect = inspect;
+    this.nativeFinalIngressOnly = nativeFinalIngressOnly === true;
+    this.nativeFinalHandling = Promise.resolve();
     this.dispatch = dispatch;
     this.continueIncompleteGoal = typeof continueIncompleteGoal === "function"
       ? continueIncompleteGoal : null;
@@ -392,7 +399,31 @@ export class ClassicGoalRoundCompletionGuard {
     };
   }
 
+  noteNativeAssistantFinal(event) {
+    const operation = this.nativeFinalHandling.then(async () => {
+      if (this.closed || !this.continueIncompleteGoal || !isNativeStreamFinalReceipt(event)) {
+        return { continued: false, reason: 'native-final-ingress-ineligible' };
+      }
+      const goals = await this.goalRuntime.activeGoals({ conversationId: event.conversationId });
+      if (goals.length !== 1 || !['working', 'reported'].includes(goals[0].roundState)) {
+        return { continued: false, reason: 'no-exact-active-goal' };
+      }
+      const goal = goals[0];
+      if (await this.goalRuntime.hasConversationCollision({ goalId: goal.id })) {
+        return { continued: false, reason: 'conversation-goal-conflict' };
+      }
+      // Semantic completion/pause remains the AI-owned Goal state. The input
+      // proves only that this physical native assistant turn has finished.
+      return this.continueIncompleteGoal({ goal, nativeCompletion: event });
+    });
+    this.nativeFinalHandling = operation.catch(() => {});
+    return operation;
+  }
+
   async #pollOnceImpl() {
+    // Production native-final ingress must never infer completion from UI
+    // idle, Stop buttons, DOM text, or a finished/failed network request.
+    if (this.nativeFinalIngressOnly) return { ok: true, recovered: 0, results: [], reason: 'native-final-event-owned' };
     const goals = await this.goalRuntime.recoverableWorkingRounds();
     const activeRunKeys = new Set(goals.map(recoveryRunKey).filter(Boolean));
     for (const key of this.recoverySessions.keys()) {
@@ -585,5 +616,6 @@ export class ClassicGoalRoundCompletionGuard {
     this.nativeFinalRetryAt.clear();
     this.recoverySessions.clear();
     if (this.polling) await this.polling.catch(() => {});
+    await this.nativeFinalHandling;
   }
 }

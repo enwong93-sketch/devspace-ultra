@@ -8,6 +8,23 @@ Progress narration is an Agent responsibility, not a reason to deny ordinary too
 
 A `pending` claim, unresolved or unbound conversation identity, unavailable recipient, omitted tool, or timeout is not proof that the floating card was updated. The report tool's hidden page-local relay completes an initial claim automatically; a separate `devspace_progress_bind` call is not required and may be absent from an older ChatGPT tool snapshot. If automatic confirmation is unavailable, use the exact-conversation compatibility bridge once when the current conversation ID is known and verify that the report appeared on this conversation. If verification still fails, state one visible progress-routing blocker, continue safe workspace work, and never claim that the card was updated. Re-check the card at meaningful boundaries and before the final response. Chat Swarm workers remain backend-only and must not write the user-facing progress card.
 
+## No operator bypass of Classic continuation admission
+
+Permission to send a message is not proof that the current assistant turn has
+ended. Do not use Codex `send_message_to_thread` as a maintenance fallback for
+Classic Goal continuation: preserving a conversation ID does not prove that
+the resulting turn retains its Classic Gateway tool environment. An idle
+thread label, a completed user-message item, a transport acknowledgement or
+an earlier assistant summary is not a current native assistant final.
+
+Once Rescue has resumed a turn, let that turn work. A next-Goal-round message,
+whether requested manually or automatically, must use the same exact-owner
+native-final claim and one-shot delivery path; no separate operator sender
+may bypass it. Rescue remains interrupted-turn recovery, not Goal advancement.
+A new Rescue/user request invalidates an older final and cannot itself redeem
+a Goal round. Never send a second diagnostic message merely to find out if the
+first worked. Missing receipts mean inspect and preserve work, not replay.
+
 ## Context-safe continuation work
 
 A single user turn can contain hundreds of model/tool messages. Preserve the
@@ -84,7 +101,7 @@ Every Plugin/MCP connection is conversation-isolated. Never reuse a shared state
 
 The floating progress narration card is written only by the Agent through `devspace_progress_report`. Write one natural-language update after each meaningful medium-sized step, important verification, material direction change, or genuine blocker, and during active non-atomic work keep the silent interval below ten minutes. Do not report every tool call or turn this ceiling into mechanical boilerplate. The liveness supervisor must remain silent at ten minutes; only a verified interrupted or incomplete turn may receive one rescue after twenty minutes, and normal completion or cancellation disarms that episode. A useful report should tell the user what has just become true and what the next medium step is; it must not imitate a status template, heartbeat, trace, or program log.
 
-Normal Goal continuation is backend-owned and hidden. When a ChatGPT Classic assistant turn reaches its native completed end-turn and the exact conversation's Goal remains active/incomplete, the backend closes that physical turn and queues one continuation for the next Goal round. `devspace_goal_turn_report`, completed Plans, progress-card updates, and another user prompt are not continuation prerequisites. The relay must verify the native final on the exact local Main conversation, create no user message or composer draft, and never select by Runtime alone or fall back to another computer/Connector. Explicit Goal pause, stop, completion, or a genuine blocked state is respected. Interrupted-turn same-round recovery remains a separate path, must not race an episode owned by Rescue, and must never use a visible composer message or synthetic user turn.
+Normal Goal continuation is backend-owned. The user has authorized an automatic public component message; hidden-only delivery is not required. When a ChatGPT Classic assistant turn reaches its native completed end-turn and the exact conversation's Goal remains active/incomplete, the backend closes that physical turn and queues one continuation for the next Goal round. `devspace_goal_turn_report`, completed Plans, progress-card updates, and another user prompt are not continuation prerequisites. The relay must verify the native final on the exact local Main conversation, send one public component message through the documented API with scrollToBottom:false, create no composer draft or focus change, and never select by Runtime alone or fall back to another computer/Connector. Explicit Goal pause, stop, completion, or a genuine blocked state is respected. Interrupted-turn same-round recovery remains a separate path, must not race an episode owned by Rescue, and must never use a visible composer message or synthetic user turn.
 
 Goal and Plan state are execution structure, not tool gates. An active/incomplete Plan or missing `devspace_goal_turn_report` must not deny, delay, or suppress ordinary tools or automatic Goal continuation. The model may use Plans and optional reports when useful, but a normal completed assistant turn is itself the continuation boundary; no report/Plan threshold is needed.
 

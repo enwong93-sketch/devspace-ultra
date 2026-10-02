@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { atomicWriteJson } from './atomic-file.js';
 import { enqueueRecoverablePersist } from './recoverable-persist-queue.js';
+import { isNativeStreamFinalReceipt } from './classic-native-final-ingress.js';
 
 const digest = text => createHash('sha256').update(String(text || '')).digest('hex');
 const pending = goal => goal?.status === 'active' && goal.roundState === 'reported'
@@ -12,7 +13,7 @@ const redeemable = goal => goal?.status === 'active' && goal.roundState === 'rep
 const finalPage = page => page?.chatMode === true && page.generating === false
   && page.streamStatus === 'COMPLETE' && page.latestMessageRole === 'assistant'
   && Boolean(page.latestAssistantMessageId) && Boolean(page.latestAssistantText?.trim())
-  && !page.safetyCheckVisible && !page.deliveryTimeoutVisible && !page.retryVisible;
+  && !page.safetyCheckVisible && !page.nativeSafetyBlocked && !page.deliveryTimeoutVisible && !page.retryVisible;
 const HUMAN_SUPERSESSION_REASONS = new Set([
   'new-user-turn-before-hidden-continuation',
   'new-user-turn-takes-precedence',
@@ -44,6 +45,35 @@ function nativeCompletionProof(goal) {
     || !Number.isFinite(Date.parse(String(proof.assistantCreatedAt || '')))
     || !Number.isFinite(Date.parse(String(proof.completedAt || '')))) return null;
   return proof;
+}
+
+function receiptNativeFinalProof(goal, page, nowMs) {
+  const native = page?.nativeContinuation, witness = native?.goalStartWitness;
+  const assistantAt = timeMs(native?.latestAssistantCreatedAt);
+  const beganAt = timeMs(goal?.roundBeganAt);
+  if (page?.boundarySource !== 'native-goal-start-tool-result' || !finalPage(page)
+    || page.conversationId !== goal.conversationId || witness?.verified !== true
+    || witness.goalId !== goal.id || witness.conversationId !== goal.conversationId
+    || witness.sourceUserMessageId !== page.latestUserMessageId
+    || witness.sourceUserMessageId !== native.latestUserMessageId
+    || native.currentRole !== 'assistant' || native.currentEndTurn !== true
+    || native.latestAssistantEndTurn !== true || native.currentStatus !== 'finished_successfully'
+    || native.latestAssistantStatus !== 'finished_successfully'
+    || native.currentMessageId !== page.latestAssistantMessageId
+    || native.currentNodeId !== page.latestAssistantMessageId
+    || native.latestAssistantMessageId !== page.latestAssistantMessageId
+    || digest(native.latestPublicAssistantText?.trim()) !== digest(page.latestAssistantText)
+    || timeMs(native.currentCreatedAt) !== assistantAt
+    || timeMs(witness.toolCreatedAt) == null || timeMs(witness.toolCreatedAt) > assistantAt
+    || !/^main-(0[1-9]|[12][0-9]|3[0-2])$/.test(String(page.runtimeKey || ''))
+    || !page.pageTargetId || assistantAt == null || beganAt == null
+    || assistantAt < beganAt - 1000 || assistantAt > nowMs + 60_000) return null;
+  return { source: 'native-assistant-turn-final', round: goal.round,
+    conversationId: goal.conversationId, runtimeKey: page.runtimeKey,
+    pageTargetId: page.pageTargetId, sourceUserMessageId: page.latestUserMessageId,
+    assistantMessageId: page.latestAssistantMessageId,
+    assistantTextHash: digest(page.latestAssistantText),
+    assistantCreatedAt: native.latestAssistantCreatedAt, completedAt: new Date(nowMs).toISOString() };
 }
 
 function exactNativeCompletionBoundary(goal, pages) {
@@ -108,6 +138,12 @@ function exactNativeCompletionBoundary(goal, pages) {
 function exactMissingArmBoundary(goal, pages, nowMs = Date.now()) {
   const autoBoundary = exactNativeCompletionBoundary(goal, pages);
   if (autoBoundary) return autoBoundary;
+  if (pages?.length === 1 && pages[0].nativeGoalSourceRequired === true) {
+    const proof = receiptNativeFinalProof(goal, pages[0], nowMs);
+    return proof ? { type: 'completed-final', sourceUserId: proof.sourceUserMessageId,
+      finalAssistantId: proof.assistantMessageId, finalAssistantHash: proof.assistantTextHash,
+      finalAssistantCreatedAt: proof.assistantCreatedAt, nativeCompletionProof: proof } : null;
+  }
   if (!pending(goal) || !Array.isArray(pages) || !pages.length || pages.length > 4) return null;
   const reportedAtMs = timeMs(goal?.lastRoundReport?.reportedAt);
   if (reportedAtMs == null) return null;
@@ -224,12 +260,17 @@ function exactMissingArmBoundary(goal, pages, nowMs = Date.now()) {
 export class GoalContinuationSupervisor {
   constructor({ goalRuntime, inspect, dispatch, statePath = null, enabled = true,
     now = () => Date.now(), pollMs = 1000, settleMs = 750, maxRecords = 128,
-    onHiddenContinuationStarted = null, relayDiagnostics = null } = {}) {
+    onHiddenContinuationStarted = null, relayDiagnostics = null, inspectNativeFinal = null,
+    nativeFinalIngressOnly = false, publicMessageContinuation = false } = {}) {
     if (!goalRuntime || typeof inspect !== 'function' || typeof dispatch !== 'function') throw new Error('Goal continuation adapters are required');
     Object.assign(this, { goalRuntime, inspect, dispatch, statePath, enabled, now, pollMs, settleMs, maxRecords });
     this.onHiddenContinuationStarted = typeof onHiddenContinuationStarted === 'function'
       ? onHiddenContinuationStarted : null;
     this.relayDiagnostics = typeof relayDiagnostics === 'function' ? relayDiagnostics : null;
+    this.inspectNativeFinal = typeof inspectNativeFinal === 'function' ? inspectNativeFinal : null;
+    this.nativeFinalIngressOnly = nativeFinalIngressOnly === true;
+    this.publicMessageContinuation = publicMessageContinuation === true;
+    this.publicClaimQueue = Promise.resolve();
     this.records = new Map(); this.timer = null; this.polling = null; this.closed = false;
     this.persistQueue = Promise.resolve(); this.lastError = null;
     this.missingArmRetryAt = new Map();
@@ -262,12 +303,23 @@ export class GoalContinuationSupervisor {
     await enqueueRecoverablePersist(this, () => atomicWriteJson(this.statePath, snapshot));
   }
   async pages(goal, options = {}) {
+    const unavailable = reason => {
+      if (options.inspectionOutcome) options.inspectionOutcome.reason = reason;
+      return null;
+    };
     let rows = await this.inspect(goal, options);
     if (Array.isArray(rows) && options.runtimeKey) rows = rows.filter(p => p.runtimeKey === options.runtimeKey);
     if (Array.isArray(rows) && options.pageTargetId) rows = rows.filter(p => p.pageTargetId === options.pageTargetId);
-    if (!Array.isArray(rows) || !rows.length || rows.length > 4) return null;
-    if (rows.some(p => p?.conversationId !== goal.conversationId || !p.latestUserMessageId || p.chatMode !== true)) return null;
-    if (!options.allowDivergent && new Set(rows.map(p => p.latestUserMessageId)).size !== 1) return null;
+    if (!Array.isArray(rows) || !rows.length) return unavailable('no-exact-page');
+    if (rows.length > 4) return unavailable('ambiguous-exact-pages');
+    if (rows.some(p => p?.conversationId !== goal.conversationId || !p.latestUserMessageId || p.chatMode !== true)) return unavailable('invalid-exact-page-owner');
+    if (rows.some(p => p.nativeSafetyBlocked === true)) return unavailable('native-safety-blocked');
+    const unresolved = rows.find(p => p.nativeGoalSourceRequired === true && p.boundarySource !== 'native-goal-start-tool-result');
+    if (unresolved) {
+      const state = String(unresolved.nativeContinuation?.state || unresolved.nativeContinuation?.goalStartWitness?.reason || 'missing-start-witness');
+      return unavailable('native-source-unavailable:' + (/^[a-z0-9-]{1,80}$/.test(state) ? state : 'unresolved'));
+    }
+    if (!options.allowDivergent && new Set(rows.map(p => p.latestUserMessageId)).size !== 1) return unavailable('divergent-source-users');
     return rows;
   }
   async arm(goal, { resume = false, reportAuthority = null } = {}) {
@@ -280,7 +332,10 @@ export class GoalContinuationSupervisor {
     const id = goal.continuation.continuationId;
     if (this.records.has(id)) return { armed: this.records.get(id).state === 'waiting', state: this.records.get(id).state };
     // Never infer a source turn for old pending Goals merely found on disk.
-    const autoFinal = nativeCompletionProof(goal);
+    let autoFinal = nativeCompletionProof(goal);
+    if (this.nativeFinalIngressOnly && autoFinal?.ingress !== 'native-response-stream') {
+      return { armed: false, reason: 'awaiting-native-final-ingress' };
+    }
     const boundaryAt = autoFinal?.completedAt || goal.lastRoundReport?.reportedAt || null;
     const reportAge = this.now() - Date.parse(boundaryAt || '');
     if (!resume && (!Number.isFinite(reportAge) || reportAge < -1000 || reportAge > 120_000)) return { armed: false, reason: 'report-not-current' };
@@ -293,8 +348,10 @@ export class GoalContinuationSupervisor {
       ? reportAuthority.runtimeKey : null);
     let pages;
     try {
-      pages = await this.pages(goal, {
-        sourceOnly: true,
+      pages = autoFinal?.ingress === 'native-response-stream'
+        ? (await this.inspectNativeFinal?.(goal, { nativeCompletionProof: autoFinal }))?.pages || null
+        : await this.pages(goal, {
+        sourceOnly: !autoFinal,
         runtimeKey: sourceRuntimeKey,
         pageTargetId: autoFinal?.pageTargetId || null,
         allowDivergent: true,
@@ -305,14 +362,16 @@ export class GoalContinuationSupervisor {
       return { armed: false, reason: 'source-boundary-inspection-failed' };
     }
     if (!pages) return { armed: false, reason: 'source-page-unresolved' };
+    if (!autoFinal && pages.length === 1) autoFinal = receiptNativeFinalProof(goal, pages[0], this.now());
     if (autoFinal && (!Array.isArray(pages) || pages.length !== 1
       || pages[0]?.conversationId !== goal.conversationId
       || pages[0]?.runtimeKey !== autoFinal.runtimeKey
       || pages[0]?.pageTargetId !== autoFinal.pageTargetId
       || pages[0]?.latestUserMessageId !== autoFinal.sourceUserMessageId
       || pages[0]?.latestAssistantMessageId !== autoFinal.assistantMessageId
-      || digest(pages[0]?.latestAssistantText) !== autoFinal.assistantTextHash
-      || !finalPage(pages[0]))) {
+      || (autoFinal.ingress === 'native-response-stream'
+        ? pages[0]?.nativeFinalReceipt?.assistantTextHash !== autoFinal.assistantTextHash
+        : digest(pages[0]?.latestAssistantText) !== autoFinal.assistantTextHash || !finalPage(pages[0])))) {
       return { armed: false, reason: 'native-final-page-not-current' };
     }
     const current = await this.goalRuntime.status(goal.id);
@@ -418,7 +477,21 @@ export class GoalContinuationSupervisor {
         continue;
       }
       let pages;
+      const inspectionOutcome = {};
       const nativeFinal = nativeCompletionProof(goal);
+      if (this.nativeFinalIngressOnly && nativeFinal?.ingress !== 'native-response-stream') {
+        results.push({ goalId: goal.id, round: goal.round, recovered: false, reason: 'awaiting-native-final-ingress' });
+        continue;
+      }
+      if (nativeFinal?.ingress === 'native-response-stream') {
+        try {
+          const armed = await this.arm(goal, { resume: true });
+          if (!armed?.armed) this.scheduleMissingArmRetry(continuationId, armed?.reason || 'awaiting-native-final-ingress');
+          else this.clearMissingArmRetry(continuationId);
+          results.push({ goalId: goal.id, round: goal.round, recovered: armed?.armed === true, reason: 'native-final-ingress-arm' });
+        } catch (error) { this.scheduleMissingArmRetry(continuationId, String(error?.message || error)); }
+        continue;
+      }
       try {
         pages = await this.pages(goal, {
           // A persisted exact native-final receipt is revalidated with the
@@ -430,6 +503,7 @@ export class GoalContinuationSupervisor {
           pageTargetId: nativeFinal?.pageTargetId || null,
           allowDivergent: !nativeFinal,
           includeNativeBranch: true,
+          inspectionOutcome,
         });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -439,7 +513,7 @@ export class GoalContinuationSupervisor {
       }
       const proof = exactMissingArmBoundary(goal, pages, this.now());
       if (!proof) {
-        this.scheduleMissingArmRetry(continuationId, 'exact-boundary-unresolved');
+        this.scheduleMissingArmRetry(continuationId, inspectionOutcome.reason || 'exact-boundary-unresolved');
         results.push({ goalId: goal.id, round: goal.round, recovered: false, reason: 'missing-arm-boundary-unresolved' });
         continue;
       }
@@ -514,6 +588,7 @@ export class GoalContinuationSupervisor {
         reportedAt: nativeCompletionProof(goal)?.completedAt || goal.lastRoundReport?.reportedAt || null,
         sourceUserId: proof.sourceUserId,
         sourceRuntimeKey: pages.length === 1 ? pages[0].runtimeKey || null : null,
+        sourcePageTargetId: pages.length === 1 ? pages[0].pageTargetId || null : null,
         causalDisplayProof: false,
         sourceCandidates: null,
         baseline: proof.type === 'completed-final'
@@ -527,8 +602,8 @@ export class GoalContinuationSupervisor {
         createdAt: this.now(),
         recoveredMissingArm: true,
         nativeFinalVerified: proof.type === 'completed-final',
-        nativeCompletionProof: proof.type === 'completed-final' && nativeFinal
-          ? { ...nativeFinal }
+        nativeCompletionProof: proof.type === 'completed-final' && (proof.nativeCompletionProof || nativeFinal)
+          ? { ...(proof.nativeCompletionProof || nativeFinal) }
           : null,
         finalAssistantId: proof.type === 'completed-final' ? proof.finalAssistantId : null,
         finalAssistantHash: proof.type === 'completed-final' ? proof.finalAssistantHash : null,
@@ -634,6 +709,15 @@ export class GoalContinuationSupervisor {
     return true;
   }
   matchesFinal(row, pages) {
+    if (row?.nativeCompletionProof?.ingress === 'native-response-stream') {
+      const proof = row.nativeCompletionProof;
+      return pages?.length === 1 && pages[0]?.nativeFinalReceipt?.ingress === proof.ingress
+        && pages[0].conversationId === row.conversationId
+        && pages[0].runtimeKey === proof.runtimeKey && pages[0].pageTargetId === proof.pageTargetId
+        && pages[0].latestUserMessageId === row.sourceUserId
+        && pages[0].latestAssistantMessageId === proof.assistantMessageId
+        && pages[0].nativeFinalReceipt.assistantTextHash === proof.assistantTextHash;
+    }
     const recoveredExactFinal = Boolean(
       row?.recoveredMissingArm === true
       && row?.nativeFinalVerified === true
@@ -647,21 +731,37 @@ export class GoalContinuationSupervisor {
         && p.generating !== true
         && Boolean(p.latestAssistantText?.trim())
         && !p.safetyCheckVisible
+        && !p.nativeSafetyBlocked
         && !p.deliveryTimeoutVisible
-        && !p.retryVisible)
+        && !p.retryVisible
+        && (!row.nativeCompletionProof
+          || (p.runtimeKey === row.nativeCompletionProof.runtimeKey
+            && p.pageTargetId === row.nativeCompletionProof.pageTargetId)))
     );
-    if (recoveredExactFinal) return true;
+    // A persisted native final is an exact boundary, not permission to accept
+    // any later final just because the recovered row has an empty baseline.
+    if (row?.recoveredMissingArm === true && row?.nativeFinalVerified === true) return recoveredExactFinal;
     return pages && pages.every(p => p.latestUserMessageId === row.sourceUserId && finalPage(p))
       && new Set(pages.map(p => `${p.latestAssistantMessageId}:${digest(p.latestAssistantText)}`)).size === 1
       && !row.baseline.some(b => b.id === pages[0].latestAssistantMessageId && b.hash === digest(pages[0].latestAssistantText));
   }
   async finalCandidates(goal,row) {
-    if (!row.causalDisplayProof) return {pages:await this.pages(goal,{
-      runtimeKey:row.sourceRuntimeKey,
-      pageTargetId:row.sourcePageTargetId||row.dispatchPageTargetId||null,
-    })};
-    const all=await this.pages(goal,{allowDivergent:true});
-    if(!all)return {pages:null};
+    if (row?.nativeCompletionProof?.ingress === 'native-response-stream') {
+      return await this.inspectNativeFinal?.(goal, row)
+        || { pages: null, inspectionReason: 'awaiting-native-final-ingress' };
+    }
+    if (this.nativeFinalIngressOnly) return { pages: null, inspectionReason: 'awaiting-native-final-ingress' };
+    const inspectionOutcome = {};
+    if (!row.causalDisplayProof) {
+      const pages = await this.pages(goal,{
+        runtimeKey:row.sourceRuntimeKey,
+        pageTargetId:row.sourcePageTargetId||row.nativeCompletionProof?.pageTargetId||row.dispatchPageTargetId||null,
+        inspectionOutcome,
+      });
+      return {pages, inspectionReason: inspectionOutcome.reason || null};
+    }
+    const all=await this.pages(goal,{allowDivergent:true,inspectionOutcome});
+    if(!all)return {pages:null,inspectionReason:inspectionOutcome.reason||null};
     const knownUsers=new Set(row.sourceCandidates.map(p=>p.userId));
     // Synchronizing a stale display to an already-captured user is harmless;
     // an actually NEW user in any display cancels this report's continuation.
@@ -811,6 +911,15 @@ export class GoalContinuationSupervisor {
     await this.save();
     return true;
   }
+  async scheduleReconciliationRetry(row, state) {
+    // Unavailable observation is not evidence of an unsent transport. Retain
+    // the uncertain receipt and exclusive lease; throttle every unavailable
+    // exact-page path, including filtered evidence and thrown inspections.
+    row.reconciliationAttempts = Number(row.reconciliationAttempts || 0) + 1;
+    row.retryAt = this.now() + Math.min(60_000, 5_000 * (2 ** Math.min(4, row.reconciliationAttempts - 1)));
+    row.reconciliationState = state;
+    await this.save();
+  }
   async reconcile(row) {
     const goal = await this.goalRuntime.status(row.goalId);
     if (goal.status !== 'active' || this.closed) return;
@@ -820,23 +929,35 @@ export class GoalContinuationSupervisor {
       await this.notifyHiddenContinuationStarted(row);
       return;
     }
+    // Public delivery is reconciled only by Agent redemption or a correlated
+    // native final. Never enter the legacy DOM/native-page inspection path.
+    if (row.deliveryMode === 'public-component-message') return;
     if (goal.continuation?.continuationId !== row.continuationId || !row.finalAssistantId) return;
     if (row.deliveryMode === 'hidden-assistant-continuation') {
-      const pages = await this.pages(goal, {
-        runtimeKey: row.dispatchRuntimeKey || row.sourceRuntimeKey,
-        pageTargetId: row.dispatchPageTargetId,
-        allowDivergent: true,
-        includeNativeBranch: true,
-        sourceUserMessageId: row.sourceUserId,
-        baselineAssistantMessageId: row.finalAssistantId,
-      });
-      if (this.closed || !pages || pages.length !== 1) return;
+      const inspectionOutcome = {};
+      let pages;
+      let inspectionFailed = false;
+      try {
+        pages = await this.pages(goal, {
+          runtimeKey: row.dispatchRuntimeKey || row.sourceRuntimeKey,
+          pageTargetId: row.dispatchPageTargetId,
+          allowDivergent: true,
+          includeNativeBranch: true,
+          sourceUserMessageId: row.sourceUserId,
+          baselineAssistantMessageId: row.finalAssistantId,
+          inspectionOutcome,
+        });
+      } catch { inspectionFailed = true; }
+      if (this.closed) return;
+      if (inspectionFailed || !pages || pages.length !== 1) {
+        await this.scheduleReconciliationRetry(row, inspectionFailed
+          ? 'exact-page-inspection-failed'
+          : inspectionOutcome.reason || 'ambiguous-exact-pages');
+        return;
+      }
       const proof = pages[0].nativeContinuation;
       if (!proof?.resolved || proof.sourceUserFound !== true || proof.baselineAssistantFound !== true) {
-        row.reconciliationAttempts = Number(row.reconciliationAttempts || 0) + 1;
-        row.retryAt = this.now() + Math.min(60_000, 5_000 * (2 ** Math.min(4, row.reconciliationAttempts - 1)));
-        row.reconciliationState = proof?.state || 'native-branch-unresolved';
-        await this.save();
+        await this.scheduleReconciliationRetry(row, proof?.state || 'native-branch-unresolved');
         return;
       }
       const assistantIndex = Number(proof.newAssistantAfterBaselineIndex);
@@ -880,6 +1001,17 @@ export class GoalContinuationSupervisor {
     catch { row.reason='delivered-awaiting-agent-redemption'; }
     await this.save();
   }
+  async deferNewUserUntilNativeFinal(row) {
+    if (!this.nativeFinalIngressOnly && !this.publicMessageContinuation) return false;
+    // A new user envelope can be Rescue resuming interrupted work. It is not
+    // an assistant final and must neither redeem a Goal round nor authorize a
+    // second message. Native final reconciliation owns the eventual decision.
+    row.reason = 'new-user-turn-awaiting-native-final';
+    row.candidateKey = null;
+    row.settledAt = null;
+    await this.save();
+    return true;
+  }
   async advance(row) {
     const goal = await this.goalRuntime.status(row.goalId);
     if (redeemable(goal) && goal.round === row.round
@@ -897,6 +1029,7 @@ export class GoalContinuationSupervisor {
     }
     let selected = await this.finalCandidates(goal,row);
     if(selected.newUser){
+      if (await this.deferNewUserUntilNativeFinal(row)) return;
       const redeemed=await this.redeemHumanContinuation(row, {
         userMessageId:selected.newUserMessageId||null,
         reason:'human-user-turn-started-next-round',
@@ -905,8 +1038,16 @@ export class GoalContinuationSupervisor {
       return;
     }
     let pages = selected.pages;
-    if (!pages) { row.reason = 'exact-page-unavailable'; return; }
+    if (!pages) {
+      row.reason = selected.inspectionReason || 'exact-page-unavailable';
+      if (selected.inspectionReason) {
+        row.retryAt = this.now() + 5000; row.candidateKey = null; row.settledAt = null;
+        await this.save();
+      }
+      return;
+    }
     if (pages.some(p => p.latestUserMessageId !== row.sourceUserId)) {
+      if (await this.deferNewUserUntilNativeFinal(row)) return;
       const nextUser=pages.find(p=>p.latestUserMessageId!==row.sourceUserId)?.latestUserMessageId||null;
       const redeemed=await this.redeemHumanContinuation(row, {
         userMessageId:nextUser,
@@ -916,24 +1057,67 @@ export class GoalContinuationSupervisor {
       return;
     }
     if (!this.matchesFinal(row, pages)) { row.reason = 'awaiting-current-final'; row.candidateKey = null; return; }
-    const key = pages.map(p => `${p.pageTargetId}:${p.latestAssistantMessageId}:${digest(p.latestAssistantText)}`).join('|');
+    if (this.publicMessageContinuation && row.nativeCompletionProof?.ingress !== 'native-response-stream') {
+      row.reason = 'awaiting-native-final-ingress'; return;
+    }
+    if (pages.length === 1 && pages[0].boundarySource === 'native-goal-start-tool-result') {
+      const nativeProof = receiptNativeFinalProof(goal, pages[0], this.now());
+      if (!nativeProof) { row.reason = 'native-start-final-proof-unavailable'; row.candidateKey = null; return; }
+      row.nativeCompletionProof = nativeProof;
+      row.nativeFinalVerified = true;
+    }
+    const key = pages.map(p => `${p.pageTargetId}:${p.latestAssistantMessageId}:${p.nativeFinalReceipt?.assistantTextHash || digest(p.latestAssistantText)}`).join('|');
     if (row.candidateKey !== key) { row.candidateKey = key; row.settledAt = this.now(); return; }
     if (this.now() - row.settledAt < this.settleMs || this.closed) return;
     // Exclusive GoalRuntime lease also arbitrates the legacy app dispatch path.
     const claimed = await this.goalRuntime.continuation({ goalId: row.goalId, action: 'claim' });
     const leaseId = claimed.claim.leaseId;
-    selected = await this.finalCandidates(goal,row);
+    try {
+      selected = await this.finalCandidates(goal,row);
+    } catch {
+      // No host transport has run. An inspection timeout is unavailable
+      // evidence, not proof that a user changed the boundary.
+      selected = { pages: null };
+    }
     pages = selected.pages;
     const current = await this.goalRuntime.status(row.goalId);
-    if (this.closed || current.status !== 'active' || current.continuation?.leaseId !== leaseId || !this.matchesFinal(row, pages)) {
+    if (this.closed || current.status !== 'active' || current.roundState !== 'reported'
+      || current.round !== row.round || current.continuation?.continuationId !== row.continuationId
+      || current.continuation?.leaseId !== leaseId || selected.newUser) {
+      await this.goalRuntime.continuation({ goalId: row.goalId, action: 'release', leaseId }).catch(() => {});
+      row.state = 'cancelled'; row.reason = 'pre-send-boundary-changed'; await this.save(); return;
+    }
+    if (!pages) {
+      // Release only this uncommitted lease, retain the journal, and require
+      // another fresh settled boundary after bounded backoff. Never send from
+      // the earlier positive inspection, revive a cancelled row, or replay a
+      // possibly committed transport.
+      await this.goalRuntime.continuation({ goalId: row.goalId, action: 'release', leaseId });
+      row.state = 'waiting'; row.reason = 'pre-send-boundary-unavailable';
+      row.retryAt = this.now() + 5000; row.candidateKey = null; row.settledAt = null;
+      await this.save(); return;
+    }
+    if (!this.matchesFinal(row, pages)) {
       await this.goalRuntime.continuation({ goalId: row.goalId, action: 'release', leaseId }).catch(() => {});
       row.state = 'cancelled'; row.reason = 'pre-send-boundary-changed'; await this.save(); return;
     }
     row.state = 'dispatching'; row.attempts += 1; row.leaseId = leaseId; row.sentAt = this.now();
+    // Receipts describe one attempt only. A crash during this new transport
+    // must never retain an earlier preflight's definite-unsent result.
+    row.dispatchCommitted = null; row.dispatchDefiniteFailure = null;
+    row.dispatchState = null; row.dispatchError = null;
     row.finalAssistantId = pages[0].latestAssistantMessageId;
     row.deliveryMode = 'hidden-assistant-continuation';
     row.dispatchRuntimeKey = pages[0].runtimeKey || row.sourceRuntimeKey || null;
     row.dispatchPageTargetId = pages[0].pageTargetId || null;
+    if (this.publicMessageContinuation) {
+      row.deliveryMode = 'public-component-message';
+      row.publicPrompt = claimed.claim.prompt + '\nAt the start of this automatic round, call devspace_goal_round_begin with '
+        + JSON.stringify({ goalId: row.goalId, continuationId: row.continuationId })
+        + '. This reconciles delivery only; it is not a prerequisite for ordinary work tools.';
+      row.publicPromptHash = digest(row.publicPrompt);
+      row.state = 'awaiting-app'; row.reason = 'awaiting-public-component-message';
+    }
     if(row.causalDisplayProof)row.sourceRuntimeKey=pages[0].runtimeKey||null;
     try {
       await this.save(); // durable before any possible transport side effect
@@ -956,6 +1140,8 @@ export class GoalContinuationSupervisor {
       row.state='cancelled'; row.reason='control-change-before-transport';
       await this.save(); return;
     }
+    // Durable public job is pulled by the App, never by a CDP SDK invocation.
+    if (this.publicMessageContinuation) return;
     let sent;
     try {
       sent = await this.dispatch({ goal: current, page: pages[0], sourceUserId: row.sourceUserId,
@@ -1002,6 +1188,101 @@ export class GoalContinuationSupervisor {
     const row = rows.at(-1);
     return { ok: true, backendOwned: true, state: row?.state || 'unarmed', dispatched: row?.state === 'delivered' };
   }
+  async claimPublicMessage(goalId) {
+    // Serialize competing old/new App frames. Persist issued state BEFORE
+    // returning the prompt: a lost tools/call reply must never issue it twice.
+    const task = this.publicClaimQueue.then(async () => {
+      await this.pollOnce();
+      if (!this.publicMessageContinuation || !this.enabled || this.closed) return null;
+      const row = [...this.records.values()].find(r => r.goalId === goalId && r.state === 'awaiting-app');
+      if (!row) return null;
+      const goal = await this.goalRuntime.status(goalId);
+      if (await this.goalRuntime.hasConversationCollision({ goalId })) return null;
+      if (!redeemable(goal) || goal.round !== row.round || goal.continuation.continuationId !== row.continuationId) {
+        row.state = 'superseded'; row.reason = 'goal-stopped-paused-or-consumed'; await this.save(); return null;
+      }
+      // A never-issued job can safely renew an expired lease. Issued/unknown
+      // jobs never enter this branch and cannot be replayed after expiration.
+      if (goal.continuation.state === 'pending') {
+        const renewal = await this.goalRuntime.continuation({ goalId, action: 'claim' });
+        row.leaseId = renewal.claim.leaseId;
+      } else if (goal.continuation.leaseId !== row.leaseId) return null;
+      const boundary = await this.finalCandidates(goal, row);
+      if (boundary.newUser) {
+        if (await this.deferNewUserUntilNativeFinal(row)) return null;
+        await this.redeemHumanContinuation(row, { userMessageId: boundary.newUserMessageId });
+        return null;
+      }
+      if (!this.matchesFinal(row, boundary.pages)) return null;
+      const current = await this.goalRuntime.status(goalId);
+      if (this.closed || current.status !== 'active' || current.round !== row.round
+        || current.continuation?.leaseId !== row.leaseId) return null;
+      row.state = 'uncertain'; row.reason = 'public-message-issued-awaiting-native-receipt';
+      row.publicIssuedAt = this.now();
+      try { await this.save(); }
+      catch (error) {
+        // The prompt has not left this method; no host side effect is possible.
+        row.state = 'awaiting-app'; row.publicIssuedAt = null;
+        row.reason = 'public-message-claim-persist-failed';
+        throw error;
+      }
+      const latest = await this.finalCandidates(await this.goalRuntime.status(goalId), row);
+      const stillActive = await this.goalRuntime.status(goalId);
+      if (this.closed || stillActive.status !== 'active' || stillActive.continuation?.leaseId !== row.leaseId
+        || latest.newUser || !this.matchesFinal(row, latest.pages)) {
+        // Still before returning the prompt. Unlike a lost App reply, this is
+        // definitely unsent and may be revalidated later, not quarantined.
+        row.state = 'awaiting-app'; row.publicIssuedAt = null;
+        row.reason = 'public-message-boundary-changed-before-issue';
+        await this.save(); return null;
+      }
+      return { goalId, conversationId: row.conversationId, continuationId: row.continuationId,
+        leaseId: row.leaseId, prompt: row.publicPrompt, round: row.round };
+    });
+    this.publicClaimQueue = task.catch(() => {});
+    return task;
+  }
+  async notePublicMessageFinal(event) {
+    await this.ready;
+    if (!isNativeStreamFinalReceipt(event)) return false;
+    const row = [...this.records.values()].find(r => r.deliveryMode === 'public-component-message'
+      && r.publicIssuedAt && r.state === 'uncertain' && r.conversationId === event.conversationId
+      && r.dispatchRuntimeKey === event.runtimeKey && r.dispatchPageTargetId === event.pageTargetId
+      && r.publicPromptHash === event.sourceUserTextHash && r.finalAssistantId === event.parentMessageId
+      && r.sourceUserId !== event.sourceUserMessageId && event.observedAtMs >= r.publicIssuedAt);
+    if (!row) return false;
+    const goal = await this.goalRuntime.status(row.goalId);
+    if (goal.status !== 'active' || await this.goalRuntime.hasConversationCollision({ goalId: row.goalId })) return false;
+    await this.goalRuntime.roundBegin({ goalId: row.goalId, continuationId: row.continuationId,
+      roundBeganAt: new Date(row.publicIssuedAt).toISOString() });
+    row.state = 'delivered'; row.redeemed = true;
+    row.reason = 'public-message-confirmed-by-native-assistant-final';
+    row.publicUserMessageId = event.sourceUserMessageId;
+    row.publicAssistantMessageId = event.assistantMessageId;
+    await this.save();
+    return true;
+  }
+  async noteNativeFinalSupersession(event) {
+    await this.ready;
+    if (!isNativeStreamFinalReceipt(event)) return false;
+    // Reboot can move the SAME conversation to another local Main. A fresh
+    // native completed turn with a new source user supersedes an old unknown
+    // send; it is human/external progress, never an automatic-delivery pass.
+    for (const row of this.records.values()) {
+      if (!['waiting', 'awaiting-app', 'dispatching', 'uncertain'].includes(row.state)
+        || row.conversationId !== event.conversationId || row.sourceUserId === event.sourceUserMessageId
+        || (row.publicPromptHash && row.publicPromptHash === event.sourceUserTextHash)) continue;
+      const after = Math.max(Number(row.sentAt || row.createdAt || 0), Date.parse(row.reportedAt || '') || 0);
+      if (!after || Date.parse(event.assistantCreatedAt) < after || event.observedAtMs < after) continue;
+      const goal = await this.goalRuntime.status(row.goalId);
+      if (await this.goalRuntime.hasConversationCollision({ goalId: row.goalId })) return false;
+      if (!redeemable(goal) || goal.conversationId !== event.conversationId
+        || goal.round !== row.round || goal.continuation.continuationId !== row.continuationId) continue;
+      return await this.redeemHumanContinuation(row, { userMessageId: event.sourceUserMessageId,
+        observedAt: event.assistantCreatedAt, reason: 'native-final-proves-external-user-continuation' });
+    }
+    return false;
+  }
   status() {
     return { enabled: this.enabled, running: Boolean(this.timer), lastError: this.lastError,
       relayLookup: this.relayDiagnostics?.() ?? null,
@@ -1021,6 +1302,7 @@ export class GoalContinuationSupervisor {
         reason: r.reason, attempts: r.attempts, redeemed: r.redeemed === true,
         deliveryMode: r.deliveryMode || null,
         recoveredMissingArm: r.recoveredMissingArm === true,
+        nativeFinalVerified: r.nativeFinalVerified === true,
         manualUserObservedAt: r.manualUserObservedAt || null,
         manualTimestampResolution: r.manualTimestampResolution || null,
         manualTimestampAttempts: Number(r.manualTimestampAttempts || 0),
@@ -1032,7 +1314,8 @@ export class GoalContinuationSupervisor {
     this.missingArmRetryAt.clear();
     this.missingArmAttempts.clear();
     this.missingArmErrors.clear();
-    await this.polling?.catch(() => {}); await this.persistQueue.catch(() => {});
+    await this.polling?.catch(() => {}); await this.publicClaimQueue.catch(() => {});
+    await this.persistQueue.catch(() => {});
   }
 }
 

@@ -3,6 +3,11 @@ import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
 const root = resolve(import.meta.dirname, "..");
+const packageJson = JSON.parse(await readFile(resolve(root, 'package.json'), 'utf8'));
+for (const bin of new Set(Object.values(packageJson.bin || {}))) {
+  const source = await readFile(resolve(root, bin), 'utf8');
+  assert.match(source, /^#![^\r\n]+\n/, `${bin}: ship LF shebang so npm install does not rewrite archive bytes`);
+}
 const files = Object.fromEntries(await Promise.all([
   "install.ps1",
   "install.sh",

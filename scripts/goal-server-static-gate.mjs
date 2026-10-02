@@ -8,17 +8,19 @@ assert.match(source, /import \{ GoalRuntime \} from "\.\/goal-runtime\.js";/);
 assert.match(source, /import \{ registerGoalTools \} from "\.\/goal-tools\.js";/);
 assert.match(source, /import \{ ClassicGoalHostBridge, defaultMainDebugPorts, inspectGoalContinuationPages \} from "\.\/goal-host-bridge\.js";/);
 assert.match(source, /const GOAL_DOCK_URI = "ui:\/\/devspace\/goal-dock\.html";/);
-assert.equal(GOAL_RELAY_URI, "ui://devspace/goal-continuation-relay-v2.html");
+assert.equal(GOAL_RELAY_URI, "ui://devspace/goal-continuation-relay-v3.html");
 assert.match(source, /import \{ GOAL_RELAY_URI, PROGRESS_CLAIM_RELAY_URI, readGoalRelayHtml \} from "\.\/goal-relay-resource\.js";/,
   "production must use the versioned resource with its bundled Apps bridge");
 assert.match(source, /new GoalRuntime\(\{\s*stateDir: config\.stateDir,?\s*\}\)/s);
 assert.match(source, /const configuredClassicPorts = Array\.isArray\(config\.classicMainDebugPorts\)[\s\S]{0,260}const classicCdpOptions = \{[\s\S]{0,220}configuredClassicPorts\.length[\s\S]{0,120}defaultMainDebugPorts\(\{ includeObserved: true, refresh: true \}\)/,
   "Goal Host Bridge must share explicit ports or the observed-process plus canonical fallback set");
-assert.match(source, /new ClassicGoalHostBridge\(\{\s*\.\.\.classicCdpOptions,\s*beforeDispatch:\s*config\.passiveCore\s*\|\|\s*!primaryDebugGuard\s*\?\s*undefined\s*:\s*\(\) => primaryDebugGuard\.pollOnce\(\),?\s*\}\)/s);
+assert.match(source, /new ClassicGoalHostBridge\(\{\s*\.\.\.classicCdpOptions,\s*inspectNativeFinal: \(goal, row\) => nativeFinalBoundaries\.inspect\(goal, row\),\s*beforeDispatch:\s*config\.passiveCore\s*\|\|\s*!primaryDebugGuard\s*\?\s*undefined\s*:\s*\(\) => primaryDebugGuard\.pollOnce\(\),?\s*\}\)/s);
 assert.doesNotMatch(source, /sendExactGoalRecovery|progressLivenessAdapter\.sendGoalRecovery|progressLivenessAdapter\.sendGoalContinuation/,
   "Goal continuation and same-round recovery must never be wired to the visible composer transport");
-assert.match(source, /dispatch:\s*\(\{ goal, page,[\s\S]{0,500}return goalHostBridge\.dispatch\(\{/,
+assert.match(source, /dispatch:\s*(?:async\s+)?\(\{ goal, page,[\s\S]{0,500}return goalHostBridge\.dispatch\(\{/,
   "the Goal continuation supervisor must dispatch through the hidden host bridge");
+assert.match(source, /nativeGoalStartReceipt:\s*await goalRuntime\.nativeStartReceipt\(goal\.id\)/,
+  "native start evidence must come from durable server state, never caller arguments");
 assert.match(source, /expectedPageTargetId:\s*candidate\.pageTargetId/,
   "hidden continuation must remain bound to the exact page proven at the visible-final boundary");
 assert.match(source, /onHiddenContinuationStarted:\s*async \(\{ conversationId, continuationId, sourceUserMessageId, runtimeKey, observedAtMs \}\)/,

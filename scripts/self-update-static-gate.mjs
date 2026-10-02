@@ -51,7 +51,10 @@ assert.match(updater, /else \{[\s\S]*npmOutput = @\(& \$npm\.Source install --gl
   "production staging must continue to use a real isolated npm install");
 assert.match(updater, /Get-GatewayBusyState/);
 assert.match(updater, /\$otherHttpActive\s*=\s*\[Math\]::Max\(0,\s*\$httpActive\s*-\s*1\)/, "updater must exclude its own gateway status request from active-work detection");
-assert.match(updater, /Busy\s*=\s*\(\$toolActive\s*-gt\s*0\)/, "the authoritative non-stream tool counter must defer real work without treating replayable SSE as busy");
+assert.match(updater, /Busy\s*=\s*\(\$toolActive\s*-gt\s*0\s*-or\s*\$processSessions\s*-gt\s*0\)/, "retained process sessions must defer updates even when HTTP/tool counters are quiet");
+assert.match(updater, /core\.pid[\s\S]*core\.registries\.processSessions/, "readiness must bind aggregate process diagnostics to the exact Core PID");
+assert.match(updater, /function Stop-DevSpaceRuntime[\s\S]*Get-GatewayBusyState[\s\S]*Runtime retirement deferred[\s\S]*Get-CimInstance/, "recheck readiness after staging before runtime retirement side effects");
+assert.match(updater, /function Restore-RetiredUpdateRuntime[\s\S]*if \(-not \$script:RuntimeRetirementStarted\) \{ return \}/, "a pre-retirement failure must not restart or rewrite still-running tasks");
 assert.match(updater, /function Move-ItemWithRetry/);
 assert.match(updater, /bounded Windows lock retries/);
 assert.match(updater, /Collections\.Generic\.HashSet\[int\]/);
@@ -75,7 +78,7 @@ assert.match(updater, /better-sqlite3 native binding did not load/);
 assert.match(updater, /preservedLegacyRoots/);
 assert.match(updater, /devspace-stable-gateway-startup\.ps1/);
 assert.match(updater, /-Action install -ConfigDir \$gatewayConfigDir/);
-assert.match(updater, /if \(\$busy\.Known -and \$busy\.Busy -and -not \$Force\)/,
+assert.match(updater, /if \(-not \$busy\.Known -or \$busy\.Busy\)/,
   "automatic update must defer instead of interrupting active Agent/tool work");
 assert.match(updater, /DevSpace-Ultra-Auto-Update/);
 assert.match(updater, /New-ScheduledTaskTrigger\s+-Daily/,

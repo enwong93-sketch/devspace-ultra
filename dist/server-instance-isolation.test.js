@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig } from "./config.js";
@@ -151,6 +151,37 @@ try {
   }, sessionId, protocolVersion);
   assert.equal(workspace.body?.result?.structuredContent?.root, root,
     "workspace tools must not require an unrelated progress-card claim");
+  const workspaceId = workspace.body.result.structuredContent.workspaceId;
+  const imageBytes = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jN1sAAAAASUVORK5CYII=', 'base64');
+  writeFileSync(join(root, 'workspace-qa.png'), imageBytes);
+  const imageRequest = {
+    jsonrpc: '2.0', id: 30, method: 'tools/call',
+    params: { name: 'view_image', arguments: { workspaceId, path: 'workspace-qa.png' } },
+  };
+  const image = await post(imageRequest, sessionId, protocolVersion);
+  assert.equal(image.body?.result?.structuredContent?.ok, true,
+    'workspace image reads must use the same OAuth/workspace authority as ordinary file reads, without an unrelated Classic page claim');
+  const imageBlock = image.body.result.content.find(block => block.type === 'image');
+  assert.equal(imageBlock.mimeType, 'image/png');
+  assert.deepEqual(Buffer.from(imageBlock.data, 'base64'), imageBytes);
+  const unauthenticatedImage = await fetch(`${base}/mcp`, {
+    method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
+    body: JSON.stringify(imageRequest),
+  });
+  assert.equal(unauthenticatedImage.status, 401, 'workspace image reads still require OAuth');
+  for (const [id, arguments_, expectedError] of [
+    [31, { workspaceId, path: '../outside.png' }, /outside|escape|not allowed|denied/i],
+    [32, { workspaceId: 'nonexistent-workspace', path: 'workspace-qa.png' }, /workspaceId|workspace/i],
+  ]) {
+    const deniedImage = await post({ ...imageRequest, id, params: { name: 'view_image', arguments: arguments_ } }, sessionId, protocolVersion);
+    assert.equal(deniedImage.body?.result?.isError, true);
+    assert.match(JSON.stringify(deniedImage.body.result), expectedError);
+    assert.equal(deniedImage.body.result.content.some(block => block.type === 'image'), false);
+  }
+  writeFileSync(join(root, 'not-an-image.png'), 'Not an image');
+  const invalidImage = await post({ ...imageRequest, id: 33,
+    params: { name: 'view_image', arguments: { workspaceId, path: 'not-an-image.png' } } }, sessionId, protocolVersion);
+  assert.equal(invalidImage.body?.result?.isError, true, 'file signature validation remains enforced');
   const blender = await post({
     jsonrpc: "2.0", id: 11, method: "tools/call",
     params: { name: "blender_runtime", arguments: { action: "list" } },

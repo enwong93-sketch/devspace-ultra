@@ -150,6 +150,9 @@
         stop(`goal-${String(goal.status || "terminal")}`);
         return;
       }
+      if (goal.roundState === "reported") {
+        await relayBridge.dispatchPublicMessage(goalId, conversationId);
+      }
       if (goal.roundState === "reported" && goal.continuation?.state === "pending" && continuationId) {
         if (lastRequestedContinuationId !== continuationId) {
           const dispatched = await relayBridge.callTool("devspace_goal_continuation", {

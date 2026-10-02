@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import test from "node:test";
 import { createHash } from "node:crypto";
 
 let moduleUnderTest = null;
@@ -839,11 +840,58 @@ console.log(JSON.stringify({
   main01: ports[0],
   main32: ports.at(-1),
   chatModeOnly: true,
-  singleRawDispatch: true,
-  hiddenHostRecovery: true,
+  singleInjectedSenderDispatch: true,
+  injectedHiddenRecoveryFlow: true,
+  defaultNativeHiddenTransportAvailable: false,
   visibleSameRoundRecoveryRetired: true,
   visibleComposerRecovery: false,
   composerExposureDetectedAndCleared: true,
   recoveryForegroundActivation: false,
   recoveryPageNavigation: false,
 }));
+
+// Default production transport must never extract private SDK scopes or use CDP
+// to bypass a host activation gate. Injected test adapters exercise a different
+// contract and do not establish production transport availability.
+test('legacy host sender is definitely unavailable without touching a socket', async () => {
+  let socketOpens = 0;
+  class ForbiddenSocket {
+    constructor() { socketOpens++; throw new Error('unexpected socket open'); }
+  }
+  const result = await moduleUnderTest.sendRawHostFollowUp(
+    { webSocketDebuggerUrl: 'ws://invalid.test/exact-owned-target' },
+    { prompt: 'continue owned Goal' }, { WebSocketImpl: ForbiddenSocket });
+  assert.equal(socketOpens, 0);
+  assert.equal(result.ok, false);
+  assert.equal(result.definiteFailure, true);
+  assert.equal(result.dispatchCommitted, false);
+  assert.equal(result.backgroundAccepted, false);
+  assert.equal(result.state, 'supported-native-hidden-transport-unavailable');
+});
+
+for (const [method, payload] of [
+  ['dispatchConversationFollowUp', { conversationId: 'owned-conversation', prompt: 'continue' }],
+  ['dispatchRoundRecovery', { goalId: 'owned-goal', conversationId: 'owned-conversation',
+    prompt: '[DEVSPACE_GOAL_ROUND_RECOVERY] continue', sourceUserMessageId: 'source-user',
+    baselineAssistantMessageId: 'source-final' }],
+  ['dispatch', { goalId: 'owned-goal', conversationId: 'owned-conversation', prompt: 'continue' }],
+]) {
+  test(`${method} without an injected sender fails before discovery or maintenance`, async () => {
+    let sideEffects = 0;
+    const forbidden = async () => { sideEffects++; throw new Error('unexpected side effect'); };
+    const bridge = new moduleUnderTest.ClassicGoalHostBridge({
+      beforeDispatch: forbidden, beforeRawDispatch: forbidden, probePort: forbidden,
+      probeRelayPort: forbidden, inspectComposer: forbidden, inspectVisibleReport: forbidden,
+    });
+    bridge.findExactConversationRelay = async () => {
+      sideEffects++; return { candidate: null, matchCount: 0 };
+    };
+    const result = await bridge[method](payload);
+    assert.equal(sideEffects, 0);
+    assert.equal(result.ok, false);
+    assert.equal(result.definiteFailure, true);
+    assert.equal(result.dispatchCommitted, false);
+    assert.equal(result.backgroundAccepted, false);
+    assert.equal(result.state, 'supported-native-hidden-transport-unavailable');
+  });
+}

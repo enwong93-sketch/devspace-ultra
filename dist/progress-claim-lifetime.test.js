@@ -72,9 +72,10 @@ test('an exact Goal start result keeps one persistent relay and requests backend
   const firstPoll=timers.find(timer=>timer.ms===250);assert.ok(firstPoll);
   await firstPoll.callback();
   await new Promise(resolve=>setImmediate(resolve));
-  assert.deepEqual(calls.map(call=>call.name),['devspace_goal_status','devspace_goal_continuation']);
+  assert.deepEqual(calls.map(call=>call.name),['devspace_goal_status','devspace_goal_continuation','devspace_goal_continuation']);
   assert.equal(calls[1].args.goalId,goal.id);
-  assert.equal(calls[1].args.action,'dispatch');
+  assert.equal(calls[1].args.action,'public_message');
+  assert.equal(calls[2].args.action,'dispatch');
   assert.equal(window.__DEVSPACE_GOAL_RELAY_STATE__.lastDispatchContinuationId,'continuation-persistent-relay');
   assert.equal(window.__DEVSPACE_GOAL_RELAY_STATE__.active,true);
 });
