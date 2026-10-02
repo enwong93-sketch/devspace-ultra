@@ -62,6 +62,12 @@ acceptance evidence.
     cancel the round or strand its lease. A genuinely changed final, user,
     Goal control or lease still wins. An exact recovered native final must
     never fall through to the generic empty-baseline final test.
+11. A startup/refresh process-inventory timeout cannot remove the known legacy
+    Main fallback from discovery or exact runtime filtering. The public static
+    port catalog stays unchanged; the observed-runtime path also probes the
+    deterministic legacy aliases, still requiring exact conversation/page/relay
+    ownership. Missing-arm diagnostics distinguish no exact page, unresolved
+    native source and actual rate-limit backoff without returning content.
 
 ## Verification boundary
 

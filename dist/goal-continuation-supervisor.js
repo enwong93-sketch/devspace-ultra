@@ -297,14 +297,23 @@ export class GoalContinuationSupervisor {
     await enqueueRecoverablePersist(this, () => atomicWriteJson(this.statePath, snapshot));
   }
   async pages(goal, options = {}) {
+    const unavailable = reason => {
+      if (options.inspectionOutcome) options.inspectionOutcome.reason = reason;
+      return null;
+    };
     let rows = await this.inspect(goal, options);
     if (Array.isArray(rows) && options.runtimeKey) rows = rows.filter(p => p.runtimeKey === options.runtimeKey);
     if (Array.isArray(rows) && options.pageTargetId) rows = rows.filter(p => p.pageTargetId === options.pageTargetId);
-    if (!Array.isArray(rows) || !rows.length || rows.length > 4) return null;
-    if (rows.some(p => p?.conversationId !== goal.conversationId || !p.latestUserMessageId || p.chatMode !== true)) return null;
-    if (rows.some(p => p.nativeSafetyBlocked === true)) return null;
-    if (rows.some(p => p.nativeGoalSourceRequired === true && p.boundarySource !== 'native-goal-start-tool-result')) return null;
-    if (!options.allowDivergent && new Set(rows.map(p => p.latestUserMessageId)).size !== 1) return null;
+    if (!Array.isArray(rows) || !rows.length) return unavailable('no-exact-page');
+    if (rows.length > 4) return unavailable('ambiguous-exact-pages');
+    if (rows.some(p => p?.conversationId !== goal.conversationId || !p.latestUserMessageId || p.chatMode !== true)) return unavailable('invalid-exact-page-owner');
+    if (rows.some(p => p.nativeSafetyBlocked === true)) return unavailable('native-safety-blocked');
+    const unresolved = rows.find(p => p.nativeGoalSourceRequired === true && p.boundarySource !== 'native-goal-start-tool-result');
+    if (unresolved) {
+      const state = String(unresolved.nativeContinuation?.state || unresolved.nativeContinuation?.goalStartWitness?.reason || 'missing-start-witness');
+      return unavailable('native-source-unavailable:' + (/^[a-z0-9-]{1,80}$/.test(state) ? state : 'unresolved'));
+    }
+    if (!options.allowDivergent && new Set(rows.map(p => p.latestUserMessageId)).size !== 1) return unavailable('divergent-source-users');
     return rows;
   }
   async arm(goal, { resume = false, reportAuthority = null } = {}) {
@@ -456,6 +465,7 @@ export class GoalContinuationSupervisor {
         continue;
       }
       let pages;
+      const inspectionOutcome = {};
       const nativeFinal = nativeCompletionProof(goal);
       try {
         pages = await this.pages(goal, {
@@ -468,6 +478,7 @@ export class GoalContinuationSupervisor {
           pageTargetId: nativeFinal?.pageTargetId || null,
           allowDivergent: !nativeFinal,
           includeNativeBranch: true,
+          inspectionOutcome,
         });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -477,7 +488,7 @@ export class GoalContinuationSupervisor {
       }
       const proof = exactMissingArmBoundary(goal, pages, this.now());
       if (!proof) {
-        this.scheduleMissingArmRetry(continuationId, 'exact-boundary-unresolved');
+        this.scheduleMissingArmRetry(continuationId, inspectionOutcome.reason || 'exact-boundary-unresolved');
         results.push({ goalId: goal.id, round: goal.round, recovered: false, reason: 'missing-arm-boundary-unresolved' });
         continue;
       }

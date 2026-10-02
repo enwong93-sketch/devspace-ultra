@@ -73,6 +73,22 @@ test('a stale display cannot arm before the native start witness is available', 
   assert.equal((await h.runtime.status(h.g.id)).round, 1);
 });
 
+test('missing-arm diagnostics distinguish unavailable exact page from native rate-limit evidence', async t => {
+  const h = await harness(t, { skipArm: true });
+  h.setPages([]);
+  await h.tick();
+  assert.equal(h.driver.status().missingArmErrors[0].error, 'no-exact-page');
+  h.advanceTime(5100);
+  h.setPages([{ conversationId: h.g.conversationId, latestUserMessageId: 'stale-user',
+    chatMode: true, nativeGoalSourceRequired: true,
+    nativeContinuation: { resolved: false, state: 'native-branch-rate-limit-backoff' } }]);
+  await h.tick();
+  assert.equal(h.driver.status().missingArmErrors[0].error,
+    'native-source-unavailable:native-branch-rate-limit-backoff');
+  assert.equal(h.sends(), 0);
+  assert.equal((await h.runtime.status(h.g.id)).round, 1);
+});
+
 test('native receipt reconciles a stale display without counting it as human continuation', async t => {
   const h = await harness(t, { skipArm: true });
   h.setPages([await receiptPage(h)]);

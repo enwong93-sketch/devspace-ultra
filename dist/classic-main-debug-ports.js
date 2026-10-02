@@ -106,14 +106,20 @@ export function runtimePortsForClassicKey(runtimeKey) {
     .filter(entry => entry.mainNumber === number)
     .map(entry => entry.port);
   const fallback = staticClassicMainPort(number);
-  return [...new Set([...observed, ...(fallback ? [fallback] : [])])];
+  const legacyFallback = number >= MIN_MAIN ? LEGACY_ALTERNATE_BASE + number : null;
+  // Process inventory can time out during Core startup or a later refresh.
+  // These deterministic Main aliases remain valid probe candidates; an exact
+  // page/conversation/relay check still authorizes every actual operation.
+  return [...new Set([...observed, ...(fallback ? [fallback] : []),
+    ...(legacyFallback ? [legacyFallback] : [])])];
 }
 
 export function classicMainDebugPorts({ includeObserved = false, refresh = false } = {}) {
   const defaults = [PRIMARY_PORT, ...Array.from({ length: MAX_MAIN - MIN_MAIN + 1 }, (_, index) => INTERACTIVE_BASE + MIN_MAIN + index)];
   if (!includeObserved) return defaults;
   const observed = observedClassicMainPortEntries({ refresh }).map(entry => entry.port);
-  return [...new Set([...observed, ...defaults])];
+  const legacy = Array.from({ length: MAX_MAIN - MIN_MAIN + 1 }, (_, index) => LEGACY_ALTERNATE_BASE + MIN_MAIN + index);
+  return [...new Set([...observed, ...defaults, ...legacy])];
 }
 
 export function runtimeLabelForClassicPort(port) {
