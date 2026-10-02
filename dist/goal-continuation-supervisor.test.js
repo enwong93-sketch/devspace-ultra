@@ -95,6 +95,90 @@ test('missing-arm restart uses the durable native receipt instead of an old disp
   assert.equal(h.sentPayloads[0].nativeCompletionProof.sourceUserMessageId, 'native-source');
 });
 
+test('native rate-limit unavailability after claim releases the unsent lease and retries a fresh boundary', async t => {
+  const h = await harness(t, { skipArm: true });
+  h.setPages([await receiptPage(h)]);
+  await h.driver.arm(h.reported);
+  await h.tick();
+  const inspect = h.driver.inspect;
+  let unavailable = true;
+  h.driver.inspect = async (...args) => {
+    const current = await h.runtime.status(h.g.id);
+    if (unavailable && current.continuation.state === 'dispatching') {
+      return [{ ...h.page(), boundarySource: null, nativeGoalSourceRequired: true,
+        nativeContinuation: { resolved: false, state: 'native-branch-rate-limit-backoff' } }];
+    }
+    return inspect(...args);
+  };
+  await h.tick();
+  assert.equal(h.sends(), 0);
+  assert.equal(h.driver.status().records[0].state, 'waiting');
+  assert.equal(h.driver.status().records[0].reason, 'pre-send-boundary-unavailable');
+  assert.equal(h.driver.status().records[0].attempts, 0);
+  assert.equal((await h.runtime.status(h.g.id)).continuation.state, 'pending');
+  await h.tick(); assert.equal(h.sends(), 0, 'no busy retry during the floor');
+  unavailable = false;
+  h.advanceTime(5100);
+  await h.tick(); await h.tick();
+  assert.equal(h.sends(), 1);
+  assert.equal((await h.runtime.status(h.g.id)).round, 2);
+  await h.tick(); assert.equal(h.sends(), 1, 'a delivered turn is never replayed');
+});
+
+test('a pre-send inspection exception releases its lease and remains recoverable after Core replacement', async t => {
+  const h = await harness(t);
+  h.final(); await h.tick();
+  const inspect = h.driver.inspect;
+  h.driver.inspect = async (...args) => {
+    if ((await h.runtime.status(h.g.id)).continuation.state === 'dispatching') {
+      throw new Error('injected native inspection timeout');
+    }
+    return inspect(...args);
+  };
+  await h.tick();
+  assert.equal(h.sends(), 0);
+  assert.equal((await h.runtime.status(h.g.id)).continuation.state, 'pending');
+  assert.equal(h.driver.status().records[0].state, 'waiting');
+  await h.driver.close(); h.advanceTime(5100);
+  const restarted = new GoalContinuationSupervisor(h.config);
+  t.after(() => restarted.close());
+  await restarted.pollOnce(); h.advanceTime(100); await restarted.pollOnce();
+  assert.equal(h.sends(), 1);
+  assert.equal((await h.runtime.status(h.g.id)).round, 2);
+});
+
+test('an actually changed native final after claim cancels rather than falling through to a fresh final', async t => {
+  const h = await harness(t, { skipArm: true });
+  h.setPages([await receiptPage(h)]);
+  await h.driver.arm(h.reported); await h.tick();
+  const inspect = h.driver.inspect;
+  h.driver.inspect = async (...args) => {
+    const pages = await inspect(...args);
+    return (await h.runtime.status(h.g.id)).continuation.state === 'dispatching'
+      ? pages.map(page => ({ ...page, latestAssistantMessageId: 'different-native-final',
+        latestAssistantText: 'A different native final must not replace the captured one.' })) : pages;
+  };
+  await h.tick();
+  assert.equal(h.sends(), 0);
+  assert.equal(h.driver.status().records[0].state, 'cancelled');
+  assert.equal(h.driver.status().records[0].reason, 'pre-send-boundary-changed');
+});
+
+test('a new human source after claim wins without dispatch or automatic redemption', async t => {
+  const h = await harness(t);
+  h.final(); await h.tick();
+  const inspect = h.driver.inspect;
+  h.driver.inspect = async (...args) => {
+    const pages = await inspect(...args);
+    return (await h.runtime.status(h.g.id)).continuation.state === 'dispatching'
+      ? pages.map(page => ({ ...page, latestUserMessageId: 'new-human-source' })) : pages;
+  };
+  await h.tick();
+  assert.equal(h.sends(), 0);
+  assert.equal(h.driver.status().records[0].state, 'cancelled');
+  assert.equal((await h.runtime.status(h.g.id)).round, 1);
+});
+
 function nativePageForReported(h, overrides = {}) {
   const reportedAtMs = Date.parse(h.reported.lastRoundReport.reportedAt);
   const sourceUserCreatedAt = new Date(reportedAtMs - 2_000).toISOString();

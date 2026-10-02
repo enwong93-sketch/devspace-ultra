@@ -56,6 +56,12 @@ acceptance evidence.
    loop. The guard's ordinary observation does not force a native branch read
    merely because a receipt exists; its explicit retry floor still applies.
    Do not cache a positive native boundary for dispatch revalidation.
+10. A failed or unavailable post-claim inspection releases only that unsent
+    exclusive lease and waits for a fresh settled boundary after bounded
+    backoff. It is not evidence of a changed user/final and must not silently
+    cancel the round or strand its lease. A genuinely changed final, user,
+    Goal control or lease still wins. An exact recovered native final must
+    never fall through to the generic empty-baseline final test.
 
 ## Verification boundary
 

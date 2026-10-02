@@ -552,6 +552,7 @@ export class GoalContinuationSupervisor {
         reportedAt: nativeCompletionProof(goal)?.completedAt || goal.lastRoundReport?.reportedAt || null,
         sourceUserId: proof.sourceUserId,
         sourceRuntimeKey: pages.length === 1 ? pages[0].runtimeKey || null : null,
+        sourcePageTargetId: pages.length === 1 ? pages[0].pageTargetId || null : null,
         causalDisplayProof: false,
         sourceCandidates: null,
         baseline: proof.type === 'completed-final'
@@ -685,10 +686,16 @@ export class GoalContinuationSupervisor {
         && p.generating !== true
         && Boolean(p.latestAssistantText?.trim())
         && !p.safetyCheckVisible
+        && !p.nativeSafetyBlocked
         && !p.deliveryTimeoutVisible
-        && !p.retryVisible)
+        && !p.retryVisible
+        && (!row.nativeCompletionProof
+          || (p.runtimeKey === row.nativeCompletionProof.runtimeKey
+            && p.pageTargetId === row.nativeCompletionProof.pageTargetId)))
     );
-    if (recoveredExactFinal) return true;
+    // A persisted native final is an exact boundary, not permission to accept
+    // any later final just because the recovered row has an empty baseline.
+    if (row?.recoveredMissingArm === true && row?.nativeFinalVerified === true) return recoveredExactFinal;
     return pages && pages.every(p => p.latestUserMessageId === row.sourceUserId && finalPage(p))
       && new Set(pages.map(p => `${p.latestAssistantMessageId}:${digest(p.latestAssistantText)}`)).size === 1
       && !row.baseline.some(b => b.id === pages[0].latestAssistantMessageId && b.hash === digest(pages[0].latestAssistantText));
@@ -696,7 +703,7 @@ export class GoalContinuationSupervisor {
   async finalCandidates(goal,row) {
     if (!row.causalDisplayProof) return {pages:await this.pages(goal,{
       runtimeKey:row.sourceRuntimeKey,
-      pageTargetId:row.sourcePageTargetId||row.dispatchPageTargetId||null,
+      pageTargetId:row.sourcePageTargetId||row.nativeCompletionProof?.pageTargetId||row.dispatchPageTargetId||null,
     })};
     const all=await this.pages(goal,{allowDivergent:true});
     if(!all)return {pages:null};
@@ -966,10 +973,32 @@ export class GoalContinuationSupervisor {
     // Exclusive GoalRuntime lease also arbitrates the legacy app dispatch path.
     const claimed = await this.goalRuntime.continuation({ goalId: row.goalId, action: 'claim' });
     const leaseId = claimed.claim.leaseId;
-    selected = await this.finalCandidates(goal,row);
+    try {
+      selected = await this.finalCandidates(goal,row);
+    } catch {
+      // No host transport has run. An inspection timeout is unavailable
+      // evidence, not proof that a user changed the boundary.
+      selected = { pages: null };
+    }
     pages = selected.pages;
     const current = await this.goalRuntime.status(row.goalId);
-    if (this.closed || current.status !== 'active' || current.continuation?.leaseId !== leaseId || !this.matchesFinal(row, pages)) {
+    if (this.closed || current.status !== 'active' || current.roundState !== 'reported'
+      || current.round !== row.round || current.continuation?.continuationId !== row.continuationId
+      || current.continuation?.leaseId !== leaseId || selected.newUser) {
+      await this.goalRuntime.continuation({ goalId: row.goalId, action: 'release', leaseId }).catch(() => {});
+      row.state = 'cancelled'; row.reason = 'pre-send-boundary-changed'; await this.save(); return;
+    }
+    if (!pages) {
+      // Release only this uncommitted lease, retain the journal, and require
+      // another fresh settled boundary after bounded backoff. Never send from
+      // the earlier positive inspection, revive a cancelled row, or replay a
+      // possibly committed transport.
+      await this.goalRuntime.continuation({ goalId: row.goalId, action: 'release', leaseId });
+      row.state = 'waiting'; row.reason = 'pre-send-boundary-unavailable';
+      row.retryAt = this.now() + 5000; row.candidateKey = null; row.settledAt = null;
+      await this.save(); return;
+    }
+    if (!this.matchesFinal(row, pages)) {
       await this.goalRuntime.continuation({ goalId: row.goalId, action: 'release', leaseId }).catch(() => {});
       row.state = 'cancelled'; row.reason = 'pre-send-boundary-changed'; await this.save(); return;
     }
