@@ -6,7 +6,8 @@ import { tmpdir } from 'node:os';
 import { GoalRuntime } from './goal-runtime.js';
 import { nativeGoalStartWitness, projectNativeGoalSource } from './goal-native-start-witness.js';
 import { provesNativeCurrentRoundFinal, shouldRecoverWorkingRound } from './goal-round-completion-guard.js';
-import { inspectVisibleReportCommit } from './goal-host-bridge.js';
+import { inspectVisibleReportCommit, inspectGoalContinuationPages } from './goal-host-bridge.js';
+import { observedClassicMainPortEntries } from './classic-main-debug-ports.js';
 
 const receipt = { source: 'server-created-goal-start', goalId: 'goal_0123456789abcdef',
   receiptId: 'a'.repeat(48), conversationId: 'conversation-native-qa', issuedAt: '2026-09-30T12:04:00.000Z' };
@@ -106,6 +107,86 @@ test('a service-named tool reply requires its canonical parent recipient', () =>
 test('authentication stops at the latest source user, not unrelated earlier history', () => {
   const p = payload(); p.mapping.user.parent = 'unrelated-old-history';
   assert.equal(nativeGoalStartWitness(p, receipt, receipt.conversationId).verified, true);
+});
+function structuredNativePayload() {
+  const p = payload();
+  p.mapping.call = { parent: 'user', message: { id: 'call', author: { role: 'assistant' }, recipient: 'api_tool.call_tool',
+    content: { content_type: 'code', language: 'json', text: JSON.stringify({ path: '/fixture/devspace_goal_start', args: {} }) } } };
+  p.mapping.tool.parent = 'call'; p.mapping.tool.message.author.name = 'api_tool.call_tool';
+  p.mapping.tool.message.content = { content_type: 'code', language: 'json', text: JSON.stringify({ goal: {
+    id: receipt.goalId, conversationId: receipt.conversationId, createdAt: receipt.issuedAt,
+    status: 'active', round: 1, roundState: 'working',
+  } }) };
+  return p;
+}
+test('observed code/structuredContent serialization authenticates the canonical new Goal tuple, not a missing nonce', () => {
+  const witness = nativeGoalStartWitness(structuredNativePayload(), receipt, receipt.conversationId);
+  assert.equal(witness.verified, true);
+  assert.equal(witness.witnessFormat, 'canonical-start-result-goal-stamp');
+  assert.equal(witness.sourceUserMessageId, 'user');
+});
+test('the observed API route permits spaces in its provider name, not path traversal or another action', () => {
+  const p = structuredNativePayload();
+  p.mapping.call.message.content.text = JSON.stringify({ path: '/Fixture Local Gateway/anonymous_connector/devspace_goal_start', args: {} });
+  assert.equal(nativeGoalStartWitness(p, receipt, receipt.conversationId).verified, true);
+  for (const path of ['/Fixture Local Gateway/../devspace_goal_start', 'https://fixture/devspace_goal_start', '/Fixture Local Gateway/devspace_goal_status']) {
+    p.mapping.call.message.content.text = JSON.stringify({ path, args: {} });
+    assert.equal(nativeGoalStartWitness(p, receipt, receipt.conversationId).verified, false);
+  }
+});
+for (const [field, value] of [['id', 'goal_fedcba9876543210'], ['conversationId', 'another-conversation'],
+  ['createdAt', new Date((epoch + 239) * 1000).toISOString()], ['status', 'completed'], ['round', 2], ['roundState', 'reported']]) {
+  test(`a structured start reply with mismatched ${field} is rejected`, () => {
+    const p = structuredNativePayload(), result = JSON.parse(p.mapping.tool.message.content.text);
+    result.goal[field] = value; p.mapping.tool.message.content.text = JSON.stringify(result);
+    assert.equal(nativeGoalStartWitness(p, receipt, receipt.conversationId).verified, false);
+  });
+}
+test('a structured Goal tuple in a shell, status call or reasoning echo is not start authority', () => {
+  for (const change of ['shell', 'status', 'analysis']) {
+    const p = structuredNativePayload();
+    if (change === 'shell') p.mapping.tool.message.author.name = 'shell.exec_command';
+    if (change === 'status') p.mapping.call.message.content.text = JSON.stringify({ path: '/fixture/devspace_goal_status', args: {} });
+    if (change === 'analysis') { p.mapping.call.message.recipient = 'all'; p.mapping.call.message.channel = 'analysis'; }
+    assert.equal(nativeGoalStartWitness(p, receipt, receipt.conversationId).verified, false);
+  }
+});
+test('invalid/free-form invocation JSON or reply JSON cannot authenticate a structured Goal', () => {
+  for (const target of ['call', 'tool']) {
+    const p = structuredNativePayload(); p.mapping[target].message.content.text = 'not JSON';
+    assert.equal(nativeGoalStartWitness(p, receipt, receipt.conversationId).verified, false);
+  }
+});
+test('legacy Main port inspection uses observed runtime ownership without contacting another Main', async () => {
+  const savedFetch = globalThis.fetch, savedSocket = globalThis.WebSocket, calls = [];
+  observedClassicMainPortEntries({ rows: [{ port: 19735, mainNumber: 5 }] });
+  class FixtureSocket extends EventTarget {
+    constructor() { super(); queueMicrotask(() => this.dispatchEvent(new Event('open'))); }
+    send(text) {
+      const call = JSON.parse(text);
+      if (call.method === 'Runtime.evaluate') {
+        new Function(`return ${call.params.expression};`);
+        assert.equal(call.params.userGesture, false);
+      }
+      const result = call.method === 'Runtime.evaluate' ? { result: { value: snapshot() } } : {};
+      queueMicrotask(() => this.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ id: call.id, result }) })));
+    }
+    close() { this.dispatchEvent(new Event('close')); }
+  }
+  try {
+    globalThis.WebSocket = FixtureSocket;
+    globalThis.fetch = async url => {
+      calls.push(String(url)); assert.equal(String(url), 'http://127.0.0.1:19735/json/list');
+      return { ok: true, json: async () => [{ type: 'page', id: 'exact-page', url: 'https://chatgpt.com/c/' + receipt.conversationId, webSocketDebuggerUrl: 'ws://fixture-only' }] };
+    };
+    const pages = await inspectGoalContinuationPages(goal, { ports: [19735], runtimeKey: 'main-05', includeNativeBranch: true, nativeGoalStartReceipt: receipt });
+    assert.equal(pages.length, 1); assert.equal(pages[0].runtimeKey, 'main-05');
+    assert.equal(pages[0].latestUserMessageId, 'user');
+    assert.deepEqual(await inspectGoalContinuationPages(goal, { ports: [19734], runtimeKey: 'main-05' }), []);
+    assert.equal(calls.length, 1);
+  } finally {
+    globalThis.fetch = savedFetch; globalThis.WebSocket = savedSocket; observedClassicMainPortEntries({ rows: [] });
+  }
 });
 test('the witness extractor stays self-contained when serialized into the existing inspector', () => {
   const extract = new Function(`return (${nativeGoalStartWitness.toString()})`)();

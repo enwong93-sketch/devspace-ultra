@@ -37,29 +37,47 @@ export function nativeGoalStartWitness(payload, receipt, conversationId) {
     const startName = value => /^(?:[A-Za-z0-9_-]+(?:\.|__))*devspace_goal_start$/.test(String(value || ''));
     let startTool = startName(message.author?.name)
       || (call?.author?.role === 'assistant' && startName(call.recipient));
-    if (!startTool && message.author?.name === 'api_tool') {
+    let structuredWrapper = false;
+    if (!startTool && ['api_tool', 'api_tool.call_tool'].includes(message.author?.name)) {
       if (call?.author?.role === 'assistant' && call.recipient === 'api_tool.call_tool'
-        && call.content?.content_type === 'text' && call.content.parts?.length === 1
-        && typeof call.content.parts[0] === 'string' && call.content.parts[0].length <= 65_536) {
+        && ['text', 'code'].includes(call.content?.content_type)) {
+        const invocationText = call.content.content_type === 'code' ? call.content.text
+          : call.content.parts?.length === 1 ? call.content.parts[0] : null;
         try {
-          const envelope = JSON.parse(call.content.parts[0]);
+          const envelope = typeof invocationText === 'string' && invocationText.length <= 65_536
+            ? JSON.parse(invocationText) : null;
           startTool = typeof envelope?.path === 'string'
-            && /^[A-Za-z0-9_./-]{1,240}$/.test(envelope.path)
+            && /^\/[A-Za-z0-9_./ -]{1,239}$/.test(envelope.path)
             && envelope.path.split('/').every(part => part !== '.' && part !== '..')
             && /(?:^|\/)devspace_goal_start$/.test(envelope.path);
+          structuredWrapper = startTool;
         } catch { /* Free-form text is not a structured invocation. */ }
       }
     }
     if (!startTool) continue;
-    if (message.content?.content_type !== 'text' || !Array.isArray(message.content.parts)) continue;
-    const found = message.content.parts.slice(0, 32).some(part => typeof part === 'string'
-      && part.length <= 1_000_000 && part.includes(marker));
+    let found = message.content?.content_type === 'text' && Array.isArray(message.content.parts)
+      && message.content.parts.slice(0, 32).some(part => typeof part === 'string'
+        && part.length <= 1_000_000 && part.includes(marker));
+    let witnessFormat = found ? 'nonce-in-start-result-text' : null;
+    // Observed native serialization keeps structuredContent, not result text.
+    // Authenticate its exact canonical invocation and newly created Goal tuple.
+    // The private nonce is NOT claimed to have appeared in this representation.
+    if (!found && structuredWrapper && message.content?.content_type === 'code'
+      && typeof message.content.text === 'string' && message.content.text.length <= 1_000_000) {
+      try {
+        const resultGoal = JSON.parse(message.content.text)?.goal;
+        found = resultGoal?.id === receipt.goalId && resultGoal?.conversationId === conversationId
+          && resultGoal?.createdAt === receipt.issuedAt && resultGoal?.status === 'active'
+          && resultGoal?.round === 1 && resultGoal?.roundState === 'working';
+        if (found) witnessFormat = 'canonical-start-result-goal-stamp';
+      } catch { /* Free-form replies cannot provide structured start authority. */ }
+    }
     if (!found || !sourceUser?.id || !message.id) continue;
     const userAt = typeof sourceUser.create_time === 'number' ? sourceUser.create_time * 1000 : NaN;
     const toolAt = typeof message.create_time === 'number' ? message.create_time * 1000 : NaN;
     if (!Number.isFinite(userAt) || !Number.isFinite(toolAt)
       || userAt > Date.parse(receipt.issuedAt) || toolAt < userAt) continue;
-    matches.push({ sourceUserMessageId: sourceUser.id, sourceUserCreatedAt: new Date(userAt).toISOString(),
+    matches.push({ witnessFormat, sourceUserMessageId: sourceUser.id, sourceUserCreatedAt: new Date(userAt).toISOString(),
       toolMessageId: message.id, toolCreatedAt: new Date(toolAt).toISOString() });
   }
   if (!matches.length) return failed('native-start-tool-result-unavailable');

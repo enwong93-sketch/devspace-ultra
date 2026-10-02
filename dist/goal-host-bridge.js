@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { nativeGoalStartWitness, projectNativeGoalSource } from './goal-native-start-witness.js';
 import { ClassicCdpClient } from "./classic-cdp-client.js";
 import { readComposerDraft } from "./classic-composer-draft.js";
-import { classicMainDebugPorts, runtimeLabelForClassicPort } from './classic-main-debug-ports.js';
+import { classicMainDebugPorts, runtimeLabelForClassicPort, runtimeKeyForClassicPort, runtimePortsForClassicKey } from './classic-main-debug-ports.js';
 
 const DEFAULT_PROBE_TIMEOUT_MS = 2_000;
 const DEFAULT_PAGE_INSPECTION_TIMEOUT_MS = 12_000;
@@ -795,8 +795,8 @@ export async function inspectGoalContinuationPages(goal, {
 } = {}) {
   if (runtimeKey) {
     if (!/^main-(0[1-9]|[12][0-9]|3[0-2])$/.test(runtimeKey)) return [];
-    const number=Number(runtimeKey.slice(-2)); const port=number===1?9721:9730+number;
-    ports=ports.filter(value=>value===port);
+    const ownedPorts = runtimePortsForClassicKey(runtimeKey);
+    ports = ports.filter(value => ownedPorts.includes(value));
   }
   const groups = await Promise.all(ports.map(port => probeClassicConversationPagePort(port, goal.conversationId).catch(() => [])));
   let candidates = groups.flat();
@@ -813,7 +813,7 @@ export async function inspectGoalContinuationPages(goal, {
       sourceUserMessageId,
       baselineAssistantMessageId,
     });
-    return { ...page, candidate, runtimeKey: candidate.runtimePort===9721?'main-01':`main-${String(candidate.runtimePort-9730).padStart(2,'0')}` };
+    return { ...page, candidate, runtimeKey: runtimeKeyForClassicPort(candidate.runtimePort) };
   }));
   return snapshots;
 }
