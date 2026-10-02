@@ -1,5 +1,6 @@
 import { ClassicCdpClient } from "./classic-cdp-client.js";
 import { StringDecoder } from "node:string_decoder";
+import { nativeFinalFromStreamBlock } from './classic-native-final-ingress.js';
 import { ClassicTurnIdentityCorrelator, parseClassicTurnRequest } from "./context-guardian-cdp.js";
 import { sessionFingerprintFromClassicRequest } from "./classic-conversation-authority.js";
 import { defaultMainDebugPorts } from "./goal-host-bridge.js";
@@ -30,6 +31,15 @@ function conversationIdFromUrl(url) {
   try {
     return new URL(String(url || "")).pathname.match(/\/c\/([^/?#]+)/)?.[1] || null;
   } catch { return null; }
+}
+
+function isChatGptPageTarget(target) {
+  if (target?.type !== 'page' || typeof target.id !== 'string' || !target.id
+    || typeof target.webSocketDebuggerUrl !== 'string') return false;
+  try {
+    const url = new URL(target.url);
+    return url.protocol === 'https:' && url.hostname === 'chatgpt.com';
+  } catch { return false; }
 }
 
 function decodedNetworkData(value, { base64Encoded = false, decoder = null } = {}) {
@@ -73,6 +83,7 @@ export class ClassicTurnTransportTracker {
     onNativeMcpCall,
     onToolInvocation,
     onActiveTurn,
+    onAssistantFinal,
   } = {}) {
     this.now = now;
     this.pendingTtlMs = Math.max(1_000, Number(pendingTtlMs) || DEFAULT_PENDING_TTL_MS);
@@ -84,6 +95,7 @@ export class ClassicTurnTransportTracker {
     this.onNativeMcpCall = typeof onNativeMcpCall === "function" ? onNativeMcpCall : null;
     this.onToolInvocation = typeof onToolInvocation === "function" ? onToolInvocation : null;
     this.onActiveTurn = typeof onActiveTurn === "function" ? onActiveTurn : null;
+    this.onAssistantFinal = typeof onAssistantFinal === 'function' ? onAssistantFinal : null;
     this.toolInvocationStream = new ClassicToolInvocationStreamTracker({ now });
     this.responseBuffers = new Map();
     this.responseDecoders = new Map();
@@ -172,6 +184,7 @@ export class ClassicTurnTransportTracker {
     const requestId = String(params?.requestId || "").trim();
     const entry = requestId ? this.pending.get(requestId) : null;
     if (!entry || !isTurnUrl(params?.response?.url)) return null;
+    entry.responseStatus = Number(params?.response?.status || 0);
     this.#emitTransport({
       conversationId: entry.conversationId,
       kind: "response",
@@ -203,6 +216,7 @@ export class ClassicTurnTransportTracker {
     const remainder = blocks.pop() || "";
     const accepted = [];
     for (const block of blocks) {
+      this.#noteAssistantFinal(id, entry, block, observedAtMs);
       accepted.push(...this.toolInvocationStream.notePayload({
         payloadData: block,
         conversationId: entry.conversationId,
@@ -212,6 +226,7 @@ export class ClassicTurnTransportTracker {
     // Some ChatGPT stream variants deliver one complete JSON envelope without
     // an SSE blank-line delimiter. Parse the bounded remainder as well; the
     // invocation tracker deduplicates it if later chunks repeat the envelope.
+    this.#noteAssistantFinal(id, entry, remainder, observedAtMs);
     accepted.push(...this.toolInvocationStream.notePayload({
       payloadData: remainder,
       conversationId: entry.conversationId,
@@ -351,6 +366,18 @@ export class ClassicTurnTransportTracker {
     try { this.onConversationIdentity(identity); } catch {}
   }
 
+  #noteAssistantFinal(requestId, entry, block, observedAtMs) {
+    if (!this.onAssistantFinal || entry.finalAssistantMessageId || !Number.isFinite(entry.responseStatus)
+      || entry.responseStatus < 200 || entry.responseStatus >= 300) return;
+    const event = nativeFinalFromStreamBlock(block, { ...entry, requestId, observedAtMs });
+    if (!event) return;
+    entry.finalAssistantMessageId = event.assistantMessageId;
+    try {
+      const result = this.onAssistantFinal(event);
+      result?.catch?.(() => {});
+    } catch {}
+  }
+
   #emitTransport(event) {
     if (!this.onTurnTransportEvent) return;
     try { this.onTurnTransportEvent(event); } catch {}
@@ -381,6 +408,7 @@ export async function connectClassicTurnTransportPort(port, {
   onNativeMcpCall,
   onToolInvocation,
   onActiveTurn,
+  onAssistantFinal,
   onDisconnected,
 } = {}) {
   let targets;
@@ -388,7 +416,7 @@ export async function connectClassicTurnTransportPort(port, {
     targets = await fetchJson(`http://127.0.0.1:${port}/json/list`, { fetchImpl, timeoutMs: probeTimeoutMs });
   } catch { return null; }
   if (!Array.isArray(targets)) return null;
-  const page = targets.find((target) => target?.type === "page" && /chatgpt\.com/i.test(target.url || "") && typeof target.webSocketDebuggerUrl === "string");
+  const page = targets.find(isChatGptPageTarget);
   if (!page) return null;
 
   const runtimeKey = runtimeKeyForPort(port);
@@ -402,8 +430,20 @@ export async function connectClassicTurnTransportPort(port, {
     onTurnTransportEvent: (event) => onTurnTransportEvent?.({ runtimeKey, port, ...event }),
     onNativeMcpCall: (event) => onNativeMcpCall?.({ runtimeKey, port, ...event }),
     onToolInvocation: (event) => onToolInvocation?.({ runtimeKey, port, ...event }),
-    onActiveTurn: (event) => onActiveTurn?.({ runtimeKey, port, ...event }),
+    onActiveTurn: (event) => onActiveTurn?.({ ...event, runtimeKey, port, pageTargetId: page.id }),
+    onAssistantFinal: (event) => onAssistantFinal?.({ ...event, runtimeKey, port, pageTargetId: page.id }),
   });
+  // streamResourceContent replies with an earlier buffered prefix. New data
+  // and even loadingFinished can arrive before that reply: preserve wire
+  // ordering and keep the request alive until its native bytes are consumed.
+  const responseStreams = new Map();
+  const deliverStreamData = (requestId, data) => tracker.noteResponseData({
+    requestId, data, base64Encoded: true, observedAtMs: Date.now(),
+  });
+  const discardResponseStreams = () => {
+    for (const stream of responseStreams.values()) { stream.dropped = true; stream.queued = []; }
+    responseStreams.clear();
+  };
   const disposers = [
     client.on("Page.frameNavigated", (params) => {
       if (params?.frame?.parentId) return;
@@ -428,27 +468,43 @@ export async function connectClassicTurnTransportPort(port, {
     client.on("Network.requestWillBeSentExtraInfo", (params) => tracker.noteExtraInfo(params)),
     client.on("Network.responseReceived", (params) => {
       const turn = tracker.noteResponse(params);
-      if (!turn?.requestId) return;
-      void client.call("Network.streamResourceContent", { requestId: turn.requestId })
-        .then((result) => tracker.noteResponseData({
-          requestId: turn.requestId,
-          data: result?.bufferedData || "",
-          base64Encoded: true,
-          observedAtMs: Date.now(),
-        }))
-        .catch(() => {});
+      if (!turn?.requestId || responseStreams.has(turn.requestId) || responseStreams.size >= MAX_STREAM_BUFFERS) return;
+      const stream = { ready: false, dropped: false, queued: [], queuedChars: 0, admission: null };
+      responseStreams.set(turn.requestId, stream);
+      stream.admission = client.call("Network.streamResourceContent", { requestId: turn.requestId })
+        .then(result => {
+          if (stream.dropped) return;
+          deliverStreamData(turn.requestId, result?.bufferedData || '');
+          for (const data of stream.queued) deliverStreamData(turn.requestId, data);
+          stream.queued = []; stream.queuedChars = 0; stream.ready = true;
+        })
+        .catch(() => { stream.dropped = true; stream.queued = []; stream.queuedChars = 0; });
     }),
     client.on("Network.dataReceived", (params) => {
       if (!params?.data) return;
-      tracker.noteResponseData({
-        requestId: params.requestId,
-        data: params.data,
-        base64Encoded: true,
-        observedAtMs: Date.now(),
+      const stream = responseStreams.get(params.requestId);
+      if (!stream || stream.dropped) return;
+      if (stream.ready) { deliverStreamData(params.requestId, params.data); return; }
+      if (stream.queuedChars + params.data.length > MAX_STREAM_BUFFER_CHARS * 2 || stream.queued.length >= 1024) {
+        stream.dropped = true; stream.queued = []; stream.queuedChars = 0;
+        return; // Incomplete bytes are not an assistant-final receipt.
+      }
+      stream.queued.push(params.data); stream.queuedChars += params.data.length;
+    }),
+    client.on("Network.loadingFailed", (params) => {
+      const stream = responseStreams.get(params.requestId);
+      if (stream) { stream.dropped = true; stream.queued = []; }
+      responseStreams.delete(params.requestId);
+      tracker.noteFailure(params);
+    }),
+    client.on("Network.loadingFinished", (params) => {
+      const stream = responseStreams.get(params.requestId);
+      if (!stream) { tracker.noteFinished(params); return; }
+      void stream.admission.finally(() => {
+        responseStreams.delete(params.requestId);
+        tracker.noteFinished(params);
       });
     }),
-    client.on("Network.loadingFailed", (params) => tracker.noteFailure(params)),
-    client.on("Network.loadingFinished", (params) => tracker.noteFinished(params)),
     client.on("Network.webSocketFrameReceived", (params) => {
       if (!currentConversationId) return;
       tracker.noteWebSocketFrame({
@@ -458,7 +514,7 @@ export async function connectClassicTurnTransportPort(port, {
       });
     }),
   ];
-  const closeListener = () => { try { onDisconnected?.({ runtimeKey, port }); } catch {} };
+  const closeListener = () => { discardResponseStreams(); try { onDisconnected?.({ runtimeKey, port }); } catch {} };
   client.ws.addEventListener?.("close", closeListener, { once: true });
   return {
     runtimeKey,
@@ -467,6 +523,7 @@ export async function connectClassicTurnTransportPort(port, {
     get pendingSize() { return tracker.pendingSize; },
     get toolInvocationDiagnostics() { return tracker.diagnostics(); },
     async close() {
+      discardResponseStreams();
       for (const dispose of disposers) dispose();
       client.close();
     },
@@ -493,8 +550,8 @@ export class ClassicTurnTransportObserver {
     this.closed = false;
   }
 
-  setHandlers({ onConversationIdentity, onTurnTransportEvent, onNativeMcpCall, onToolInvocation, onActiveTurn } = {}) {
-    this.handlers = { onConversationIdentity, onTurnTransportEvent, onNativeMcpCall, onToolInvocation, onActiveTurn };
+  setHandlers({ onConversationIdentity, onTurnTransportEvent, onNativeMcpCall, onToolInvocation, onActiveTurn, onAssistantFinal } = {}) {
+    this.handlers = { onConversationIdentity, onTurnTransportEvent, onNativeMcpCall, onToolInvocation, onActiveTurn, onAssistantFinal };
   }
 
   async start({ schedule = true } = {}) {

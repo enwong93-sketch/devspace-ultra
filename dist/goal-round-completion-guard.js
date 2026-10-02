@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { isNativeStreamFinalReceipt } from './classic-native-final-ingress.js';
 import { matchesNativeGoalStartWitness } from './goal-native-start-witness.js';
 import { runtimeKeyForClassicPort } from './classic-main-debug-ports.js';
 
@@ -180,6 +181,7 @@ export class ClassicGoalRoundCompletionGuard {
     inspect,
     dispatch,
     continueIncompleteGoal = null,
+    nativeFinalIngressOnly = false,
     pollMs = DEFAULT_POLL_MS,
     minimumRoundSettleMs = DEFAULT_ROUND_SETTLE_MS,
     routeSettleMs = DEFAULT_ROUTE_SETTLE_MS,
@@ -195,6 +197,8 @@ export class ClassicGoalRoundCompletionGuard {
     }
     this.goalRuntime = goalRuntime;
     this.inspect = inspect;
+    this.nativeFinalIngressOnly = nativeFinalIngressOnly === true;
+    this.nativeFinalHandling = Promise.resolve();
     this.dispatch = dispatch;
     this.continueIncompleteGoal = typeof continueIncompleteGoal === "function"
       ? continueIncompleteGoal : null;
@@ -395,7 +399,31 @@ export class ClassicGoalRoundCompletionGuard {
     };
   }
 
+  noteNativeAssistantFinal(event) {
+    const operation = this.nativeFinalHandling.then(async () => {
+      if (this.closed || !this.continueIncompleteGoal || !isNativeStreamFinalReceipt(event)) {
+        return { continued: false, reason: 'native-final-ingress-ineligible' };
+      }
+      const goals = await this.goalRuntime.activeGoals({ conversationId: event.conversationId });
+      if (goals.length !== 1 || !['working', 'reported'].includes(goals[0].roundState)) {
+        return { continued: false, reason: 'no-exact-active-goal' };
+      }
+      const goal = goals[0];
+      if (await this.goalRuntime.hasConversationCollision({ goalId: goal.id })) {
+        return { continued: false, reason: 'conversation-goal-conflict' };
+      }
+      // Semantic completion/pause remains the AI-owned Goal state. The input
+      // proves only that this physical native assistant turn has finished.
+      return this.continueIncompleteGoal({ goal, nativeCompletion: event });
+    });
+    this.nativeFinalHandling = operation.catch(() => {});
+    return operation;
+  }
+
   async #pollOnceImpl() {
+    // Production native-final ingress must never infer completion from UI
+    // idle, Stop buttons, DOM text, or a finished/failed network request.
+    if (this.nativeFinalIngressOnly) return { ok: true, recovered: 0, results: [], reason: 'native-final-event-owned' };
     const goals = await this.goalRuntime.recoverableWorkingRounds();
     const activeRunKeys = new Set(goals.map(recoveryRunKey).filter(Boolean));
     for (const key of this.recoverySessions.keys()) {
@@ -588,5 +616,6 @@ export class ClassicGoalRoundCompletionGuard {
     this.nativeFinalRetryAt.clear();
     this.recoverySessions.clear();
     if (this.polling) await this.polling.catch(() => {});
+    await this.nativeFinalHandling;
   }
 }

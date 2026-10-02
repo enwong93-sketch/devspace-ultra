@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import { isNativeStreamFinalReceipt } from './classic-native-final-ingress.js';
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { atomicWriteJson } from "./atomic-file.js";
@@ -577,10 +578,14 @@ export class GoalRuntime {
   async autoCompleteAssistantTurn({ goalId, nativeCompletion } = {}) {
     await this.ready;
     const goal = this.getGoal(goalId);
-    if (goal.status !== "active" || goal.roundState !== "working") {
+    if (goal.status !== "active" || (goal.roundState !== "working"
+      && !(goal.roundState === 'reported' && nativeCompletion?.ingress === 'native-response-stream'))) {
       return { continued: false, reason: "goal-no-longer-active", goal: clone(goal) };
     }
     const proof = nativeCompletion && typeof nativeCompletion === "object" ? nativeCompletion : null;
+    if (proof?.ingress === 'native-response-stream' && !isNativeStreamFinalReceipt(proof)) {
+      throw new Error('Native stream completion requires a scoped successful public-final receipt.');
+    }
     const sourceUserMessageId = String(proof?.sourceUserMessageId || "").trim();
     const assistantMessageId = String(proof?.assistantMessageId || "").trim();
     const assistantTextHash = String(proof?.assistantTextHash || "").trim().toLowerCase();
@@ -619,14 +624,17 @@ export class GoalRuntime {
       assistantTextHash,
       assistantCreatedAt: new Date(assistantCreatedAt).toISOString(),
       completedAt,
+      ...(proof.ingress === 'native-response-stream' ? { ingress: proof.ingress, requestId: proof.requestId } : {}),
     };
     this.state.nativeCompletionLedger[goal.id] = [
       ...consumedNativeAssistantMessageIds,
       assistantMessageId,
     ];
-    goal.roundState = "reported";
-    goal.roundRecovery = idleRoundRecovery(goal.round);
-    goal.continuation = pendingContinuation(goal.round);
+    if (goal.roundState === 'working') {
+      goal.roundState = "reported";
+      goal.roundRecovery = idleRoundRecovery(goal.round);
+      goal.continuation = pendingContinuation(goal.round);
+    }
     this.touch(goal);
     await this.save();
     return { continued: true, goal: clone(goal) };

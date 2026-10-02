@@ -69,6 +69,7 @@ import { ClassicActiveTurnRegistry, ClassicMcpCallCorrelator, fingerprintMcpTool
 import { requestTraceCorrelationFingerprints } from "./request-trace-correlation.js";
 import { mergeSessionCorrelationFingerprints, sessionCorrelationFingerprintsFromHeaders } from "./session-correlation.js";
 import { ClassicTurnTransportObserver } from "./classic-turn-transport-observer.js";
+import { ClassicNativeFinalBoundaryStore } from './classic-native-final-ingress.js';
 import { ClassicNativeUsageEvidenceStore } from "./classic-native-usage-evidence.js";
 import { ClassicExactUsageAuthority } from "./classic-exact-usage-authority.js";
 import { ClassicTurnDeliveryEvidenceStore } from "./classic-turn-delivery-evidence.js";
@@ -2345,8 +2346,11 @@ export function createServer(config = loadConfig(), options = {}) {
             : () => primaryDebugGuard.pollOnce(),
     });
     let conversationProgressLiveness = null;
+    const nativeFinalBoundaries = new ClassicNativeFinalBoundaryStore();
     const goalContinuationSupervisor = new GoalContinuationSupervisor({
         goalRuntime,
+        inspectNativeFinal: (goal, row) => nativeFinalBoundaries.inspect(goal, row),
+        nativeFinalIngressOnly: true,
         relayDiagnostics: () => goalHostBridge.relayDiagnostics(),
         statePath: join(config.stateDir, 'goal-continuation-driver.json'),
         enabled: !config.passiveCore,
@@ -2400,6 +2404,7 @@ export function createServer(config = loadConfig(), options = {}) {
     goalContinuationSupervisor.start();
     const goalRoundCompletionGuard = new ClassicGoalRoundCompletionGuard({
         goalRuntime,
+        nativeFinalIngressOnly: true,
         continueIncompleteGoal: async ({ goal, nativeCompletion }) => {
             const completedTurn = await goalRuntime.autoCompleteAssistantTurn({
                 goalId: goal.id,
@@ -2937,9 +2942,20 @@ export function createServer(config = loadConfig(), options = {}) {
             });
         },
         onActiveTurn: (event) => {
+            nativeFinalBoundaries.noteTurn(event);
             activeTurnRegistry.noteTurn(event);
             interactiveProgressGate.noteTurn(event);
             void conversationProgressLiveness?.noteTurn?.(event).catch(() => null);
+        },
+        onAssistantFinal: async (event) => {
+            if (config.passiveCore || !nativeFinalBoundaries.noteFinal(event)) return;
+            try {
+                await goalRoundCompletionGuard.noteNativeAssistantFinal(event);
+            } catch (error) {
+                logEvent(config.logging, 'warn', 'goal_native_final_ingress_failed', {
+                    error: error instanceof Error ? error.message : String(error),
+                });
+            }
         },
         onNativeMcpCall: (event) => {
             const progressOnlyCall = ["devspace_progress_report", "devspace_progress_bind"].includes(event?.toolName);

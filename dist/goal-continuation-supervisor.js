@@ -259,12 +259,15 @@ function exactMissingArmBoundary(goal, pages, nowMs = Date.now()) {
 export class GoalContinuationSupervisor {
   constructor({ goalRuntime, inspect, dispatch, statePath = null, enabled = true,
     now = () => Date.now(), pollMs = 1000, settleMs = 750, maxRecords = 128,
-    onHiddenContinuationStarted = null, relayDiagnostics = null } = {}) {
+    onHiddenContinuationStarted = null, relayDiagnostics = null, inspectNativeFinal = null,
+    nativeFinalIngressOnly = false } = {}) {
     if (!goalRuntime || typeof inspect !== 'function' || typeof dispatch !== 'function') throw new Error('Goal continuation adapters are required');
     Object.assign(this, { goalRuntime, inspect, dispatch, statePath, enabled, now, pollMs, settleMs, maxRecords });
     this.onHiddenContinuationStarted = typeof onHiddenContinuationStarted === 'function'
       ? onHiddenContinuationStarted : null;
     this.relayDiagnostics = typeof relayDiagnostics === 'function' ? relayDiagnostics : null;
+    this.inspectNativeFinal = typeof inspectNativeFinal === 'function' ? inspectNativeFinal : null;
+    this.nativeFinalIngressOnly = nativeFinalIngressOnly === true;
     this.records = new Map(); this.timer = null; this.polling = null; this.closed = false;
     this.persistQueue = Promise.resolve(); this.lastError = null;
     this.missingArmRetryAt = new Map();
@@ -327,6 +330,9 @@ export class GoalContinuationSupervisor {
     if (this.records.has(id)) return { armed: this.records.get(id).state === 'waiting', state: this.records.get(id).state };
     // Never infer a source turn for old pending Goals merely found on disk.
     let autoFinal = nativeCompletionProof(goal);
+    if (this.nativeFinalIngressOnly && autoFinal?.ingress !== 'native-response-stream') {
+      return { armed: false, reason: 'awaiting-native-final-ingress' };
+    }
     const boundaryAt = autoFinal?.completedAt || goal.lastRoundReport?.reportedAt || null;
     const reportAge = this.now() - Date.parse(boundaryAt || '');
     if (!resume && (!Number.isFinite(reportAge) || reportAge < -1000 || reportAge > 120_000)) return { armed: false, reason: 'report-not-current' };
@@ -339,7 +345,9 @@ export class GoalContinuationSupervisor {
       ? reportAuthority.runtimeKey : null);
     let pages;
     try {
-      pages = await this.pages(goal, {
+      pages = autoFinal?.ingress === 'native-response-stream'
+        ? (await this.inspectNativeFinal?.(goal, { nativeCompletionProof: autoFinal }))?.pages || null
+        : await this.pages(goal, {
         sourceOnly: !autoFinal,
         runtimeKey: sourceRuntimeKey,
         pageTargetId: autoFinal?.pageTargetId || null,
@@ -358,8 +366,9 @@ export class GoalContinuationSupervisor {
       || pages[0]?.pageTargetId !== autoFinal.pageTargetId
       || pages[0]?.latestUserMessageId !== autoFinal.sourceUserMessageId
       || pages[0]?.latestAssistantMessageId !== autoFinal.assistantMessageId
-      || digest(pages[0]?.latestAssistantText) !== autoFinal.assistantTextHash
-      || !finalPage(pages[0]))) {
+      || (autoFinal.ingress === 'native-response-stream'
+        ? pages[0]?.nativeFinalReceipt?.assistantTextHash !== autoFinal.assistantTextHash
+        : digest(pages[0]?.latestAssistantText) !== autoFinal.assistantTextHash || !finalPage(pages[0])))) {
       return { armed: false, reason: 'native-final-page-not-current' };
     }
     const current = await this.goalRuntime.status(goal.id);
@@ -467,6 +476,19 @@ export class GoalContinuationSupervisor {
       let pages;
       const inspectionOutcome = {};
       const nativeFinal = nativeCompletionProof(goal);
+      if (this.nativeFinalIngressOnly && nativeFinal?.ingress !== 'native-response-stream') {
+        results.push({ goalId: goal.id, round: goal.round, recovered: false, reason: 'awaiting-native-final-ingress' });
+        continue;
+      }
+      if (nativeFinal?.ingress === 'native-response-stream') {
+        try {
+          const armed = await this.arm(goal, { resume: true });
+          if (!armed?.armed) this.scheduleMissingArmRetry(continuationId, armed?.reason || 'awaiting-native-final-ingress');
+          else this.clearMissingArmRetry(continuationId);
+          results.push({ goalId: goal.id, round: goal.round, recovered: armed?.armed === true, reason: 'native-final-ingress-arm' });
+        } catch (error) { this.scheduleMissingArmRetry(continuationId, String(error?.message || error)); }
+        continue;
+      }
       try {
         pages = await this.pages(goal, {
           // A persisted exact native-final receipt is revalidated with the
@@ -684,6 +706,15 @@ export class GoalContinuationSupervisor {
     return true;
   }
   matchesFinal(row, pages) {
+    if (row?.nativeCompletionProof?.ingress === 'native-response-stream') {
+      const proof = row.nativeCompletionProof;
+      return pages?.length === 1 && pages[0]?.nativeFinalReceipt?.ingress === proof.ingress
+        && pages[0].conversationId === row.conversationId
+        && pages[0].runtimeKey === proof.runtimeKey && pages[0].pageTargetId === proof.pageTargetId
+        && pages[0].latestUserMessageId === row.sourceUserId
+        && pages[0].latestAssistantMessageId === proof.assistantMessageId
+        && pages[0].nativeFinalReceipt.assistantTextHash === proof.assistantTextHash;
+    }
     const recoveredExactFinal = Boolean(
       row?.recoveredMissingArm === true
       && row?.nativeFinalVerified === true
@@ -712,6 +743,11 @@ export class GoalContinuationSupervisor {
       && !row.baseline.some(b => b.id === pages[0].latestAssistantMessageId && b.hash === digest(pages[0].latestAssistantText));
   }
   async finalCandidates(goal,row) {
+    if (row?.nativeCompletionProof?.ingress === 'native-response-stream') {
+      return await this.inspectNativeFinal?.(goal, row)
+        || { pages: null, inspectionReason: 'awaiting-native-final-ingress' };
+    }
+    if (this.nativeFinalIngressOnly) return { pages: null, inspectionReason: 'awaiting-native-final-ingress' };
     const inspectionOutcome = {};
     if (!row.causalDisplayProof) {
       const pages = await this.pages(goal,{
@@ -1008,7 +1044,7 @@ export class GoalContinuationSupervisor {
       row.nativeCompletionProof = nativeProof;
       row.nativeFinalVerified = true;
     }
-    const key = pages.map(p => `${p.pageTargetId}:${p.latestAssistantMessageId}:${digest(p.latestAssistantText)}`).join('|');
+    const key = pages.map(p => `${p.pageTargetId}:${p.latestAssistantMessageId}:${p.nativeFinalReceipt?.assistantTextHash || digest(p.latestAssistantText)}`).join('|');
     if (row.candidateKey !== key) { row.candidateKey = key; row.settledAt = this.now(); return; }
     if (this.now() - row.settledAt < this.settleMs || this.closed) return;
     // Exclusive GoalRuntime lease also arbitrates the legacy app dispatch path.
