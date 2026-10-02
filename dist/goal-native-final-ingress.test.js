@@ -333,9 +333,80 @@ for (const split of [false, true]) test(`delayed native buffered response ${spli
   assert.equal(session.pendingSize, 0);
   assert.equal(calls.some(method => /Runtime|Debugger|Input/.test(method)), false, 'native transport observation performs no UI execution');
   socket.close();
-  assert.equal(invalidations.length, 1, 'socket loss invalidates the former completion boundary');
+  assert.equal(invalidations.length, 2, 'new native request and socket loss both invalidate the former completion boundary');
   assert.equal(invalidations[0].pageTargetId, 'native-page-02');
 });
+
+for (const outcome of ['complete', 'failure', 'newer-request', 'disconnect', 'navigation', 'body-error', 'invalid-body', 'metadata-overflow']) {
+  test(`omitted native request body: ${outcome} preserves source/final ordering`, async t => {
+    const finals = [], turns = [], invalidations = [], calls = []; let socket;
+    class BodySocket extends EventTarget {
+      constructor() { super(); socket = this; setTimeout(() => this.dispatchEvent(new Event('open')), 0); }
+      send(raw) {
+        const call = JSON.parse(raw); calls.push(call);
+        if (!['Network.getRequestPostData', 'Network.streamResourceContent'].includes(call.method)) {
+          queueMicrotask(() => this.emit({ id: call.id, result: {} }));
+        }
+      }
+      emit(payload) { this.dispatchEvent(new MessageEvent('message', { data: JSON.stringify(payload) })); }
+      close() { this.dispatchEvent(new Event('close')); }
+    }
+    const session = await connectClassicTurnTransportPort(9732, {
+      WebSocketImpl: BodySocket,
+      fetchImpl: async () => ({ ok: true, json: async () => [{ id: 'body-page', type: 'page',
+        url: `https://chatgpt.com/g/project/c/${cid}`, webSocketDebuggerUrl: 'ws://fixture/native' }] }),
+      onActiveTurn: event => turns.push(event), onAssistantFinal: event => finals.push(event),
+      onNativeBoundaryInvalidated: event => invalidations.push(event),
+    });
+    t.after(() => session.close());
+    const url = 'https://chatgpt.com/backend-api/f/conversation';
+    const body = JSON.stringify({ conversation_id: cid, model: 'test-fixture',
+      messages: [{ id: userId, author: { role: 'user' } }] });
+    socket.emit({ method: 'Network.requestWillBeSent', params: { requestId: 'omitted-body',
+      request: { method: 'POST', url, hasPostData: true } } });
+    assert.equal(invalidations.length, 1, 'new unknown source immediately invalidates any older final');
+    const getBody = calls.find(call => call.method === 'Network.getRequestPostData');
+    assert.ok(getBody, 'recover only the existing observed native request body');
+    if (outcome === 'metadata-overflow') {
+      for (let i = 0; i < 33; i++) {
+        socket.emit({ method: 'Network.requestWillBeSentExtraInfo', params: { requestId: 'omitted-body', headers: {} } });
+      }
+    }
+    socket.emit({ method: 'Network.requestWillBeSentExtraInfo', params: { requestId: 'omitted-body', headers: {} } });
+    socket.emit({ method: 'Network.responseReceived', params: { requestId: 'omitted-body', response: { url, status: 200 } } });
+    if (outcome === 'failure') {
+      socket.emit({ method: 'Network.loadingFailed', params: { requestId: 'omitted-body' } });
+    } else {
+      socket.emit({ method: 'Network.loadingFinished', params: { requestId: 'omitted-body' } });
+    }
+    if (outcome === 'newer-request') {
+      socket.emit({ method: 'Network.requestWillBeSent', params: { requestId: 'newer-native',
+        request: { method: 'POST', url, postData: body.replace(userId, 'newer-source-user') } } });
+    }
+    if (outcome === 'disconnect') socket.close();
+    if (outcome === 'navigation') {
+      socket.emit({ method: 'Page.frameNavigated', params: { frame: { url: 'https://chatgpt.com/c/different-native-cid' } } });
+    }
+    socket.emit(outcome === 'body-error' ? { id: getBody.id, error: { code: -32000, message: 'Body unavailable' } }
+      : { id: getBody.id, result: { postData: outcome === 'invalid-body' ? '{}' : body } });
+    await new Promise(resolve => setTimeout(resolve, 10));
+    const stream = calls.find(call => call.method === 'Network.streamResourceContent');
+    if (outcome === 'complete') {
+      assert.ok(stream, 'response received before body recovery is not dropped');
+      socket.emit({ id: stream.id, result: { bufferedData: Buffer.from(frame()).toString('base64') } });
+      await new Promise(resolve => setTimeout(resolve, 10));
+      assert.equal(finals.length, 1);
+      assert.equal(finals[0].sourceUserMessageId, userId);
+      assert.equal(finals[0].requestId, 'omitted-body');
+      assert.equal(session.pendingSize, 0);
+    } else {
+      assert.equal(stream, undefined, 'late body cannot revive a failed, superseded or disconnected request');
+      assert.equal(finals.length, 0);
+      assert.equal(turns.some(event => event.requestId === 'omitted-body'), false);
+    }
+    assert.equal(calls.some(call => /Runtime|Debugger|Input|Fetch\./.test(call.method)), false);
+  });
+}
 
 test('lookalike page URL cannot become native-final ingress authority', async () => {
   const session = await connectClassicTurnTransportPort(9732, {

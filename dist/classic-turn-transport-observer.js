@@ -478,6 +478,20 @@ export async function connectClassicTurnTransportPort(port, {
   // and even loadingFinished can arrive before that reply: preserve wire
   // ordering and keep the request alive until its native bytes are consumed.
   const responseStreams = new Map();
+  // CDP may omit a large POST body from requestWillBeSent. Recover that
+  // observed request only; never infer its source from the page or replay it.
+  // Response/EOF metadata may overtake the asynchronous body lookup.
+  const requestBodyAdmissions = new Map();
+  const afterRequestBody = (params, handle) => {
+    const admission = requestBodyAdmissions.get(params?.requestId);
+    if (!admission) { handle(params); return; }
+    if (admission.queued.length >= 32) {
+      requestBodyAdmissions.delete(params.requestId);
+      admission.queued = []; // Incomplete correlation cannot authorize final.
+      return;
+    }
+    admission.queued.push(() => handle(params));
+  };
   const deliverStreamData = (requestId, data) => tracker.noteResponseData({
     requestId, data, base64Encoded: true, observedAtMs: Date.now(),
   });
@@ -486,6 +500,7 @@ export async function connectClassicTurnTransportPort(port, {
     responseStreams.clear();
   };
   const invalidateBoundary = () => {
+    requestBodyAdmissions.clear();
     discardResponseStreams();
     tracker.invalidateFinals();
     try { onNativeBoundaryInvalidated?.({ runtimeKey, port, pageTargetId: page.id }); } catch {}
@@ -493,13 +508,42 @@ export async function connectClassicTurnTransportPort(port, {
   const disposers = [
     client.on("Page.frameNavigated", (params) => {
       if (params?.frame?.parentId) return;
+      invalidateBoundary();
       currentConversationId = conversationIdFromUrl(params?.frame?.url) || null;
     }),
     client.on("Page.navigatedWithinDocument", (params) => {
-      currentConversationId = conversationIdFromUrl(params?.url) || null;
+      const nextConversationId = conversationIdFromUrl(params?.url) || null;
+      if (nextConversationId !== currentConversationId) invalidateBoundary();
+      currentConversationId = nextConversationId;
     }),
     client.on("Network.requestWillBeSent", (params) => {
       const request = params?.request;
+      if (String(request?.method || '').toUpperCase() === 'POST' && isTurnUrl(request?.url)) {
+        // A newer source supersedes any pending older body lookup, including
+        // when its body is already inline. Late metadata must not roll back
+        // the exact native branch to an earlier user/Rescue request.
+        invalidateBoundary();
+        if (!request?.postData && params?.requestId) {
+          if (request.hasPostData !== true) return;
+          const admission = { queued: [] };
+          requestBodyAdmissions.set(params.requestId, admission);
+          void client.call('Network.getRequestPostData', { requestId: params.requestId })
+            .then(result => {
+              if (requestBodyAdmissions.get(params.requestId) !== admission) return;
+              requestBodyAdmissions.delete(params.requestId);
+              const metadata = tracker.noteRequest({ ...params,
+                request: { ...request, postData: result?.postData || '' } });
+              if (!metadata) return;
+              for (const handle of admission.queued) handle();
+              admission.queued = [];
+            })
+            .catch(() => {
+              if (requestBodyAdmissions.get(params.requestId) === admission) requestBodyAdmissions.delete(params.requestId);
+              admission.queued = [];
+            });
+          return;
+        }
+      }
       if (isNativeCallMcpRequest(request) && !request?.postData && params?.requestId) {
         void client.call("Network.getRequestPostData", { requestId: params.requestId })
           .then((result) => tracker.noteRequest({
@@ -511,8 +555,8 @@ export async function connectClassicTurnTransportPort(port, {
       }
       tracker.noteRequest(params);
     }),
-    client.on("Network.requestWillBeSentExtraInfo", (params) => tracker.noteExtraInfo(params)),
-    client.on("Network.responseReceived", (params) => {
+    client.on("Network.requestWillBeSentExtraInfo", (params) => afterRequestBody(params, value => tracker.noteExtraInfo(value))),
+    client.on("Network.responseReceived", (params) => afterRequestBody(params, params => {
       const turn = tracker.noteResponse(params);
       if (!turn?.requestId || responseStreams.has(turn.requestId) || responseStreams.size >= MAX_STREAM_BUFFERS) return;
       const stream = { ready: false, dropped: false, queued: [], queuedChars: 0, admission: null };
@@ -525,7 +569,7 @@ export async function connectClassicTurnTransportPort(port, {
           stream.queued = []; stream.queuedChars = 0; stream.ready = true;
         })
         .catch(() => { stream.dropped = true; stream.queued = []; stream.queuedChars = 0; });
-    }),
+    })),
     client.on("Network.dataReceived", (params) => {
       if (!params?.data) return;
       const stream = responseStreams.get(params.requestId);
@@ -538,19 +582,20 @@ export async function connectClassicTurnTransportPort(port, {
       stream.queued.push(params.data); stream.queuedChars += params.data.length;
     }),
     client.on("Network.loadingFailed", (params) => {
+      requestBodyAdmissions.delete(params?.requestId);
       const stream = responseStreams.get(params.requestId);
       if (stream) { stream.dropped = true; stream.queued = []; }
       responseStreams.delete(params.requestId);
       tracker.noteFailure(params);
     }),
-    client.on("Network.loadingFinished", (params) => {
+    client.on("Network.loadingFinished", (params) => afterRequestBody(params, params => {
       const stream = responseStreams.get(params.requestId);
       if (!stream) { tracker.noteFinished(params); return; }
       void stream.admission.finally(() => {
         responseStreams.delete(params.requestId);
         tracker.noteFinished(params);
       });
-    }),
+    })),
     client.on("Network.webSocketFrameReceived", (params) => {
       if (!currentConversationId) return;
       tracker.noteWebSocketFrame({
