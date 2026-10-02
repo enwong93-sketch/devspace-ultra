@@ -17,8 +17,9 @@ Eight deterministic regressions cover completion and those failure/supersession
 boundaries. They validate correlation and ordering only: they do not establish
 the cause of an existing production stall or real-client automatic continuation.
 
-This patch follows the immutable v0.5.22 draft. That draft archive and its
-package-validation evidence describe the tagged source, not this later patch.
+The v0.5.23 candidate includes this patch after the immutable v0.5.22 draft.
+The older draft archive and its package-validation evidence describe its
+tagged source, not this later patch.
 Stable promotion still requires actual Classic client acceptance on the exact
 archive being promoted. Transport uncertainty remains a delivery state, not an
 automatic semantic Goal-block decision.
