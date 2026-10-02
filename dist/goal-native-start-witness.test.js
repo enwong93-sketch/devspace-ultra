@@ -86,6 +86,26 @@ test('an api_tool wrapper requires the exact structured start invocation, never 
   assert.equal(nativeGoalStartWitness(p, receipt, receipt.conversationId).verified, false);
   p.mapping.call.message.content.parts = ['A free-form explanation mentioning /fixture/devspace_goal_start'];
   assert.equal(nativeGoalStartWitness(p, receipt, receipt.conversationId).verified, false);
+  p.mapping.call.message.content.parts = [JSON.stringify({ path: '/fixture/../devspace_goal_start', args: {} })];
+  assert.equal(nativeGoalStartWitness(p, receipt, receipt.conversationId).verified, false);
+});
+for (const name of ['mcp__fixture__devspace_goal_start', 'fixture.devspace_goal_start']) {
+  test(`canonical native start name ${name} is supported`, () => {
+    const p = payload(); p.mapping.tool.message.author.name = name;
+    assert.equal(nativeGoalStartWitness(p, receipt, receipt.conversationId).verified, true);
+  });
+}
+test('a service-named tool reply requires its canonical parent recipient', () => {
+  const p = payload();
+  p.mapping.call = { parent: 'user', message: { id: 'call', author: { role: 'assistant' }, recipient: 'mcp__fixture__devspace_goal_start' } };
+  p.mapping.tool.parent = 'call'; p.mapping.tool.message.author.name = 'Fixture Service';
+  assert.equal(nativeGoalStartWitness(p, receipt, receipt.conversationId).verified, true);
+  p.mapping.call.message.recipient = 'mcp__fixture__exec_command';
+  assert.equal(nativeGoalStartWitness(p, receipt, receipt.conversationId).verified, false);
+});
+test('authentication stops at the latest source user, not unrelated earlier history', () => {
+  const p = payload(); p.mapping.user.parent = 'unrelated-old-history';
+  assert.equal(nativeGoalStartWitness(p, receipt, receipt.conversationId).verified, true);
 });
 test('the witness extractor stays self-contained when serialized into the existing inspector', () => {
   const extract = new Function(`return (${nativeGoalStartWitness.toString()})`)();

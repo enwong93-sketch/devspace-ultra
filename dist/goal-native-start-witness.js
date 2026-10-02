@@ -20,6 +20,9 @@ export function nativeGoalStartWitness(payload, receipt, conversationId) {
     seen.add(id);
     const node = mapping[id], message = node?.message;
     if (message) reverse.push({ message, parent: node?.parent });
+    // Earlier history cannot change the latest user or the result's ancestry.
+    // Do not scan unrelated old branches just to authenticate this request.
+    if (message?.author?.role === 'user') break;
     id = node?.parent;
   }
   const branch = reverse.reverse(), matches = [];
@@ -30,10 +33,11 @@ export function nativeGoalStartWitness(payload, receipt, conversationId) {
     if (message.author?.role !== 'tool' || message.status !== 'finished_successfully') continue;
     // The marker in an assistant/user echo or another tool is not authority.
     // Do not accept a tool's arbitrary result metadata as its invocation name.
-    const names = [message.author?.name];
-    let startTool = names.some(name => /^(?:[A-Za-z0-9_-]+\.)*devspace_goal_start$/.test(String(name || '')));
+    const call = parent ? mapping[parent]?.message : null;
+    const startName = value => /^(?:[A-Za-z0-9_-]+(?:\.|__))*devspace_goal_start$/.test(String(value || ''));
+    let startTool = startName(message.author?.name)
+      || (call?.author?.role === 'assistant' && startName(call.recipient));
     if (!startTool && message.author?.name === 'api_tool') {
-      const call = parent ? mapping[parent]?.message : null;
       if (call?.author?.role === 'assistant' && call.recipient === 'api_tool.call_tool'
         && call.content?.content_type === 'text' && call.content.parts?.length === 1
         && typeof call.content.parts[0] === 'string' && call.content.parts[0].length <= 65_536) {
@@ -41,6 +45,7 @@ export function nativeGoalStartWitness(payload, receipt, conversationId) {
           const envelope = JSON.parse(call.content.parts[0]);
           startTool = typeof envelope?.path === 'string'
             && /^[A-Za-z0-9_./-]{1,240}$/.test(envelope.path)
+            && envelope.path.split('/').every(part => part !== '.' && part !== '..')
             && /(?:^|\/)devspace_goal_start$/.test(envelope.path);
         } catch { /* Free-form text is not a structured invocation. */ }
       }
