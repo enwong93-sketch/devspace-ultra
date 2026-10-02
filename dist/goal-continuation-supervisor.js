@@ -1001,6 +1001,17 @@ export class GoalContinuationSupervisor {
     catch { row.reason='delivered-awaiting-agent-redemption'; }
     await this.save();
   }
+  async deferNewUserUntilNativeFinal(row) {
+    if (!this.nativeFinalIngressOnly && !this.publicMessageContinuation) return false;
+    // A new user envelope can be Rescue resuming interrupted work. It is not
+    // an assistant final and must neither redeem a Goal round nor authorize a
+    // second message. Native final reconciliation owns the eventual decision.
+    row.reason = 'new-user-turn-awaiting-native-final';
+    row.candidateKey = null;
+    row.settledAt = null;
+    await this.save();
+    return true;
+  }
   async advance(row) {
     const goal = await this.goalRuntime.status(row.goalId);
     if (redeemable(goal) && goal.round === row.round
@@ -1018,6 +1029,7 @@ export class GoalContinuationSupervisor {
     }
     let selected = await this.finalCandidates(goal,row);
     if(selected.newUser){
+      if (await this.deferNewUserUntilNativeFinal(row)) return;
       const redeemed=await this.redeemHumanContinuation(row, {
         userMessageId:selected.newUserMessageId||null,
         reason:'human-user-turn-started-next-round',
@@ -1035,6 +1047,7 @@ export class GoalContinuationSupervisor {
       return;
     }
     if (pages.some(p => p.latestUserMessageId !== row.sourceUserId)) {
+      if (await this.deferNewUserUntilNativeFinal(row)) return;
       const nextUser=pages.find(p=>p.latestUserMessageId!==row.sourceUserId)?.latestUserMessageId||null;
       const redeemed=await this.redeemHumanContinuation(row, {
         userMessageId:nextUser,
@@ -1196,6 +1209,7 @@ export class GoalContinuationSupervisor {
       } else if (goal.continuation.leaseId !== row.leaseId) return null;
       const boundary = await this.finalCandidates(goal, row);
       if (boundary.newUser) {
+        if (await this.deferNewUserUntilNativeFinal(row)) return null;
         await this.redeemHumanContinuation(row, { userMessageId: boundary.newUserMessageId });
         return null;
       }

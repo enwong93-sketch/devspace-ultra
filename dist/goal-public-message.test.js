@@ -48,6 +48,33 @@ async function harness(t) {
     async restart() { await supervisor.close(); supervisor = new GoalContinuationSupervisor(options); await supervisor.ready; } };
 }
 
+test('Rescue starting a new native request cannot redeem a round or insert another message before its final', async t => {
+  const h = await harness(t);
+  const previous = await h.final();
+  h.boundary.noteTurn({ ...h.scope, kind: 'started', sourceUserMessageId: 'source-user-2', requestId: 'request-2' });
+  assert.equal(h.boundary.noteFinal(previous), false, 'late previous final cannot finish rescued work');
+  h.advance(60_000);
+  for (let i = 0; i < 3; i++) {
+    await h.supervisor.pollOnce();
+    assert.equal(await h.supervisor.claimPublicMessage(h.goal.id), null);
+    assert.equal((await h.runtime.status(h.goal.id)).round, 1, 'new user envelope is not round completion');
+  }
+  await h.final('- 繼續', previous.assistantMessageId);
+  const claims = await Promise.all([h.supervisor.claimPublicMessage(h.goal.id), h.supervisor.claimPublicMessage(h.goal.id)]);
+  assert.equal(claims.filter(Boolean).length, 1, 'only the new native final authorizes one continuation');
+  assert.equal((await h.runtime.status(h.goal.id)).round, 2);
+});
+
+test('native resumed work invalidates its earlier final without requiring a new user envelope', async t => {
+  const h = await harness(t);
+  const previous = await h.final();
+  h.boundary.noteTurn({ ...previous, kind: 'resumed', requestId: 'rescue-resumed-request' });
+  assert.equal(h.boundary.noteFinal(previous), false);
+  h.advance(60_000);
+  assert.equal(await h.supervisor.claimPublicMessage(h.goal.id), null);
+  assert.equal((await h.runtime.status(h.goal.id)).round, 1);
+});
+
 test('three public automatic rounds use native finals, not UI, RPC ack, or extra reports', async t => {
   const h = await harness(t);
   assert.equal(await h.supervisor.claimPublicMessage(h.goal.id), null, 'working round never sends');

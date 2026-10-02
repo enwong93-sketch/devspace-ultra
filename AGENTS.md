@@ -8,6 +8,23 @@ Progress narration is an Agent responsibility, not a reason to deny ordinary too
 
 A `pending` claim, unresolved or unbound conversation identity, unavailable recipient, omitted tool, or timeout is not proof that the floating card was updated. The report tool's hidden page-local relay completes an initial claim automatically; a separate `devspace_progress_bind` call is not required and may be absent from an older ChatGPT tool snapshot. If automatic confirmation is unavailable, use the exact-conversation compatibility bridge once when the current conversation ID is known and verify that the report appeared on this conversation. If verification still fails, state one visible progress-routing blocker, continue safe workspace work, and never claim that the card was updated. Re-check the card at meaningful boundaries and before the final response. Chat Swarm workers remain backend-only and must not write the user-facing progress card.
 
+## No operator bypass of Classic continuation admission
+
+Permission to send a message is not proof that the current assistant turn has
+ended. Do not use Codex `send_message_to_thread` as a maintenance fallback for
+Classic Goal continuation: preserving a conversation ID does not prove that
+the resulting turn retains its Classic Gateway tool environment. An idle
+thread label, a completed user-message item, a transport acknowledgement or
+an earlier assistant summary is not a current native assistant final.
+
+Once Rescue has resumed a turn, let that turn work. A next-Goal-round message,
+whether requested manually or automatically, must use the same exact-owner
+native-final claim and one-shot delivery path; no separate operator sender
+may bypass it. Rescue remains interrupted-turn recovery, not Goal advancement.
+A new Rescue/user request invalidates an older final and cannot itself redeem
+a Goal round. Never send a second diagnostic message merely to find out if the
+first worked. Missing receipts mean inspect and preserve work, not replay.
+
 ## Context-safe continuation work
 
 A single user turn can contain hundreds of model/tool messages. Preserve the
