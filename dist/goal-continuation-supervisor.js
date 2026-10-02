@@ -872,6 +872,15 @@ export class GoalContinuationSupervisor {
     await this.save();
     return true;
   }
+  async scheduleReconciliationRetry(row, state) {
+    // Unavailable observation is not evidence of an unsent transport. Retain
+    // the uncertain receipt and exclusive lease; throttle every unavailable
+    // exact-page path, including filtered evidence and thrown inspections.
+    row.reconciliationAttempts = Number(row.reconciliationAttempts || 0) + 1;
+    row.retryAt = this.now() + Math.min(60_000, 5_000 * (2 ** Math.min(4, row.reconciliationAttempts - 1)));
+    row.reconciliationState = state;
+    await this.save();
+  }
   async reconcile(row) {
     const goal = await this.goalRuntime.status(row.goalId);
     if (goal.status !== 'active' || this.closed) return;
@@ -883,21 +892,30 @@ export class GoalContinuationSupervisor {
     }
     if (goal.continuation?.continuationId !== row.continuationId || !row.finalAssistantId) return;
     if (row.deliveryMode === 'hidden-assistant-continuation') {
-      const pages = await this.pages(goal, {
-        runtimeKey: row.dispatchRuntimeKey || row.sourceRuntimeKey,
-        pageTargetId: row.dispatchPageTargetId,
-        allowDivergent: true,
-        includeNativeBranch: true,
-        sourceUserMessageId: row.sourceUserId,
-        baselineAssistantMessageId: row.finalAssistantId,
-      });
-      if (this.closed || !pages || pages.length !== 1) return;
+      const inspectionOutcome = {};
+      let pages;
+      let inspectionFailed = false;
+      try {
+        pages = await this.pages(goal, {
+          runtimeKey: row.dispatchRuntimeKey || row.sourceRuntimeKey,
+          pageTargetId: row.dispatchPageTargetId,
+          allowDivergent: true,
+          includeNativeBranch: true,
+          sourceUserMessageId: row.sourceUserId,
+          baselineAssistantMessageId: row.finalAssistantId,
+          inspectionOutcome,
+        });
+      } catch { inspectionFailed = true; }
+      if (this.closed) return;
+      if (inspectionFailed || !pages || pages.length !== 1) {
+        await this.scheduleReconciliationRetry(row, inspectionFailed
+          ? 'exact-page-inspection-failed'
+          : inspectionOutcome.reason || 'ambiguous-exact-pages');
+        return;
+      }
       const proof = pages[0].nativeContinuation;
       if (!proof?.resolved || proof.sourceUserFound !== true || proof.baselineAssistantFound !== true) {
-        row.reconciliationAttempts = Number(row.reconciliationAttempts || 0) + 1;
-        row.retryAt = this.now() + Math.min(60_000, 5_000 * (2 ** Math.min(4, row.reconciliationAttempts - 1)));
-        row.reconciliationState = proof?.state || 'native-branch-unresolved';
-        await this.save();
+        await this.scheduleReconciliationRetry(row, proof?.state || 'native-branch-unresolved');
         return;
       }
       const assistantIndex = Number(proof.newAssistantAfterBaselineIndex);

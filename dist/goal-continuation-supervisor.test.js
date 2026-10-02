@@ -605,6 +605,53 @@ test('unresolved native acknowledgement checks back off without repeating the se
   assert.equal(row.reconciliationState,'conversation-fetch-429');
 });
 
+test('filtered native-source unavailability backs off uncertain reconciliation across restart', async t => {
+  const h = await harness(t, { send: () => ({ok:false,dispatchCommitted:true,definiteFailure:false,state:'ack-lost'}) });
+  h.final(); await h.tick(); await h.tick();
+  h.setPages([{ ...h.page(), nativeGoalSourceRequired:true,
+    nativeContinuation:{resolved:false,state:'native-branch-rate-limit-backoff'} }]);
+  const inspect = h.driver.inspect;
+  let inspections = 0;
+  h.driver.inspect = async (...args) => { inspections++; return inspect(...args); };
+  await h.tick();
+  const row = h.driver.records.get(h.reported.continuation.continuationId);
+  assert.equal(row.reconciliationAttempts, 1);
+  assert.equal(row.reconciliationState, 'native-source-unavailable:native-branch-rate-limit-backoff');
+  assert.equal(row.state, 'uncertain');
+  assert.equal(row.dispatchCommitted, true);
+  for (let n=0; n<10; n++) await h.tick();
+  assert.equal(inspections, 1, 'filtered unavailable evidence must obey the reconciliation retry floor');
+  await h.driver.close();
+  const restarted = new GoalContinuationSupervisor({...h.config, inspect:h.driver.inspect});
+  t.after(() => restarted.close());
+  await restarted.pollOnce();
+  assert.equal(inspections, 1, 'the retry deadline is durable across a Core restart');
+  h.advanceTime(5100); await restarted.pollOnce();
+  assert.equal(inspections, 2);
+  assert.equal(h.sends(), 1, 'unavailable evidence never authorizes another send');
+  assert.equal((await h.runtime.status(h.g.id)).round, 1);
+});
+
+test('an uncertain exact-page inspection exception backs off without releasing its lease', async t => {
+  const h = await harness(t, { send: () => ({ok:false,dispatchCommitted:true,definiteFailure:false,state:'ack-lost'}) });
+  h.final(); await h.tick(); await h.tick();
+  let inspections = 0;
+  h.driver.inspect = async () => { inspections++; throw Error('bounded observation timeout'); };
+  await h.tick();
+  const row = h.driver.records.get(h.reported.continuation.continuationId);
+  assert.equal(row.reconciliationAttempts, 1);
+  assert.equal(row.reconciliationState, 'exact-page-inspection-failed');
+  assert.equal(row.state, 'uncertain');
+  assert.equal(row.dispatchCommitted, true);
+  for (let n=0; n<10; n++) await h.tick();
+  assert.equal(inspections, 1);
+  assert.equal((await h.runtime.status(h.g.id)).continuation.leaseId, row.leaseId);
+  h.advanceTime(5100); await h.tick();
+  assert.equal(inspections, 2);
+  assert.equal(row.reconciliationAttempts, 2);
+  assert.equal(h.sends(), 1);
+});
+
 test('hidden acknowledgement loss reconciles from the native branch without a user message or resend', async t => {
   const h=await harness(t,{send:()=>({ok:false,dispatchCommitted:true,definiteFailure:false,state:'ack-lost'})});
   h.final(); await h.tick(); await h.tick(); assert.equal(h.sends(),1);
