@@ -119,6 +119,10 @@ const activeHandles = [];
 let bGeneration = 0;
 
 const dependencies = {
+  async readCoreRuntimeIdentity({ coreBaseUrl }) {
+    const handle = [initial, ...activeHandles].find((item) => item.baseUrl === coreBaseUrl && item.server.listening);
+    return handle ? { ok: true, pid: handle.pid, processSessions: 0 } : { ok: false };
+  },
   async createCandidateSnapshot() {
     const stateDir = await mkdtemp(join(temp, "candidate-"));
     return { stateDir, async cleanup() { await rm(stateDir, { recursive: true, force: true }); } };

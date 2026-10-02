@@ -13,7 +13,7 @@ import { loadConfig } from "../dist/config.js";
 import { SingleUserOAuthProvider } from "../dist/oauth-provider.js";
 import { loadDevspaceFiles, writeDevspaceAuth, writeDevspaceConfig } from "../dist/user-config.js";
 import { createStableGatewayController } from "../dist/stable-gateway-controller.js";
-import { probeCandidate, readCoreSchemaFingerprint } from "../dist/stable-gateway-candidate.js";
+import { probeCandidate, readCoreSchemaFingerprint, readCoreRuntimeIdentity } from "../dist/stable-gateway-candidate.js";
 import { createCandidateSnapshot, startCoreSlot, stopCoreSlot } from "./devspace-core-slot.mjs";
 import { startStableGatewayRuntime } from "./devspace-stable-gateway.mjs";
 
@@ -360,6 +360,7 @@ try {
     stopCoreSlot,
     probeCandidate,
     readCoreSchemaFingerprint,
+    readCoreRuntimeIdentity,
   };
   const controller = createStableGatewayController({
     publicBaseUrl: PUBLIC_BASE,
