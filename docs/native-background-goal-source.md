@@ -15,6 +15,55 @@ acceptance evidence.
 
 ## Candidate contract
 
+### Native completed-turn ingress (current candidate server wiring)
+
+The physical round boundary is an explicit native completed public assistant
+summary/final, not a GUI observation. Both the round-completion guard and
+continuation arming use `nativeFinalIngressOnly` in current candidate server
+wiring. This source has not yet been deployed/accepted on the original Main.
+Legacy inspectors below remain compatibility/history helpers, not permission
+to infer a completed round from DOM text, idle, Stop controls, or a report.
+
+- Observe the already-existing native response stream, scoped to the exact
+  request, original user message, conversation, local Main and page target.
+  Require assistant role, public text, successful native completion and
+  `end_turn=true`. Analysis, tool recipients, hidden content, partial messages,
+  transport EOF and `[DONE]` are not completion receipts.
+- A new-chat request can legitimately lack a conversation ID. Keep only its
+  bounded provisional request/source-user metadata until an actual successful
+  native response envelope supplies the ID. Never learn it from a page URL,
+  quoted message/tool content or another request. Once known, that request's
+  conversation ID cannot be replaced by a later envelope.
+- Consume the earlier buffered response prefix before subsequently streamed
+  bytes and before `loadingFinished` removes the request. Bounded buffering
+  drops incomplete evidence on overflow/failure; it never manufactures a final.
+- Persist a hashed public-final receipt and an exactly-once assistant ledger.
+  A physical final arriving after an optional report preserves its existing
+  continuation ID and any unknown delivery lease. No reset/reissue is implied.
+- Semantic Goal success, pause and stop remain AI/user-owned state. Unknown
+  transport delivery does not decide semantic completion or disable the Goal.
+  Exactly-once delivery protection still prohibits blindly replaying an
+  unconfirmed side effect; task judgment and transport evidence are separate.
+
+This parser currently accepts complete native message envelopes. Actual
+delta-only, resumed/background and cold-client variants require real supported
+client validation. Fixture coverage is not evidence that every host variant
+emits that envelope or that original Classic hidden delivery is available.
+
+OpenAI's documented component `sendFollowUpMessage` publishes a message and
+does not establish this hidden-assistant continuation contract. The documented
+MCP Events surface is scoped to Work/Cloud/dots; it must not be substituted for
+the original Classic client. A supported hidden sender must be supplied by a
+trusted host through an explicit integration; default private SDK closure
+access, guessed RPCs, credential extraction and activation bypass are retired.
+
+Primary references consulted:
+- https://developers.openai.com/plugins/reference#openaisendfollowupmessage
+- https://developers.openai.com/plugins/build/mcp-events
+- https://chromedevtools.github.io/devtools-protocol/tot/Network/#method-streamResourceContent
+
+### Historical native-start / inspection compatibility contract
+
 1. Mint an unpredictable 192-bit receipt in the same durable transaction as a
    new conversation-bound Goal. Keep it in the private start-receipt ledger;
    do not change tool schemas or accept it as a tool argument.
@@ -32,12 +81,14 @@ acceptance evidence.
    An `api_tool` or `api_tool.call_tool` reply additionally needs its exact structured
    `api_tool.call_tool` parent invocation naming `devspace_goal_start`; a
    shell/tool echo or free-form assistant text is not a start invocation.
-4. Project native IDs and **public end-turn text only** into an inspection
+4. Historical inspectors project native IDs and **public end-turn text only** into an inspection
    snapshot, without mutating the display, composer, focus or navigation.
    Preserve display IDs separately. Never attach old display text to a new ID.
 5. A verified native start result correlates the initial user without guessing a short
    wall-clock window. Without it, retain the legacy time guard and native/DOM
-   agreement requirements; do not infer authority from a later native user.
+   agreement requirements in the legacy compatibility path; do not infer
+   authority from a later native user. The current production round-completion
+   ingress above does not use DOM/native agreement to decide whether a round ended.
 6. The exclusive Goal lease, exact page/relay ownership, current native final,
    stream status, safety/error gates and post-send native reconciliation remain
    mandatory. A committed uncertain send must never be replayed.

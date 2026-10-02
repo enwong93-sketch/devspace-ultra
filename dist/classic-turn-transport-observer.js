@@ -1,6 +1,6 @@
 import { ClassicCdpClient } from "./classic-cdp-client.js";
 import { StringDecoder } from "node:string_decoder";
-import { nativeFinalFromStreamBlock } from './classic-native-final-ingress.js';
+import { nativeFinalFromStreamBlock, nativeConversationFromStreamBlock } from './classic-native-final-ingress.js';
 import { ClassicTurnIdentityCorrelator, parseClassicTurnRequest } from "./context-guardian-cdp.js";
 import { sessionFingerprintFromClassicRequest } from "./classic-conversation-authority.js";
 import { defaultMainDebugPorts } from "./goal-host-bridge.js";
@@ -110,13 +110,14 @@ export class ClassicTurnTransportTracker {
       return nativeMcpCall;
     }
     const metadata = parseClassicTurnRequest(params?.request);
-    if (!metadata?.conversationId) return null;
+    if (!metadata || (!metadata.conversationId && !metadata.sourceUserMessageId)) return null;
     const requestId = String(params?.requestId || "").trim();
     if (!requestId) return null;
     this.prune();
     const firstSeenAt = this.now();
     this.pending.set(requestId, {
       conversationId: metadata.conversationId,
+      transportKind: metadata.transportKind,
       sourceUserMessageId: metadata.sourceUserMessageId || null,
       firstSeenAt,
       localFunctionNames: metadata.localFunctionNames || [],
@@ -197,7 +198,7 @@ export class ClassicTurnTransportTracker {
   noteResponseData({ requestId, data, base64Encoded = false, observedAtMs = this.now() } = {}) {
     const id = String(requestId || "").trim();
     const entry = id ? this.pending.get(id) : null;
-    if (!entry?.conversationId) return [];
+    if (!entry) return [];
     let decoder = null;
     if (base64Encoded) {
       decoder = this.responseDecoders.get(id);
@@ -216,8 +217,9 @@ export class ClassicTurnTransportTracker {
     const remainder = blocks.pop() || "";
     const accepted = [];
     for (const block of blocks) {
+      this.#learnNativeConversation(id, entry, block);
       this.#noteAssistantFinal(id, entry, block, observedAtMs);
-      accepted.push(...this.toolInvocationStream.notePayload({
+      if (entry.conversationId) accepted.push(...this.toolInvocationStream.notePayload({
         payloadData: block,
         conversationId: entry.conversationId,
         observedAtMs,
@@ -226,8 +228,9 @@ export class ClassicTurnTransportTracker {
     // Some ChatGPT stream variants deliver one complete JSON envelope without
     // an SSE blank-line delimiter. Parse the bounded remainder as well; the
     // invocation tracker deduplicates it if later chunks repeat the envelope.
+    this.#learnNativeConversation(id, entry, remainder);
     this.#noteAssistantFinal(id, entry, remainder, observedAtMs);
-    accepted.push(...this.toolInvocationStream.notePayload({
+    if (entry.conversationId) accepted.push(...this.toolInvocationStream.notePayload({
       payloadData: remainder,
       conversationId: entry.conversationId,
       observedAtMs,
@@ -378,8 +381,26 @@ export class ClassicTurnTransportTracker {
     } catch {}
   }
 
+  #learnNativeConversation(requestId, entry, block) {
+    if (entry.conversationId || !entry.sourceUserMessageId || !Number.isFinite(entry.responseStatus)
+      || entry.responseStatus < 200 || entry.responseStatus >= 300) return;
+    const conversationId = nativeConversationFromStreamBlock(block);
+    if (!conversationId) return;
+    entry.conversationId = conversationId;
+    this.#emitActiveTurn({
+      kind: entry.transportKind === 'resume' ? 'resumed' : 'started',
+      requestId, conversationId, sourceUserMessageId: entry.sourceUserMessageId,
+      localFunctionNames: entry.localFunctionNames, turnTraceFingerprint: entry.turnTraceFingerprint,
+      sessionFingerprint: entry.sessionFingerprint,
+      sessionCorrelationFingerprints: entry.sessionCorrelationFingerprints,
+      traceCorrelationFingerprints: entry.traceCorrelationFingerprints,
+      observedAt: observedAt(entry.firstSeenAt), observedAtMs: entry.firstSeenAt,
+    });
+    this.#emitTransport({ conversationId, kind: 'request', observedAt: observedAt(entry.firstSeenAt) });
+  }
+
   #emitTransport(event) {
-    if (!this.onTurnTransportEvent) return;
+    if (!event?.conversationId || !this.onTurnTransportEvent) return;
     try { this.onTurnTransportEvent(event); } catch {}
   }
 
@@ -394,7 +415,7 @@ export class ClassicTurnTransportTracker {
   }
 
   #emitActiveTurn(event) {
-    if (!this.onActiveTurn) return;
+    if (!event?.conversationId || !this.onActiveTurn) return;
     try { this.onActiveTurn(event); } catch {}
   }
 }

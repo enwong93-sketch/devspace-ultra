@@ -4,15 +4,27 @@ import { runtimeKeyForClassicPort } from './classic-main-debug-ports.js';
 const id = value => typeof value === 'string' && /^[A-Za-z0-9_-]{8,200}$/.test(value) ? value : null;
 const digest = text => createHash('sha256').update(text).digest('hex');
 
+function nativeStreamEnvelope(block) {
+  const raw = String(block || '').trim();
+  const data = raw.startsWith('{') ? raw : raw.split(/\r?\n/)
+    .filter(line => line.startsWith('data:')).map(line => line.slice(5).trimStart()).join('\n');
+  try { return JSON.parse(data); } catch { return null; }
+}
+
+// A first/new-chat request may not yet have a conversation ID. Learn only
+// the native envelope identity from that exact response, not a page URL,
+// quoted JSON, message content, or another request's cached conversation.
+export function nativeConversationFromStreamBlock(block) {
+  const payload = nativeStreamEnvelope(block);
+  return payload?.message?.author?.role === 'assistant' && id(payload.message.id)
+    ? id(payload.conversation_id) : null;
+}
+
 // Consume only an explicit native message envelope. Never search message text,
 // tool arguments, quoted documents, DOM, or transport EOF for a final marker.
 export function nativeFinalFromStreamBlock(block, { conversationId, sourceUserMessageId, requestId, observedAtMs } = {}) {
   if (!id(conversationId) || !id(sourceUserMessageId) || !requestId || !Number.isFinite(observedAtMs)) return null;
-  const raw = String(block || '').trim();
-  const data = raw.startsWith('{') ? raw : raw.split(/\r?\n/)
-    .filter(line => line.startsWith('data:')).map(line => line.slice(5).trimStart()).join('\n');
-  let payload;
-  try { payload = JSON.parse(data); } catch { return null; }
+  const payload = nativeStreamEnvelope(block);
   const message = payload?.message;
   if (payload?.conversation_id !== conversationId || !id(message?.id)
     || message?.author?.role !== 'assistant'

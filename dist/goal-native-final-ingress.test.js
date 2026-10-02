@@ -264,3 +264,51 @@ test('lookalike page URL cannot become native-final ingress authority', async ()
   });
   assert.equal(session, null);
 });
+
+test('new-chat request binds its first native conversation ID before the public final, without page/DOM inference', () => {
+  const turns = [], finals = [];
+  const tracker = new ClassicTurnTransportTracker({ now: () => now,
+    onActiveTurn: event => turns.push(event), onAssistantFinal: event => finals.push(event),
+  });
+  tracker.noteRequest({ requestId: 'first-native-request', request: {
+    method: 'POST', url: 'https://chatgpt.com/backend-api/f/conversation',
+    postData: JSON.stringify({ conversation_id: null, model: 'test-fixture',
+      messages: [{ id: userId, author: { role: 'user' } }] }),
+  } });
+  assert.equal(turns.length, 0, 'a provisional request cannot invent a conversation identity');
+  tracker.noteResponse({ requestId: 'first-native-request', response: { url: 'https://chatgpt.com/backend-api/f/conversation', status: 200 } });
+  tracker.noteResponseData({ requestId: 'first-native-request', data: frame({ channel: 'analysis', end_turn: false, status: 'in_progress' }) });
+  assert.equal(finals.length, 0);
+  assert.equal(turns.length, 1);
+  assert.equal(turns[0].kind, 'started');
+  assert.equal(turns[0].conversationId, cid);
+  assert.equal(turns[0].sourceUserMessageId, userId);
+  tracker.noteResponseData({ requestId: 'first-native-request', data: frame() });
+  assert.equal(finals.length, 1);
+  assert.equal(finals[0].requestId, 'first-native-request');
+  assert.equal(finals[0].conversationId, cid);
+  assert.equal(finals[0].sourceUserMessageId, userId);
+  assert.equal(JSON.stringify(turns).includes('公開總結'), false);
+});
+
+test('new-chat native final can itself supply CID, but wrong response or missing original user cannot', () => {
+  for (const [status, sourceUser, expected] of [[200, userId, 1], [429, userId, 0], [200, null, 0]]) {
+    const finals = [];
+    const tracker = new ClassicTurnTransportTracker({ now: () => now, onAssistantFinal: e => finals.push(e) });
+    tracker.noteRequest({ requestId: 'cold-request', request: { method: 'POST', url: 'https://chatgpt.com/backend-api/f/conversation',
+      postData: JSON.stringify({ model: 'test-fixture', messages: sourceUser ? [{ id: sourceUser, author: { role: 'user' } }] : [] }),
+    } });
+    tracker.noteResponse({ requestId: 'cold-request', response: { url: 'https://chatgpt.com/backend-api/f/conversation', status } });
+    tracker.noteResponseData({ requestId: 'cold-request', data: frame() });
+    assert.equal(finals.length, expected);
+  }
+});
+
+test('a later streamed envelope cannot replace the originally supplied CID', () => {
+  const finals = [], tracker = track(event => finals.push(event));
+  tracker.noteResponseData({ requestId: 'native-request', data: frame({}, { conversation_id: 'other-native-conversation' }) });
+  assert.equal(finals.length, 0);
+  tracker.noteResponseData({ requestId: 'native-request', data: frame() });
+  assert.equal(finals.length, 1);
+  assert.equal(finals[0].conversationId, cid);
+});
