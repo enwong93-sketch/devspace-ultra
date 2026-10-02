@@ -44,6 +44,15 @@ to infer a completed round from DOM text, idle, Stop controls, or a report.
   transport delivery does not decide semantic completion or disable the Goal.
   Exactly-once delivery protection still prohibits blindly replaying an
   unconfirmed side effect; task judgment and transport evidence are separate.
+- The native stream dispatch path revalidates the same live receipt immediately
+  before sending, including after asynchronous pre-send hooks. It does not call
+  the legacy visible-report/native-page completion inspector. A new request,
+  or observer disconnection invalidates that live boundary;
+  unavailable evidence cannot fall back to a rendered summary.
+
+Transport target discovery still requires the exact legacy relay for the
+injected sender and its acknowledgement. Removing the UI completion gate does
+not supply a production sender or eliminate that remaining relay dependency.
 
 This parser currently accepts complete native message envelopes. Actual
 delta-only, resumed/background and cold-client variants require real supported

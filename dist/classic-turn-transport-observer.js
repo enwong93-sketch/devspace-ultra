@@ -103,6 +103,10 @@ export class ClassicTurnTransportTracker {
 
   get pendingSize() { return this.pending.size; }
 
+  invalidateFinals() {
+    for (const entry of this.pending.values()) entry.finalIngressInvalidated = true;
+  }
+
   noteRequest(params = {}) {
     const nativeMcpCall = parseNativeCallMcpRequest(params?.request);
     if (nativeMcpCall) {
@@ -370,7 +374,7 @@ export class ClassicTurnTransportTracker {
   }
 
   #noteAssistantFinal(requestId, entry, block, observedAtMs) {
-    if (!this.onAssistantFinal || entry.finalAssistantMessageId || !Number.isFinite(entry.responseStatus)
+    if (!this.onAssistantFinal || entry.finalIngressInvalidated || entry.finalAssistantMessageId || !Number.isFinite(entry.responseStatus)
       || entry.responseStatus < 200 || entry.responseStatus >= 300) return;
     const event = nativeFinalFromStreamBlock(block, { ...entry, requestId, observedAtMs });
     if (!event) return;
@@ -382,7 +386,7 @@ export class ClassicTurnTransportTracker {
   }
 
   #learnNativeConversation(requestId, entry, block) {
-    if (entry.conversationId || !entry.sourceUserMessageId || !Number.isFinite(entry.responseStatus)
+    if (entry.finalIngressInvalidated || entry.conversationId || !entry.sourceUserMessageId || !Number.isFinite(entry.responseStatus)
       || entry.responseStatus < 200 || entry.responseStatus >= 300) return;
     const conversationId = nativeConversationFromStreamBlock(block);
     if (!conversationId) return;
@@ -431,6 +435,7 @@ export async function connectClassicTurnTransportPort(port, {
   onActiveTurn,
   onAssistantFinal,
   onDisconnected,
+  onNativeBoundaryInvalidated,
 } = {}) {
   let targets;
   try {
@@ -464,6 +469,11 @@ export async function connectClassicTurnTransportPort(port, {
   const discardResponseStreams = () => {
     for (const stream of responseStreams.values()) { stream.dropped = true; stream.queued = []; }
     responseStreams.clear();
+  };
+  const invalidateBoundary = () => {
+    discardResponseStreams();
+    tracker.invalidateFinals();
+    try { onNativeBoundaryInvalidated?.({ runtimeKey, port, pageTargetId: page.id }); } catch {}
   };
   const disposers = [
     client.on("Page.frameNavigated", (params) => {
@@ -535,7 +545,7 @@ export async function connectClassicTurnTransportPort(port, {
       });
     }),
   ];
-  const closeListener = () => { discardResponseStreams(); try { onDisconnected?.({ runtimeKey, port }); } catch {} };
+  const closeListener = () => { invalidateBoundary(); try { onDisconnected?.({ runtimeKey, port }); } catch {} };
   client.ws.addEventListener?.("close", closeListener, { once: true });
   return {
     runtimeKey,
@@ -544,7 +554,7 @@ export async function connectClassicTurnTransportPort(port, {
     get pendingSize() { return tracker.pendingSize; },
     get toolInvocationDiagnostics() { return tracker.diagnostics(); },
     async close() {
-      discardResponseStreams();
+      invalidateBoundary();
       for (const dispose of disposers) dispose();
       client.close();
     },
@@ -571,8 +581,8 @@ export class ClassicTurnTransportObserver {
     this.closed = false;
   }
 
-  setHandlers({ onConversationIdentity, onTurnTransportEvent, onNativeMcpCall, onToolInvocation, onActiveTurn, onAssistantFinal } = {}) {
-    this.handlers = { onConversationIdentity, onTurnTransportEvent, onNativeMcpCall, onToolInvocation, onActiveTurn, onAssistantFinal };
+  setHandlers({ onConversationIdentity, onTurnTransportEvent, onNativeMcpCall, onToolInvocation, onActiveTurn, onAssistantFinal, onNativeBoundaryInvalidated } = {}) {
+    this.handlers = { onConversationIdentity, onTurnTransportEvent, onNativeMcpCall, onToolInvocation, onActiveTurn, onAssistantFinal, onNativeBoundaryInvalidated };
   }
 
   async start({ schedule = true } = {}) {

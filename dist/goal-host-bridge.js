@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { nativeGoalStartWitness, projectNativeGoalSource } from './goal-native-start-witness.js';
+import { isNativeStreamFinalReceipt } from './classic-native-final-ingress.js';
 import { ClassicCdpClient } from "./classic-cdp-client.js";
 import { readComposerDraft } from "./classic-composer-draft.js";
 import { classicMainDebugPorts, runtimeLabelForClassicPort, runtimeKeyForClassicPort, runtimePortsForClassicKey } from './classic-main-debug-ports.js';
@@ -889,6 +890,7 @@ export class ClassicGoalHostBridge {
     beforeRawDispatch,
     waitForVisibleReport,
     inspectVisibleReport,
+    inspectNativeFinal,
     inspectComposer,
     clearOwnedComposer,
     visibleReportTimeoutMs = DEFAULT_VISIBLE_REPORT_TIMEOUT_MS,
@@ -931,6 +933,7 @@ export class ClassicGoalHostBridge {
     this.sendRaw = this.nativeHiddenTransportConfigured ? sendRaw : sendRawHostFollowUp;
     this.beforeDispatch = beforeDispatch;
     this.beforeRawDispatch = beforeRawDispatch;
+    this.inspectNativeFinal = typeof inspectNativeFinal === 'function' ? inspectNativeFinal : null;
     this.inspectVisibleReport = inspectVisibleReport || ((candidate, payload = {}) => inspectVisibleReportCommit(candidate, { ...this.pageInspectionOptions, ...payload }));
     this.inspectComposer = inspectComposer || ((candidate, expectedText) => inspectExactPageComposer(candidate, expectedText, this.composerOptions));
     this.clearOwnedComposer = clearOwnedComposer || ((candidate, expectedText) => clearExactOwnedComposerPayload(candidate, expectedText, this.composerOptions));
@@ -1457,6 +1460,27 @@ export class ClassicGoalHostBridge {
     this.beforeRawDispatch = typeof handler === "function" ? handler : null;
   }
 
+  async hasNativeFinalBoundary({ goalId, conversationId, runtimePort, expectedPageTargetId,
+    sourceUserId, assistantMessageId, nativeCompletionProof } = {}) {
+    const proof = nativeCompletionProof;
+    if (!isNativeStreamFinalReceipt(proof) || !this.inspectNativeFinal
+      || proof.conversationId !== conversationId || proof.sourceUserMessageId !== sourceUserId
+      || proof.assistantMessageId !== assistantMessageId
+      || (runtimePort != null && proof.port !== runtimePort)
+      || (expectedPageTargetId && proof.pageTargetId !== expectedPageTargetId)) return null;
+    try {
+      const result = await this.inspectNativeFinal({ id: goalId, conversationId }, { nativeCompletionProof: proof });
+      if (result?.pages?.length !== 1 || result.newUser) return null;
+      const event = result.pages[0]?.nativeFinalReceipt;
+      if (!isNativeStreamFinalReceipt(event)) return null;
+      for (const field of ['conversationId', 'sourceUserMessageId', 'assistantMessageId',
+        'requestId', 'assistantTextHash', 'assistantCreatedAt', 'runtimeKey', 'port', 'pageTargetId']) {
+        if (event[field] !== proof[field]) return null;
+      }
+      return true;
+    } catch { return null; }
+  }
+
   async dispatch({ goalId, prompt, continuationId, leaseId, round, reportedAt,
     conversationId = null, runtimePort = null, expectedPageTargetId = null,
     sourceUserId = null, assistantMessageId = null, nativeCompletionProof = null,
@@ -1465,7 +1489,10 @@ export class ClassicGoalHostBridge {
     if (typeof prompt !== "string" || !prompt.trim()) throw new Error("Goal host dispatch requires prompt.");
     if (!this.nativeHiddenTransportConfigured) return nativeHiddenTransportUnavailable();
 
-    if (typeof this.beforeDispatch === "function") {
+    const nativeStreamFinal = nativeCompletionProof?.ingress === 'native-response-stream';
+    const nativeRequest = { goalId, conversationId, runtimePort, expectedPageTargetId,
+      sourceUserId, assistantMessageId, nativeCompletionProof };
+    if (!nativeStreamFinal && typeof this.beforeDispatch === "function") {
       try {
         await this.beforeDispatch({ goalId, continuationId, leaseId, round });
       } catch {
@@ -1475,6 +1502,13 @@ export class ClassicGoalHostBridge {
     }
 
     const expectedConversationId = String(conversationId || "").trim();
+    if (nativeStreamFinal && !await this.hasNativeFinalBoundary(nativeRequest)) {
+      return { ok: false, definiteFailure: true, dispatchCommitted: false,
+        state: 'native-final-preflight-unavailable',
+        error: 'The exact live native assistant-final receipt is unavailable.' };
+    }
+    // Target discovery is transport ownership, not a completed-turn signal.
+    // The legacy sender still needs its exact relay candidate for acknowledgement.
     const resolved = expectedConversationId
       ? await this.findExactConversationRelay(expectedConversationId, { runtimePort, goalId })
       : { candidate: null, relayFallback: false, ambiguous: false, matchCount: 0,
@@ -1513,7 +1547,9 @@ export class ClassicGoalHostBridge {
         reportedAt: reportedAt || null,
       };
       let boundary;
-      if (nativeCompletionProof) {
+      if (nativeStreamFinal) {
+        boundary = { ok: true, committed: true, nativeCompleted: true };
+      } else if (nativeCompletionProof) {
         const nativeFinal = await inspectVisibleReportCommit(matching, {
           recovery: true,
           includeNativeBranch: true,
@@ -1574,6 +1610,13 @@ export class ClassicGoalHostBridge {
             pageNavigation: false,
           };
         }
+      }
+      // A hook may yield while a new user/turn arrives. Re-read the native
+      // boundary immediately before handing off; never infer completion from UI.
+      if (nativeStreamFinal && !await this.hasNativeFinalBoundary(nativeRequest)) {
+        return { ok: false, definiteFailure: true, dispatchCommitted: false,
+          state: 'native-final-preflight-unavailable',
+          error: 'The live native final changed before continuation dispatch.' };
       }
       const sent = await this.sendRaw(matching, {
         prompt,

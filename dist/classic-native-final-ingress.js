@@ -68,6 +68,11 @@ export function isNativeStreamFinalReceipt(event) {
 export class ClassicNativeFinalBoundaryStore {
   constructor({ maxEntries = 128 } = {}) { this.maxEntries = maxEntries; this.turns = new Map(); }
   key(event) { return `${event.runtimeKey}:${event.pageTargetId}:${event.conversationId}`; }
+  invalidatePage({ runtimeKey, pageTargetId } = {}) {
+    if (!runtimeKey || !pageTargetId) return;
+    const prefix = `${runtimeKey}:${pageTargetId}:`;
+    for (const key of this.turns.keys()) if (key.startsWith(prefix)) this.turns.delete(key);
+  }
   noteTurn(event) {
     if (!['started', 'resumed', 'failed', 'expired', 'evicted'].includes(event?.kind)
       || !id(event.conversationId) || !event.runtimeKey || !event.pageTargetId || !event.requestId) return;

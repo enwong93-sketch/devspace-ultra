@@ -2339,14 +2339,15 @@ export function createServer(config = loadConfig(), options = {}) {
     const progressLivenessAdapter = new ConversationProgressLivenessCdpAdapter({
         ...classicCdpOptions,
     });
+    const nativeFinalBoundaries = new ClassicNativeFinalBoundaryStore();
     const goalHostBridge = new ClassicGoalHostBridge({
         ...classicCdpOptions,
+        inspectNativeFinal: (goal, row) => nativeFinalBoundaries.inspect(goal, row),
         beforeDispatch: config.passiveCore || !primaryDebugGuard
             ? undefined
             : () => primaryDebugGuard.pollOnce(),
     });
     let conversationProgressLiveness = null;
-    const nativeFinalBoundaries = new ClassicNativeFinalBoundaryStore();
     const goalContinuationSupervisor = new GoalContinuationSupervisor({
         goalRuntime,
         inspectNativeFinal: (goal, row) => nativeFinalBoundaries.inspect(goal, row),
@@ -2934,6 +2935,7 @@ export function createServer(config = loadConfig(), options = {}) {
     const nativeUsageEvidenceReady = nativeUsageEvidence.load().catch(() => nativeUsageEvidence.snapshot());
     const turnTransportObserver = new ClassicTurnTransportObserver(classicCdpOptions);
     turnTransportObserver.setHandlers({
+        onNativeBoundaryInvalidated: (event) => nativeFinalBoundaries.invalidatePage(event),
         onConversationIdentity: (event) => {
             void persistConversationIdentity({ ...event, authoritativeCurrent: true }).catch((error) => {
                 logEvent(config.logging, "debug", "classic_conversation_identity_persist_failed", {

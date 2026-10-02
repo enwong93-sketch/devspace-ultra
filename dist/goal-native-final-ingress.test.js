@@ -7,6 +7,8 @@ import { ClassicTurnTransportTracker, connectClassicTurnTransportPort } from './
 import { GoalRuntime } from './goal-runtime.js';
 import { ClassicGoalRoundCompletionGuard } from './goal-round-completion-guard.js';
 import { GoalContinuationSupervisor } from './goal-continuation-supervisor.js';
+import { ClassicGoalHostBridge } from './goal-host-bridge.js';
+import { ClassicNativeFinalBoundaryStore } from './classic-native-final-ingress.js';
 
 const now = Date.parse('2026-10-02T15:30:00.000Z');
 const cid = 'conversation-native-summary';
@@ -155,6 +157,82 @@ async function scopedFinal() {
   return event;
 }
 
+test('native final dispatch reaches the trusted sender without UI completion inspection', async () => {
+  const proof = await scopedFinal();
+  const store = new ClassicNativeFinalBoundaryStore();
+  store.noteTurn({ ...proof, kind: 'started' }); store.noteFinal(proof);
+  let forbiddenCalls = 0, sends = 0;
+  const forbidden = async () => { forbiddenCalls++; throw new Error('UI/relay inspection is not a native final gate'); };
+  const bridge = new ClassicGoalHostBridge({ ports: [9732],
+    inspectNativeFinal: (goal, row) => store.inspect(goal, row),
+    beforeDispatch: forbidden, inspectVisibleReport: forbidden,
+    probeRelayPort: async () => [{ runtimePort: proof.port, pageTargetId: proof.pageTargetId,
+      targetId: 'fixture-relay', conversationId: cid, chatMode: true, webSocketDebuggerUrl: 'ws://fixture/relay' }],
+    waitForVisibleReport: forbidden,
+    sendRaw: async candidate => { sends++; assert.equal(candidate.pageTargetId, proof.pageTargetId); return { ok: true, dispatchCommitted: true }; },
+  });
+  bridge.waitForHiddenAssistant = async () => ({ ok: true }); // Fixture acknowledgement only.
+  const result = await bridge.dispatch({ goalId: 'owned-goal', prompt: 'continue', conversationId: cid,
+    runtimePort: proof.port, expectedPageTargetId: proof.pageTargetId, sourceUserId: userId,
+    assistantMessageId: proof.assistantMessageId, nativeCompletionProof: proof });
+  assert.equal(result.ok, true); assert.equal(sends, 1); assert.equal(forbiddenCalls, 0);
+});
+
+test('new native request during pre-send hook prevents dispatch from the old final', async () => {
+  const proof = await scopedFinal();
+  const store = new ClassicNativeFinalBoundaryStore();
+  store.noteTurn({ ...proof, kind: 'started' }); store.noteFinal(proof);
+  let sends = 0, hooks = 0;
+  const bridge = new ClassicGoalHostBridge({ ports: [9732],
+    inspectNativeFinal: (goal, row) => store.inspect(goal, row),
+    probeRelayPort: async () => [{ runtimePort: proof.port, pageTargetId: proof.pageTargetId,
+      targetId: 'fixture-relay', conversationId: cid, chatMode: true, webSocketDebuggerUrl: 'ws://fixture/relay' }],
+    beforeRawDispatch: async () => { hooks++; store.noteTurn({ ...proof, kind: 'started', requestId: 'new-native-request' }); },
+    sendRaw: async () => { sends++; return { ok: true }; },
+  });
+  const result = await bridge.dispatch({ goalId: 'owned-goal', prompt: 'continue', conversationId: cid,
+    runtimePort: proof.port, expectedPageTargetId: proof.pageTargetId, sourceUserId: userId,
+    assistantMessageId: proof.assistantMessageId, nativeCompletionProof: proof });
+  assert.equal(hooks, 1); assert.equal(sends, 0);
+  assert.equal(result.dispatchCommitted, false); assert.equal(result.state, 'native-final-preflight-unavailable');
+});
+
+test('disconnect invalidates only its exact native page, including completed finals', async () => {
+  const proof = await scopedFinal(); const other = { ...proof, pageTargetId: 'another-native-page' };
+  const store = new ClassicNativeFinalBoundaryStore();
+  for (const event of [proof, other]) { store.noteTurn({ ...event, kind: 'started' }); store.noteFinal(event); }
+  store.invalidatePage(proof);
+  assert.equal(store.inspect({ conversationId: cid }, { nativeCompletionProof: proof }).pages, null);
+  assert.equal(store.inspect({ conversationId: cid }, { nativeCompletionProof: other }).pages.length, 1);
+  assert.equal(store.noteFinal(proof), false, 'late response cannot restore disconnected authority');
+});
+
+test('late response after observer loss cannot recreate an invalidated native final', () => {
+  const finals = []; const tracker = track(event => finals.push(event));
+  tracker.invalidateFinals();
+  tracker.noteResponseData({ requestId: 'native-request', data: frame() });
+  assert.equal(finals.length, 0);
+});
+
+test('native dispatch rejects unavailable or mismatched receipts without falling back to a UI report', async () => {
+  const proof = await scopedFinal(); let sends = 0, uiReads = 0;
+  const altered = [null, { pages: [] }, { pages: [{ nativeFinalReceipt: { ...proof, requestId: 'different-request' } }] },
+    { pages: [{ nativeFinalReceipt: { ...proof, pageTargetId: 'another-page' } }] },
+    { pages: [{ nativeFinalReceipt: { ...proof, assistantTextHash: '0'.repeat(64) } }] }];
+  for (const response of altered) {
+    const bridge = new ClassicGoalHostBridge({ inspectNativeFinal: async () => response,
+      probeRelayPort: async () => { uiReads++; return []; },
+      waitForVisibleReport: async () => { uiReads++; return { ok: true }; },
+      sendRaw: async () => { sends++; return { ok: true }; } });
+    const result = await bridge.dispatch({ goalId: 'owned-goal', prompt: 'continue', conversationId: cid,
+      runtimePort: proof.port, expectedPageTargetId: proof.pageTargetId, sourceUserId: userId,
+      assistantMessageId: proof.assistantMessageId, nativeCompletionProof: proof });
+    assert.equal(result.state, 'native-final-preflight-unavailable');
+    assert.equal(result.dispatchCommitted, false);
+  }
+  assert.equal(sends, 0); assert.equal(uiReads, 0);
+});
+
 test('optional report cannot trigger UI final guessing, and native completion preserves its exact pending ID', async t => {
   const root = await mkdtemp(join(tmpdir(), 'goal-native-reported-'));
   const runtime = new GoalRuntime({ stateDir: root, now: () => now });
@@ -218,7 +296,7 @@ test('production wires passive native-final input and event-only completion gate
 });
 
 for (const split of [false, true]) test(`delayed native buffered response ${split ? 'prefix' : 'body'} is consumed before transport EOF`, async t => {
-  const finals = [], calls = []; let socket;
+  const finals = [], calls = [], invalidations = []; let socket;
   class FakeSocket extends EventTarget {
     constructor() { super(); socket = this; setTimeout(() => this.dispatchEvent(new Event('open')), 0); }
     send(raw) {
@@ -235,6 +313,7 @@ for (const split of [false, true]) test(`delayed native buffered response ${spli
       ok: true, json: async () => [{ id: 'native-page-02', type: 'page', url: `https://chatgpt.com/c/${cid}`, webSocketDebuggerUrl: 'ws://fixture/native' }],
     }; },
     onAssistantFinal: event => finals.push(event),
+    onNativeBoundaryInvalidated: event => invalidations.push(event),
   });
   t.after(() => session.close());
   socket.emit({ method: 'Network.requestWillBeSent', params: { requestId: 'native-request', request: {
@@ -253,6 +332,9 @@ for (const split of [false, true]) test(`delayed native buffered response ${spli
   assert.equal(finals[0].pageTargetId, 'native-page-02');
   assert.equal(session.pendingSize, 0);
   assert.equal(calls.some(method => /Runtime|Debugger|Input/.test(method)), false, 'native transport observation performs no UI execution');
+  socket.close();
+  assert.equal(invalidations.length, 1, 'socket loss invalidates the former completion boundary');
+  assert.equal(invalidations[0].pageTargetId, 'native-page-02');
 });
 
 test('lookalike page URL cannot become native-final ingress authority', async () => {
