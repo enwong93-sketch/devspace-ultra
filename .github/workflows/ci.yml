@@ -41,6 +41,8 @@ jobs:
         run: |
           $files = @(
             'install.ps1',
+            'update.ps1',
+            'scripts/self-update-readiness.test.ps1',
             'scripts/devspace-public-setup.ps1',
             'scripts/devspace-duckdns-update.ps1',
             'scripts/devspace-ultra-setup.ps1',
