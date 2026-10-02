@@ -2,7 +2,7 @@
 
 Version-specific release notes are published with each [GitHub Release](https://github.com/enwong93-sketch/devspace-ultra/releases). They describe the reusable product, not any customer's machine or live installation.
 
-## 0.5.22 - in preparation
+## 0.5.22 — in preparation
 
 - Carry forward the native-final Goal continuation and Rescue ordering fixes from the immutable v0.5.21 draft.
 - Defer package retirement for retained Core process sessions, invalid/missing diagnostics, wrong PID, active tools or concurrent handover.
