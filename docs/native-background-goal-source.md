@@ -68,6 +68,10 @@ acceptance evidence.
     deterministic legacy aliases, still requiring exact conversation/page/relay
     ownership. Missing-arm diagnostics distinguish no exact page, unresolved
     native source and actual rate-limit backoff without returning content.
+12. Serialize native API-read admission before the first response can set
+    negative backoff. Concurrent inspections receive a distinct unavailable
+    busy state, not another caller's positive proof. Release admission on all
+    response/error paths and retain a bounded unsent retry floor.
 
 ## Verification boundary
 

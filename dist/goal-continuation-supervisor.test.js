@@ -102,6 +102,22 @@ test('native receipt reconciles a stale display without counting it as human con
   assert.notEqual(h.driver.status().records[0].deliveryMode, 'human-user-continuation');
 });
 
+test('armed native backoff is diagnosed and never sends from an earlier positive snapshot', async t => {
+  const h = await harness(t, { skipArm: true });
+  const current = await receiptPage(h);
+  h.setPages([current]); await h.driver.arm(h.reported); await h.tick();
+  h.setPages([{ ...current, boundarySource: null, nativeGoalSourceRequired: true,
+    nativeContinuation: { resolved: false, state: 'native-branch-rate-limit-backoff' } }]);
+  await h.tick();
+  assert.equal(h.driver.status().records[0].reason,
+    'native-source-unavailable:native-branch-rate-limit-backoff');
+  assert.equal(h.sends(), 0);
+  h.setPages([current]); await h.tick();
+  assert.equal(h.sends(), 0, 'the retry floor remains mandatory');
+  h.advanceTime(5100); await h.tick(); await h.tick();
+  assert.equal(h.sends(), 1, 'only a fresh settled boundary permits delivery');
+});
+
 test('missing-arm restart uses the durable native receipt instead of an old display baseline', async t => {
   const h = await harness(t, { skipArm: true });
   h.setPages([await receiptPage(h)]);

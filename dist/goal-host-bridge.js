@@ -15,6 +15,7 @@ const DEFAULT_VISIBLE_REPORT_SETTLE_MS = 400;
 const DEFAULT_HIDDEN_CONFIRM_TIMEOUT_MS = 15_000;
 const DEFAULT_HIDDEN_CONFIRM_POLL_MS = 2_000;
 let nativeBranchBackoffUntilMs = 0;
+let nativeBranchInspectionActive = false;
 
 export function nativeInspectionRetryDelayMs(retryAfter, nowMs = Date.now()) {
   const value = String(retryAfter || '').trim();
@@ -406,9 +407,20 @@ export async function inspectVisibleReportCommit(candidate, options = {}) {
   }
   const client = new CdpClient(candidate.pageWebSocketDebuggerUrl, options);
   await client.open();
+  let ownsNativeInspection = false;
   try {
     await client.call("Runtime.enable");
-    const nativeBranchBlocked = Date.now() < nativeBranchBackoffUntilMs;
+    const nativeBranchRateLimited = Date.now() < nativeBranchBackoffUntilMs;
+    const nativeBranchBusy = nativeBranchInspectionActive;
+    const nativeBranchBlocked = nativeBranchRateLimited || nativeBranchBusy;
+    if (options.includeNativeBranch === true && !nativeBranchBlocked) {
+      // Hold the slot until the response updates negative backoff. Concurrent
+      // Goal/guard inspections must not all pass the pre-response check and
+      // stampede the same host API. Busy callers get unavailable evidence,
+      // never another caller's positive snapshot.
+      nativeBranchInspectionActive = true;
+      ownsNativeInspection = true;
+    }
     const result = await client.call("Runtime.evaluate", {
       expression: `(async () => {
         const href = location.href;
@@ -461,7 +473,7 @@ export async function inspectVisibleReportCommit(candidate, options = {}) {
         const match = location.pathname.match(/\\/c\\/([^/?#]+)/);
         const conversationId = match?.[1] || null;
         let nativeContinuation = ${nativeBranchBlocked}
-          ? { resolved: false, state: 'native-branch-rate-limit-backoff' } : null;
+          ? { resolved: false, state: ${JSON.stringify(nativeBranchRateLimited ? 'native-branch-rate-limit-backoff' : 'native-branch-inspection-busy')} } : null;
         if (conversationId && ${options.includeNativeBranch === true && !nativeBranchBlocked}) {
           const expectedSourceUserId = ${JSON.stringify(String(options.sourceUserMessageId || "").trim())};
           const baselineAssistantMessageId = ${JSON.stringify(String(options.baselineAssistantMessageId || "").trim())};
@@ -674,6 +686,7 @@ export async function inspectVisibleReportCommit(candidate, options = {}) {
       id: receipt.goalId, conversationId: receipt.conversationId, nativeStartReceipt: receipt,
     }) : snapshot;
   } finally {
+    if (ownsNativeInspection) nativeBranchInspectionActive = false;
     client.close();
   }
 }

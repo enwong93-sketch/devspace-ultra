@@ -712,12 +712,17 @@ export class GoalContinuationSupervisor {
       && !row.baseline.some(b => b.id === pages[0].latestAssistantMessageId && b.hash === digest(pages[0].latestAssistantText));
   }
   async finalCandidates(goal,row) {
-    if (!row.causalDisplayProof) return {pages:await this.pages(goal,{
-      runtimeKey:row.sourceRuntimeKey,
-      pageTargetId:row.sourcePageTargetId||row.nativeCompletionProof?.pageTargetId||row.dispatchPageTargetId||null,
-    })};
-    const all=await this.pages(goal,{allowDivergent:true});
-    if(!all)return {pages:null};
+    const inspectionOutcome = {};
+    if (!row.causalDisplayProof) {
+      const pages = await this.pages(goal,{
+        runtimeKey:row.sourceRuntimeKey,
+        pageTargetId:row.sourcePageTargetId||row.nativeCompletionProof?.pageTargetId||row.dispatchPageTargetId||null,
+        inspectionOutcome,
+      });
+      return {pages, inspectionReason: inspectionOutcome.reason || null};
+    }
+    const all=await this.pages(goal,{allowDivergent:true,inspectionOutcome});
+    if(!all)return {pages:null,inspectionReason:inspectionOutcome.reason||null};
     const knownUsers=new Set(row.sourceCandidates.map(p=>p.userId));
     // Synchronizing a stale display to an already-captured user is harmless;
     // an actually NEW user in any display cancels this report's continuation.
@@ -961,7 +966,14 @@ export class GoalContinuationSupervisor {
       return;
     }
     let pages = selected.pages;
-    if (!pages) { row.reason = 'exact-page-unavailable'; return; }
+    if (!pages) {
+      row.reason = selected.inspectionReason || 'exact-page-unavailable';
+      if (selected.inspectionReason) {
+        row.retryAt = this.now() + 5000; row.candidateKey = null; row.settledAt = null;
+        await this.save();
+      }
+      return;
+    }
     if (pages.some(p => p.latestUserMessageId !== row.sourceUserId)) {
       const nextUser=pages.find(p=>p.latestUserMessageId!==row.sourceUserId)?.latestUserMessageId||null;
       const redeemed=await this.redeemHumanContinuation(row, {

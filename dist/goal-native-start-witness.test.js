@@ -217,6 +217,39 @@ test('the existing inspector emits compilable JS and never requests a user gestu
   assert.equal(calls.find(call => call.method === 'Runtime.evaluate').params.userGesture, false);
   assert.deepEqual(calls.map(call => call.method), ['Runtime.enable', 'Runtime.evaluate']);
 });
+
+test('concurrent native inspections cannot stampede the API before the first rate-limit result arrives', async () => {
+  let firstReply, ready;
+  const firstStarted = new Promise(resolve => { ready = resolve; });
+  const expressions = [];
+  class FixtureSocket extends EventTarget {
+    constructor() { super(); queueMicrotask(() => this.dispatchEvent(new Event('open'))); }
+    send(text) {
+      const call = JSON.parse(text);
+      const reply = value => this.dispatchEvent(new MessageEvent('message', {
+        data: JSON.stringify({ id: call.id, result: call.method === 'Runtime.evaluate' ? { result: { value } } : {} }),
+      }));
+      if (call.method !== 'Runtime.evaluate') { queueMicrotask(() => reply({})); return; }
+      expressions.push(call.params.expression);
+      if (expressions.length === 1) { firstReply = () => reply(snapshot()); ready(); }
+      else queueMicrotask(() => reply(snapshot()));
+    }
+    close() { this.dispatchEvent(new Event('close')); }
+  }
+  const candidate = { pageWebSocketDebuggerUrl: 'ws://fixture-only', pageTargetId: 'exact-page' };
+  const options = { WebSocketImpl: FixtureSocket, includeNativeBranch: true };
+  const first = inspectVisibleReportCommit(candidate, options);
+  try {
+    await firstStarted;
+    await inspectVisibleReportCommit(candidate, options);
+    assert.match(expressions[1], /native-branch-inspection-busy/);
+    assert.match(expressions[1], /if \(conversationId && false\)/,
+      'the second snapshot cannot start another conversation API read');
+  } finally { firstReply(); await first; }
+  await inspectVisibleReportCommit(candidate, options);
+  assert.match(expressions[2], /if \(conversationId && true\)/,
+    'the completed inspection releases ownership; a fresh read is not a positive cache');
+});
 for (const field of ['safetyCheckVisible', 'deliveryTimeoutVisible', 'retryVisible']) {
   test(`native source projection does not override ${field}`, () => {
     const s = { ...snapshot(), [field]: true };
