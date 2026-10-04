@@ -450,13 +450,13 @@ function Get-UpdateRuntimeProcessPlan([string[]] $Roots, [object[]] $Processes, 
     return [pscustomobject]@{StopProcessIds=$(if($conflict){@()}else{$ids});ProtectedDescendantConflict=$conflict}
 }
 
-function Get-NativeMaintenanceState {
+function Get-NativeMaintenanceState([string] $ProbeRoot = $PSScriptRoot) {
     if ($script:TestMode) { return [pscustomobject]@{ Ready = $true; Reason = 'isolated-updater-sandbox' } }
     if (Test-UpdateRuntimeAbsent) { return [pscustomobject]@{ Ready = $true; Reason = 'verified-offline' } }
     $unknown = [pscustomobject]@{ Ready = $false; Reason = 'native-maintenance-proof-unavailable' }
     if (-not $NativeMaintenancePorts -or $NativeMaintenancePorts.Count -eq 0) { return $unknown }
     try {
-        $probe = Join-Path $PSScriptRoot 'scripts\self-update-native-readiness.mjs'
+        $probe = Join-Path $ProbeRoot 'scripts\self-update-native-readiness.mjs'
         if (-not (Test-Path -LiteralPath $probe)) { return $unknown }
         $output = @(& node $probe ($NativeMaintenancePorts -join ',') 2>$null)
         if ($LASTEXITCODE -ne 0) { return $unknown }
@@ -467,7 +467,7 @@ function Get-NativeMaintenanceState {
     } catch { return $unknown }
 }
 
-function Stop-DevSpaceRuntime([object[]] $PackageRecords, [object[]] $TaskSnapshot) {
+function Stop-DevSpaceRuntime([object[]] $PackageRecords, [object[]] $TaskSnapshot, [string] $NativeProbeRoot = $PSScriptRoot) {
     if ($script:TestMode) { return }
     # Staging can take minutes. Check again before the first process/task side
     # effect; -Force is a version/repair override, not permission to kill work.
@@ -485,7 +485,7 @@ function Stop-DevSpaceRuntime([object[]] $PackageRecords, [object[]] $TaskSnapsh
     }
     $stopProcessIds=@($plan.StopProcessIds)
 
-    $native = Get-NativeMaintenanceState
+    $native = Get-NativeMaintenanceState -ProbeRoot $NativeProbeRoot
     # Native reads may take seconds. Recheck actual Core work after them.
     $readiness = Get-GatewayBusyState
     if (-not $native.Ready -or -not $readiness.Known -or $readiness.Busy) {
@@ -830,7 +830,7 @@ try {
     $staged = Invoke-StagePackage -Release $release -ArchivePath $archivePath -Prefix $prefix
 
     $taskSnapshot = Get-TaskSnapshot
-    Stop-DevSpaceRuntime -PackageRecords $records -TaskSnapshot $taskSnapshot
+    Stop-DevSpaceRuntime -PackageRecords $records -TaskSnapshot $taskSnapshot -NativeProbeRoot $staged.Root
 
     $timestamp = (Get-Date).ToUniversalTime().ToString("yyyyMMdd-HHmmss")
     $backupDirectory = Join-Path $BackupRoot ("$timestamp-" + $(if ($installed) { $installed.Version } else { "fresh" }))
