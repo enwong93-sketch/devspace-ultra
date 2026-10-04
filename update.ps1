@@ -142,6 +142,7 @@ function Get-InstalledPackageRecords([string] $Prefix) {
 }
 
 function Get-PrimaryInstalledRecord([object[]] $Records) {
+    if (-not $Records -or $Records.Count -eq 0) { return $null }
     $preferred = @($Records | Where-Object { $_.Name -eq "devspace-ultra" } | Select-Object -First 1)
     if ($preferred.Count -gt 0) { return $preferred[0] }
     $legacy = @($Records | Where-Object { $_.Name -eq "@waishnav/devspace" } | Select-Object -First 1)
@@ -393,6 +394,59 @@ function Get-GatewayBusyState {
     }
 }
 
+function Test-PreservedUpdateTask([string] $Name) {
+    # These are infrastructure / native-app launchers, not package retirement.
+    return $Name -in @('DevSpace-Local-Ingress', 'DevSpace-Canonical-Startup')
+}
+
+function Get-UpdateRuntimeProcessPlan([string[]] $Roots, [object[]] $Processes, [int] $UpdaterPid) {
+    $protectedIds = [Collections.Generic.HashSet[int]]::new()
+    foreach ($row in $Processes) {
+        if ([string]$row.Name -in @('caddy.exe','ChatGPT Classic.exe','ChatGPT.exe')) {
+            $null = $protectedIds.Add([int]$row.ProcessId)
+        }
+    }
+    $ownedIds = [Collections.Generic.HashSet[int]]::new()
+    foreach ($row in $Processes) {
+        $id = [int]$row.ProcessId
+        if ($id -eq $UpdaterPid -or $protectedIds.Contains($id)) { continue }
+        $command = [string]$row.CommandLine
+        if (-not $command) { continue }
+        foreach ($root in $Roots) {
+            if (-not $root) { continue }
+            $prefix = [regex]::Escape($root.TrimEnd('\','/')) + '[\\/]'
+            if ($command -match ($prefix + '(?:scripts[\\/]devspace-(?:stable-gateway|fixed-backend|live-progress)|dist[\\/]cli\.js["'']?\s+serve)')) {
+                $null = $ownedIds.Add($id); break
+            }
+        }
+    }
+    $tree = [Collections.Generic.HashSet[int]]::new()
+    $ordered = [Collections.Generic.List[int]]::new()
+    foreach ($row in $Processes) {
+        if ($ownedIds.Contains([int]$row.ProcessId)) { $null=$tree.Add([int]$row.ProcessId); $ordered.Add([int]$row.ProcessId) }
+    }
+    do {
+        $added=$false
+        foreach ($row in $Processes) {
+            $id=[int]$row.ProcessId
+            if ($id -eq $UpdaterPid -or $tree.Contains($id)) { continue }
+            if ($tree.Contains([int]$row.ParentProcessId)) { $null=$tree.Add($id);$ordered.Add($id);$added=$true }
+        }
+    } while ($added)
+    $conflict=@($tree | Where-Object { $protectedIds.Contains($_) }).Count -gt 0
+    $byId=@{};foreach($row in $Processes){$byId[[int]$row.ProcessId]=$row}
+    $depths=@{}
+    foreach($id in $ordered){
+        $seen=[Collections.Generic.HashSet[int]]::new();$parent=$id;$depth=0
+        while($byId.ContainsKey($parent)-and$tree.Contains($parent)-and$seen.Add($parent)){
+            $parent=[int]$byId[$parent].ParentProcessId;$depth++
+        }
+        $depths[$id]=$depth
+    }
+    $ids=@($ordered | Sort-Object -Property @{Expression={$depths[$_]};Descending=$true},@{Expression={$_};Descending=$true})
+    return [pscustomobject]@{StopProcessIds=$(if($conflict){@()}else{$ids});ProtectedDescendantConflict=$conflict}
+}
+
 function Stop-DevSpaceRuntime([object[]] $PackageRecords, [object[]] $TaskSnapshot) {
     if ($script:TestMode) { return }
     # Staging can take minutes. Check again before the first process/task side
@@ -403,42 +457,17 @@ function Stop-DevSpaceRuntime([object[]] $PackageRecords, [object[]] $TaskSnapsh
         throw 'Runtime retirement deferred: active or unverified Core work must be preserved.'
     }
     $roots = @($PackageRecords | ForEach-Object { [string]$_.Root })
-    $devspaceCaddyConfigs = @(
-        (Join-Path $HOME 'DevSpaceIngress\Caddyfile'),
-        (Join-Path $HOME '.devspace-local-ingress\Caddyfile')
-    )
     $allProcesses = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
-    $processes = @($allProcesses | Where-Object {
-        if ([int]$_.ProcessId -eq $PID) { return $false }
-        $command = [string]$_.CommandLine
-        if (-not $command) { return $false }
-        $isDevSpaceCaddy = ([string]$_.Name -ieq 'caddy.exe') -and @($devspaceCaddyConfigs | Where-Object {
-            $command.IndexOf($_, [StringComparison]::OrdinalIgnoreCase) -ge 0
-        }).Count -gt 0
-        if ($isDevSpaceCaddy) { return $true }
-        $matchesRoot = $false
-        foreach ($root in $roots) { if ($command.IndexOf($root, [StringComparison]::OrdinalIgnoreCase) -ge 0) { $matchesRoot = $true; break } }
-        if (-not $matchesRoot) { return $false }
-        return $command -match 'devspace-(?:stable-gateway|fixed-backend|local-ingress|live-progress)|dist[\\/]cli\.js\s+serve'
-    })
-    $ownedProcessIds = @($processes | ForEach-Object { [int]$_.ProcessId })
-    $processTreeIds = [Collections.Generic.HashSet[int]]::new()
-    foreach ($processId in $ownedProcessIds) { $null = $processTreeIds.Add($processId) }
-    do {
-        $added = $false
-        foreach ($candidate in $allProcesses) {
-            $candidateId = [int]$candidate.ProcessId
-            if ($candidateId -eq $PID -or $processTreeIds.Contains($candidateId)) { continue }
-            if ($processTreeIds.Contains([int]$candidate.ParentProcessId)) {
-                $null = $processTreeIds.Add($candidateId)
-                $added = $true
-            }
-        }
-    } while ($added)
-    $descendantProcessIds = @($processTreeIds | Where-Object { $ownedProcessIds -notcontains $_ })
+    $plan=Get-UpdateRuntimeProcessPlan -Roots $roots -Processes $allProcesses -UpdaterPid $PID
+    if($plan.ProtectedDescendantConflict) {
+        $script:RuntimeRetirementDeferred=$true
+        throw 'Runtime retirement deferred: an owned process tree contains protected shared/native runtime work.'
+    }
+    $stopProcessIds=@($plan.StopProcessIds)
 
     $script:RuntimeRetirementStarted = $true
     foreach ($task in $TaskSnapshot) {
+        if (Test-PreservedUpdateTask $task.Name) { continue }
         if ($task.WasEnabled) {
             try { Disable-ScheduledTask -TaskName $task.Name -ErrorAction Stop | Out-Null } catch {}
         }
@@ -448,19 +477,19 @@ function Stop-DevSpaceRuntime([object[]] $PackageRecords, [object[]] $TaskSnapsh
     }
     Start-Sleep -Milliseconds 600
     if ($roots.Count -eq 0) { return }
-    foreach ($processId in @($descendantProcessIds + $ownedProcessIds)) {
+    foreach ($processId in $stopProcessIds) {
         try { Stop-Process -Id $processId -Force -ErrorAction Stop } catch {}
     }
     $deadline = [DateTime]::UtcNow.AddSeconds(15)
     do {
-        $remaining = @($processTreeIds | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue })
+        $remaining = @($stopProcessIds | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue })
         if ($remaining.Count -eq 0) { break }
         foreach ($processId in $remaining) {
             try { Stop-Process -Id $processId -Force -ErrorAction Stop } catch {}
         }
         Start-Sleep -Milliseconds 250
     } while ([DateTime]::UtcNow -lt $deadline)
-    $remaining = @($processTreeIds | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue })
+    $remaining = @($stopProcessIds | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue })
     if ($remaining.Count -gt 0) {
         throw "DevSpace package-owning process tree did not exit before package swap: $($remaining -join ', ')"
     }
@@ -478,10 +507,12 @@ function Restart-PreviousRuntime([object[]] $TaskSnapshot) {
     if ($script:TestMode) { return }
     if ($SkipRuntimeRestart) { return }
     foreach ($task in $TaskSnapshot) {
+        if (Test-PreservedUpdateTask $task.Name) { continue }
         if (-not $task.WasEnabled) { continue }
         try { Enable-ScheduledTask -TaskName $task.Name -ErrorAction Stop | Out-Null } catch {}
     }
     foreach ($task in $TaskSnapshot) {
+        if (Test-PreservedUpdateTask $task.Name) { continue }
         if (-not $task.WasRunning) { continue }
         try {
             if (Get-ScheduledTask -TaskName $task.Name -ErrorAction SilentlyContinue) {

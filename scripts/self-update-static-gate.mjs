@@ -37,6 +37,10 @@ assert.match(updater, /\$script:TestMode\s*=\s*\$env:DEVSPACE_UPDATE_TEST_MODE\s
   "sandbox update tests must enter an explicit fail-closed test mode");
 assert.match(updater, /function Get-TaskSnapshot[\s\S]*if \(\$script:TestMode\) \{ return @\(\) \}/s,
   "test mode must not inspect production Scheduled Tasks");
+assert.match(updater, /function Test-PreservedUpdateTask[\s\S]*'DevSpace-Local-Ingress', 'DevSpace-Canonical-Startup'/);
+assert.match(updater, /ProtectedDescendantConflict[\s\S]*Runtime retirement deferred: an owned process tree contains protected/);
+assert.match(updater, /Stop-DevSpaceRuntime[\s\S]*if \(Test-PreservedUpdateTask \$task\.Name\) \{ continue \}/);
+assert.match(updater, /Restart-PreviousRuntime[\s\S]*if \(Test-PreservedUpdateTask \$task\.Name\) \{ continue \}/);
 assert.match(updater, /function Stop-DevSpaceRuntime[\s\S]*if \(\$script:TestMode\) \{ return \}/s,
   "test mode must not stop production DevSpace tasks or processes");
 assert.match(updater, /function Restart-PreviousRuntime[\s\S]*if \(\$script:TestMode\) \{ return \}/s,
@@ -58,14 +62,14 @@ assert.match(updater, /function Restore-RetiredUpdateRuntime[\s\S]*if \(-not \$s
 assert.match(updater, /function Move-ItemWithRetry/);
 assert.match(updater, /bounded Windows lock retries/);
 assert.match(updater, /Collections\.Generic\.HashSet\[int\]/);
-assert.match(updater, /candidate\.ParentProcessId/);
-assert.match(updater, /\$devspaceCaddyConfigs/);
-assert.match(updater, /\[string\]\$_\.Name -ieq 'caddy\.exe'/);
+assert.match(updater, /row\.ParentProcessId/);
+assert.match(updater, /protectedIds/);
+assert.match(updater, /'caddy\.exe','ChatGPT Classic\.exe','ChatGPT\.exe'/);
 assert.match(updater, /DevSpace-Stable-Gateway-Watchdog/);
 assert.match(updater, /WasEnabled\s*=\s*\$task\.State\.ToString\(\) -ne "Disabled"/);
 assert.match(updater, /Disable-ScheduledTask/);
 assert.match(updater, /Enable-ScheduledTask/);
-assert.match(updater, /\$descendantProcessIds\s*\+\s*\$ownedProcessIds/);
+assert.match(updater, /foreach \(\$processId in \$stopProcessIds\)/);
 assert.match(updater, /DevSpace package-owning process tree did not exit before package swap/);
 assert.match(updater, /Move-ItemWithRetry -Source \$record\.Root/);
 assert.match(updater, /Move-ItemWithRetry -Source \$staged\.Root/);

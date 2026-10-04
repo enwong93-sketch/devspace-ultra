@@ -21,6 +21,7 @@ if (platform() !== 'win32') {
     'scripts/devspace-public-setup.test.ps1',
     'scripts/devspace-local-ingress.test.ps1',
     'scripts/self-update-readiness.test.ps1',
+    'scripts/self-update-shared-runtime.test.ps1',
     'scripts/chat-classic-session-source.test.ps1',
   ]) {
     const result = spawnSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', file], {
