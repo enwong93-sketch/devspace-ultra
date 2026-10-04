@@ -50,7 +50,7 @@ jobs:
           # evidence-checked promotion workflow may expose a stable update.
           draft: true
           make_latest: false
-          body_path: docs/releases/V0.5.23.md
+          body_path: docs/releases/V0.5.24.md
           files: |
             install.ps1
             install.sh

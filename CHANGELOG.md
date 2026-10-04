@@ -2,6 +2,14 @@
 
 Version-specific release notes are published with each [GitHub Release](https://github.com/enwong93-sketch/devspace-ultra/releases). They describe the reusable product, not any customer's machine or live installation.
 
+## 0.5.24 — in preparation
+
+- Read exact native successful public final/end-turn evidence from the conversation API when stream completion envelopes are absent.
+- Persist complete scoped receipts and admit already-issued public rounds after verified native work begins.
+- Keep semantic Goal completion independent of optional checkpoints.
+- Preserve shared ingress and native applications during transactional package updates; refuse protected-descendant retirement.
+- Keep prior tags and archives immutable; exact-archive real-client acceptance remains required for stable promotion.
+
 ## 0.5.23 — in preparation
 
 - Recover omitted native request bodies from the already observed allowlisted POST, without replaying a request or inferring the source from UI.
