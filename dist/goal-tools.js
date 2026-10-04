@@ -208,6 +208,12 @@ export function registerGoalTools(server, goalRuntime, {
     if (!goal.conversationId && goal.status === "active" && typeof goalRuntime.bindConversation === "function") {
       goal = await goalRuntime.bindConversation({ goalId: goal.id, conversationId });
     }
+    // Admit only already-issued, exact-owner public continuation work before a
+    // semantic Goal operation. No report/compatibility round-begin prerequisite.
+    if(goal.status==='active'&&goal.roundState==='reported'&&hostBridge?.continuationSupervisor?.reconcilePublicWorkingRound) {
+      await hostBridge.continuationSupervisor.reconcilePublicWorkingRound(goal);
+      goal=await goalRuntime.status(goalId);
+    }
     return goal;
   };
 

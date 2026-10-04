@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { isNativeStreamFinalReceipt } from './classic-native-final-ingress.js';
+import { isNativeCompletedFinalReceipt } from './classic-native-final-ingress.js';
 import { matchesNativeGoalStartWitness } from './goal-native-start-witness.js';
 import { runtimeKeyForClassicPort } from './classic-main-debug-ports.js';
 
@@ -182,6 +182,8 @@ export class ClassicGoalRoundCompletionGuard {
     dispatch,
     continueIncompleteGoal = null,
     nativeFinalIngressOnly = false,
+    readNativeFinal = null,
+    nativeFinalReadMs = 10_000,
     pollMs = DEFAULT_POLL_MS,
     minimumRoundSettleMs = DEFAULT_ROUND_SETTLE_MS,
     routeSettleMs = DEFAULT_ROUTE_SETTLE_MS,
@@ -198,6 +200,10 @@ export class ClassicGoalRoundCompletionGuard {
     this.goalRuntime = goalRuntime;
     this.inspect = inspect;
     this.nativeFinalIngressOnly = nativeFinalIngressOnly === true;
+    this.readNativeFinal = typeof readNativeFinal==='function'?readNativeFinal:null;
+    this.nativeFinalReadCursor = 0;
+    this.nativeFinalReadMs = Math.max(1000,Number(nativeFinalReadMs)||10_000);
+    this.nativeFinalReadAt = new Map();
     this.nativeFinalHandling = Promise.resolve();
     this.dispatch = dispatch;
     this.continueIncompleteGoal = typeof continueIncompleteGoal === "function"
@@ -401,7 +407,7 @@ export class ClassicGoalRoundCompletionGuard {
 
   noteNativeAssistantFinal(event) {
     const operation = this.nativeFinalHandling.then(async () => {
-      if (this.closed || !this.continueIncompleteGoal || !isNativeStreamFinalReceipt(event)) {
+      if (this.closed || !this.continueIncompleteGoal || !isNativeCompletedFinalReceipt(event)) {
         return { continued: false, reason: 'native-final-ingress-ineligible' };
       }
       const goals = await this.goalRuntime.activeGoals({ conversationId: event.conversationId });
@@ -423,7 +429,28 @@ export class ClassicGoalRoundCompletionGuard {
   async #pollOnceImpl() {
     // Production native-final ingress must never infer completion from UI
     // idle, Stop buttons, DOM text, or a finished/failed network request.
-    if (this.nativeFinalIngressOnly) return { ok: true, recovered: 0, results: [], reason: 'native-final-event-owned' };
+    if (this.nativeFinalIngressOnly) {
+      if(!this.readNativeFinal)return {ok:true,recovered:0,results:[],reason:'native-final-event-owned'};
+      const goals=(await this.goalRuntime.activeGoals()).filter(g=>g.conversationId&&['working','reported'].includes(g.roundState));
+      const activeKeys=new Set(goals.map(g=>`${g.id}:${g.round}`));
+      for(const key of this.nativeFinalReadAt.keys())if(!activeKeys.has(key))this.nativeFinalReadAt.delete(key);
+      const results=[];let autoContinued=0;
+      const count=Math.min(goals.length,4),start=this.nativeFinalReadCursor%Math.max(1,goals.length);
+      this.nativeFinalReadCursor=(start+count)%Math.max(1,goals.length);
+      for(let i=0;i<count&&!this.closed;i++) {
+        const goal=goals[(start+i)%goals.length];
+        const key=`${goal.id}:${goal.round}`;
+        if((this.nativeFinalReadAt.get(key)||0)>this.now())continue;
+        this.nativeFinalReadAt.set(key,this.now()+this.nativeFinalReadMs);
+        try {
+          const event=await this.readNativeFinal(goal);
+          const result=event?await this.noteNativeAssistantFinal(event):{continued:false,reason:'awaiting-native-api-final'};
+          if(result?.continued===true)autoContinued++;
+          results.push({goalId:goal.id,round:goal.round,...result});
+        }catch(error){results.push({goalId:goal.id,round:goal.round,continued:false,reason:'native-api-read-unavailable'});}
+      }
+      return{ok:true,recovered:0,autoContinued,results,reason:'native-final-event-and-api-owned'};
+    }
     const goals = await this.goalRuntime.recoverableWorkingRounds();
     const activeRunKeys = new Set(goals.map(recoveryRunKey).filter(Boolean));
     for (const key of this.recoverySessions.keys()) {

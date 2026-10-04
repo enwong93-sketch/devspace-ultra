@@ -119,7 +119,11 @@ export class ClassicTurnTransportTracker {
     const requestId = String(params?.requestId || "").trim();
     if (!requestId) return null;
     this.prune();
-    const firstSeenAt = this.now();
+    const handledAt = this.now(), nativeRequestAt = Number(params?.wallTime) * 1000;
+    // A busy renderer/observer can deliver this event late. Its trusted CDP
+    // request timestamp, not handler latency, is the physical start boundary.
+    const firstSeenAt = Number.isFinite(nativeRequestAt) && nativeRequestAt > 0 && nativeRequestAt <= handledAt + 60_000
+      ? nativeRequestAt : handledAt;
     // Retain only the exact source-message hash and native parent ID, never
     // user prose. They reconcile public Goal delivery without a DOM heuristic.
     let publicCorrelation = {};
@@ -434,7 +438,7 @@ export class ClassicTurnTransportTracker {
   }
 
   #emitActiveTurn(event) {
-    if (!event?.conversationId || !this.onActiveTurn) return;
+    if (!this.onActiveTurn || (!event?.conversationId && !['started','resumed'].includes(event?.kind))) return;
     try { this.onActiveTurn(event); } catch {}
   }
 }

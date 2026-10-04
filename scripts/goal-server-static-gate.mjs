@@ -14,7 +14,9 @@ assert.match(source, /import \{ GOAL_RELAY_URI, PROGRESS_CLAIM_RELAY_URI, readGo
 assert.match(source, /new GoalRuntime\(\{\s*stateDir: config\.stateDir,?\s*\}\)/s);
 assert.match(source, /const configuredClassicPorts = Array\.isArray\(config\.classicMainDebugPorts\)[\s\S]{0,260}const classicCdpOptions = \{[\s\S]{0,220}configuredClassicPorts\.length[\s\S]{0,120}defaultMainDebugPorts\(\{ includeObserved: true, refresh: true \}\)/,
   "Goal Host Bridge must share explicit ports or the observed-process plus canonical fallback set");
-assert.match(source, /new ClassicGoalHostBridge\(\{\s*\.\.\.classicCdpOptions,\s*inspectNativeFinal: \(goal, row\) => nativeFinalBoundaries\.inspect\(goal, row\),\s*beforeDispatch:\s*config\.passiveCore\s*\|\|\s*!primaryDebugGuard\s*\?\s*undefined\s*:\s*\(\) => primaryDebugGuard\.pollOnce\(\),?\s*\}\)/s);
+assert.match(source, /new ClassicGoalHostBridge\(\{\s*\.\.\.classicCdpOptions,\s*inspectNativeFinal,\s*beforeDispatch:\s*config\.passiveCore\s*\|\|\s*!primaryDebugGuard\s*\?\s*undefined\s*:\s*\(\) => primaryDebugGuard\.pollOnce\(\),?\s*\}\)/s);
+assert.match(source, /new ClassicNativeFinalApiIngress\(\{/);
+assert.match(source, /row\?\.nativeCompletionProof\?\.ingress==='native-conversation-api'/);
 assert.doesNotMatch(source, /sendExactGoalRecovery|progressLivenessAdapter\.sendGoalRecovery|progressLivenessAdapter\.sendGoalContinuation/,
   "Goal continuation and same-round recovery must never be wired to the visible composer transport");
 assert.match(source, /dispatch:\s*(?:async\s+)?\(\{ goal, page,[\s\S]{0,500}return goalHostBridge\.dispatch\(\{/,

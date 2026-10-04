@@ -10,7 +10,7 @@ assert.match(server, /const primaryDebugGuard = process\.platform === "win32"\s*
   "Primary Debug Guard must exist only on its supported Windows runtime");
 assert.match(server, /const configuredClassicPorts = Array\.isArray\(config\.classicMainDebugPorts\)[\s\S]{0,260}const classicCdpOptions = \{[\s\S]{0,220}configuredClassicPorts\.length[\s\S]{0,120}defaultMainDebugPorts\(\{ includeObserved: true, refresh: true \}\)/,
   "Primary/Host Bridge lifecycle must use explicit ports or the bounded observed-process fallback set");
-assert.match(server, /new ClassicGoalHostBridge\(\{\s*\.\.\.classicCdpOptions,\s*inspectNativeFinal: \(goal, row\) => nativeFinalBoundaries\.inspect\(goal, row\),\s*beforeDispatch:\s*config\.passiveCore\s*\|\|\s*!primaryDebugGuard\s*\?\s*undefined\s*:\s*\(\) => primaryDebugGuard\.pollOnce\(\),?\s*\}\)/s);
+assert.match(server, /new ClassicGoalHostBridge\(\{\s*\.\.\.classicCdpOptions,\s*inspectNativeFinal,\s*beforeDispatch:\s*config\.passiveCore\s*\|\|\s*!primaryDebugGuard\s*\?\s*undefined\s*:\s*\(\) => primaryDebugGuard\.pollOnce\(\),?\s*\}\)/s);
 assert.doesNotMatch(server, /sendExactGoalRecovery|sendRecovery:\s*/,
   "same-round Goal Recovery must not wire a page-composer sender through Primary Debug Guard");
 assert.match(server, /if\s*\(config\.goalRoundRecoveryEnabled\)[\s\S]{0,220}goalRoundCompletionGuard\.start\(/,

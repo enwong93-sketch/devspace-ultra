@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { isNativeStreamFinalReceipt } from './classic-native-final-ingress.js';
+import { isNativeCompletedFinalReceipt, hasNativeFinalIngress } from './classic-native-final-ingress.js';
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { atomicWriteJson } from "./atomic-file.js";
@@ -579,11 +579,11 @@ export class GoalRuntime {
     await this.ready;
     const goal = this.getGoal(goalId);
     if (goal.status !== "active" || (goal.roundState !== "working"
-      && !(goal.roundState === 'reported' && nativeCompletion?.ingress === 'native-response-stream'))) {
+      && !(goal.roundState === 'reported' && hasNativeFinalIngress(nativeCompletion)))) {
       return { continued: false, reason: "goal-no-longer-active", goal: clone(goal) };
     }
     const proof = nativeCompletion && typeof nativeCompletion === "object" ? nativeCompletion : null;
-    if (proof?.ingress === 'native-response-stream' && !isNativeStreamFinalReceipt(proof)) {
+    if (hasNativeFinalIngress(proof) && !isNativeCompletedFinalReceipt(proof)) {
       throw new Error('Native stream completion requires a scoped successful public-final receipt.');
     }
     const sourceUserMessageId = String(proof?.sourceUserMessageId || "").trim();
@@ -608,7 +608,20 @@ export class GoalRuntime {
       throw new Error("Goal automatic continuation requires an exact native assistant-final receipt for this conversation.");
     }
     const consumedNativeAssistantMessageIds = this.state.nativeCompletionLedger[goal.id] || [];
+    const receiptFields=hasNativeFinalIngress(proof)?{ingress:proof.ingress,requestId:proof.requestId,port:proof.port,
+      status:proof.status,endTurn:proof.endTurn,publicFinal:proof.publicFinal,observedAtMs:proof.observedAtMs,observedAt:proof.observedAt,
+      ...(proof.ingress==='native-conversation-api'?{nativeConversationVerified:true,readStartedAtMs:proof.readStartedAtMs}:{}),
+      sourceUserTextHash:proof.sourceUserTextHash||null,parentMessageId:proof.parentMessageId||null}:{};
     if (consumedNativeAssistantMessageIds.includes(assistantMessageId)) {
+      const previous=goal.lastTurnCompletion;
+      if(goal.roundState==='reported'&&hasNativeFinalIngress(proof)&&!isNativeCompletedFinalReceipt(previous)
+        &&previous?.round===goal.round&&previous.conversationId===goal.conversationId
+        &&previous.sourceUserMessageId===sourceUserMessageId&&previous.assistantMessageId===assistantMessageId
+        &&previous.assistantTextHash===assistantTextHash&&Date.parse(previous.assistantCreatedAt)===assistantCreatedAt) {
+        goal.lastTurnCompletion={...previous,...receiptFields,runtimeKey,pageTargetId};
+        this.touch(goal);await this.save();
+        return{continued:true,reason:'native-final-receipt-refreshed',goal:clone(goal)};
+      }
       return { continued: false, reason: "native-final-already-consumed", goal: clone(goal) };
     }
 
@@ -624,7 +637,7 @@ export class GoalRuntime {
       assistantTextHash,
       assistantCreatedAt: new Date(assistantCreatedAt).toISOString(),
       completedAt,
-      ...(proof.ingress === 'native-response-stream' ? { ingress: proof.ingress, requestId: proof.requestId } : {}),
+      ...receiptFields,
     };
     this.state.nativeCompletionLedger[goal.id] = [
       ...consumedNativeAssistantMessageIds,
@@ -646,7 +659,9 @@ export class GoalRuntime {
     if (goal.status === "completed") throw new Error(`Goal ${goal.id} is already completed.`);
     if (goal.status === "stopped") throw new Error(`Goal ${goal.id} is terminal (stopped).`);
     if (goal.status !== "active") throw new Error(`Goal ${goal.id} cannot complete from ${goal.status}.`);
-    if (goal.roundState !== "working") throw new Error(`Goal ${goal.id} can complete only during a working round.`);
+    // An optional checkpoint is bookkeeping, not loss of the AI's authority
+    // to complete the full objective with all required criterion evidence.
+    if (!['working','reported'].includes(goal.roundState)) throw new Error(`Goal ${goal.id} has no completable round.`);
     if (!Array.isArray(evidence)) throw new Error("Completion evidence is required for every success criterion.");
 
     const criteriaById = new Map(goal.successCriteria.map((criterion) => [criterion.id, criterion]));

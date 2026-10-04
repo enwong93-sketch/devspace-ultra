@@ -69,7 +69,7 @@ import { ClassicActiveTurnRegistry, ClassicMcpCallCorrelator, fingerprintMcpTool
 import { requestTraceCorrelationFingerprints } from "./request-trace-correlation.js";
 import { mergeSessionCorrelationFingerprints, sessionCorrelationFingerprintsFromHeaders } from "./session-correlation.js";
 import { ClassicTurnTransportObserver } from "./classic-turn-transport-observer.js";
-import { ClassicNativeFinalBoundaryStore } from './classic-native-final-ingress.js';
+import { ClassicNativeFinalBoundaryStore, ClassicNativeFinalApiIngress } from './classic-native-final-ingress.js';
 import { ClassicNativeUsageEvidenceStore } from "./classic-native-usage-evidence.js";
 import { ClassicExactUsageAuthority } from "./classic-exact-usage-authority.js";
 import { ClassicTurnDeliveryEvidenceStore } from "./classic-turn-delivery-evidence.js";
@@ -2340,9 +2340,18 @@ export function createServer(config = loadConfig(), options = {}) {
         ...classicCdpOptions,
     });
     const nativeFinalBoundaries = new ClassicNativeFinalBoundaryStore();
+    const nativeFinalApi = new ClassicNativeFinalApiIngress({
+        boundaries:nativeFinalBoundaries,
+        inspectPages:async (goal,options={})=>inspectGoalContinuationPages(goal,{
+            ...classicCdpOptions,...options,skipNativeStatus:true,includeNativeBranch:true,nativeConversationTimeoutMs:5000,
+            nativeGoalStartReceipt:await goalRuntime.nativeStartReceipt(goal.id),
+        }),
+    });
+    const inspectNativeFinal = (goal,row)=>row?.nativeCompletionProof?.ingress==='native-conversation-api'
+        ? nativeFinalApi.inspect(goal,row) : nativeFinalBoundaries.inspect(goal,row);
     const goalHostBridge = new ClassicGoalHostBridge({
         ...classicCdpOptions,
-        inspectNativeFinal: (goal, row) => nativeFinalBoundaries.inspect(goal, row),
+        inspectNativeFinal,
         beforeDispatch: config.passiveCore || !primaryDebugGuard
             ? undefined
             : () => primaryDebugGuard.pollOnce(),
@@ -2351,7 +2360,10 @@ export function createServer(config = loadConfig(), options = {}) {
     const goalContinuationSupervisor = new GoalContinuationSupervisor({
         goalRuntime,
         publicMessageContinuation: true,
-        inspectNativeFinal: (goal, row) => nativeFinalBoundaries.inspect(goal, row),
+        readPublicWorkingTurn: async (goal,row)=>(await nativeFinalApi.inspect(goal,{apiScope:{
+            runtimeKey:row.dispatchRuntimeKey,pageTargetId:row.dispatchPageTargetId,
+        }}))?.started||null,
+        inspectNativeFinal,
         nativeFinalIngressOnly: true,
         relayDiagnostics: () => goalHostBridge.relayDiagnostics(),
         statePath: join(config.stateDir, 'goal-continuation-driver.json'),
@@ -2407,6 +2419,17 @@ export function createServer(config = loadConfig(), options = {}) {
     const goalRoundCompletionGuard = new ClassicGoalRoundCompletionGuard({
         goalRuntime,
         nativeFinalIngressOnly: true,
+        readNativeFinal: async goal=>{
+            if(config.passiveCore)return null;
+            const sampled=await nativeFinalApi.inspect(goal);
+            if(sampled?.started)await goalContinuationSupervisor.notePublicMessageStarted(sampled.started);
+            const event=sampled?.event||null;
+            if(event){
+                await goalContinuationSupervisor.notePublicMessageFinal(event);
+                await goalContinuationSupervisor.noteNativeFinalSupersession(event);
+            }
+            return event;
+        },
         continueIncompleteGoal: async ({ goal, nativeCompletion }) => {
             const completedTurn = await goalRuntime.autoCompleteAssistantTurn({
                 goalId: goal.id,

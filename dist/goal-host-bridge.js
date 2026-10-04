@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { nativeGoalStartWitness, projectNativeGoalSource } from './goal-native-start-witness.js';
-import { isNativeStreamFinalReceipt } from './classic-native-final-ingress.js';
+import { isNativeCompletedFinalReceipt, hasNativeFinalIngress } from './classic-native-final-ingress.js';
 import { ClassicCdpClient } from "./classic-cdp-client.js";
 import { readComposerDraft } from "./classic-composer-draft.js";
 import { classicMainDebugPorts, runtimeLabelForClassicPort, runtimeKeyForClassicPort, runtimePortsForClassicKey } from './classic-main-debug-ports.js';
@@ -496,6 +496,8 @@ export async function inspectVisibleReportCommit(candidate, options = {}) {
             });
             if (conversationResponse.ok) {
               const payload = await conversationResponse.json();
+              const payloadConversationIds = [payload?.id, payload?.conversation_id].filter(value => value != null);
+              const conversationIdVerified = payloadConversationIds.length > 0 && payloadConversationIds.every(value => String(value) === conversationId);
               const reversed = [];
               const seen = new Set();
               let currentNodeId = payload?.current_node || null;
@@ -509,13 +511,22 @@ export async function inspectVisibleReportCommit(candidate, options = {}) {
                     role: String(node.message.author?.role || '').trim().toLowerCase() || null,
                     status: String(node.message.status || '').trim() || null,
                     endTurn: node.message.end_turn === true,
+                    parentMessageId: payload.mapping[node.parent]?.message?.id || null,
+                    publicUserText: node.message.author?.role === 'user'
+                      && node.message.content?.content_type === 'text'
+                      && Array.isArray(node.message.content.parts)
+                      && node.message.content.parts.every(part=>typeof part==='string')
+                      ? node.message.content.parts.join('\\n').trim() : null,
                     publicFinalText: node.message.author?.role === 'assistant'
                       && node.message.end_turn === true
                       && (node.message.channel == null || node.message.channel === 'final')
+                      && (node.message.metadata?.channel == null || node.message.metadata.channel === 'final')
                       && (node.message.recipient == null || node.message.recipient === 'all')
+                      && node.message.metadata?.is_visually_hidden_from_conversation !== true
                       && node.message.content?.content_type === 'text'
                       && Array.isArray(node.message.content.parts)
-                      ? node.message.content.parts.filter(part => typeof part === 'string').join('\\n').slice(0, 100_000)
+                      && node.message.content.parts.every(part=>typeof part==='string')
+                      ? node.message.content.parts.join('\\n')
                       : null,
                     createTime: Number.isFinite(Number(node.message.create_time))
                       ? Number(node.message.create_time)
@@ -545,6 +556,7 @@ export async function inspectVisibleReportCommit(candidate, options = {}) {
               const current = branch.at(-1) || null;
               nativeContinuation = {
                 resolved: true,
+                conversationIdVerified,
                 goalStartWitness: (${nativeGoalStartWitness.toString()})(payload,
                   ${JSON.stringify(options.nativeGoalStartReceipt || null)}, conversationId),
                 currentNodeId,
@@ -576,6 +588,10 @@ export async function inspectVisibleReportCommit(candidate, options = {}) {
                   return { complete: queue.length === 0, visited: visited.size, leaves };
                 })(),
                 latestUserMessageId: latestUser?.id || null,
+                latestUserParentMessageId: latestUser?.parentMessageId || null,
+                latestUserTextHash: latestUser?.publicUserText && latestUser.publicUserText.length<=100_000
+                  ? Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(latestUser.publicUserText))))
+                    .map(byte=>byte.toString(16).padStart(2,'0')).join('') : null,
                 latestUserCreatedAt: latestUser?.createTime != null
                   ? new Date(latestUser.createTime * 1000).toISOString()
                   : null,
@@ -852,6 +868,8 @@ export async function inspectGoalContinuationPages(goal, {
   nativeGoalStartReceipt = null,
   sourceUserMessageId = null,
   baselineAssistantMessageId = null,
+  nativeFinalApiOnly = false,
+  nativeConversationTimeoutMs = 30_000,
 } = {}) {
   if (runtimeKey) {
     if (!/^main-(0[1-9]|[12][0-9]|3[0-2])$/.test(runtimeKey)) return [];
@@ -864,9 +882,9 @@ export async function inspectGoalContinuationPages(goal, {
   if (!candidates.length || candidates.length > 4) return [];
   const snapshots = await Promise.all(candidates.map(async candidate => {
     const page = await inspectVisibleReportCommit(candidate, {
-      timeoutMs: includeNativeBranch ? 45_000 : 3_000,
+      timeoutMs: nativeFinalApiOnly ? 12_000 : includeNativeBranch ? 45_000 : 3_000,
       nativeSessionTimeoutMs: includeNativeBranch ? 5_000 : undefined,
-      nativeConversationTimeoutMs: includeNativeBranch ? 30_000 : undefined,
+      nativeConversationTimeoutMs: includeNativeBranch ? nativeConversationTimeoutMs : undefined,
       skipNativeStatus,
       includeNativeBranch,
       nativeGoalStartReceipt,
@@ -1480,7 +1498,7 @@ export class ClassicGoalHostBridge {
   async hasNativeFinalBoundary({ goalId, conversationId, runtimePort, expectedPageTargetId,
     sourceUserId, assistantMessageId, nativeCompletionProof } = {}) {
     const proof = nativeCompletionProof;
-    if (!isNativeStreamFinalReceipt(proof) || !this.inspectNativeFinal
+    if (!isNativeCompletedFinalReceipt(proof) || !this.inspectNativeFinal
       || proof.conversationId !== conversationId || proof.sourceUserMessageId !== sourceUserId
       || proof.assistantMessageId !== assistantMessageId
       || (runtimePort != null && proof.port !== runtimePort)
@@ -1489,7 +1507,7 @@ export class ClassicGoalHostBridge {
       const result = await this.inspectNativeFinal({ id: goalId, conversationId }, { nativeCompletionProof: proof });
       if (result?.pages?.length !== 1 || result.newUser) return null;
       const event = result.pages[0]?.nativeFinalReceipt;
-      if (!isNativeStreamFinalReceipt(event)) return null;
+      if (!isNativeCompletedFinalReceipt(event) || event.ingress!==proof.ingress) return null;
       for (const field of ['conversationId', 'sourceUserMessageId', 'assistantMessageId',
         'requestId', 'assistantTextHash', 'assistantCreatedAt', 'runtimeKey', 'port', 'pageTargetId']) {
         if (event[field] !== proof[field]) return null;
@@ -1506,7 +1524,7 @@ export class ClassicGoalHostBridge {
     if (typeof prompt !== "string" || !prompt.trim()) throw new Error("Goal host dispatch requires prompt.");
     if (!this.nativeHiddenTransportConfigured) return nativeHiddenTransportUnavailable();
 
-    const nativeStreamFinal = nativeCompletionProof?.ingress === 'native-response-stream';
+    const nativeStreamFinal = hasNativeFinalIngress(nativeCompletionProof);
     const nativeRequest = { goalId, conversationId, runtimePort, expectedPageTargetId,
       sourceUserId, assistantMessageId, nativeCompletionProof };
     if (!nativeStreamFinal && typeof this.beforeDispatch === "function") {

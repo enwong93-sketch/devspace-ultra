@@ -312,13 +312,16 @@ test('AI/user paused Goal is not resumed merely because a physical final arrived
   assert.equal((await runtime.status(goal.id)).status, 'paused');
 });
 
-test('production wires passive native-final input and event-only completion gates', async () => {
+test('production wires native stream and verified native-API final input, never UI completion gates', async () => {
   const source = await readFile(new URL('./server.js', import.meta.url), 'utf8');
   assert.equal((source.match(/nativeFinalIngressOnly: true/g) || []).length, 2);
   assert.match(source, /onAssistantFinal: async \(event\)/);
   assert.match(source, /goalRoundCompletionGuard\.noteNativeAssistantFinal\(event\)/);
   assert.match(source, /nativeFinalBoundaries\.noteTurn\(event\)/);
-  assert.match(source, /inspectNativeFinal: \(goal, row\) => nativeFinalBoundaries\.inspect\(goal, row\)/);
+  assert.match(source, /const nativeFinalApi = new ClassicNativeFinalApiIngress/);
+  assert.match(source, /row\?\.nativeCompletionProof\?\.ingress==='native-conversation-api'/);
+  assert.match(source, /nativeFinalApi\.inspect\(goal,row\) : nativeFinalBoundaries\.inspect\(goal,row\)/);
+  assert.match(source, /readNativeFinal: async goal=>/);
 });
 
 for (const split of [false, true]) test(`delayed native buffered response ${split ? 'prefix' : 'body'} is consumed before transport EOF`, async t => {
@@ -454,14 +457,15 @@ test('new-chat request binds its first native conversation ID before the public 
     postData: JSON.stringify({ conversation_id: null, model: 'test-fixture',
       messages: [{ id: userId, author: { role: 'user' } }] }),
   } });
-  assert.equal(turns.length, 0, 'a provisional request cannot invent a conversation identity');
+  assert.equal(turns.length, 1, 'a provisional request fences the physical page without inventing a conversation identity');
+  assert.equal(turns[0].conversationId, null);
   tracker.noteResponse({ requestId: 'first-native-request', response: { url: 'https://chatgpt.com/backend-api/f/conversation', status: 200 } });
   tracker.noteResponseData({ requestId: 'first-native-request', data: frame({ channel: 'analysis', end_turn: false, status: 'in_progress' }) });
   assert.equal(finals.length, 0);
-  assert.equal(turns.length, 1);
-  assert.equal(turns[0].kind, 'started');
-  assert.equal(turns[0].conversationId, cid);
-  assert.equal(turns[0].sourceUserMessageId, userId);
+  assert.equal(turns.length, 2);
+  assert.equal(turns[1].kind, 'started');
+  assert.equal(turns[1].conversationId, cid);
+  assert.equal(turns[1].sourceUserMessageId, userId);
   tracker.noteResponseData({ requestId: 'first-native-request', data: frame() });
   assert.equal(finals.length, 1);
   assert.equal(finals[0].requestId, 'first-native-request');
