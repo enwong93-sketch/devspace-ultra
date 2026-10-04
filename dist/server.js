@@ -931,11 +931,11 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
             },
         ],
     }));
-    // Old tool snapshots still address the unversioned resources. Serve both
+    // Retained v0.5.20 tool results address v2; older snapshots are unversioned.
     // without forcing users to reconnect or interrupt existing conversations.
-    for (const uri of [GOAL_RELAY_URI, "ui://devspace/goal-continuation-relay.html"]) {
+    for (const uri of [GOAL_RELAY_URI, "ui://devspace/goal-continuation-relay-v2.html", "ui://devspace/goal-continuation-relay.html"]) {
     registerAppResource(server, `DevSpace Goal Continuation Relay ${uri}`, uri, {
-        description: "Per-round hidden Goal continuation relay for Chat mode.",
+        description: "Native-final-authorized Goal continuation component for Chat mode.",
         _meta: {
             ui: {
                 csp: appCsp(config),
@@ -956,7 +956,7 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
         ],
     }));
     }
-    for (const uri of [PROGRESS_CLAIM_RELAY_URI, "ui://devspace/progress-claim-relay.html"]) {
+    for (const uri of [PROGRESS_CLAIM_RELAY_URI, "ui://devspace/progress-claim-relay-v2.html", "ui://devspace/progress-claim-relay.html"]) {
     registerAppResource(server, `DevSpace Progress Claim Relay ${uri}`, uri, {
         description: "Hidden one-time relay that binds one pending progress report to the exact ChatGPT Classic page that received its tool result.",
         _meta: {
@@ -2257,7 +2257,12 @@ export function createServer(config = loadConfig(), options = {}) {
             return;
         toolSurfaceRefreshSent.add(transport);
         Promise.resolve()
-            .then(() => sessionServer.sendToolListChanged())
+            .then(async () => {
+                await sessionServer.sendToolListChanged();
+                // Supported cache invalidation only. It does not mount a view,
+                // invoke an SDK sender or imply the host refreshed its iframe.
+                await sessionServer.sendResourceListChanged();
+            })
             .then(() => {
             logEvent(config.logging, "debug", "mcp_tool_surface_refresh_notified", {
                 reason,
@@ -4141,6 +4146,7 @@ export function createServer(config = loadConfig(), options = {}) {
                 transport.__devspaceToolListChangedSent = true;
                 try {
                     await transport.__devspaceMcpServer.sendToolListChanged();
+                    await transport.__devspaceMcpServer.sendResourceListChanged();
                     logEvent(config.logging, "debug", "mcp_tool_list_changed_sent", {
                         requestId,
                         sessionIdPrefix: sessionIdPrefix(sessionId || trackedSessionId),

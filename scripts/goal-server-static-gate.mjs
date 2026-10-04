@@ -3,6 +3,9 @@ import { readFile } from "node:fs/promises";
 import { GOAL_RELAY_URI, readGoalRelayHtml } from "../dist/goal-relay-resource.js";
 
 const source = await readFile(new URL("../dist/server.js", import.meta.url), "utf8");
+assert.ok(source.includes('"ui://devspace/progress-claim-relay-v2.html"'), "retained v0.5.20 progress results must still resolve their resource URI");
+assert.match(source, /await sessionServer\.sendToolListChanged\(\);[\s\S]{0,400}await sessionServer\.sendResourceListChanged\(\);/, "restored clients need supported resource-cache invalidation as well as tool refresh");
+assert.match(source, /await transport\.__devspaceMcpServer\.sendToolListChanged\(\);\s*await transport\.__devspaceMcpServer\.sendResourceListChanged\(\);/, "initialized clients must receive both supported surface notifications");
 
 assert.match(source, /import \{ GoalRuntime \} from "\.\/goal-runtime\.js";/);
 assert.match(source, /import \{ registerGoalTools \} from "\.\/goal-tools\.js";/);
@@ -38,7 +41,7 @@ assert.match(source, /goalHostBridge\.dispatchRoundRecovery\(\{[\s\S]{0,420}sour
   "hidden same-round recovery must retain the exact native branch boundary for acknowledgement reconciliation");
 assert.match(source, /registerAppResource\(server, "DevSpace Goal Dock", GOAL_DOCK_URI,/);
 assert.match(source, /new URL\("\.\/ui\/goal-dock\.html", import\.meta\.url\)/);
-assert.match(source, /for \(const uri of \[GOAL_RELAY_URI, "ui:\/\/devspace\/goal-continuation-relay\.html"\]\)/,
+assert.match(source, /for \(const uri of \[GOAL_RELAY_URI, "ui:\/\/devspace\/goal-continuation-relay-v2\.html", "ui:\/\/devspace\/goal-continuation-relay\.html"\]\)/,
   "new and cached tool snapshots must both retain their Goal relay resource");
 assert.match(source, /registerAppResource\(server, `DevSpace Goal Continuation Relay \$\{uri\}`, uri,/);
 assert.match(source, /readGoalRelayHtml\("goal-continuation-relay\.html"\)/);
