@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { atomicWriteJson } from './atomic-file.js';
 import { enqueueRecoverablePersist } from './recoverable-persist-queue.js';
 import { isNativeStreamFinalReceipt } from './classic-native-final-ingress.js';
+import { runtimeKeyForClassicPort } from './classic-main-debug-ports.js';
 
 const digest = text => createHash('sha256').update(String(text || '')).digest('hex');
 const pending = goal => goal?.status === 'active' && goal.roundState === 'reported'
@@ -27,6 +28,44 @@ const timeMs = value => {
   const parsed = Date.parse(String(value || ''));
   return Number.isFinite(parsed) ? parsed : null;
 };
+
+function movedCompletedUserProof(goal, row, pages, nowMs) {
+  if (!Array.isArray(pages) || pages.length !== 1 || goal.conversationId !== row.conversationId) return null;
+  const page = pages[0], native = page?.nativeContinuation;
+  const port = page?.candidate?.runtimePort || page?.runtimePort;
+  const previousRuntime = row.dispatchRuntimeKey || row.sourceRuntimeKey;
+  const previousPage = row.dispatchPageTargetId || row.sourcePageTargetId;
+  const after = Math.max(Number(row.sentAt || row.createdAt || 0), timeMs(row.reportedAt) || 0);
+  const userAt = timeMs(native?.latestUserCreatedAt), assistantAt = timeMs(native?.latestAssistantCreatedAt);
+  const sameBranch = native?.sourceUserFound === true && native.baselineAssistantFound === true
+    && Number.isInteger(native.newUserAfterBaselineIndex) && native.newUserAfterBaselineIndex >= 0;
+  const leaves = native?.baselineBranchLeaves;
+  const retiredBranch = native?.sourceUserExistsInConversation === true && native.baselineAssistantExistsInConversation === true
+    && leaves?.complete === true && leaves.leaves?.length === 1
+    && leaves.leaves[0].id === row.finalAssistantId && leaves.leaves[0].role === 'assistant'
+    && leaves.leaves[0].status === 'finished_successfully' && leaves.leaves[0].endTurn === true;
+  if (!page || page.conversationId !== goal.conversationId || page.chatMode !== true
+    || !/^main-(0[1-9]|[12][0-9]|3[0-2])$/.test(String(page.runtimeKey || ''))
+    || runtimeKeyForClassicPort(port) !== page.runtimeKey || !page.pageTargetId
+    || (page.runtimeKey === previousRuntime && page.pageTargetId === previousPage)
+    || page.nativeSafetyBlocked === true || native?.resolved !== true
+    || (!sameBranch && !retiredBranch)
+    || native.currentRole !== 'assistant' || native.currentEndTurn !== true
+    || native.latestAssistantEndTurn !== true || native.currentStatus !== 'finished_successfully'
+    || native.latestAssistantStatus !== 'finished_successfully'
+    || !native.latestAssistantMessageId || native.latestAssistantMessageId === row.finalAssistantId
+    || native.currentMessageId !== native.latestAssistantMessageId || native.currentNodeId !== native.latestAssistantMessageId
+    || !native.latestUserMessageId || native.latestUserMessageId === row.sourceUserId
+    || typeof native.latestPublicAssistantText !== 'string' || !native.latestPublicAssistantText.trim()
+    || /^(?:This request requires additional safety checks|Additional safety checks|此請求需要額外安全檢查|需要進行額外安全檢查)/i.test(native.latestPublicAssistantText.trim())
+    || !Number.isFinite(after) || after <= 0 || userAt == null || assistantAt == null
+    || userAt <= after || assistantAt < userAt || assistantAt > nowMs + 60_000
+    || timeMs(native.currentCreatedAt) !== assistantAt) return null;
+  return { userMessageId: native.latestUserMessageId, observedAt: native.latestUserCreatedAt,
+    assistantMessageId: native.latestAssistantMessageId, assistantCreatedAt: native.latestAssistantCreatedAt,
+    runtimeKey: page.runtimeKey, pageTargetId: page.pageTargetId,
+    branchRelationship: sameBranch ? 'same-native-branch' : 'retired-native-branch-and-newer-canonical-final' };
+}
 const nativeStopped = status => {
   const normalized = String(status || '').trim().toUpperCase();
   return Boolean(normalized) && !NATIVE_RUNNING_STATES.has(normalized);
@@ -920,10 +959,37 @@ export class GoalContinuationSupervisor {
     row.reconciliationState = state;
     await this.save();
   }
+  async reconcileMovedCompletedUser(row, goal) {
+    if (!row.sourceUserId || !row.finalAssistantId || !redeemable(goal)
+      || goal.round !== row.round || goal.continuation?.continuationId !== row.continuationId) return false;
+    if (await this.goalRuntime.hasConversationCollision?.({ goalId: row.goalId })) return false;
+    // The missing old physical page is not delivery evidence. Search the exact
+    // conversation without that obsolete locator, for reconciliation only.
+    const options = { allowDivergent: true, includeNativeBranch: true,
+      sourceUserMessageId: row.sourceUserId, baselineAssistantMessageId: row.finalAssistantId };
+    let first, second;
+    try {
+      first = movedCompletedUserProof(goal, row, await this.inspect(goal, options), this.now());
+      if (!first || this.closed) return false;
+      second = movedCompletedUserProof(goal, row, await this.inspect(goal, options), this.now());
+    } catch { return false; }
+    if (!second || JSON.stringify(first) !== JSON.stringify(second) || this.closed) return false;
+    const current = await this.goalRuntime.status(row.goalId);
+    if (!redeemable(current) || current.round !== row.round
+      || current.continuation?.continuationId !== row.continuationId) return false;
+    // Persist human/external provenance before consuming the lease. A restart
+    // between Goal and journal persistence must never relabel this as automatic.
+    row.externalNativeSupersession = second;
+    await this.save();
+    return await this.redeemHumanContinuation(row, { ...second,
+      reason: 'moved-conversation-completed-native-user-supersession' });
+  }
   async reconcile(row) {
     const goal = await this.goalRuntime.status(row.goalId);
     if (goal.status !== 'active' || this.closed) return;
     if (goal.lastConsumedContinuationId === row.continuationId) {
+      if (row.externalNativeSupersession) return this.redeemHumanContinuation(row, {
+        ...row.externalNativeSupersession, reason: 'moved-conversation-completed-native-user-supersession' });
       row.state='delivered'; row.redeemed=true; row.reason='agent-redeemed-uncertain-delivery';
       await this.save();
       await this.notifyHiddenContinuationStarted(row);
@@ -950,6 +1016,8 @@ export class GoalContinuationSupervisor {
       } catch { inspectionFailed = true; }
       if (this.closed) return;
       if (inspectionFailed || !pages || pages.length !== 1) {
+        if (!inspectionFailed && inspectionOutcome.reason === 'no-exact-page'
+          && await this.reconcileMovedCompletedUser(row, goal)) return;
         await this.scheduleReconciliationRetry(row, inspectionFailed
           ? 'exact-page-inspection-failed'
           : inspectionOutcome.reason || 'ambiguous-exact-pages');

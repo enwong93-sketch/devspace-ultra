@@ -558,6 +558,23 @@ export async function inspectVisibleReportCommit(candidate, options = {}) {
                 branchMessageCount: branch.length,
                 sourceUserFound: sourceIndex >= 0,
                 baselineAssistantFound: baselineIndex >= 0,
+                sourceUserExistsInConversation: Object.values(payload.mapping || {}).some(node => node?.message?.id === expectedSourceUserId && node.message.author?.role === 'user'),
+                baselineAssistantExistsInConversation: Object.values(payload.mapping || {}).some(node => node?.message?.id === baselineAssistantMessageId && node.message.author?.role === 'assistant'),
+                baselineBranchLeaves: (() => {
+                  const entry = Object.entries(payload.mapping || {}).find(([, node]) => node?.message?.id === baselineAssistantMessageId && node.message.author?.role === 'assistant');
+                  if (!entry) return null;
+                  const queue = [entry[0]], visited = new Set(), leaves = [];
+                  while (queue.length && visited.size < 512 && leaves.length < 24) {
+                    const id = queue.shift(); if (visited.has(id)) continue; visited.add(id);
+                    const node = payload.mapping[id]; if (!node) continue;
+                    const children = Array.isArray(node.children) ? node.children : [];
+                    if (children.length) queue.push(...children);
+                    else leaves.push({ id: node.message?.id || id, role: node.message?.author?.role || null,
+                      status: node.message?.status || null, endTurn: node.message?.end_turn === true,
+                      createdAt: typeof node.message?.create_time === 'number' ? new Date(node.message.create_time * 1000).toISOString() : null });
+                  }
+                  return { complete: queue.length === 0, visited: visited.size, leaves };
+                })(),
                 latestUserMessageId: latestUser?.id || null,
                 latestUserCreatedAt: latestUser?.createTime != null
                   ? new Date(latestUser.createTime * 1000).toISOString()
