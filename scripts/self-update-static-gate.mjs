@@ -58,6 +58,8 @@ assert.match(updater, /\$otherHttpActive\s*=\s*\[Math\]::Max\(0,\s*\$httpActive\
 assert.match(updater, /Busy\s*=\s*\(\$toolActive\s*-gt\s*0\s*-or\s*\$processSessions\s*-gt\s*0\)/, "retained process sessions must defer updates even when HTTP/tool counters are quiet");
 assert.match(updater, /core\.pid[\s\S]*core\.registries\.processSessions/, "readiness must bind aggregate process diagnostics to the exact Core PID");
 assert.match(updater, /function Stop-DevSpaceRuntime[\s\S]*Get-GatewayBusyState[\s\S]*Runtime retirement deferred[\s\S]*Get-CimInstance/, "recheck readiness after staging before runtime retirement side effects");
+assert.match(updater, /function Stop-DevSpaceRuntime[\s\S]*Get-NativeMaintenanceState[\s\S]*Get-GatewayBusyState[\s\S]*current native end-turn[\s\S]*RuntimeRetirementStarted = \$true/, "fresh native finals and a post-read Core check must precede retirement");
+assert.match(updater, /NativeMaintenancePorts\.Count -eq 0\) \{ return \$unknown \}/, "unknown live Classic membership must defer rather than imply idle");
 assert.match(updater, /function Restore-RetiredUpdateRuntime[\s\S]*if \(-not \$script:RuntimeRetirementStarted\) \{ return \}/, "a pre-retirement failure must not restart or rewrite still-running tasks");
 assert.match(updater, /function Move-ItemWithRetry/);
 assert.match(updater, /bounded Windows lock retries/);

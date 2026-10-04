@@ -82,6 +82,15 @@ try { Stop-DevSpaceRuntime -PackageRecords @() -TaskSnapshot @() } catch {
     $threw = $_.Exception.Message -like 'Runtime retirement deferred:*'
 }
 Assert-True ($threw -and $script:StopCalls -eq 0) 'Retirement must refuse late work without side effects.'
+Assert-True (-not (Get-NativeMaintenanceState).Ready) 'Unknown native membership must defer a live update even with quiet counters.'
+$script:Core.registries.processSessions = 0
+function Get-CimInstance { return @() }
+function Get-NativeMaintenanceState { return [pscustomobject]@{ Ready=$false; Reason='fixture-native-not-ended' } }
+$threw = $false
+try { Stop-DevSpaceRuntime -PackageRecords @() -TaskSnapshot @() } catch {
+    $threw = $_.Exception.Message -like 'Runtime retirement deferred:*'
+}
+Assert-True ($threw -and $script:StopCalls -eq 0 -and -not $script:RuntimeRetirementStarted) 'Native non-final must veto quiet counters before any retirement.'
 Restore-RetiredUpdateRuntime -TaskSnapshot @()
 Assert-True ($script:RestoreCalls -eq 0 -and -not $script:RuntimeRetirementStarted) 'A readiness deferral must not restart or rewrite live tasks in rollback.'
 $script:RuntimeRetirementStarted = $true

@@ -17,6 +17,9 @@ param(
     [switch] $Force,
     [switch] $SkipRuntimeRestart,
     [switch] $NoAutoUpdateTask,
+    # Complete operator-declared local Classic membership for this Gateway.
+    # Empty/unknown membership defers live updates; verified-offline is separate.
+    [int[]] $NativeMaintenancePorts = @(),
     [int] $WaitForProcessId = 0
 )
 
@@ -447,6 +450,23 @@ function Get-UpdateRuntimeProcessPlan([string[]] $Roots, [object[]] $Processes, 
     return [pscustomobject]@{StopProcessIds=$(if($conflict){@()}else{$ids});ProtectedDescendantConflict=$conflict}
 }
 
+function Get-NativeMaintenanceState {
+    if ($script:TestMode) { return [pscustomobject]@{ Ready = $true; Reason = 'isolated-updater-sandbox' } }
+    if (Test-UpdateRuntimeAbsent) { return [pscustomobject]@{ Ready = $true; Reason = 'verified-offline' } }
+    $unknown = [pscustomobject]@{ Ready = $false; Reason = 'native-maintenance-proof-unavailable' }
+    if (-not $NativeMaintenancePorts -or $NativeMaintenancePorts.Count -eq 0) { return $unknown }
+    try {
+        $probe = Join-Path $PSScriptRoot 'scripts\self-update-native-readiness.mjs'
+        if (-not (Test-Path -LiteralPath $probe)) { return $unknown }
+        $output = @(& node $probe ($NativeMaintenancePorts -join ',') 2>$null)
+        if ($LASTEXITCODE -ne 0) { return $unknown }
+        $proof = ($output -join "`n") | ConvertFrom-Json
+        if ($proof.ok -ne $true -or $proof.ready -ne $true -or
+            [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() - [long]$proof.observedAtMs -gt 2000) { return $unknown }
+        return [pscustomobject]@{ Ready = $true; Reason = 'fresh-native-final-readback'; Proof = $proof }
+    } catch { return $unknown }
+}
+
 function Stop-DevSpaceRuntime([object[]] $PackageRecords, [object[]] $TaskSnapshot) {
     if ($script:TestMode) { return }
     # Staging can take minutes. Check again before the first process/task side
@@ -464,6 +484,14 @@ function Stop-DevSpaceRuntime([object[]] $PackageRecords, [object[]] $TaskSnapsh
         throw 'Runtime retirement deferred: an owned process tree contains protected shared/native runtime work.'
     }
     $stopProcessIds=@($plan.StopProcessIds)
+
+    $native = Get-NativeMaintenanceState
+    # Native reads may take seconds. Recheck actual Core work after them.
+    $readiness = Get-GatewayBusyState
+    if (-not $native.Ready -or -not $readiness.Known -or $readiness.Busy) {
+        $script:RuntimeRetirementDeferred = $true
+        throw 'Runtime retirement deferred: current native end-turn or Core work is unverified.'
+    }
 
     $script:RuntimeRetirementStarted = $true
     foreach ($task in $TaskSnapshot) {
