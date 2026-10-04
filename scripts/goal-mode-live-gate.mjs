@@ -100,7 +100,8 @@ try {
   ]);
   assert.deepEqual(tools.get("devspace_goal_continuation")._meta.ui.visibility, ["app"]);
   assert.equal(tools.get("devspace_goal_start")._meta.ui.resourceUri, undefined);
-  assert.equal(tools.get("devspace_goal_mount")._meta.ui.resourceUri, undefined);
+  assert.equal(tools.get("devspace_goal_mount")._meta.ui.resourceUri, GOAL_RELAY_URI,
+    "recovery must restore the hidden transport without restoring the retired visible Goal Dock");
   assert.match(tools.get("devspace_goal_start").description, /floating Goal strip.*progress narration card/i);
   assert.match(tools.get("devspace_goal_mount").description, /does not render.*inline Goal Dock/i);
   assert.equal(tools.get("devspace_goal_turn_report")._meta.ui.resourceUri, GOAL_RELAY_URI);

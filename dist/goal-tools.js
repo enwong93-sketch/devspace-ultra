@@ -537,18 +537,27 @@ export function registerGoalTools(server, goalRuntime, {
 
   registerAppTool(server, "devspace_goal_mount", {
     title: "Rebind DevSpace Goal Overlay",
-    description: "Rebind the latest floating Goal strip for an existing Goal after renderer reload, later-turn loss, deleted-owner recovery, or another missing-overlay condition. This is read-only for Goal state and does not render the retired inline Goal Dock; when Host Overlay is enabled, the explicit mount may briefly arm exact runtime+conversation owner recovery.",
+    description: "Rebind the latest floating Goal strip and restore its hidden continuation App component for an existing Goal after later-turn or client-view loss. This is read-only for Goal state and does not render the retired inline Goal Dock. Use the original verified conversation; mounting does not send a message or require a Goal report, and native end-turn admission still controls any subsequent continuation.",
     inputSchema: { goalId: z.string().min(1) },
     outputSchema: goalOutputSchema,
     annotations: READ_ONLY,
-    _meta: modelOnlyMeta(),
+    _meta: renderMeta(relayResourceUri),
   }, async ({ goalId }, extra) => {
     try {
+      // A renderer-less status read may retain compatibility, but restoring a
+      // sender view requires a verified caller for the existing bound owner.
+      if (typeof resolveConversation === 'function') {
+        const caller = await resolveConversationId(extra);
+        const existing = await goalRuntime.status(goalId);
+        if (!caller || !existing.conversationId || caller !== existing.conversationId) {
+          throw new Error('Goal transport mount requires the original verified conversation owner.');
+        }
+      }
       const goal = await bindOrVerifyActiveGoal(goalId, extra);
       if (typeof onMount === "function") {
         try { await onMount({ goal }); } catch {}
       }
-      return textResult(goal, `Mounted Goal ${goal.id} at round ${goal.round}, revision ${goal.revision}.`, {}, { fullHistory: true });
+      return textResult(goal, `Requested restoration of Goal ${goal.id} at round ${goal.round}, revision ${goal.revision}. Goal state is preserved; host component startup and any later continuation still require their own receipts.`, {}, { fullHistory: true });
     } catch (error) {
       return errorResult(error);
     }

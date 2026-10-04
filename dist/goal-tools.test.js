@@ -8,6 +8,7 @@ import './goal-result-view.test.js';
 import './context-payload-audit.test.js';
 import './workspace-discovery-view.test.js';
 import './workspace-discovery-scan.test.js';
+import './goal-mount-transport.test.js';
 import { ConversationStartClaimRegistry } from "./conversation-start-claim-registry.js";
 
 const root = await mkdtemp(join(tmpdir(), "devspace-goal-tools-"));
@@ -65,7 +66,7 @@ try {
 
   assert.equal(start.config._meta.ui.resourceUri, undefined);
   assert.deepEqual(start.config._meta.ui.visibility, ["model"]);
-  assert.equal(mount.config._meta.ui.resourceUri, undefined);
+  assert.equal(mount.config._meta.ui.resourceUri, "ui://devspace/goal-continuation-relay.html");
   assert.deepEqual(mount.config._meta.ui.visibility, ["model"]);
   assert.match(start.config.description, /floating Goal strip.*progress narration card/i);
   assert.match(start.config.description, /retired inline Goal Dock/i);
@@ -184,7 +185,9 @@ try {
   const resumedResult = await control.handler({ goalId: goal1.id, action: "resume" });
   assert.equal(resumedResult.structuredContent.goal.status, "active");
 
+  const beforeMount = await runtime.status(goal1.id);
   const mountResult = await mount.handler({ goalId: goal1.id });
+  assert.deepEqual(await runtime.status(goal1.id), beforeMount, 'mount must preserve Goal, clock, reports and continuation state');
   assert.deepEqual(mountResult.structuredContent.goal, await runtime.status(goal1.id),
     'read-only mount must return the full authoritative history, not the acknowledgement projection');
   assert.deepEqual(mountResult.structuredContent.goal.lastRoundReport, resumedResult.structuredContent.goal.lastRoundReport);
@@ -326,7 +329,7 @@ try {
     tools: registered.size,
     continuationAppOnly: true,
     legacyInlineDockTools: 0,
-    relayRenderTools: 1,
+    relayRenderTools: 2,
     conversationBound: true,
     exactPageStartClaim: true,
   }));
