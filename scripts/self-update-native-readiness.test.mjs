@@ -29,5 +29,10 @@ reads=0;
 assert.equal((await run({inspect:async()=>{reads++;const p=structuredClone(page);
   if(reads===2)p.nativeContinuation.latestPublicAssistantText='different final';return[p]}})).reason,'native-current-turn-changed');
 assert.equal((await run({inspect:async()=>{throw new Error('fixture unavailable')}})).ready,false);
+const unavailable=await run({inspect:async()=>[{...page,nativeContinuation:{resolved:false,state:'conversation-fetch-429',
+  secret:'fixture-must-not-leak'}}]});
+assert.equal(unavailable.diagnostic.port,9721);
+assert.equal(unavailable.diagnostic.state,'conversation-fetch-429');
+assert.ok(!JSON.stringify(unavailable).includes('fixture-must-not-leak'));
 console.log(JSON.stringify({ok:true,gate:'self-update-native-readiness',nativeFinalRequired:true,
   twoCurrentReadbacks:true,unknownDefers:true,productionChanged:false}));

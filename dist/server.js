@@ -2974,6 +2974,7 @@ export function createServer(config = loadConfig(), options = {}) {
         },
         onActiveTurn: (event) => {
             nativeFinalBoundaries.noteTurn(event);
+            void goalRoundCompletionGuard.noteNativeTransportHint(event).catch(() => null);
             activeTurnRegistry.noteTurn(event);
             interactiveProgressGate.noteTurn(event);
             void conversationProgressLiveness?.noteTurn?.(event).catch(() => null);

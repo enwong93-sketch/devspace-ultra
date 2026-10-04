@@ -114,6 +114,41 @@ test('native API read failures remain nonterminal and are bounded by the per-rou
   assert.equal(reads,1);
   clock+=10000;await guard.pollOnce();assert.equal(reads,2);
 });
+
+test('an already-consumed native final uses idle cadence; exact transport hints wake reads without closing a turn',async t=>{
+  const {r,g}=await runtime(t);let clock=at+2000,reads=0,current=true;
+  const event=ingress.nativeApiFinalFromPages(g,[page()],{readStartedAtMs:clock,observedAtMs:clock});
+  await r.autoCompleteAssistantTurn({goalId:g.id,nativeCompletion:event});
+  const before=await r.status(g.id);
+  const guard=new ClassicGoalRoundCompletionGuard({goalRuntime:r,nativeFinalIngressOnly:true,now:()=>clock,
+    readNativeFinal:async()=>{reads++;return current?event:null;},
+    continueIncompleteGoal:async({goal,nativeCompletion})=>r.autoCompleteAssistantTurn({goalId:goal.id,nativeCompletion}),
+    inspect:async()=>{throw Error('No DOM final inference');},dispatch:async()=>{throw Error('No Rescue/send');}});
+  t.after(()=>guard.close());
+  await guard.pollOnce();clock+=10000;await guard.pollOnce();assert.equal(reads,1);
+  await guard.noteNativeTransportHint({kind:'finished'});await guard.pollOnce();assert.equal(reads,1);
+  await guard.noteNativeTransportHint({kind:'started',conversationId:'fixture-foreign'});
+  await guard.pollOnce();assert.equal(reads,1);
+  current=false;
+  await guard.noteNativeTransportHint({kind:'finished',conversationId:cid});
+  assert.deepEqual(await r.status(g.id),before,'EOF is a scheduling hint, not turn-completion evidence');
+  await guard.pollOnce();assert.equal(reads,2);
+  clock+=10000;await guard.pollOnce();assert.equal(reads,3,'incomplete native input keeps normal working cadence');
+  assert.deepEqual(await r.status(g.id),before);
+});
+
+test('a native activity hint during a duplicate-final read cannot be overwritten by idle backoff',async t=>{
+  const {r,g}=await runtime(t);let clock=at+2000,reads=0;
+  const event=ingress.nativeApiFinalFromPages(g,[page()],{readStartedAtMs:clock,observedAtMs:clock});
+  await r.autoCompleteAssistantTurn({goalId:g.id,nativeCompletion:event});
+  let guard;
+  guard=new ClassicGoalRoundCompletionGuard({goalRuntime:r,nativeFinalIngressOnly:true,now:()=>clock,
+    readNativeFinal:async()=>{reads++;if(reads===1)await guard.noteNativeTransportHint({kind:'resumed',conversationId:cid});return event;},
+    continueIncompleteGoal:async({goal,nativeCompletion})=>r.autoCompleteAssistantTurn({goalId:goal.id,nativeCompletion}),
+    inspect:async()=>{throw Error('No DOM');},dispatch:async()=>{throw Error('No send');}});
+  t.after(()=>guard.close());
+  await guard.pollOnce();await guard.pollOnce();assert.equal(reads,2);
+});
 test('a delayed CDP request callback fences by its native wallTime rather than rejecting an already completed real turn',async()=>{
   const boundaries=new ingress.ClassicNativeFinalBoundaryStore();
   const tracker=new ClassicTurnTransportTracker({now:()=>at+6000,onActiveTurn:event=>boundaries.noteTurn({...event,

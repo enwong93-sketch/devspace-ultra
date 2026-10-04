@@ -48,7 +48,19 @@ export async function inspectNativeMaintenance(ports, {
         pageTargetId: scope.pageTargetId, skipNativeStatus: true, includeNativeBranch: true,
         nativeFinalApiOnly: true, nativeConversationTimeoutMs: 5_000 });
       const receipt = nativeApiFinalFromPages(goal, pages, { readStartedAtMs, observedAtMs: now() });
-      if (!receipt) throw new Error('native-current-turn-not-completed');
+      if (!receipt) {
+        const page = pages?.length === 1 ? pages[0] : null;
+        throw Object.assign(new Error('native-current-turn-not-completed'), {
+          nativeDiagnostic: { port:scope.port, pageCount:Array.isArray(pages)?pages.length:null,
+            chatMode:page?.chatMode??null, resolved:page?.nativeContinuation?.resolved??null,
+            state:page?.nativeContinuation?.state??null,
+            retryAfter:page?.nativeContinuation?.retryAfter??null,
+            conversationIdVerified:page?.nativeContinuation?.conversationIdVerified??null,
+            currentRole:page?.nativeContinuation?.currentRole??null,
+            currentStatus:page?.nativeContinuation?.currentStatus??null,
+            currentEndTurn:page?.nativeContinuation?.currentEndTurn??null },
+        });
+      }
       return receipt;
     };
     const first = [];
@@ -66,9 +78,10 @@ export async function inspectNativeMaintenance(ports, {
     if (JSON.stringify(scopes) !== JSON.stringify(await inventory())) return fail('native-page-owner-changed');
     return { ok: true, ready: true, scope: 'operator-declared-Gateway-Classic-owners',
       atomicAdmissionBarrier: false, observedAtMs: now(), finalReceipts };
-  } catch {
+  } catch (error) {
     // Do not print native response text, auth errors, cookies or final prose.
-    return fail('native-maintenance-proof-unavailable');
+    return { ...fail('native-maintenance-proof-unavailable'),
+      ...(error?.nativeDiagnostic ? { diagnostic:error.nativeDiagnostic } : {}) };
   }
 }
 
