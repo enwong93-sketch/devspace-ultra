@@ -463,9 +463,16 @@ export async function connectClassicTurnTransportPort(port, {
   const runtimeKey = runtimeKeyForPort(port);
   let currentConversationId = conversationIdFromUrl(page.url);
   const client = new ClassicCdpClient(page.webSocketDebuggerUrl, { WebSocketImpl, callTimeoutMs: 3_000, maxPendingCalls: 32 });
-  await client.open();
-  await client.call("Network.enable", { maxTotalBufferSize: 1_000_000, maxResourceBufferSize: 512_000, enableDurableMessages: false });
-  await client.call("Page.enable");
+  try {
+    await client.open();
+    await client.call("Network.enable", { maxTotalBufferSize: 1_000_000, maxResourceBufferSize: 512_000, enableDurableMessages: false });
+    await client.call("Page.enable");
+  } catch (error) {
+    // The polling owner cannot close a session that was never returned. Failed
+    // setup must dispose the socket before the next connection attempt.
+    client.close();
+    throw error;
+  }
   const tracker = new ClassicTurnTransportTracker({
     onConversationIdentity: (identity) => onConversationIdentity?.({ runtimeKey, port, ...identity, observedAt: observedAt() }),
     onTurnTransportEvent: (event) => onTurnTransportEvent?.({ runtimeKey, port, ...event }),

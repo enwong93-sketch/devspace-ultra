@@ -1006,10 +1006,19 @@ export class GoalContinuationSupervisor {
     // A new user envelope can be Rescue resuming interrupted work. It is not
     // an assistant final and must neither redeem a Goal round nor authorize a
     // second message. Native final reconciliation owns the eventual decision.
-    row.reason = 'new-user-turn-awaiting-native-final';
+    const reason = 'new-user-turn-awaiting-native-final';
+    if (row.reason === reason && row.candidateKey == null && row.settledAt == null) return true;
+    const previous = { reason: row.reason, candidateKey: row.candidateKey, settledAt: row.settledAt };
+    row.reason = reason;
     row.candidateKey = null;
     row.settledAt = null;
-    await this.save();
+    try { await this.save(); }
+    catch (error) {
+      // This transition has no delivery side effect. Restore it so a failed
+      // durable write is retried rather than mistaken for an unchanged wait.
+      Object.assign(row, previous);
+      throw error;
+    }
     return true;
   }
   async advance(row) {

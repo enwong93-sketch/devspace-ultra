@@ -13,6 +13,32 @@ import { ClassicNativeFinalBoundaryStore } from './classic-native-final-ingress.
 const now = Date.parse('2026-10-02T15:30:00.000Z');
 const cid = 'conversation-native-summary';
 const userId = 'source-user-native-summary';
+
+for (const failedMethod of ['Network.enable', 'Page.enable']) {
+  test(`failed ${failedMethod} initialization closes each observer socket before retry`, async () => {
+    const sockets = [];
+    class FailedSocket extends EventTarget {
+      constructor() { super(); sockets.push(this); this.closeCount = 0; queueMicrotask(() => this.dispatchEvent(new Event('open'))); }
+      send(raw) {
+        const call = JSON.parse(raw);
+        queueMicrotask(() => this.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({
+          id: call.id, ...(call.method === failedMethod ? { error: { message: 'fixture initialization denied' } } : { result: {} }),
+        }) })));
+      }
+      close() { this.closeCount++; this.dispatchEvent(new Event('close')); }
+    }
+    for (let i = 0; i < 3; i++) {
+      await assert.rejects(connectClassicTurnTransportPort(9732, {
+        WebSocketImpl: FailedSocket,
+        fetchImpl: async () => ({ ok: true, json: async () => [{ id: 'native-page-02', type: 'page',
+          url: `https://chatgpt.com/c/${cid}`, webSocketDebuggerUrl: 'ws://fixture/native' }] }),
+      }), /fixture initialization denied/);
+    }
+    assert.equal(sockets.length, 3);
+    assert.ok(sockets.every(socket => socket.closeCount === 1), 'failed retries cannot leave live observer sockets behind');
+  });
+}
+
 function frame(overrides = {}, envelope = {}) {
   return `data: ${JSON.stringify({ conversation_id: cid, message: {
     id: 'assistant-native-summary', author: { role: 'assistant' },

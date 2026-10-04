@@ -48,6 +48,43 @@ async function harness(t) {
     async restart() { await supervisor.close(); supervisor = new GoalContinuationSupervisor(options); await supervisor.ready; } };
 }
 
+test('unchanged Rescue wait persists once and resumes only after its native final', async t => {
+  const h = await harness(t);
+  const previous = await h.final();
+  h.boundary.noteTurn({ ...h.scope, kind: 'started', sourceUserMessageId: 'source-user-2', requestId: 'request-2' });
+  const save = h.supervisor.save.bind(h.supervisor);
+  let writes = 0;
+  h.supervisor.save = async () => { writes++; await save(); };
+  for (let i = 0; i < 60; i++) {
+    h.advance(1000);
+    assert.equal(await h.supervisor.claimPublicMessage(h.goal.id), null);
+  }
+  assert.equal(writes, 1, 'a minute of unchanged wait must not rewrite the journal every second');
+  assert.equal((await h.runtime.status(h.goal.id)).round, 1);
+  const journal = JSON.parse(await readFile(join(h.root, 'driver.json'), 'utf8'));
+  assert.equal(journal.records.at(-1).reason, 'new-user-turn-awaiting-native-final');
+  await h.final('- 繼續', previous.assistantMessageId);
+  assert.ok(await h.supervisor.claimPublicMessage(h.goal.id));
+});
+
+test('failed native-final wait persistence remains retryable', async t => {
+  const h = await harness(t);
+  await h.final();
+  h.boundary.noteTurn({ ...h.scope, kind: 'started', sourceUserMessageId: 'source-user-2', requestId: 'request-2' });
+  const save = h.supervisor.save.bind(h.supervisor);
+  let writes = 0;
+  h.supervisor.save = async () => {
+    writes++;
+    if (writes === 1) throw new Error('fixture journal write failed');
+    await save();
+  };
+  await assert.rejects(h.supervisor.claimPublicMessage(h.goal.id), /journal write failed/);
+  assert.equal(await h.supervisor.claimPublicMessage(h.goal.id), null);
+  assert.equal(await h.supervisor.claimPublicMessage(h.goal.id), null);
+  assert.equal(writes, 2, 'retry a failed write once, then suppress unchanged writes');
+  assert.equal((await h.runtime.status(h.goal.id)).round, 1);
+});
+
 test('Rescue starting a new native request cannot redeem a round or insert another message before its final', async t => {
   const h = await harness(t);
   const previous = await h.final();
