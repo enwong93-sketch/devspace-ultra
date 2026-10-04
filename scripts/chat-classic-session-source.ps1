@@ -56,6 +56,24 @@ function Test-SignedInPort {
     catch { return $false }
 }
 
+function Get-RuntimeDebugPort {
+    param([Parameter(Mandatory)]$Root, [Parameter(Mandatory)][int]$FallbackPort)
+    if (-not $Root -or -not $Root.ProcessId) { return $null }
+    $match = [regex]::Match([string]$Root.CommandLine, '(?:^|\s)"?--remote-debugging-port(?:=|\s+)"?(\d+)"?(?=\s|$)')
+    $port = [long]$FallbackPort
+    if ($match.Success) {
+        if (-not [long]::TryParse($match.Groups[1].Value, [ref]$port)) { return $null }
+    }
+    elseif ([string]$Root.CommandLine -match '(?:^|\s)"?--remote-debugging-port(?:=|\s|$)') { return $null }
+    if ($port -lt 1024 -or $port -gt 65535) { return $null }
+    # Session credentials may only come from this exact package's root process
+    # on loopback. A legacy observed port is not an unverified alias/fallback.
+    $listeners = @(Get-NetTCPConnection -State Listen -LocalPort ([int]$port) -ErrorAction SilentlyContinue |
+        Where-Object { $_.OwningProcess -eq $Root.ProcessId -and $_.LocalAddress -in @('127.0.0.1', '::1') })
+    if ($listeners.Count -eq 0) { return $null }
+    return [int]$port
+}
+
 function Get-InteractiveCandidate {
     param([Parameter(Mandatory)][int]$Number)
     $padded = "{0:D2}" -f $Number
@@ -65,7 +83,9 @@ function Get-InteractiveCandidate {
     if (-not $package) { return $null }
     $exe = Join-Path $package.InstallLocation "app\ChatGPT Classic.exe"
     $root = Get-RootProcessForExecutable -ExecutablePath $exe
-    $port = $interactiveDebugBasePort + $Number
+    if (-not $root) { return $null }
+    $port = Get-RuntimeDebugPort -Root $root -FallbackPort ($interactiveDebugBasePort + $Number)
+    if (-not $port) { return $null }
     if (-not $root -or -not (Test-SignedInPort -Port $port)) { return $null }
     [pscustomobject]@{
         Priority = 10 + $Number
@@ -90,7 +110,9 @@ function Get-WorkerCandidate {
     if (-not $package) { return $null }
     $exe = Join-Path $package.InstallLocation "app\ChatGPT Classic.exe"
     $root = Get-RootProcessForExecutable -ExecutablePath $exe
-    $port = $workerDebugBasePort + $Number
+    if (-not $root) { return $null }
+    $port = Get-RuntimeDebugPort -Root $root -FallbackPort ($workerDebugBasePort + $Number)
+    if (-not $port) { return $null }
     if (-not $root -or -not (Test-SignedInPort -Port $port)) { return $null }
     [pscustomobject]@{
         Priority = 100 + $Number
