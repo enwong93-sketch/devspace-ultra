@@ -1,7 +1,7 @@
 import { pathToFileURL } from 'node:url';
-import { inspectGoalContinuationPages } from '../dist/goal-host-bridge.js';
-import { nativeApiFinalFromPages } from '../dist/classic-native-final-ingress.js';
+import { nativeApiFinalFromPages, isNativeCompletedFinalReceipt } from '../dist/classic-native-final-ingress.js';
 import { runtimeKeyForClassicPort } from '../dist/classic-main-debug-ports.js';
+import { observeNativeMaintenance } from '../dist/native-maintenance-observer.js';
 
 // Read-only maintenance input, not a Goal dispatch or a client acceptance test.
 // The operator supplies the complete set of local Classic ports using this
@@ -12,7 +12,8 @@ export async function inspectNativeMaintenance(ports, {
     if (!response.ok) throw new Error('native-target-inventory-unavailable');
     return response.json();
   },
-  inspect = inspectGoalContinuationPages,
+  inspect = null,
+  observe = observeNativeMaintenance,
   now = Date.now,
 } = {}) {
   const fail = reason => ({ ok: false, ready: false, reason });
@@ -35,12 +36,32 @@ export async function inspectNativeMaintenance(ports, {
           if (!conversationId || url.searchParams.get('surface') === 'work' || !page.id || !page.webSocketDebuggerUrl) {
             throw new Error('native-page-ownership-unavailable');
           }
-          scopes.push({ port, runtimeKey: runtimeKeyForClassicPort(port), pageTargetId: page.id, conversationId });
+          scopes.push({ port, runtimeKey: runtimeKeyForClassicPort(port), pageTargetId: page.id, conversationId,
+            pageWebSocketDebuggerUrl:page.webSocketDebuggerUrl });
         }
       }
       return scopes.sort((a,b) => `${a.port}:${a.pageTargetId}`.localeCompare(`${b.port}:${b.pageTargetId}`));
     };
     const scopes = await inventory();
+    if(!inspect) {
+      const finalReceipts=[];
+      for(const scope of scopes) {
+        const observed=await observe(scope);
+        if(!observed?.ready)return fail(observed?.reason||'native-observation-unavailable');
+        if(!isNativeCompletedFinalReceipt(observed.receipt)
+          ||observed.receipt.conversationId!==scope.conversationId
+          ||observed.receipt.runtimeKey!==scope.runtimeKey
+          ||observed.receipt.pageTargetId!==scope.pageTargetId
+          ||observed.receipt.port!==scope.port)return fail('native-observation-scope-mismatch');
+        finalReceipts.push(observed.receipt);
+      }
+      if(JSON.stringify(scopes)!==JSON.stringify(await inventory()))return fail('native-page-owner-changed');
+      return {ok:true,ready:true,scope:'operator-declared-Gateway-Classic-owners',
+        atomicAdmissionBarrier:false,source:'passive-existing-native-api-replies',nativeFetchesInduced:0,
+        observedAtMs:now(),finalReceipts};
+    }
+    // Injected reader is retained for deterministic tests only. Production
+    // does not issue extra native GETs while the client's reader is active.
     const sample = async scope => {
       const readStartedAtMs = now();
       const goal = { conversationId: scope.conversationId };

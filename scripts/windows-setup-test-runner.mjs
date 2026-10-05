@@ -5,6 +5,8 @@ import { createServer } from 'node:http';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import './self-update-native-readiness.test.mjs';
+import '../dist/native-conversation-response-receipt.test.js';
+import '../dist/native-maintenance-observer.test.js';
 
 if (platform() !== 'win32') {
   console.log(JSON.stringify({ ok: true, gate: 'windows-setup-unit', skipped: 'non-Windows host' }));
