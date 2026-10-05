@@ -45,7 +45,16 @@ export function validateAcceptance(evidence, { version, sourceCommit, archiveSha
   assert.ok(Number.isInteger(goal.observedAssistantTurns) && goal.observedAssistantTurns >= 3);
   assert.equal(goal.additionalHumanMessages, 0, 'Goal must not require human continuation');
   assert.equal(goal.manualBindCalls, 0);
-  assert.equal(goal.hiddenContinuation, true);
+  if (goal.hiddenContinuation !== true) {
+    assert.equal(goal.continuationTransport, 'public-component-message');
+    assert.equal(goal.publicMessagesAuthorized, true);
+    assert.equal(goal.nativeFinalTriggered, true);
+    assert.equal(goal.foregroundInputUsed, false);
+    assert.equal(goal.focusChanged, false);
+    assert.equal(goal.composerMutated, false);
+    assert.equal(goal.automaticScroll, false);
+    assert.equal(goal.duplicateDispatches, 0);
+  }
   assert.equal(evidence.checks.ordinaryTools.disposableReadWriteEditCommandReadback, true);
   const rescue = evidence.checks.automaticRescue;
   assert.equal(rescue.automaticDispatchCount, 1, 'Rescue must dispatch exactly once');

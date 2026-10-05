@@ -17,6 +17,9 @@ param(
     [switch] $Force,
     [switch] $SkipRuntimeRestart,
     [switch] $NoAutoUpdateTask,
+    # Complete operator-declared local Classic membership for this Gateway.
+    # Empty/unknown membership defers live updates; verified-offline is separate.
+    [int[]] $NativeMaintenancePorts = @(),
     [int] $WaitForProcessId = 0
 )
 
@@ -30,6 +33,8 @@ if ($env:OS -ne "Windows_NT") {
 
 $script:UpdaterSchemaVersion = 1
 $script:TestMode = $env:DEVSPACE_UPDATE_TEST_MODE -eq "1"
+$script:RuntimeRetirementStarted = $false
+$script:RuntimeRetirementDeferred = $false
 $script:AutoTaskName = "DevSpace-Ultra-Auto-Update"
 $script:KnownPackageNames = @("devspace-ultra", "@waishnav/devspace")
 $script:KnownShimNames = @(
@@ -140,6 +145,7 @@ function Get-InstalledPackageRecords([string] $Prefix) {
 }
 
 function Get-PrimaryInstalledRecord([object[]] $Records) {
+    if (-not $Records -or $Records.Count -eq 0) { return $null }
     $preferred = @($Records | Where-Object { $_.Name -eq "devspace-ultra" } | Select-Object -First 1)
     if ($preferred.Count -gt 0) { return $preferred[0] }
     $legacy = @($Records | Where-Object { $_.Name -eq "@waishnav/devspace" } | Select-Object -First 1)
@@ -332,66 +338,164 @@ function Restore-RuntimeTaskActions([object[]] $TaskSnapshot) {
     }
 }
 
+function Test-UpdateCounter($Value) {
+    return (($Value -is [int] -or $Value -is [long]) -and $Value -ge 0)
+}
+
+function Test-UpdateRuntimeAbsent {
+    # An offline install is permitted; failed diagnostics on a live runtime
+    # are not evidence of inactivity. Never print process command lines.
+    try {
+        $listeners = @(Get-NetTCPConnection -State Listen -ErrorAction Stop | Where-Object { $_.LocalPort -in @(7678,7688,7689) })
+        if ($listeners.Count) { return $false }
+        $runtime = @(Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object {
+            $_.ProcessId -ne $PID -and [string]$_.CommandLine -match 'devspace-(?:stable-gateway|fixed-backend|local-ingress)|dist[\\/]cli\.js\s+serve'
+        })
+        return $runtime.Count -eq 0
+    } catch { return $false }
+}
+
 function Get-GatewayBusyState {
     if ($script:TestMode) { return [pscustomobject]@{ Known = $true; Busy = $false; HttpActive = 0; ToolActive = 0 } }
+    $unknown = [pscustomobject]@{ Known = $false; Busy = $true; Reason = 'runtime-readiness-unavailable' }
     $controlPath = Join-Path $HOME ".devspace-tailscale-bootstrap\logs\stable-gateway-control.json"
-    if (-not (Test-Path -LiteralPath $controlPath)) { return [pscustomobject]@{ Known = $false; Busy = $false } }
+    if (-not (Test-Path -LiteralPath $controlPath)) {
+        if (Test-UpdateRuntimeAbsent) { return [pscustomobject]@{ Known = $true; Busy = $false; Reason = 'verified-offline' } }
+        return $unknown
+    }
     try {
         $control = Get-Content -LiteralPath $controlPath -Raw | ConvertFrom-Json
         $port = [int]$control.gatewayPort
         $token = [string]$control.controlToken
-        if ($port -lt 1 -or -not $token) { return [pscustomobject]@{ Known = $false; Busy = $false } }
+        if ($port -lt 1 -or $port -gt 65535 -or -not $token) { return $unknown }
         $headers = @{ "x-devspace-gateway-control" = $token }
         $status = Invoke-RestMethod -Uri "http://127.0.0.1:$port/__devspace/gateway/status" -Headers $headers -Method Get -UseBasicParsing
-        $httpActive = if ($status.admission -and $status.admission.PSObject.Properties.Name -contains "activeRequests") { [int]$status.admission.activeRequests } else { 0 }
-        $toolActive = if ($status.sessions -and $status.sessions.PSObject.Properties.Name -contains "totalNonStreamActiveRequests") { [int]$status.sessions.totalNonStreamActiveRequests } else { 0 }
+        $core = Invoke-RestMethod -Uri "http://127.0.0.1:$port/__devspace/memory/status" -Method Get -UseBasicParsing
+        # Re-read after the Core probe. A controller migration or new tool call
+        # between observations invalidates the earlier readiness snapshot.
+        $after = Invoke-RestMethod -Uri "http://127.0.0.1:$port/__devspace/gateway/status" -Headers $headers -Method Get -UseBasicParsing
+        foreach ($gateway in @($status, $after)) {
+            if ($gateway.ok -ne $true -or -not (Test-UpdateCounter $gateway.activePid) -or $gateway.activePid -eq 0 -or
+                $gateway.activePid -ne $core.pid -or $gateway.handoverInProgress -ne $false -or
+                $gateway.coreRecoveryInProgress -ne $false -or $gateway.runtimeIdentityMismatch -or $gateway.fatalHandoverError -or
+                -not (Test-UpdateCounter $gateway.sessions.totalNonStreamActiveRequests)) { return $unknown }
+        }
+        if ($core.ok -ne $true -or -not (Test-UpdateCounter $core.pid) -or
+            -not (Test-UpdateCounter $core.registries.processSessions)) { return $unknown }
+        $httpActive = if (Test-UpdateCounter $after.admission.activeRequests) { $after.admission.activeRequests } else { 0 }
+        $toolActive = [Math]::Max($status.sessions.totalNonStreamActiveRequests, $after.sessions.totalNonStreamActiveRequests)
+        $processSessions = $core.registries.processSessions
         # Admission includes this status probe and replayable SSE connections,
         # neither of which is active Agent/tool work. The session registry owns
         # the authoritative non-stream counter used by Gateway quiet/drain logic.
         $otherHttpActive = [Math]::Max(0, $httpActive - 1)
-        return [pscustomobject]@{ Known = $true; Busy = ($toolActive -gt 0); HttpActive = $httpActive; OtherHttpActive = $otherHttpActive; ToolActive = $toolActive }
+        return [pscustomobject]@{ Known = $true; Busy = ($toolActive -gt 0 -or $processSessions -gt 0); HttpActive = $httpActive; OtherHttpActive = $otherHttpActive; ToolActive = $toolActive; ProcessSessions = $processSessions; CorePid = $core.pid }
     }
-    catch { return [pscustomobject]@{ Known = $false; Busy = $false } }
+    catch {
+        if (Test-UpdateRuntimeAbsent) { return [pscustomobject]@{ Known = $true; Busy = $false; Reason = 'verified-offline' } }
+        return $unknown
+    }
 }
 
-function Stop-DevSpaceRuntime([object[]] $PackageRecords, [object[]] $TaskSnapshot) {
-    if ($script:TestMode) { return }
-    $roots = @($PackageRecords | ForEach-Object { [string]$_.Root })
-    $devspaceCaddyConfigs = @(
-        (Join-Path $HOME 'DevSpaceIngress\Caddyfile'),
-        (Join-Path $HOME '.devspace-local-ingress\Caddyfile')
-    )
-    $allProcesses = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
-    $processes = @($allProcesses | Where-Object {
-        if ([int]$_.ProcessId -eq $PID) { return $false }
-        $command = [string]$_.CommandLine
-        if (-not $command) { return $false }
-        $isDevSpaceCaddy = ([string]$_.Name -ieq 'caddy.exe') -and @($devspaceCaddyConfigs | Where-Object {
-            $command.IndexOf($_, [StringComparison]::OrdinalIgnoreCase) -ge 0
-        }).Count -gt 0
-        if ($isDevSpaceCaddy) { return $true }
-        $matchesRoot = $false
-        foreach ($root in $roots) { if ($command.IndexOf($root, [StringComparison]::OrdinalIgnoreCase) -ge 0) { $matchesRoot = $true; break } }
-        if (-not $matchesRoot) { return $false }
-        return $command -match 'devspace-(?:stable-gateway|fixed-backend|local-ingress|live-progress)|dist[\\/]cli\.js\s+serve'
-    })
-    $ownedProcessIds = @($processes | ForEach-Object { [int]$_.ProcessId })
-    $processTreeIds = [Collections.Generic.HashSet[int]]::new()
-    foreach ($processId in $ownedProcessIds) { $null = $processTreeIds.Add($processId) }
-    do {
-        $added = $false
-        foreach ($candidate in $allProcesses) {
-            $candidateId = [int]$candidate.ProcessId
-            if ($candidateId -eq $PID -or $processTreeIds.Contains($candidateId)) { continue }
-            if ($processTreeIds.Contains([int]$candidate.ParentProcessId)) {
-                $null = $processTreeIds.Add($candidateId)
-                $added = $true
+function Test-PreservedUpdateTask([string] $Name) {
+    # These are infrastructure / native-app launchers, not package retirement.
+    return $Name -in @('DevSpace-Local-Ingress', 'DevSpace-Canonical-Startup')
+}
+
+function Get-UpdateRuntimeProcessPlan([string[]] $Roots, [object[]] $Processes, [int] $UpdaterPid) {
+    $protectedIds = [Collections.Generic.HashSet[int]]::new()
+    foreach ($row in $Processes) {
+        if ([string]$row.Name -in @('caddy.exe','ChatGPT Classic.exe','ChatGPT.exe')) {
+            $null = $protectedIds.Add([int]$row.ProcessId)
+        }
+    }
+    $ownedIds = [Collections.Generic.HashSet[int]]::new()
+    foreach ($row in $Processes) {
+        $id = [int]$row.ProcessId
+        if ($id -eq $UpdaterPid -or $protectedIds.Contains($id)) { continue }
+        $command = [string]$row.CommandLine
+        if (-not $command) { continue }
+        foreach ($root in $Roots) {
+            if (-not $root) { continue }
+            $prefix = [regex]::Escape($root.TrimEnd('\','/')) + '[\\/]'
+            if ($command -match ($prefix + '(?:scripts[\\/]devspace-(?:stable-gateway|fixed-backend|live-progress)|dist[\\/]cli\.js["'']?\s+serve)')) {
+                $null = $ownedIds.Add($id); break
             }
         }
+    }
+    $tree = [Collections.Generic.HashSet[int]]::new()
+    $ordered = [Collections.Generic.List[int]]::new()
+    foreach ($row in $Processes) {
+        if ($ownedIds.Contains([int]$row.ProcessId)) { $null=$tree.Add([int]$row.ProcessId); $ordered.Add([int]$row.ProcessId) }
+    }
+    do {
+        $added=$false
+        foreach ($row in $Processes) {
+            $id=[int]$row.ProcessId
+            if ($id -eq $UpdaterPid -or $tree.Contains($id)) { continue }
+            if ($tree.Contains([int]$row.ParentProcessId)) { $null=$tree.Add($id);$ordered.Add($id);$added=$true }
+        }
     } while ($added)
-    $descendantProcessIds = @($processTreeIds | Where-Object { $ownedProcessIds -notcontains $_ })
+    $conflict=@($tree | Where-Object { $protectedIds.Contains($_) }).Count -gt 0
+    $byId=@{};foreach($row in $Processes){$byId[[int]$row.ProcessId]=$row}
+    $depths=@{}
+    foreach($id in $ordered){
+        $seen=[Collections.Generic.HashSet[int]]::new();$parent=$id;$depth=0
+        while($byId.ContainsKey($parent)-and$tree.Contains($parent)-and$seen.Add($parent)){
+            $parent=[int]$byId[$parent].ParentProcessId;$depth++
+        }
+        $depths[$id]=$depth
+    }
+    $ids=@($ordered | Sort-Object -Property @{Expression={$depths[$_]};Descending=$true},@{Expression={$_};Descending=$true})
+    return [pscustomobject]@{StopProcessIds=$(if($conflict){@()}else{$ids});ProtectedDescendantConflict=$conflict}
+}
 
+function Get-NativeMaintenanceState([string] $ProbeRoot = $PSScriptRoot) {
+    if ($script:TestMode) { return [pscustomobject]@{ Ready = $true; Reason = 'isolated-updater-sandbox' } }
+    if (Test-UpdateRuntimeAbsent) { return [pscustomobject]@{ Ready = $true; Reason = 'verified-offline' } }
+    $unknown = [pscustomobject]@{ Ready = $false; Reason = 'native-maintenance-proof-unavailable' }
+    if (-not $NativeMaintenancePorts -or $NativeMaintenancePorts.Count -eq 0) { return $unknown }
+    try {
+        $probe = Join-Path $ProbeRoot 'scripts\self-update-native-readiness.mjs'
+        if (-not (Test-Path -LiteralPath $probe)) { return $unknown }
+        $output = @(& node $probe ($NativeMaintenancePorts -join ',') 2>$null)
+        if ($LASTEXITCODE -ne 0) { return $unknown }
+        $proof = ($output -join "`n") | ConvertFrom-Json
+        if ($proof.ok -ne $true -or $proof.ready -ne $true -or
+            [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() - [long]$proof.observedAtMs -gt 2000) { return $unknown }
+        return [pscustomobject]@{ Ready = $true; Reason = 'fresh-native-final-readback'; Proof = $proof }
+    } catch { return $unknown }
+}
+
+function Stop-DevSpaceRuntime([object[]] $PackageRecords, [object[]] $TaskSnapshot, [string] $NativeProbeRoot = $PSScriptRoot) {
+    if ($script:TestMode) { return }
+    # Staging can take minutes. Check again before the first process/task side
+    # effect; -Force is a version/repair override, not permission to kill work.
+    $readiness = Get-GatewayBusyState
+    if (-not $readiness.Known -or $readiness.Busy) {
+        $script:RuntimeRetirementDeferred = $true
+        throw 'Runtime retirement deferred: active or unverified Core work must be preserved.'
+    }
+    $roots = @($PackageRecords | ForEach-Object { [string]$_.Root })
+    $allProcesses = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
+    $plan=Get-UpdateRuntimeProcessPlan -Roots $roots -Processes $allProcesses -UpdaterPid $PID
+    if($plan.ProtectedDescendantConflict) {
+        $script:RuntimeRetirementDeferred=$true
+        throw 'Runtime retirement deferred: an owned process tree contains protected shared/native runtime work.'
+    }
+    $stopProcessIds=@($plan.StopProcessIds)
+
+    $native = Get-NativeMaintenanceState -ProbeRoot $NativeProbeRoot
+    # Native reads may take seconds. Recheck actual Core work after them.
+    $readiness = Get-GatewayBusyState
+    if (-not $native.Ready -or -not $readiness.Known -or $readiness.Busy) {
+        $script:RuntimeRetirementDeferred = $true
+        throw 'Runtime retirement deferred: current native end-turn or Core work is unverified.'
+    }
+
+    $script:RuntimeRetirementStarted = $true
     foreach ($task in $TaskSnapshot) {
+        if (Test-PreservedUpdateTask $task.Name) { continue }
         if ($task.WasEnabled) {
             try { Disable-ScheduledTask -TaskName $task.Name -ErrorAction Stop | Out-Null } catch {}
         }
@@ -401,33 +505,42 @@ function Stop-DevSpaceRuntime([object[]] $PackageRecords, [object[]] $TaskSnapsh
     }
     Start-Sleep -Milliseconds 600
     if ($roots.Count -eq 0) { return }
-    foreach ($processId in @($descendantProcessIds + $ownedProcessIds)) {
+    foreach ($processId in $stopProcessIds) {
         try { Stop-Process -Id $processId -Force -ErrorAction Stop } catch {}
     }
     $deadline = [DateTime]::UtcNow.AddSeconds(15)
     do {
-        $remaining = @($processTreeIds | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue })
+        $remaining = @($stopProcessIds | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue })
         if ($remaining.Count -eq 0) { break }
         foreach ($processId in $remaining) {
             try { Stop-Process -Id $processId -Force -ErrorAction Stop } catch {}
         }
         Start-Sleep -Milliseconds 250
     } while ([DateTime]::UtcNow -lt $deadline)
-    $remaining = @($processTreeIds | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue })
+    $remaining = @($stopProcessIds | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue })
     if ($remaining.Count -gt 0) {
         throw "DevSpace package-owning process tree did not exit before package swap: $($remaining -join ', ')"
     }
     Start-Sleep -Milliseconds 500
 }
 
+function Restore-RetiredUpdateRuntime([object[]] $TaskSnapshot) {
+    # A pre-retirement deferral must not restart or rewrite still-running tasks.
+    if (-not $script:RuntimeRetirementStarted) { return }
+    Restore-RuntimeTaskActions -TaskSnapshot $TaskSnapshot
+    Restart-PreviousRuntime -TaskSnapshot $TaskSnapshot
+}
+
 function Restart-PreviousRuntime([object[]] $TaskSnapshot) {
     if ($script:TestMode) { return }
     if ($SkipRuntimeRestart) { return }
     foreach ($task in $TaskSnapshot) {
+        if (Test-PreservedUpdateTask $task.Name) { continue }
         if (-not $task.WasEnabled) { continue }
         try { Enable-ScheduledTask -TaskName $task.Name -ErrorAction Stop | Out-Null } catch {}
     }
     foreach ($task in $TaskSnapshot) {
+        if (Test-PreservedUpdateTask $task.Name) { continue }
         if (-not $task.WasRunning) { continue }
         try {
             if (Get-ScheduledTask -TaskName $task.Name -ErrorAction SilentlyContinue) {
@@ -681,12 +794,12 @@ if ($decision -eq "newer-local") {
 }
 
 $busy = Get-GatewayBusyState
-if ($busy.Known -and $busy.Busy -and -not $Force) {
+if (-not $busy.Known -or $busy.Busy) {
     $extra = @{} + $checkPayload
-    $extra["reason"] = "active-work"
+    $extra["reason"] = if ($busy.Known) { "active-work" } else { "runtime-readiness-unavailable" }
     $status = Write-UpdateStatus -State $(if ($Automatic) { "deferred" } else { "busy" }) -Extra $extra
     if ($Automatic) { exit 0 }
-    throw "DevSpace has active non-stream work. Retry when the current Agent/tool call finishes, or use -Force only if interruption is intentional."
+    throw "DevSpace has active or unverified runtime work. Retry at a verified maintenance boundary; -Force does not override work preservation."
 }
 
 $archivePath = $null
@@ -717,7 +830,7 @@ try {
     $staged = Invoke-StagePackage -Release $release -ArchivePath $archivePath -Prefix $prefix
 
     $taskSnapshot = Get-TaskSnapshot
-    Stop-DevSpaceRuntime -PackageRecords $records -TaskSnapshot $taskSnapshot
+    Stop-DevSpaceRuntime -PackageRecords $records -TaskSnapshot $taskSnapshot -NativeProbeRoot $staged.Root
 
     $timestamp = (Get-Date).ToUniversalTime().ToString("yyyyMMdd-HHmmss")
     $backupDirectory = Join-Path $BackupRoot ("$timestamp-" + $(if ($installed) { $installed.Version } else { "fresh" }))
@@ -804,6 +917,11 @@ try {
 }
 catch {
     $failure = $_
+    if ($script:RuntimeRetirementDeferred -and -not $script:RuntimeRetirementStarted) {
+        Write-UpdateStatus -State $(if ($Automatic) { "deferred" } else { "busy" }) -Extra (@{} + $checkPayload + @{ reason = "work-resumed-before-retirement" }) | Out-Null
+        if ($Automatic) { exit 0 }
+        throw 'DevSpace update deferred before retirement; existing work and runtime tasks were left untouched.'
+    }
     try {
         $canonicalRoot = Join-Path $globalRoot "devspace-ultra"
         if ($canonicalPromoted -and (Test-Path -LiteralPath $canonicalRoot)) {
@@ -817,8 +935,7 @@ catch {
             }
         }
         if ($shimBackupDirectory) { Restore-Shims -Prefix $prefix -Directory $shimBackupDirectory -OriginallyPresent $shimPresent }
-        Restore-RuntimeTaskActions -TaskSnapshot $taskSnapshot
-        Restart-PreviousRuntime -TaskSnapshot $taskSnapshot
+        Restore-RetiredUpdateRuntime -TaskSnapshot $taskSnapshot
     }
     catch {}
     Write-UpdateStatus -State "rolled-back" -Extra (@{} + $checkPayload + @{ error = $failure.Exception.Message }) | Out-Null

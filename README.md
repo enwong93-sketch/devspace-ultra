@@ -21,11 +21,11 @@ DuckDNS/DDNS direct ingress is the recommended production route. It keeps the Lo
 For the most reliable guided path, install the setup Agent Skill first, then ask the Agent to use `devspace-ultra-setup`. The Skill lets the Agent execute local installation/repair commands and guide the user through the unavoidable DuckDNS-account and router-port-forwarding steps one at a time.
 
 ```powershell
-$p=Join-Path $env:TEMP 'devspace-ultra-install-skill.ps1'; iwr https://raw.githubusercontent.com/enwong93-sketch/devspace-ultra/v0.5.20/install-skill.ps1 -OutFile $p; & $p
+$p=Join-Path $env:TEMP 'devspace-ultra-install-skill.ps1'; iwr https://raw.githubusercontent.com/enwong93-sketch/devspace-ultra/v0.5.24/install-skill.ps1 -OutFile $p; & $p
 ```
 
 ```powershell
-$p=Join-Path $env:TEMP 'devspace-ultra-install.ps1'; iwr https://raw.githubusercontent.com/enwong93-sketch/devspace-ultra/v0.5.20/install.ps1 -OutFile $p; & $p -Network DuckDNS
+$p=Join-Path $env:TEMP 'devspace-ultra-install.ps1'; iwr https://raw.githubusercontent.com/enwong93-sketch/devspace-ultra/v0.5.24/install.ps1 -OutFile $p; & $p -Network DuckDNS
 ```
 
 Use the Cloudflare named-tunnel fallback only when DDNS/direct inbound access is unavailable. A Worker relay/free plan is quota-governed and must not be treated as unlimited. See [one-command setup](docs/ONE_COMMAND_SETUP.md) and [network ingress policy](docs/NETWORK_INGRESS.md).
@@ -146,7 +146,7 @@ devspace update
 devspace update --status
 ```
 
-The updater resolves GitHub's latest non-prerelease Release, verifies the release archive SHA-256, stages and validates the new package before touching the live install, preserves DevSpace config/auth/ChatGPT runtime state, backs up the previous package and npm command shims, and rolls the package back if post-swap verification fails. Automatic updates are enabled with a daily `DevSpace-Ultra-Auto-Update` task; it **defers instead of interrupting active non-stream Agent/tool work**. Same-version maintenance refreshes are detected by the release archive digest, including historical `0.5.8` maintenance builds.
+The updater resolves GitHub's latest non-prerelease Release, verifies the release archive SHA-256, stages and validates the new package before touching the live install, preserves DevSpace config/auth/ChatGPT runtime state, backs up the previous package and npm command shims, and rolls the package back if post-swap verification fails. Automatic updates are enabled with a daily `DevSpace-Ultra-Auto-Update` task; it **defers for active tools, retained Core process sessions, or unavailable live-runtime readiness**. It checks again after staging, before retirement; `-Force` does not override work preservation. An independently verified offline install remains supported. These readiness checks do not create an atomic admission barrier, so controlled live deployment still requires that separate boundary. Same-version maintenance refreshes are detected by the release archive digest, including historical `0.5.8` maintenance builds.
 
 Older releases cannot retroactively contain an updater they never shipped, so those users must run the bootstrap command above once. From that point onward the update path is installed locally and tracks the latest stable GitHub Release automatically.
 
@@ -256,7 +256,7 @@ When configured with a ChatGPT Project URL, new worker conversations are created
 
 ## DevSpace Ultra package update safety
 
-`update.ps1` and `devspace update` are the product/package updater. The update is staged outside the live global npm package, verified first, then swapped only after the Stable Gateway reports no active non-stream work (automatic runs defer when busy). The updater does not rewrite `~/.devspace`, `~/.devspace-tailscale-bootstrap`, ChatGPT profiles, conversation mappings, or the Chat Swarm controller state. It verifies those protected state files stayed unchanged, retains up to three on-volume package backups, restores old npm shims on rollback, refreshes the Agent setup Skill, and records a durable result under `%LOCALAPPDATA%\DevSpaceUltra\Updater`.
+`update.ps1` and `devspace update` are the product/package updater. The update is staged outside the live global npm package, verified first, then swapped only after exact-Core readiness reports zero active tools and retained process sessions (automatic runs defer when busy or live diagnostics are unavailable; readiness is rechecked before retirement). The updater does not rewrite `~/.devspace`, `~/.devspace-tailscale-bootstrap`, ChatGPT profiles, conversation mappings, or the Chat Swarm controller state. It verifies those protected state files stayed unchanged, retains up to three on-volume package backups, restores old npm shims on rollback, refreshes the Agent setup Skill, and records a durable result under `%LOCALAPPDATA%\DevSpaceUltra\Updater`.
 
 The daily `DevSpace-Ultra-Auto-Update` task is user-scoped, starts when available, ignores overlapping runs, and installs only GitHub's latest stable (non-draft, non-prerelease) Release. It never treats a same semantic version as automatically current unless the installed release digest is already known to match, which supports maintenance republishing when required.
 

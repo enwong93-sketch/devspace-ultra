@@ -55,7 +55,7 @@ const fastUri = packages['node_modules/fast-uri']?.version;
 const ipAddress = packages['node_modules/ip-address']?.version;
 assert.ok(fastUri && semver.gte(fastUri, '3.1.8'), `fast-uri ${fastUri} is still advisory-affected`);
 assert.ok(ipAddress && semver.gte(ipAddress, '10.7.1'), `ip-address ${ipAddress} is still advisory-affected`);
-assert.equal(pkg.version, '0.5.20', 'reviewed ChatGPT Classic install-contract release version must not silently drift');
+assert.equal(pkg.version, '0.5.24', 'reviewed ChatGPT Classic install-contract release version must not silently drift');
 
 console.log(JSON.stringify({
   ok: true,

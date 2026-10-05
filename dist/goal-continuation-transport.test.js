@@ -98,9 +98,10 @@ test('Goal report App remains a persistent exact relay and delegates pending dis
   const firstPoll=h.timers.find(timer=>timer.ms===250);assert.ok(firstPoll);
   await firstPoll.callback();
   await new Promise(resolve=>setImmediate(resolve));
-  assert.deepEqual(h.calls.map(call=>call.name),['devspace_goal_status','devspace_goal_continuation']);
+  assert.deepEqual(h.calls.map(call=>call.name),['devspace_goal_status','devspace_goal_continuation','devspace_goal_continuation']);
   assert.equal(h.calls[1].args.goalId,initialGoal.id);
-  assert.equal(h.calls[1].args.action,'dispatch');
+  assert.equal(h.calls[1].args.action,'public_message');
+  assert.equal(h.calls[2].args.action,'dispatch');
   assert.equal(h.window.__DEVSPACE_GOAL_RELAY_STATE__.lastDispatchContinuationId,initialGoal.continuation.continuationId);
   assert.equal(h.window.__DEVSPACE_GOAL_RELAY_STATE__.active,true);
   assert.equal(h.sends(),0);

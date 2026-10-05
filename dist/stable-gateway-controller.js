@@ -507,8 +507,22 @@ export function createStableGatewayController({
     let baselineFingerprint;
     let candidateResult;
     const startedAt = Date.now();
+    const requireNoProcessSessions = async () => {
+      // exec_command may return while its child keeps working. Draining HTTP
+      // requests does not drain that child or its unconsumed terminal output;
+      // Core shutdown destroys both. Read counts only, never command contents.
+      const identity = await readCoreRuntimeIdentity?.({ coreBaseUrl: oldHandle.baseUrl, includeProcessSessions: true });
+      if (identity?.ok !== true || identity.pid !== oldHandle.pid
+        || !Number.isInteger(identity.processSessions) || identity.processSessions < 0) {
+        throw new Error('Core process-session readiness unavailable; handover deferred without stopping work.');
+      }
+      if (identity.processSessions !== 0) {
+        throw new Error(`Core retains ${identity.processSessions} process session(s); handover deferred without stopping work.`);
+      }
+    };
 
     try {
+      await requireNoProcessSessions();
       const resolvedBaseline = await resolveBaselineSchema(oldHandle.baseUrl);
       baseline = resolvedBaseline.baseline;
       const baselineSchema = resolvedBaseline.schema;
@@ -551,6 +565,9 @@ export function createStableGatewayController({
         registry.waitForDrain(),
       ]);
 
+      // A command admitted during candidate verification may have yielded a
+      // process handle before this barrier. Recheck while admission is closed.
+      await requireNoProcessSessions();
       await ensureStopped(oldHandle, "Active Core");
       oldStopped = true;
       replacementHandle = await startActive(nextSlot);

@@ -4,6 +4,9 @@ import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import './self-update-native-readiness.test.mjs';
+import '../dist/native-conversation-response-receipt.test.js';
+import '../dist/native-maintenance-observer.test.js';
 
 if (platform() !== 'win32') {
   console.log(JSON.stringify({ ok: true, gate: 'windows-setup-unit', skipped: 'non-Windows host' }));
@@ -20,6 +23,9 @@ if (platform() !== 'win32') {
     'scripts/windows-installer.test.ps1',
     'scripts/devspace-public-setup.test.ps1',
     'scripts/devspace-local-ingress.test.ps1',
+    'scripts/self-update-readiness.test.ps1',
+    'scripts/self-update-shared-runtime.test.ps1',
+    'scripts/chat-classic-session-source.test.ps1',
   ]) {
     const result = spawnSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', file], {
       stdio: 'inherit', shell: false, timeout: 30000, env: windowsPowerShellEnv,

@@ -12,6 +12,7 @@ const releaseNotesPath = `docs/releases/V${version}.md`;
 
 const [
   packageLock,
+  packageShrinkwrap,
   server,
   installer,
   shellInstaller,
@@ -26,6 +27,7 @@ const [
   releaseNotes,
 ] = await Promise.all([
   read("package-lock.json"),
+  read("npm-shrinkwrap.json"),
   read("dist/server.js"),
   read("install.ps1"),
   read("install.sh"),
@@ -43,6 +45,9 @@ const [
 const lock = JSON.parse(packageLock);
 assert.equal(lock.version, version);
 assert.equal(lock.packages?.[""]?.version, version);
+const shrinkwrap = JSON.parse(packageShrinkwrap);
+assert.equal(shrinkwrap.version, version, "shipped npm shrinkwrap release identity must match package.json");
+assert.equal(shrinkwrap.packages?.[""]?.version, version);
 assert.match(server, new RegExp(`version:\\s*["']${version.replaceAll(".", "\\.")}["']`));
 assert.ok(installer.includes(`[string] $Ref = "${tag}"`));
 assert.ok(shellInstaller.includes(`DEVSPACE_RELEASE_TAG:-${tag}`));

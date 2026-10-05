@@ -209,13 +209,13 @@ function Start-InteractiveRuntime {
     $deadline = (Get-Date).AddSeconds($VerifyTimeoutSeconds)
     $current = Get-InteractiveRuntime -Number $Runtime.Number
     do {
-        if ($current.Running -and $current.Visible -and (Test-TcpPort -Port $current.DebugPort)) { break }
+        if ($current.Running -and ($StartMinimized -or $current.Visible) -and (Test-TcpPort -Port $current.DebugPort)) { break }
         Start-Sleep -Milliseconds 350
         $current = Get-InteractiveRuntime -Number $Runtime.Number
     } while ((Get-Date) -lt $deadline)
 
     if (-not $current.Running) { throw "$($Runtime.Label) did not produce an independent root process before timeout." }
-    if (-not $current.Visible) { throw "$($Runtime.Label) process started but no user-facing window became visible before timeout." }
+    if (-not $StartMinimized -and -not $current.Visible) { throw "$($Runtime.Label) process started but no user-facing window became visible before timeout." }
     if (-not (Test-TcpPort -Port $current.DebugPort)) { throw "$($Runtime.Label) started but its local verification port did not become ready." }
     $current
 }
@@ -245,9 +245,19 @@ function Invoke-InteractiveProbe {
 
 function Test-InteractiveSignedIn {
     param([Parameter(Mandatory)]$Runtime)
-    $probe = Invoke-InteractiveProbe -Runtime $Runtime
+    # The local port is ready before the cold page has loaded its session.
+    # A loading snapshot is unavailable authentication evidence, not logout.
+    $deadline = (Get-Date).AddSeconds($VerifyTimeoutSeconds)
+    do {
+        $probe = Invoke-InteractiveProbe -Runtime $Runtime
+        # A disabled composer can mean the assistant is working. Never reseed
+        # its profile merely because input is disabled during that work.
+        $signedIn = [bool]($probe -and $probe.composer -and -not $probe.loginVisible -and -not $probe.accountExpired)
+        if ($signedIn -or (Get-Date) -ge $deadline) { break }
+        Start-Sleep -Milliseconds 350
+    } while ((Get-Date) -lt $deadline)
     [pscustomobject]@{
-        SignedIn = [bool]($probe -and $probe.composer -and -not $probe.composerDisabled -and -not $probe.loginVisible)
+        SignedIn = $signedIn
         Probe = $probe
     }
 }

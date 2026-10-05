@@ -100,7 +100,8 @@ try {
   ]);
   assert.deepEqual(tools.get("devspace_goal_continuation")._meta.ui.visibility, ["app"]);
   assert.equal(tools.get("devspace_goal_start")._meta.ui.resourceUri, undefined);
-  assert.equal(tools.get("devspace_goal_mount")._meta.ui.resourceUri, undefined);
+  assert.equal(tools.get("devspace_goal_mount")._meta.ui.resourceUri, GOAL_RELAY_URI,
+    "recovery must restore the hidden transport without restoring the retired visible Goal Dock");
   assert.match(tools.get("devspace_goal_start").description, /floating Goal strip.*progress narration card/i);
   assert.match(tools.get("devspace_goal_mount").description, /does not render.*inline Goal Dock/i);
   assert.equal(tools.get("devspace_goal_turn_report")._meta.ui.resourceUri, GOAL_RELAY_URI);
@@ -112,8 +113,9 @@ try {
   assert.match(resource.contents[0].text, /action:\s*["']dispatch["']/);
   const relayResource = await first.client.readResource({ uri: GOAL_RELAY_URI });
   assert.equal(relayResource.contents[0].mimeType, RESOURCE_MIME_TYPE);
-  assert.doesNotMatch(relayResource.contents[0].text, /sendFollowUpMessage\s*\(/,
-    "the persistent Goal relay may verify native host capability but must not synthesize the follow-up itself");
+  assert.match(relayResource.contents[0].text, /scrollToBottom: false/,
+    "authorized public continuation must not scroll the user's viewport");
+  assert.match(relayResource.contents[0].text, /action: 'public_message'/);
   assert.match(relayResource.contents[0].text, /__DEVSPACE_GOAL_RELAY_STATE__/);
   assert.match(relayResource.contents[0].text, /lastRequestedContinuationId !== continuationId/);
   assert.match(relayResource.contents[0].text, /devspace_goal_status/);

@@ -124,6 +124,8 @@ const hostDispatchSchema = z.object({
 });
 const continuationOutputSchema = {
   goal: goalSchema,
+  publicMessage: z.object({ goalId: z.string(), conversationId: z.string(), continuationId: z.string(),
+    leaseId: z.string(), prompt: z.string(), round: z.number().int().positive() }).optional(),
   claim: continuationClaimSchema.optional(),
   acknowledged: z.boolean().optional(),
   released: z.boolean().optional(),
@@ -188,6 +190,14 @@ export function registerGoalTools(server, goalRuntime, {
     return String(resolved?.conversationId || "").trim() || null;
   };
 
+  const startResult = async (goal, text, extra = {}) => {
+    const result = textResult(goal, text, extra);
+    const receipt = await goalRuntime.nativeStartReceipt?.(goal.id);
+    if (receipt) result.content.push({ type: 'text',
+      text: `[DEVSPACE_NATIVE_GOAL_START:${goal.id}:${receipt.receiptId}]` });
+    return result;
+  };
+
   const bindOrVerifyActiveGoal = async (goalId, extra) => {
     let goal = await goalRuntime.status(goalId);
     const conversationId = await resolveConversationId(extra);
@@ -197,6 +207,12 @@ export function registerGoalTools(server, goalRuntime, {
     }
     if (!goal.conversationId && goal.status === "active" && typeof goalRuntime.bindConversation === "function") {
       goal = await goalRuntime.bindConversation({ goalId: goal.id, conversationId });
+    }
+    // Admit only already-issued, exact-owner public continuation work before a
+    // semantic Goal operation. No report/compatibility round-begin prerequisite.
+    if(goal.status==='active'&&goal.roundState==='reported'&&hostBridge?.continuationSupervisor?.reconcilePublicWorkingRound) {
+      await hostBridge.continuationSupervisor.reconcilePublicWorkingRound(goal);
+      goal=await goalRuntime.status(goalId);
     }
     return goal;
   };
@@ -241,7 +257,7 @@ export function registerGoalTools(server, goalRuntime, {
         if (existing.completed && existing.result?.goal) {
           const resumed = existing.result.resumed === true;
           return {
-            ...textResult(existing.result.goal, `${resumed ? "Resumed" : "Started"} Goal ${existing.result.goal.id} at round ${existing.result.goal.round}.`, {
+            ...await startResult(existing.result.goal, `${resumed ? "Resumed" : "Started"} Goal ${existing.result.goal.id} at round ${existing.result.goal.round}.`, {
               claimed: true,
               resumed,
               claimId: relayClaimId,
@@ -270,7 +286,7 @@ export function registerGoalTools(server, goalRuntime, {
             });
         if (!claimed?.goal) throw new Error("Exact-page Goal recovery did not return a Goal.");
         const resumed = claimed.resumed === true;
-        return textResult(claimed.goal, `${resumed ? "Resumed" : "Started"} Goal ${claimed.goal.id} at round ${claimed.goal.round}.`, {
+        return await startResult(claimed.goal, `${resumed ? "Resumed" : "Started"} Goal ${claimed.goal.id} at round ${claimed.goal.round}.`, {
           claimed: true,
           resumed,
           claimId: relayClaimId,
@@ -296,7 +312,7 @@ export function registerGoalTools(server, goalRuntime, {
         return pendingStartResult(claim);
       }
       const goal = await goalRuntime.start({ objective, successCriteria, conversationId });
-      return textResult(goal, `Started Goal ${goal.id} at round ${goal.round}.`);
+      return await startResult(goal, `Started Goal ${goal.id} at round ${goal.round}.`);
     } catch (error) {
       return errorResult(error);
     }
@@ -352,7 +368,13 @@ export function registerGoalTools(server, goalRuntime, {
     _meta: renderMeta(relayResourceUri),
   }, async ({ goalId, summary, meaningfulProgress, blockerFingerprint }, extra) => {
     try {
-      await bindOrVerifyActiveGoal(goalId, extra);
+      const bound = await bindOrVerifyActiveGoal(goalId, extra);
+      if (bound?.status === 'active' && bound.roundState === 'reported') {
+        // The native final already closed this round. Record nothing, but give
+        // the exact owner its Goal: an error result carries no structured
+        // content, so the continuation component it renders could never start.
+        return textResult(bound, `Goal round ${bound.round} was already closed by its native assistant final; no checkpoint was recorded and none is needed. Goal state is unchanged.`);
+      }
       const goal = await goalRuntime.turnReport({ goalId, summary, meaningfulProgress, blockerFingerprint });
       const reportAuthority = goal.status === 'active' && typeof resolveBootstrapConversation === 'function'
         ? await resolveBootstrapConversation(extra, 'devspace_goal_turn_report').catch(() => null) : null;
@@ -433,10 +455,10 @@ export function registerGoalTools(server, goalRuntime, {
 
   registerAppTool(server, "devspace_goal_continuation", {
     title: "Goal Continuation Lease",
-    description: "App-only Goal control for dispatching one hidden continuation through the local ChatGPT Classic host bridge, plus low-level lease claim/ack/release recovery actions.",
+    description: "App-only Goal control. Public component messages require a backend-verified native final and an exclusive, durable one-shot delivery claim. RPC success is not proof of a new working round.",
     inputSchema: {
       goalId: z.string().min(1),
-      action: z.enum(["dispatch", "claim", "ack", "release"]),
+      action: z.enum(["dispatch", "claim", "ack", "release", "public_message"]),
       leaseId: z.string().min(1).optional(),
     },
     outputSchema: continuationOutputSchema,
@@ -445,6 +467,15 @@ export function registerGoalTools(server, goalRuntime, {
   }, async ({ goalId, action, leaseId }, extra) => {
     try {
       await bindOrVerifyActiveGoal(goalId, extra);
+      if (action === 'public_message') {
+        const conversationId = await resolveConversationId(extra);
+        const goal = await goalRuntime.status(goalId);
+        if (!conversationId || conversationId !== goal.conversationId) throw new Error('Public continuation requires exact authenticated conversation ownership.');
+        const publicMessage = await hostBridge?.continuationSupervisor?.claimPublicMessage?.(goalId);
+        return textResult(await goalRuntime.status(goalId), publicMessage
+          ? 'One public component message authorized; await native continuation receipt.'
+          : 'No public component message currently authorized.', publicMessage ? { publicMessage } : {});
+      }
       if ((action === "dispatch" || action === "claim") && hostBridge?.continuationSupervisor) {
         const status = await hostBridge.continuationSupervisor.requestDispatch(goalId);
         const goal = await goalRuntime.status(goalId);
@@ -512,18 +543,27 @@ export function registerGoalTools(server, goalRuntime, {
 
   registerAppTool(server, "devspace_goal_mount", {
     title: "Rebind DevSpace Goal Overlay",
-    description: "Rebind the latest floating Goal strip for an existing Goal after renderer reload, later-turn loss, deleted-owner recovery, or another missing-overlay condition. This is read-only for Goal state and does not render the retired inline Goal Dock; when Host Overlay is enabled, the explicit mount may briefly arm exact runtime+conversation owner recovery.",
+    description: "Rebind the latest floating Goal strip and restore its hidden continuation App component for an existing Goal after later-turn or client-view loss. This is read-only for Goal state and does not render the retired inline Goal Dock. Use the original verified conversation; mounting does not send a message or require a Goal report, and native end-turn admission still controls any subsequent continuation.",
     inputSchema: { goalId: z.string().min(1) },
     outputSchema: goalOutputSchema,
     annotations: READ_ONLY,
-    _meta: modelOnlyMeta(),
+    _meta: renderMeta(relayResourceUri),
   }, async ({ goalId }, extra) => {
     try {
+      // A renderer-less status read may retain compatibility, but restoring a
+      // sender view requires a verified caller for the existing bound owner.
+      if (typeof resolveConversation === 'function') {
+        const caller = await resolveConversationId(extra);
+        const existing = await goalRuntime.status(goalId);
+        if (!caller || !existing.conversationId || caller !== existing.conversationId) {
+          throw new Error('Goal transport mount requires the original verified conversation owner.');
+        }
+      }
       const goal = await bindOrVerifyActiveGoal(goalId, extra);
       if (typeof onMount === "function") {
         try { await onMount({ goal }); } catch {}
       }
-      return textResult(goal, `Mounted Goal ${goal.id} at round ${goal.round}, revision ${goal.revision}.`, {}, { fullHistory: true });
+      return textResult(goal, `Requested restoration of Goal ${goal.id} at round ${goal.round}, revision ${goal.revision}. Goal state is preserved; host component startup and any later continuation still require their own receipts.`, {}, { fullHistory: true });
     } catch (error) {
       return errorResult(error);
     }

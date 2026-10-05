@@ -119,6 +119,12 @@ async function createRuntimeHarness({ staleReplay = false, failReplacementProbe 
   let probeCount = 0;
   const handoverOptions = [];
   const dependencies = {
+    async readCoreRuntimeIdentity({ coreBaseUrl }) {
+      const response = await requestJson(coreBaseUrl, "/mcp", {
+        body: { jsonrpc: "2.0", id: "readiness", method: "tools/list" },
+      });
+      return { ok: response.status === 200, pid: process.pid, processSessions: 0 };
+    },
     async createCandidateSnapshot() {
       const stateDir = await mkdtemp(join(temp, "candidate-"));
       return { stateDir, async cleanup() { await rm(stateDir, { recursive: true, force: true }); } };

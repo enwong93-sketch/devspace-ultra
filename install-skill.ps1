@@ -2,7 +2,7 @@
 param(
     [string] $SourceRoot,
     [string] $Repository = "https://raw.githubusercontent.com/enwong93-sketch/devspace-ultra",
-    [string] $Ref = "v0.5.20",
+    [string] $Ref = "v0.5.24",
     [string] $Destination = (Join-Path $HOME ".codex\skills\devspace-ultra-setup")
 )
 

@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import { isNativeCompletedFinalReceipt, hasNativeFinalIngress } from './classic-native-final-ingress.js';
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { atomicWriteJson } from "./atomic-file.js";
@@ -41,7 +42,7 @@ function cleanText(value, maxChars, label) {
 }
 
 function newState() {
-  return { version: STATE_VERSION, goals: {}, nativeCompletionLedger: {} };
+  return { version: STATE_VERSION, goals: {}, nativeCompletionLedger: {}, nativeStartReceipts: {} };
 }
 
 function idleContinuation() {
@@ -110,6 +111,7 @@ function ensureRoundRecoveryShape(goal) {
 
 function ensureNativeCompletionLedgerShape(state) {
   if (!Object.hasOwn(state, "nativeCompletionLedger")) state.nativeCompletionLedger = {};
+  if (!Object.hasOwn(state, "nativeStartReceipts")) state.nativeStartReceipts = {};
   return state;
 }
 
@@ -218,6 +220,17 @@ function validateLoadedState(value) {
     throw new Error("unsupported goal state version");
   }
   ensureNativeCompletionLedgerShape(value);
+  // Auxiliary evidence corruption must discard that evidence, not reset Goals.
+  if (!value.nativeStartReceipts || typeof value.nativeStartReceipts !== 'object'
+    || Array.isArray(value.nativeStartReceipts)) value.nativeStartReceipts = {};
+  for (const [goalId, receipt] of Object.entries(value.nativeStartReceipts)) {
+    const goal = value.goals[goalId];
+    if (!goal || receipt?.source !== 'server-created-goal-start' || receipt.goalId !== goalId
+      || !goal.conversationId || receipt.conversationId !== goal.conversationId
+      || receipt.issuedAt !== goal.createdAt || !/^[a-f0-9]{48}$/.test(String(receipt.receiptId || ''))) {
+      delete value.nativeStartReceipts[goalId];
+    }
+  }
   if (!value.nativeCompletionLedger || typeof value.nativeCompletionLedger !== "object"
     || Array.isArray(value.nativeCompletionLedger)) {
     throw new Error("invalid persisted native completion ledger");
@@ -332,6 +345,11 @@ export class GoalRuntime {
     };
     this.state.goals[goal.id] = goal;
     this.state.nativeCompletionLedger[goal.id] = [];
+    if (goal.conversationId) this.state.nativeStartReceipts[goal.id] = {
+      source: 'server-created-goal-start', goalId: goal.id,
+      conversationId: goal.conversationId, issuedAt: goal.createdAt,
+      receiptId: randomBytes(24).toString('hex'),
+    };
     await this.save();
     return clone(goal);
   }
@@ -346,7 +364,12 @@ export class GoalRuntime {
     if (existing.length > 1) {
       throw new Error(`Conversation ${normalizedConversationId} has multiple nonterminal Goals; refusing an ambiguous recovery.`);
     }
-    if (existing.length === 1) return { goal: clone(existing[0]), resumed: true };
+    if (existing.length === 1) {
+      // A retry can observe the in-memory Goal after an earlier save failed.
+      // Never publish its native receipt until the durable state is restored.
+      await this.save();
+      return { goal: clone(existing[0]), resumed: true };
+    }
     try {
       return {
         goal: await this.start({ objective, successCriteria, conversationId: normalizedConversationId }),
@@ -354,7 +377,10 @@ export class GoalRuntime {
       };
     } catch (error) {
       const raced = nonterminalConversationGoals(this.state, normalizedConversationId);
-      if (raced.length === 1) return { goal: clone(raced[0]), resumed: true };
+      if (raced.length === 1) {
+        await this.save();
+        return { goal: clone(raced[0]), resumed: true };
+      }
       throw error;
     }
   }
@@ -386,6 +412,13 @@ export class GoalRuntime {
     await this.ready;
     this.getGoal(goalId);
     return [...(this.state.nativeCompletionLedger[goalId] || [])];
+  }
+
+  async nativeStartReceipt(goalId) {
+    await this.ready;
+    const goal = this.getGoal(goalId), receipt = this.state.nativeStartReceipts[goalId];
+    // A conversation migration cannot reuse an old native branch witness.
+    return receipt?.conversationId === goal.conversationId ? clone(receipt) : null;
   }
 
   async activeGoals({ limit = 12, conversationId } = {}) {
@@ -446,6 +479,7 @@ export class GoalRuntime {
     const collision = nonterminalConversationGoals(this.state, next, goal.id)[0] || null;
     if (collision) throw new Error(`Target conversation ${next} is already bound to nonterminal Goal ${collision.id} (${collision.status}).`);
     goal.conversationId = next;
+    delete this.state.nativeStartReceipts[goal.id];
     goal.conversationContinuity = [
       ...(Array.isArray(goal.conversationContinuity) ? goal.conversationContinuity : []),
       { from: prior, to: next, at: this.nowIso(), reason: cleanText(reason, 240, "Conversation rebind reason") },
@@ -544,10 +578,14 @@ export class GoalRuntime {
   async autoCompleteAssistantTurn({ goalId, nativeCompletion } = {}) {
     await this.ready;
     const goal = this.getGoal(goalId);
-    if (goal.status !== "active" || goal.roundState !== "working") {
+    if (goal.status !== "active" || (goal.roundState !== "working"
+      && !(goal.roundState === 'reported' && hasNativeFinalIngress(nativeCompletion)))) {
       return { continued: false, reason: "goal-no-longer-active", goal: clone(goal) };
     }
     const proof = nativeCompletion && typeof nativeCompletion === "object" ? nativeCompletion : null;
+    if (hasNativeFinalIngress(proof) && !isNativeCompletedFinalReceipt(proof)) {
+      throw new Error('Native stream completion requires a scoped successful public-final receipt.');
+    }
     const sourceUserMessageId = String(proof?.sourceUserMessageId || "").trim();
     const assistantMessageId = String(proof?.assistantMessageId || "").trim();
     const assistantTextHash = String(proof?.assistantTextHash || "").trim().toLowerCase();
@@ -570,7 +608,20 @@ export class GoalRuntime {
       throw new Error("Goal automatic continuation requires an exact native assistant-final receipt for this conversation.");
     }
     const consumedNativeAssistantMessageIds = this.state.nativeCompletionLedger[goal.id] || [];
+    const receiptFields=hasNativeFinalIngress(proof)?{ingress:proof.ingress,requestId:proof.requestId,port:proof.port,
+      status:proof.status,endTurn:proof.endTurn,publicFinal:proof.publicFinal,observedAtMs:proof.observedAtMs,observedAt:proof.observedAt,
+      ...(proof.ingress==='native-conversation-api'?{nativeConversationVerified:true,readStartedAtMs:proof.readStartedAtMs}:{}),
+      sourceUserTextHash:proof.sourceUserTextHash||null,parentMessageId:proof.parentMessageId||null}:{};
     if (consumedNativeAssistantMessageIds.includes(assistantMessageId)) {
+      const previous=goal.lastTurnCompletion;
+      if(goal.roundState==='reported'&&hasNativeFinalIngress(proof)&&!isNativeCompletedFinalReceipt(previous)
+        &&previous?.round===goal.round&&previous.conversationId===goal.conversationId
+        &&previous.sourceUserMessageId===sourceUserMessageId&&previous.assistantMessageId===assistantMessageId
+        &&previous.assistantTextHash===assistantTextHash&&Date.parse(previous.assistantCreatedAt)===assistantCreatedAt) {
+        goal.lastTurnCompletion={...previous,...receiptFields,runtimeKey,pageTargetId};
+        this.touch(goal);await this.save();
+        return{continued:true,reason:'native-final-receipt-refreshed',goal:clone(goal)};
+      }
       return { continued: false, reason: "native-final-already-consumed", goal: clone(goal) };
     }
 
@@ -586,14 +637,17 @@ export class GoalRuntime {
       assistantTextHash,
       assistantCreatedAt: new Date(assistantCreatedAt).toISOString(),
       completedAt,
+      ...receiptFields,
     };
     this.state.nativeCompletionLedger[goal.id] = [
       ...consumedNativeAssistantMessageIds,
       assistantMessageId,
     ];
-    goal.roundState = "reported";
-    goal.roundRecovery = idleRoundRecovery(goal.round);
-    goal.continuation = pendingContinuation(goal.round);
+    if (goal.roundState === 'working') {
+      goal.roundState = "reported";
+      goal.roundRecovery = idleRoundRecovery(goal.round);
+      goal.continuation = pendingContinuation(goal.round);
+    }
     this.touch(goal);
     await this.save();
     return { continued: true, goal: clone(goal) };
@@ -605,7 +659,9 @@ export class GoalRuntime {
     if (goal.status === "completed") throw new Error(`Goal ${goal.id} is already completed.`);
     if (goal.status === "stopped") throw new Error(`Goal ${goal.id} is terminal (stopped).`);
     if (goal.status !== "active") throw new Error(`Goal ${goal.id} cannot complete from ${goal.status}.`);
-    if (goal.roundState !== "working") throw new Error(`Goal ${goal.id} can complete only during a working round.`);
+    // An optional checkpoint is bookkeeping, not loss of the AI's authority
+    // to complete the full objective with all required criterion evidence.
+    if (!['working','reported'].includes(goal.roundState)) throw new Error(`Goal ${goal.id} has no completable round.`);
     if (!Array.isArray(evidence)) throw new Error("Completion evidence is required for every success criterion.");
 
     const criteriaById = new Map(goal.successCriteria.map((criterion) => [criterion.id, criterion]));
@@ -805,6 +861,8 @@ export class GoalRuntime {
         consumedNativeAssistantMessageIds: [
           ...(this.state.nativeCompletionLedger[goal.id] || []),
         ],
+        nativeStartReceipt: this.state.nativeStartReceipts[goal.id]?.conversationId === goal.conversationId
+          ? clone(this.state.nativeStartReceipts[goal.id]) : null,
       }));
   }
 

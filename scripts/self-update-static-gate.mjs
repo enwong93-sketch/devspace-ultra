@@ -37,6 +37,10 @@ assert.match(updater, /\$script:TestMode\s*=\s*\$env:DEVSPACE_UPDATE_TEST_MODE\s
   "sandbox update tests must enter an explicit fail-closed test mode");
 assert.match(updater, /function Get-TaskSnapshot[\s\S]*if \(\$script:TestMode\) \{ return @\(\) \}/s,
   "test mode must not inspect production Scheduled Tasks");
+assert.match(updater, /function Test-PreservedUpdateTask[\s\S]*'DevSpace-Local-Ingress', 'DevSpace-Canonical-Startup'/);
+assert.match(updater, /ProtectedDescendantConflict[\s\S]*Runtime retirement deferred: an owned process tree contains protected/);
+assert.match(updater, /Stop-DevSpaceRuntime[\s\S]*if \(Test-PreservedUpdateTask \$task\.Name\) \{ continue \}/);
+assert.match(updater, /Restart-PreviousRuntime[\s\S]*if \(Test-PreservedUpdateTask \$task\.Name\) \{ continue \}/);
 assert.match(updater, /function Stop-DevSpaceRuntime[\s\S]*if \(\$script:TestMode\) \{ return \}/s,
   "test mode must not stop production DevSpace tasks or processes");
 assert.match(updater, /function Restart-PreviousRuntime[\s\S]*if \(\$script:TestMode\) \{ return \}/s,
@@ -51,18 +55,23 @@ assert.match(updater, /else \{[\s\S]*npmOutput = @\(& \$npm\.Source install --gl
   "production staging must continue to use a real isolated npm install");
 assert.match(updater, /Get-GatewayBusyState/);
 assert.match(updater, /\$otherHttpActive\s*=\s*\[Math\]::Max\(0,\s*\$httpActive\s*-\s*1\)/, "updater must exclude its own gateway status request from active-work detection");
-assert.match(updater, /Busy\s*=\s*\(\$toolActive\s*-gt\s*0\)/, "the authoritative non-stream tool counter must defer real work without treating replayable SSE as busy");
+assert.match(updater, /Busy\s*=\s*\(\$toolActive\s*-gt\s*0\s*-or\s*\$processSessions\s*-gt\s*0\)/, "retained process sessions must defer updates even when HTTP/tool counters are quiet");
+assert.match(updater, /core\.pid[\s\S]*core\.registries\.processSessions/, "readiness must bind aggregate process diagnostics to the exact Core PID");
+assert.match(updater, /function Stop-DevSpaceRuntime[\s\S]*Get-GatewayBusyState[\s\S]*Runtime retirement deferred[\s\S]*Get-CimInstance/, "recheck readiness after staging before runtime retirement side effects");
+assert.match(updater, /function Stop-DevSpaceRuntime[\s\S]*Get-NativeMaintenanceState[\s\S]*Get-GatewayBusyState[\s\S]*current native end-turn[\s\S]*RuntimeRetirementStarted = \$true/, "fresh native finals and a post-read Core check must precede retirement");
+assert.match(updater, /NativeMaintenancePorts\.Count -eq 0\) \{ return \$unknown \}/, "unknown live Classic membership must defer rather than imply idle");
+assert.match(updater, /function Restore-RetiredUpdateRuntime[\s\S]*if \(-not \$script:RuntimeRetirementStarted\) \{ return \}/, "a pre-retirement failure must not restart or rewrite still-running tasks");
 assert.match(updater, /function Move-ItemWithRetry/);
 assert.match(updater, /bounded Windows lock retries/);
 assert.match(updater, /Collections\.Generic\.HashSet\[int\]/);
-assert.match(updater, /candidate\.ParentProcessId/);
-assert.match(updater, /\$devspaceCaddyConfigs/);
-assert.match(updater, /\[string\]\$_\.Name -ieq 'caddy\.exe'/);
+assert.match(updater, /row\.ParentProcessId/);
+assert.match(updater, /protectedIds/);
+assert.match(updater, /'caddy\.exe','ChatGPT Classic\.exe','ChatGPT\.exe'/);
 assert.match(updater, /DevSpace-Stable-Gateway-Watchdog/);
 assert.match(updater, /WasEnabled\s*=\s*\$task\.State\.ToString\(\) -ne "Disabled"/);
 assert.match(updater, /Disable-ScheduledTask/);
 assert.match(updater, /Enable-ScheduledTask/);
-assert.match(updater, /\$descendantProcessIds\s*\+\s*\$ownedProcessIds/);
+assert.match(updater, /foreach \(\$processId in \$stopProcessIds\)/);
 assert.match(updater, /DevSpace package-owning process tree did not exit before package swap/);
 assert.match(updater, /Move-ItemWithRetry -Source \$record\.Root/);
 assert.match(updater, /Move-ItemWithRetry -Source \$staged\.Root/);
@@ -75,7 +84,7 @@ assert.match(updater, /better-sqlite3 native binding did not load/);
 assert.match(updater, /preservedLegacyRoots/);
 assert.match(updater, /devspace-stable-gateway-startup\.ps1/);
 assert.match(updater, /-Action install -ConfigDir \$gatewayConfigDir/);
-assert.match(updater, /if \(\$busy\.Known -and \$busy\.Busy -and -not \$Force\)/,
+assert.match(updater, /if \(-not \$busy\.Known -or \$busy\.Busy\)/,
   "automatic update must defer instead of interrupting active Agent/tool work");
 assert.match(updater, /DevSpace-Ultra-Auto-Update/);
 assert.match(updater, /New-ScheduledTaskTrigger\s+-Daily/,

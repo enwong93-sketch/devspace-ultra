@@ -1,7 +1,9 @@
 import { createHash } from "node:crypto";
+import { nativeGoalStartWitness, projectNativeGoalSource } from './goal-native-start-witness.js';
+import { isNativeCompletedFinalReceipt, hasNativeFinalIngress } from './classic-native-final-ingress.js';
 import { ClassicCdpClient } from "./classic-cdp-client.js";
 import { readComposerDraft } from "./classic-composer-draft.js";
-import { classicMainDebugPorts, runtimeLabelForClassicPort } from './classic-main-debug-ports.js';
+import { classicMainDebugPorts, runtimeLabelForClassicPort, runtimeKeyForClassicPort, runtimePortsForClassicKey } from './classic-main-debug-ports.js';
 
 const DEFAULT_PROBE_TIMEOUT_MS = 2_000;
 const DEFAULT_PAGE_INSPECTION_TIMEOUT_MS = 12_000;
@@ -13,6 +15,15 @@ const DEFAULT_VISIBLE_REPORT_POLL_MS = 150;
 const DEFAULT_VISIBLE_REPORT_SETTLE_MS = 400;
 const DEFAULT_HIDDEN_CONFIRM_TIMEOUT_MS = 15_000;
 const DEFAULT_HIDDEN_CONFIRM_POLL_MS = 2_000;
+let nativeBranchBackoffUntilMs = 0;
+let nativeBranchBackoffState = 'native-branch-rate-limit-backoff';
+let nativeBranchInspectionActive = false;
+
+export function nativeInspectionRetryDelayMs(retryAfter, nowMs = Date.now()) {
+  const value = String(retryAfter || '').trim();
+  const delay = /^\d+$/.test(value) ? Number(value) * 1000 : Date.parse(value) - nowMs;
+  return Number.isFinite(delay) && delay >= 0 ? Math.max(1000, delay) : 60_000;
+}
 
 function hashText(value) {
   return createHash("sha256").update(String(value || "")).digest("hex");
@@ -56,6 +67,7 @@ export function matchesNativeGoalCompletionBoundary(snapshot, proof, {
     && String(snapshot?.streamStatus || "").toUpperCase() === "COMPLETE"
     && snapshot?.latestMessageRole === "assistant"
     && snapshot?.safetyCheckVisible !== true
+    && snapshot?.nativeSafetyBlocked !== true
     && snapshot?.deliveryTimeoutVisible !== true
     && snapshot?.retryVisible !== true
     && String(snapshot?.latestUserMessageId || "").trim() === proof?.sourceUserMessageId
@@ -397,8 +409,21 @@ export async function inspectVisibleReportCommit(candidate, options = {}) {
   }
   const client = new CdpClient(candidate.pageWebSocketDebuggerUrl, options);
   await client.open();
+  let ownsNativeInspection = false;
+  let nativeInspectionAcknowledged = false;
   try {
     await client.call("Runtime.enable");
+    const nativeBranchRateLimited = Date.now() < nativeBranchBackoffUntilMs;
+    const nativeBranchBusy = nativeBranchInspectionActive;
+    const nativeBranchBlocked = nativeBranchRateLimited || nativeBranchBusy;
+    if (options.includeNativeBranch === true && !nativeBranchBlocked) {
+      // Hold the slot until the response updates negative backoff. Concurrent
+      // Goal/guard inspections must not all pass the pre-response check and
+      // stampede the same host API. Busy callers get unavailable evidence,
+      // never another caller's positive snapshot.
+      nativeBranchInspectionActive = true;
+      ownsNativeInspection = true;
+    }
     const result = await client.call("Runtime.evaluate", {
       expression: `(async () => {
         const href = location.href;
@@ -450,8 +475,9 @@ export async function inspectVisibleReportCommit(candidate, options = {}) {
         const latestAssistantText = String(latestAssistantNode?.innerText || '').trim();
         const match = location.pathname.match(/\\/c\\/([^/?#]+)/);
         const conversationId = match?.[1] || null;
-        let nativeContinuation = null;
-        if (conversationId && ${options.includeNativeBranch === true}) {
+        let nativeContinuation = ${nativeBranchBlocked}
+          ? { resolved: false, state: ${JSON.stringify(nativeBranchRateLimited ? nativeBranchBackoffState : 'native-branch-inspection-busy')} } : null;
+        if (conversationId && ${options.includeNativeBranch === true && !nativeBranchBlocked}) {
           const expectedSourceUserId = ${JSON.stringify(String(options.sourceUserMessageId || "").trim())};
           const baselineAssistantMessageId = ${JSON.stringify(String(options.baselineAssistantMessageId || "").trim())};
           try {
@@ -470,6 +496,8 @@ export async function inspectVisibleReportCommit(candidate, options = {}) {
             });
             if (conversationResponse.ok) {
               const payload = await conversationResponse.json();
+              const payloadConversationIds = [payload?.id, payload?.conversation_id].filter(value => value != null);
+              const conversationIdVerified = payloadConversationIds.length > 0 && payloadConversationIds.every(value => String(value) === conversationId);
               const reversed = [];
               const seen = new Set();
               let currentNodeId = payload?.current_node || null;
@@ -483,6 +511,23 @@ export async function inspectVisibleReportCommit(candidate, options = {}) {
                     role: String(node.message.author?.role || '').trim().toLowerCase() || null,
                     status: String(node.message.status || '').trim() || null,
                     endTurn: node.message.end_turn === true,
+                    parentMessageId: payload.mapping[node.parent]?.message?.id || null,
+                    publicUserText: node.message.author?.role === 'user'
+                      && node.message.content?.content_type === 'text'
+                      && Array.isArray(node.message.content.parts)
+                      && node.message.content.parts.every(part=>typeof part==='string')
+                      ? node.message.content.parts.join('\\n').trim() : null,
+                    publicFinalText: node.message.author?.role === 'assistant'
+                      && node.message.end_turn === true
+                      && (node.message.channel == null || node.message.channel === 'final')
+                      && (node.message.metadata?.channel == null || node.message.metadata.channel === 'final')
+                      && (node.message.recipient == null || node.message.recipient === 'all')
+                      && node.message.metadata?.is_visually_hidden_from_conversation !== true
+                      && node.message.content?.content_type === 'text'
+                      && Array.isArray(node.message.content.parts)
+                      && node.message.content.parts.every(part=>typeof part==='string')
+                      ? node.message.content.parts.join('\\n')
+                      : null,
                     createTime: Number.isFinite(Number(node.message.create_time))
                       ? Number(node.message.create_time)
                       : null,
@@ -511,6 +556,9 @@ export async function inspectVisibleReportCommit(candidate, options = {}) {
               const current = branch.at(-1) || null;
               nativeContinuation = {
                 resolved: true,
+                conversationIdVerified,
+                goalStartWitness: (${nativeGoalStartWitness.toString()})(payload,
+                  ${JSON.stringify(options.nativeGoalStartReceipt || null)}, conversationId),
                 currentNodeId,
                 currentMessageId: current?.id || null,
                 currentRole: current?.role || null,
@@ -522,7 +570,28 @@ export async function inspectVisibleReportCommit(candidate, options = {}) {
                 branchMessageCount: branch.length,
                 sourceUserFound: sourceIndex >= 0,
                 baselineAssistantFound: baselineIndex >= 0,
+                sourceUserExistsInConversation: Object.values(payload.mapping || {}).some(node => node?.message?.id === expectedSourceUserId && node.message.author?.role === 'user'),
+                baselineAssistantExistsInConversation: Object.values(payload.mapping || {}).some(node => node?.message?.id === baselineAssistantMessageId && node.message.author?.role === 'assistant'),
+                baselineBranchLeaves: (() => {
+                  const entry = Object.entries(payload.mapping || {}).find(([, node]) => node?.message?.id === baselineAssistantMessageId && node.message.author?.role === 'assistant');
+                  if (!entry) return null;
+                  const queue = [entry[0]], visited = new Set(), leaves = [];
+                  while (queue.length && visited.size < 512 && leaves.length < 24) {
+                    const id = queue.shift(); if (visited.has(id)) continue; visited.add(id);
+                    const node = payload.mapping[id]; if (!node) continue;
+                    const children = Array.isArray(node.children) ? node.children : [];
+                    if (children.length) queue.push(...children);
+                    else leaves.push({ id: node.message?.id || id, role: node.message?.author?.role || null,
+                      status: node.message?.status || null, endTurn: node.message?.end_turn === true,
+                      createdAt: typeof node.message?.create_time === 'number' ? new Date(node.message.create_time * 1000).toISOString() : null });
+                  }
+                  return { complete: queue.length === 0, visited: visited.size, leaves };
+                })(),
                 latestUserMessageId: latestUser?.id || null,
+                latestUserParentMessageId: latestUser?.parentMessageId || null,
+                latestUserTextHash: latestUser?.publicUserText && latestUser.publicUserText.length<=100_000
+                  ? Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(latestUser.publicUserText))))
+                    .map(byte=>byte.toString(16).padStart(2,'0')).join('') : null,
                 latestUserCreatedAt: latestUser?.createTime != null
                   ? new Date(latestUser.createTime * 1000).toISOString()
                   : null,
@@ -539,6 +608,7 @@ export async function inspectVisibleReportCommit(candidate, options = {}) {
                 latestAssistantMessageId: latestAssistant?.id || null,
                 latestAssistantStatus: latestAssistant?.status || null,
                 latestAssistantEndTurn: latestAssistant?.endTurn === true,
+                latestPublicAssistantText: latestAssistant?.publicFinalText || null,
                 latestAssistantCreatedAt: latestAssistant?.createTime != null
                   ? new Date(latestAssistant.createTime * 1000).toISOString()
                   : null,
@@ -551,7 +621,8 @@ export async function inspectVisibleReportCommit(candidate, options = {}) {
                 newAssistantAfterBaselineIndex: newAssistantIndex,
               };
             } else {
-              nativeContinuation = { resolved: false, state: 'conversation-fetch-' + conversationResponse.status };
+              nativeContinuation = { resolved: false, state: 'conversation-fetch-' + conversationResponse.status,
+                ...(conversationResponse.status === 429 ? { retryAfter: conversationResponse.headers.get('retry-after') } : {}) };
             }
           } catch {
             nativeContinuation = { resolved: false, state: 'native-branch-unavailable' };
@@ -582,7 +653,7 @@ export async function inspectVisibleReportCommit(candidate, options = {}) {
         routeLifecycle.hydratedSinceMs = routeHydrated ? (routeLifecycle.hydratedSinceMs || lifecycleNow) : null;
         routeLifecycle.lastSeenAtMs = lifecycleNow;
         let streamStatus = null;
-        if (conversationId && ${options.skipNativeStatus !== true}) {
+        if (conversationId && ${options.skipNativeStatus !== true && !nativeBranchBlocked}) {
           try {
             const response = await fetch('/backend-api/conversation/' + conversationId + '/stream_status', {
               credentials: 'include',
@@ -632,13 +703,39 @@ export async function inspectVisibleReportCommit(candidate, options = {}) {
     if (result.exceptionDetails) {
       throw new Error(result.exceptionDetails.text || "Goal visible-report inspection failed.");
     }
+    nativeInspectionAcknowledged = true;
     const value = result.result?.value || null;
-    return value ? {
+    if (value?.nativeContinuation?.state === 'conversation-fetch-429') {
+      nativeBranchBackoffUntilMs = Math.max(nativeBranchBackoffUntilMs,
+        Date.now() + nativeInspectionRetryDelayMs(value.nativeContinuation.retryAfter));
+      nativeBranchBackoffState = 'native-branch-rate-limit-backoff';
+    }
+    const snapshot = value ? {
       ...value,
       pageTargetId: candidate.pageTargetId || null,
       relayTargetId: candidate.targetId || null,
     } : null;
+    const receipt = options.nativeGoalStartReceipt;
+    const native = snapshot?.nativeContinuation;
+    const displayMatchesNative = native?.resolved === true
+      && snapshot?.latestUserMessageId === native.latestUserMessageId
+      && snapshot?.latestAssistantMessageId === native.latestAssistantMessageId;
+    return receipt ? projectNativeGoalSource({ ...snapshot, nativeGoalSourceRequired: !displayMatchesNative }, {
+      id: receipt.goalId, conversationId: receipt.conversationId, nativeStartReceipt: receipt,
+    }) : snapshot;
   } finally {
+    if (ownsNativeInspection && !nativeInspectionAcknowledged) {
+      // A lost CDP response is not proof that the in-page read stopped. Keep
+      // unavailable evidence and a bounded quiet period instead of admitting
+      // another native read immediately. Never shorten provider Retry-After,
+      // and never label a transport timeout itself as an observed HTTP 429.
+      const quietUntil = Date.now() + 60_000;
+      if (quietUntil > nativeBranchBackoffUntilMs) {
+        nativeBranchBackoffUntilMs = quietUntil;
+        nativeBranchBackoffState = 'native-branch-observation-unconfirmed-backoff';
+      }
+    }
+    if (ownsNativeInspection) nativeBranchInspectionActive = false;
     client.close();
   }
 }
@@ -768,13 +865,16 @@ export async function inspectGoalContinuationPages(goal, {
   runtimeKey = null,
   pageTargetId = null,
   includeNativeBranch = false,
+  nativeGoalStartReceipt = null,
   sourceUserMessageId = null,
   baselineAssistantMessageId = null,
+  nativeFinalApiOnly = false,
+  nativeConversationTimeoutMs = 30_000,
 } = {}) {
   if (runtimeKey) {
     if (!/^main-(0[1-9]|[12][0-9]|3[0-2])$/.test(runtimeKey)) return [];
-    const number=Number(runtimeKey.slice(-2)); const port=number===1?9721:9730+number;
-    ports=ports.filter(value=>value===port);
+    const ownedPorts = runtimePortsForClassicKey(runtimeKey);
+    ports = ports.filter(value => ownedPorts.includes(value));
   }
   const groups = await Promise.all(ports.map(port => probeClassicConversationPagePort(port, goal.conversationId).catch(() => [])));
   let candidates = groups.flat();
@@ -782,132 +882,36 @@ export async function inspectGoalContinuationPages(goal, {
   if (!candidates.length || candidates.length > 4) return [];
   const snapshots = await Promise.all(candidates.map(async candidate => {
     const page = await inspectVisibleReportCommit(candidate, {
-      timeoutMs: includeNativeBranch ? 45_000 : 3_000,
+      timeoutMs: nativeFinalApiOnly ? 12_000 : includeNativeBranch ? 45_000 : 3_000,
       nativeSessionTimeoutMs: includeNativeBranch ? 5_000 : undefined,
-      nativeConversationTimeoutMs: includeNativeBranch ? 30_000 : undefined,
+      nativeConversationTimeoutMs: includeNativeBranch ? nativeConversationTimeoutMs : undefined,
       skipNativeStatus,
       includeNativeBranch,
+      nativeGoalStartReceipt,
       sourceUserMessageId,
       baselineAssistantMessageId,
     });
-    return { ...page, candidate, runtimeKey: candidate.runtimePort===9721?'main-01':`main-${String(candidate.runtimePort-9730).padStart(2,'0')}` };
+    return { ...page, candidate, runtimeKey: runtimeKeyForClassicPort(candidate.runtimePort) };
   }));
   return snapshots;
 }
 
-async function findRawHostObject(client, contextId) {
-  const fn = (await client.call("Runtime.evaluate", {
-    contextId,
-    expression: "window.openai?.sendFollowUpMessage",
-    returnByValue: false,
-  })).result;
-  if (!fn?.objectId) throw new Error("Goal widget public follow-up function is unavailable.");
-
-  const fnProps = await client.call("Runtime.getProperties", {
-    objectId: fn.objectId,
-    ownProperties: false,
-    accessorPropertiesOnly: false,
-    generatePreview: false,
-  });
-  const scopesObjectId = fnProps.internalProperties?.find((property) => property.name === "[[Scopes]]")?.value?.objectId;
-  if (!scopesObjectId) throw new Error("Goal widget follow-up closure scopes are unavailable.");
-
-  const scopeList = await client.call("Runtime.getProperties", { objectId: scopesObjectId, ownProperties: true });
-  for (const scopeEntry of (scopeList.result || []).filter((property) => /^\d+$/.test(property.name))) {
-    const scopeObjectId = scopeEntry.value?.objectId;
-    if (!scopeObjectId) continue;
-    const scope = await client.call("Runtime.getProperties", { objectId: scopeObjectId, ownProperties: true });
-    for (const property of scope.result || []) {
-      const objectId = property.value?.objectId;
-      if (!objectId) continue;
-      const candidate = await client.call("Runtime.getProperties", { objectId, ownProperties: true });
-      const send = (candidate.result || []).find((item) => item.name === "sendFollowUpMessage" && item.value?.type === "function");
-      const callTool = (candidate.result || []).find((item) => item.name === "callTool" && item.value?.type === "function");
-      if (send && callTool) return { objectId };
-    }
-  }
-  throw new Error("Raw ChatGPT Classic Goal host API was not found in widget bridge closure.");
+function nativeHiddenTransportUnavailable() {
+  return {
+    ok: false,
+    definiteFailure: true,
+    dispatchCommitted: false,
+    backgroundAccepted: false,
+    state: "supported-native-hidden-transport-unavailable",
+    error: "No supported native hidden sender is configured for ChatGPT Classic. Private SDK closure access and activation-gate bypass are not supported.",
+  };
 }
 
-export async function sendRawHostFollowUp(candidate, payload, options = {}) {
-  const client = new CdpClient(candidate.webSocketDebuggerUrl, options);
-  let dispatchCommitted = false;
-  let dispatchAttempted = false;
-  await client.open();
-  try {
-    await client.call("Runtime.enable");
-    await client.call("Debugger.enable");
-    await sleep(options.contextSettleMs ?? DEFAULT_CONTEXT_SETTLE_MS);
-    const context = chooseInnerContext(client, candidate.targetId);
-    if (!context) throw new Error("Goal widget execution context is unavailable.");
-    const rawHost = await findRawHostObject(client, context.id);
-    dispatchAttempted = true;
-    let result;
-    try {
-      result = await client.call("Runtime.callFunctionOn", {
-        objectId: rawHost.objectId,
-        // Do not await the host promise. In current ChatGPT builds that promise
-        // can remain pending for the entire assistant turn, which is much
-        // longer than a safe CDP acknowledgement window. Successful return
-        // proves the host function was synchronously invoked; native branch
-        // confirmation remains the downstream authority for Goal advancement.
-        functionDeclaration: `function(message){
-          const pending=this.sendFollowUpMessage(message);
-          if(pending&&typeof pending.catch==='function')pending.catch(()=>{});
-          return {invoked:true,thenable:Boolean(pending&&typeof pending.then==='function')};
-        }`,
-        arguments: [{ value: { prompt: payload.prompt, scrollToBottom: false } }],
-        awaitPromise: false,
-        returnByValue: true,
-        userGesture: false,
-      });
-    } catch (error) {
-      // Once Runtime.callFunctionOn has been issued, losing the acknowledgement
-      // is not proof that the host rejected the hidden continuation. Return an
-      // uncertain committed result so no caller can retry and create a second
-      // hidden assistant turn.
-      return {
-        ok: false,
-        definiteFailure: false,
-        dispatchCommitted: true,
-        backgroundAccepted: false,
-        state: "raw-host-acknowledgement-lost",
-        error: errorMessage(error),
-      };
-    }
-    if (result.exceptionDetails) {
-      return {
-        ok: false,
-        definiteFailure: false,
-        dispatchCommitted: true,
-        backgroundAccepted: false,
-        state: "raw-host-exception-after-dispatch",
-        error: result.exceptionDetails.text || "Raw ChatGPT Classic follow-up RPC failed.",
-      };
-    }
-    if (result?.result?.value?.invoked !== true) {
-      return {
-        ok: false,
-        definiteFailure: false,
-        dispatchCommitted: true,
-        backgroundAccepted: false,
-        state: "raw-host-invocation-unconfirmed",
-      };
-    }
-    dispatchCommitted = true;
-    return { ok: true, dispatchCommitted: true, backgroundAccepted: true };
-  } catch (error) {
-    return {
-      ok: false,
-      definiteFailure: dispatchAttempted !== true,
-      dispatchCommitted: dispatchAttempted,
-      backgroundAccepted: false,
-      state: dispatchAttempted ? "raw-host-acknowledgement-lost" : "raw-host-preflight-failed",
-      error: errorMessage(error),
-    };
-  } finally {
-    client.close();
-  }
+// Compatibility export only: never inspect private SDK scopes or issue a host
+// RPC. A supported sender must be explicitly supplied by the trusted embedder;
+// the bridge still verifies exact ownership, native boundaries and receipts.
+export async function sendRawHostFollowUp(_candidate, _payload, _options = {}) {
+  return nativeHiddenTransportUnavailable();
 }
 
 export class ClassicGoalHostBridge {
@@ -921,6 +925,7 @@ export class ClassicGoalHostBridge {
     beforeRawDispatch,
     waitForVisibleReport,
     inspectVisibleReport,
+    inspectNativeFinal,
     inspectComposer,
     clearOwnedComposer,
     visibleReportTimeoutMs = DEFAULT_VISIBLE_REPORT_TIMEOUT_MS,
@@ -959,9 +964,11 @@ export class ClassicGoalHostBridge {
       ...relayOptions,
     }));
     this.probeConversationPage = probeConversationPage || ((port, conversationId) => probeClassicConversationPagePort(port, conversationId, this.options));
-    this.sendRaw = sendRaw || ((candidate, payload) => sendRawHostFollowUp(candidate, payload, this.rawDispatchOptions));
+    this.nativeHiddenTransportConfigured = typeof sendRaw === "function";
+    this.sendRaw = this.nativeHiddenTransportConfigured ? sendRaw : sendRawHostFollowUp;
     this.beforeDispatch = beforeDispatch;
     this.beforeRawDispatch = beforeRawDispatch;
+    this.inspectNativeFinal = typeof inspectNativeFinal === 'function' ? inspectNativeFinal : null;
     this.inspectVisibleReport = inspectVisibleReport || ((candidate, payload = {}) => inspectVisibleReportCommit(candidate, { ...this.pageInspectionOptions, ...payload }));
     this.inspectComposer = inspectComposer || ((candidate, expectedText) => inspectExactPageComposer(candidate, expectedText, this.composerOptions));
     this.clearOwnedComposer = clearOwnedComposer || ((candidate, expectedText) => clearExactOwnedComposerPayload(candidate, expectedText, this.composerOptions));
@@ -1210,6 +1217,7 @@ export class ClassicGoalHostBridge {
     const expectedConversationId = String(conversationId || "").trim();
     if (!expectedConversationId) throw new Error("Conversation follow-up dispatch requires conversationId.");
     if (typeof prompt !== "string" || !prompt.trim()) throw new Error("Conversation follow-up dispatch requires prompt.");
+    if (!this.nativeHiddenTransportConfigured) return nativeHiddenTransportUnavailable();
     const resolved = await this.findExactConversationRelay(expectedConversationId, { runtimePort });
     if (!resolved.candidate) {
       return {
@@ -1297,6 +1305,7 @@ export class ClassicGoalHostBridge {
       goalId,
       recovery: true,
       includeNativeBranch: includeNativeBranch === true,
+      nativeGoalStartReceipt: goal?.nativeStartReceipt || null,
       ...(includeNativeBranch === true ? {
         timeoutMs: 45_000,
         nativeSessionTimeoutMs: 5_000,
@@ -1338,6 +1347,7 @@ export class ClassicGoalHostBridge {
         state: "invalid-hidden-goal-recovery-boundary",
       };
     }
+    if (!this.nativeHiddenTransportConfigured) return nativeHiddenTransportUnavailable();
     const resolved = await this.findExactConversationRelay(expectedConversationId, { runtimePort, goalId });
     const matching = resolved.candidate;
     if (!matching) {
@@ -1485,13 +1495,39 @@ export class ClassicGoalHostBridge {
     this.beforeRawDispatch = typeof handler === "function" ? handler : null;
   }
 
+  async hasNativeFinalBoundary({ goalId, conversationId, runtimePort, expectedPageTargetId,
+    sourceUserId, assistantMessageId, nativeCompletionProof } = {}) {
+    const proof = nativeCompletionProof;
+    if (!isNativeCompletedFinalReceipt(proof) || !this.inspectNativeFinal
+      || proof.conversationId !== conversationId || proof.sourceUserMessageId !== sourceUserId
+      || proof.assistantMessageId !== assistantMessageId
+      || (runtimePort != null && proof.port !== runtimePort)
+      || (expectedPageTargetId && proof.pageTargetId !== expectedPageTargetId)) return null;
+    try {
+      const result = await this.inspectNativeFinal({ id: goalId, conversationId }, { nativeCompletionProof: proof });
+      if (result?.pages?.length !== 1 || result.newUser) return null;
+      const event = result.pages[0]?.nativeFinalReceipt;
+      if (!isNativeCompletedFinalReceipt(event) || event.ingress!==proof.ingress) return null;
+      for (const field of ['conversationId', 'sourceUserMessageId', 'assistantMessageId',
+        'requestId', 'assistantTextHash', 'assistantCreatedAt', 'runtimeKey', 'port', 'pageTargetId']) {
+        if (event[field] !== proof[field]) return null;
+      }
+      return true;
+    } catch { return null; }
+  }
+
   async dispatch({ goalId, prompt, continuationId, leaseId, round, reportedAt,
     conversationId = null, runtimePort = null, expectedPageTargetId = null,
-    sourceUserId = null, assistantMessageId = null, nativeCompletionProof = null } = {}) {
+    sourceUserId = null, assistantMessageId = null, nativeCompletionProof = null,
+    nativeGoalStartReceipt = null } = {}) {
     if (typeof goalId !== "string" || !goalId.trim()) throw new Error("Goal host dispatch requires goalId.");
     if (typeof prompt !== "string" || !prompt.trim()) throw new Error("Goal host dispatch requires prompt.");
+    if (!this.nativeHiddenTransportConfigured) return nativeHiddenTransportUnavailable();
 
-    if (typeof this.beforeDispatch === "function") {
+    const nativeStreamFinal = hasNativeFinalIngress(nativeCompletionProof);
+    const nativeRequest = { goalId, conversationId, runtimePort, expectedPageTargetId,
+      sourceUserId, assistantMessageId, nativeCompletionProof };
+    if (!nativeStreamFinal && typeof this.beforeDispatch === "function") {
       try {
         await this.beforeDispatch({ goalId, continuationId, leaseId, round });
       } catch {
@@ -1501,6 +1537,13 @@ export class ClassicGoalHostBridge {
     }
 
     const expectedConversationId = String(conversationId || "").trim();
+    if (nativeStreamFinal && !await this.hasNativeFinalBoundary(nativeRequest)) {
+      return { ok: false, definiteFailure: true, dispatchCommitted: false,
+        state: 'native-final-preflight-unavailable',
+        error: 'The exact live native assistant-final receipt is unavailable.' };
+    }
+    // Target discovery is transport ownership, not a completed-turn signal.
+    // The legacy sender still needs its exact relay candidate for acknowledgement.
     const resolved = expectedConversationId
       ? await this.findExactConversationRelay(expectedConversationId, { runtimePort, goalId })
       : { candidate: null, relayFallback: false, ambiguous: false, matchCount: 0,
@@ -1539,10 +1582,13 @@ export class ClassicGoalHostBridge {
         reportedAt: reportedAt || null,
       };
       let boundary;
-      if (nativeCompletionProof) {
+      if (nativeStreamFinal) {
+        boundary = { ok: true, committed: true, nativeCompleted: true };
+      } else if (nativeCompletionProof) {
         const nativeFinal = await inspectVisibleReportCommit(matching, {
           recovery: true,
           includeNativeBranch: true,
+          nativeGoalStartReceipt,
           sourceUserMessageId: sourceUserId,
           baselineAssistantMessageId: assistantMessageId,
           timeoutMs: 45_000,
@@ -1599,6 +1645,13 @@ export class ClassicGoalHostBridge {
             pageNavigation: false,
           };
         }
+      }
+      // A hook may yield while a new user/turn arrives. Re-read the native
+      // boundary immediately before handing off; never infer completion from UI.
+      if (nativeStreamFinal && !await this.hasNativeFinalBoundary(nativeRequest)) {
+        return { ok: false, definiteFailure: true, dispatchCommitted: false,
+          state: 'native-final-preflight-unavailable',
+          error: 'The live native final changed before continuation dispatch.' };
       }
       const sent = await this.sendRaw(matching, {
         prompt,

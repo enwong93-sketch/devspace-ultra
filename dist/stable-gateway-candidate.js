@@ -75,7 +75,7 @@ async function fetchJson(url, options = {}) {
   return { response, body };
 }
 
-export async function readCoreRuntimeIdentity({ coreBaseUrl, timeoutMs = 3_000 } = {}) {
+export async function readCoreRuntimeIdentity({ coreBaseUrl, timeoutMs = 3_000, includeProcessSessions = false } = {}) {
   const coreBase = requireLoopbackBase(coreBaseUrl);
   const timeout = Math.max(500, Math.min(30_000, Number(timeoutMs) || 3_000));
   const options = { signal: AbortSignal.timeout(timeout) };
@@ -94,6 +94,8 @@ export async function readCoreRuntimeIdentity({ coreBaseUrl, timeoutMs = 3_000 }
     pid,
     passiveCore: memory.body?.features?.passiveCore === true,
     autoCompactEnabled: memory.body?.features?.autoCompactEnabled === true,
+    ...(includeProcessSessions ? { processSessions: Number.isInteger(memory.body?.registries?.processSessions)
+      && memory.body.registries.processSessions >= 0 ? memory.body.registries.processSessions : null } : {}),
   };
 }
 

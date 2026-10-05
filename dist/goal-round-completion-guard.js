@@ -1,4 +1,7 @@
 import { createHash } from "node:crypto";
+import { isNativeCompletedFinalReceipt } from './classic-native-final-ingress.js';
+import { matchesNativeGoalStartWitness } from './goal-native-start-witness.js';
+import { runtimeKeyForClassicPort } from './classic-main-debug-ports.js';
 
 const DEFAULT_POLL_MS = 2_000;
 const DEFAULT_ROUND_SETTLE_MS = 2_000;
@@ -35,11 +38,8 @@ function recoveryPageIdentity(snapshot) {
 }
 
 function runtimeKeyForPort(port) {
-  if (port === 9721) return "main-01";
-  if (Number.isInteger(port) && port >= 9731 && port <= 9762) {
-    return `main-${String(port - 9730).padStart(2, "0")}`;
-  }
-  return null;
+  const key = Number.isInteger(port) ? runtimeKeyForClassicPort(port) : null;
+  return /^main-(0[1-9]|[12][0-9]|3[0-2])$/.test(String(key || '')) ? key : null;
 }
 
 function hashText(value) {
@@ -50,6 +50,7 @@ export function shouldInspectNativeCurrentRoundFinal(snapshot) {
   return snapshot?.chatMode === true
     && snapshot?.generating === false
     && snapshot?.safetyCheckVisible !== true
+    && snapshot?.nativeSafetyBlocked !== true
     && snapshot?.deliveryTimeoutVisible !== true
     && snapshot?.latestMessageRole === "assistant"
     && Boolean(String(snapshot?.latestAssistantMessageId || "").trim())
@@ -63,6 +64,7 @@ export function provesNativeCurrentRoundFinal(goal, snapshot, {
 } = {}) {
   if (!shouldInspectNativeCurrentRoundFinal(snapshot)) return false;
   const native = snapshot?.nativeContinuation;
+  if (snapshot?.nativeGoalSourceRequired === true && !matchesNativeGoalStartWitness(goal, native)) return false;
   if (native?.resolved !== true || native?.currentRole !== "assistant" || native?.currentEndTurn !== true) return false;
   if (ACTIVE_STREAM_STATES.has(upper(native?.currentStatus))) return false;
   const latestAssistantId = String(snapshot?.latestAssistantMessageId || "").trim();
@@ -93,7 +95,8 @@ export function provesNativeCurrentRoundFinal(goal, snapshot, {
   // the durable round boundary.
   const continuationRound = Number(goal?.round) > 1
     && Boolean(String(goal?.lastConsumedContinuationId || "").trim());
-  if (!continuationRound && userCreatedAtMs < roundBeganAtMs - requestPreRoundSlopMs) return false;
+  if (!continuationRound && !matchesNativeGoalStartWitness(goal, native)
+    && userCreatedAtMs < roundBeganAtMs - requestPreRoundSlopMs) return false;
   if (userCreatedAtMs > assistantCreatedAtMs) return false;
   return true;
 }
@@ -103,6 +106,7 @@ export function shouldRecoverWorkingRound(goal, snapshot, {
   minimumRoundSettleMs = DEFAULT_ROUND_SETTLE_MS,
 } = {}) {
   if (!goal || goal.status !== "active" || goal.roundState !== "working") return false;
+  if (snapshot?.nativeSafetyBlocked === true) return false;
   if (!Number.isInteger(goal.round) || goal.round < 1) return false;
   if (!goal.roundBeganAt) return false;
   const beganAt = Date.parse(String(goal.roundBeganAt));
@@ -177,6 +181,10 @@ export class ClassicGoalRoundCompletionGuard {
     inspect,
     dispatch,
     continueIncompleteGoal = null,
+    nativeFinalIngressOnly = false,
+    readNativeFinal = null,
+    nativeFinalReadMs = 10_000,
+    nativeFinalIdleReadMs = 60_000,
     pollMs = DEFAULT_POLL_MS,
     minimumRoundSettleMs = DEFAULT_ROUND_SETTLE_MS,
     routeSettleMs = DEFAULT_ROUTE_SETTLE_MS,
@@ -192,6 +200,14 @@ export class ClassicGoalRoundCompletionGuard {
     }
     this.goalRuntime = goalRuntime;
     this.inspect = inspect;
+    this.nativeFinalIngressOnly = nativeFinalIngressOnly === true;
+    this.readNativeFinal = typeof readNativeFinal==='function'?readNativeFinal:null;
+    this.nativeFinalReadCursor = 0;
+    this.nativeFinalReadMs = Math.max(1000,Number(nativeFinalReadMs)||10_000);
+    this.nativeFinalIdleReadMs = Math.max(this.nativeFinalReadMs,Number(nativeFinalIdleReadMs)||60_000);
+    this.nativeFinalReadAt = new Map();
+    this.nativeFinalReadActivity = new Map();
+    this.nativeFinalHandling = Promise.resolve();
     this.dispatch = dispatch;
     this.continueIncompleteGoal = typeof continueIncompleteGoal === "function"
       ? continueIncompleteGoal : null;
@@ -392,7 +408,78 @@ export class ClassicGoalRoundCompletionGuard {
     };
   }
 
+  async noteNativeTransportHint(event) {
+    if (!this.nativeFinalIngressOnly || this.closed || !['started','resumed','finished'].includes(event?.kind)) return;
+    const goals = await this.goalRuntime.activeGoals();
+    if (this.closed) return;
+    for (const goal of goals) {
+      const proof = goal.lastTurnCompletion;
+      const matches = event.conversationId
+        ? goal.conversationId === event.conversationId
+        : Boolean(event.runtimeKey && event.pageTargetId)
+          && proof?.runtimeKey === event.runtimeKey && proof?.pageTargetId === event.pageTargetId;
+      if (!matches) continue;
+      const key = `${goal.id}:${goal.round}`;
+      this.nativeFinalReadActivity.set(key,(this.nativeFinalReadActivity.get(key)||0)+1);
+      this.nativeFinalReadAt.delete(key);
+    }
+    // Scheduling only: even a transport finish is never completion authority.
+  }
+
+  noteNativeAssistantFinal(event) {
+    const operation = this.nativeFinalHandling.then(async () => {
+      if (this.closed || !this.continueIncompleteGoal || !isNativeCompletedFinalReceipt(event)) {
+        return { continued: false, reason: 'native-final-ingress-ineligible' };
+      }
+      const goals = await this.goalRuntime.activeGoals({ conversationId: event.conversationId });
+      if (goals.length !== 1 || !['working', 'reported'].includes(goals[0].roundState)) {
+        return { continued: false, reason: 'no-exact-active-goal' };
+      }
+      const goal = goals[0];
+      if (await this.goalRuntime.hasConversationCollision({ goalId: goal.id })) {
+        return { continued: false, reason: 'conversation-goal-conflict' };
+      }
+      // Semantic completion/pause remains the AI-owned Goal state. The input
+      // proves only that this physical native assistant turn has finished.
+      return this.continueIncompleteGoal({ goal, nativeCompletion: event });
+    });
+    this.nativeFinalHandling = operation.catch(() => {});
+    return operation;
+  }
+
   async #pollOnceImpl() {
+    // Production native-final ingress must never infer completion from UI
+    // idle, Stop buttons, DOM text, or a finished/failed network request.
+    if (this.nativeFinalIngressOnly) {
+      if(!this.readNativeFinal)return {ok:true,recovered:0,results:[],reason:'native-final-event-owned'};
+      const goals=(await this.goalRuntime.activeGoals()).filter(g=>g.conversationId&&['working','reported'].includes(g.roundState));
+      const activeKeys=new Set(goals.map(g=>`${g.id}:${g.round}`));
+      for(const key of this.nativeFinalReadAt.keys())if(!activeKeys.has(key))this.nativeFinalReadAt.delete(key);
+      for(const key of this.nativeFinalReadActivity.keys())if(!activeKeys.has(key))this.nativeFinalReadActivity.delete(key);
+      const results=[];let autoContinued=0;
+      const count=Math.min(goals.length,4),start=this.nativeFinalReadCursor%Math.max(1,goals.length);
+      this.nativeFinalReadCursor=(start+count)%Math.max(1,goals.length);
+      for(let i=0;i<count&&!this.closed;i++) {
+        const goal=goals[(start+i)%goals.length];
+        const key=`${goal.id}:${goal.round}`;
+        if((this.nativeFinalReadAt.get(key)||0)>this.now())continue;
+        this.nativeFinalReadAt.set(key,this.now()+this.nativeFinalReadMs);
+        const activity = this.nativeFinalReadActivity.get(key)||0;
+        try {
+          const event=await this.readNativeFinal(goal);
+          const result=event?await this.noteNativeAssistantFinal(event):{continued:false,reason:'awaiting-native-api-final'};
+          if (result?.reason==='native-final-already-consumed' && goal.roundState==='reported'
+            && isNativeCompletedFinalReceipt(goal.lastTurnCompletion)
+            && goal.lastTurnCompletion.round===goal.round
+            && (this.nativeFinalReadActivity.get(key)||0)===activity) {
+            this.nativeFinalReadAt.set(key,this.now()+this.nativeFinalIdleReadMs);
+          }
+          if(result?.continued===true)autoContinued++;
+          results.push({goalId:goal.id,round:goal.round,...result});
+        }catch(error){results.push({goalId:goal.id,round:goal.round,continued:false,reason:'native-api-read-unavailable'});}
+      }
+      return{ok:true,recovered:0,autoContinued,results,reason:'native-final-event-and-api-owned'};
+    }
     const goals = await this.goalRuntime.recoverableWorkingRounds();
     const activeRunKeys = new Set(goals.map(recoveryRunKey).filter(Boolean));
     for (const key of this.recoverySessions.keys()) {
@@ -585,5 +672,6 @@ export class ClassicGoalRoundCompletionGuard {
     this.nativeFinalRetryAt.clear();
     this.recoverySessions.clear();
     if (this.polling) await this.polling.catch(() => {});
+    await this.nativeFinalHandling;
   }
 }

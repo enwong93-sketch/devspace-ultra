@@ -3,22 +3,29 @@ import { readFile } from "node:fs/promises";
 import { GOAL_RELAY_URI, readGoalRelayHtml } from "../dist/goal-relay-resource.js";
 
 const source = await readFile(new URL("../dist/server.js", import.meta.url), "utf8");
+assert.ok(source.includes('"ui://devspace/progress-claim-relay-v2.html"'), "retained v0.5.20 progress results must still resolve their resource URI");
+assert.match(source, /await sessionServer\.sendToolListChanged\(\);[\s\S]{0,400}await sessionServer\.sendResourceListChanged\(\);/, "restored clients need supported resource-cache invalidation as well as tool refresh");
+assert.match(source, /await transport\.__devspaceMcpServer\.sendToolListChanged\(\);\s*await transport\.__devspaceMcpServer\.sendResourceListChanged\(\);/, "initialized clients must receive both supported surface notifications");
 
 assert.match(source, /import \{ GoalRuntime \} from "\.\/goal-runtime\.js";/);
 assert.match(source, /import \{ registerGoalTools \} from "\.\/goal-tools\.js";/);
 assert.match(source, /import \{ ClassicGoalHostBridge, defaultMainDebugPorts, inspectGoalContinuationPages \} from "\.\/goal-host-bridge\.js";/);
 assert.match(source, /const GOAL_DOCK_URI = "ui:\/\/devspace\/goal-dock\.html";/);
-assert.equal(GOAL_RELAY_URI, "ui://devspace/goal-continuation-relay-v2.html");
+assert.equal(GOAL_RELAY_URI, "ui://devspace/goal-continuation-relay-v3.html");
 assert.match(source, /import \{ GOAL_RELAY_URI, PROGRESS_CLAIM_RELAY_URI, readGoalRelayHtml \} from "\.\/goal-relay-resource\.js";/,
   "production must use the versioned resource with its bundled Apps bridge");
 assert.match(source, /new GoalRuntime\(\{\s*stateDir: config\.stateDir,?\s*\}\)/s);
 assert.match(source, /const configuredClassicPorts = Array\.isArray\(config\.classicMainDebugPorts\)[\s\S]{0,260}const classicCdpOptions = \{[\s\S]{0,220}configuredClassicPorts\.length[\s\S]{0,120}defaultMainDebugPorts\(\{ includeObserved: true, refresh: true \}\)/,
   "Goal Host Bridge must share explicit ports or the observed-process plus canonical fallback set");
-assert.match(source, /new ClassicGoalHostBridge\(\{\s*\.\.\.classicCdpOptions,\s*beforeDispatch:\s*config\.passiveCore\s*\|\|\s*!primaryDebugGuard\s*\?\s*undefined\s*:\s*\(\) => primaryDebugGuard\.pollOnce\(\),?\s*\}\)/s);
+assert.match(source, /new ClassicGoalHostBridge\(\{\s*\.\.\.classicCdpOptions,\s*inspectNativeFinal,\s*beforeDispatch:\s*config\.passiveCore\s*\|\|\s*!primaryDebugGuard\s*\?\s*undefined\s*:\s*\(\) => primaryDebugGuard\.pollOnce\(\),?\s*\}\)/s);
+assert.match(source, /new ClassicNativeFinalApiIngress\(\{/);
+assert.match(source, /row\?\.nativeCompletionProof\?\.ingress==='native-conversation-api'/);
 assert.doesNotMatch(source, /sendExactGoalRecovery|progressLivenessAdapter\.sendGoalRecovery|progressLivenessAdapter\.sendGoalContinuation/,
   "Goal continuation and same-round recovery must never be wired to the visible composer transport");
-assert.match(source, /dispatch:\s*\(\{ goal, page,[\s\S]{0,500}return goalHostBridge\.dispatch\(\{/,
+assert.match(source, /dispatch:\s*(?:async\s+)?\(\{ goal, page,[\s\S]{0,500}return goalHostBridge\.dispatch\(\{/,
   "the Goal continuation supervisor must dispatch through the hidden host bridge");
+assert.match(source, /nativeGoalStartReceipt:\s*await goalRuntime\.nativeStartReceipt\(goal\.id\)/,
+  "native start evidence must come from durable server state, never caller arguments");
 assert.match(source, /expectedPageTargetId:\s*candidate\.pageTargetId/,
   "hidden continuation must remain bound to the exact page proven at the visible-final boundary");
 assert.match(source, /onHiddenContinuationStarted:\s*async \(\{ conversationId, continuationId, sourceUserMessageId, runtimeKey, observedAtMs \}\)/,
@@ -34,7 +41,7 @@ assert.match(source, /goalHostBridge\.dispatchRoundRecovery\(\{[\s\S]{0,420}sour
   "hidden same-round recovery must retain the exact native branch boundary for acknowledgement reconciliation");
 assert.match(source, /registerAppResource\(server, "DevSpace Goal Dock", GOAL_DOCK_URI,/);
 assert.match(source, /new URL\("\.\/ui\/goal-dock\.html", import\.meta\.url\)/);
-assert.match(source, /for \(const uri of \[GOAL_RELAY_URI, "ui:\/\/devspace\/goal-continuation-relay\.html"\]\)/,
+assert.match(source, /for \(const uri of \[GOAL_RELAY_URI, "ui:\/\/devspace\/goal-continuation-relay-v2\.html", "ui:\/\/devspace\/goal-continuation-relay\.html"\]\)/,
   "new and cached tool snapshots must both retain their Goal relay resource");
 assert.match(source, /registerAppResource\(server, `DevSpace Goal Continuation Relay \$\{uri\}`, uri,/);
 assert.match(source, /readGoalRelayHtml\("goal-continuation-relay\.html"\)/);
