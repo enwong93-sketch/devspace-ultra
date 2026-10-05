@@ -368,7 +368,13 @@ export function registerGoalTools(server, goalRuntime, {
     _meta: renderMeta(relayResourceUri),
   }, async ({ goalId, summary, meaningfulProgress, blockerFingerprint }, extra) => {
     try {
-      await bindOrVerifyActiveGoal(goalId, extra);
+      const bound = await bindOrVerifyActiveGoal(goalId, extra);
+      if (bound?.status === 'active' && bound.roundState === 'reported') {
+        // The native final already closed this round. Record nothing, but give
+        // the exact owner its Goal: an error result carries no structured
+        // content, so the continuation component it renders could never start.
+        return textResult(bound, `Goal round ${bound.round} was already closed by its native assistant final; no checkpoint was recorded and none is needed. Goal state is unchanged.`);
+      }
       const goal = await goalRuntime.turnReport({ goalId, summary, meaningfulProgress, blockerFingerprint });
       const reportAuthority = goal.status === 'active' && typeof resolveBootstrapConversation === 'function'
         ? await resolveBootstrapConversation(extra, 'devspace_goal_turn_report').catch(() => null) : null;

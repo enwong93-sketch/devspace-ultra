@@ -276,3 +276,17 @@ test('a rate-limited read keeps the recent final; a resolved working branch disc
   await api.inspect(goal);
   assert.equal((await api.inspect(goal,row,{reuseRecent:true})).pages,null);assert.equal(reads,4);
 });
+test('a checkpoint for a round its native final already closed returns the unchanged Goal, not a content-less error',async t=>{
+  const {r,g}=await runtime(t);
+  const proof=ingress.nativeApiFinalFromPages(g,[page({createdAt:at+1000})],{readStartedAtMs:at+1000,observedAtMs:at+1000});
+  await r.autoCompleteAssistantTurn({goalId:g.id,nativeCompletion:proof});
+  const before=await r.status(g.id);assert.equal(before.roundState,'reported');
+  const tools=new Map();
+  registerGoalTools({registerTool:(name,config,handler)=>{tools.set(name,handler);return{};}},r,{
+    resourceUri:'ui://fixture/goal',relayResourceUri:'ui://fixture/relay',resolveConversation:async()=>({conversationId:cid})});
+  const result=await tools.get('devspace_goal_turn_report')({goalId:g.id,summary:'fixture late checkpoint',meaningfulProgress:true},{});
+  assert.notEqual(result.isError,true);
+  assert.equal(result.structuredContent.goal.id,g.id);
+  assert.equal(result.structuredContent.goal.conversationId,cid);
+  assert.deepEqual(await r.status(g.id),before,'nothing is recorded and no round or continuation changes');
+});
