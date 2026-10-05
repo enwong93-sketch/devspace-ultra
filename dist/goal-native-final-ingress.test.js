@@ -322,6 +322,8 @@ test('production wires native stream and verified native-API final input, never 
   assert.match(source, /row\?\.nativeCompletionProof\?\.ingress==='native-conversation-api'/);
   assert.match(source, /nativeFinalApi\.inspect\(goal,row\) : nativeFinalBoundaries\.inspect\(goal,row\)/);
   assert.match(source, /readNativeFinal: async goal=>/);
+  assert.match(source, /nativeFinalApi\.inspect\(goal,row,\{reuseRecent:true\}\)/);
+  assert.match(source, /new GoalContinuationSupervisor\(\{[\s\S]{0,400}?inspectNativeFinal: inspectEligibleNativeFinal,/);
 });
 
 for (const split of [false, true]) test(`delayed native buffered response ${split ? 'prefix' : 'body'} is consumed before transport EOF`, async t => {

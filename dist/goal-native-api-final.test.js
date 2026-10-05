@@ -246,3 +246,33 @@ test('an optional report cannot prevent the AI from marking its full objective c
   assert.equal((await r.autoCompleteAssistantTurn({goalId:g.id,nativeCompletion:ingress.nativeApiFinalFromPages(g,
     [page({createdAt:at+1000})],{readStartedAtMs:at+1000,observedAtMs:at+1000})})).continued,false);
 });
+test('a proof-scoped eligibility check reuses the sampler read only while the page is unchanged and recent',async()=>{
+  const boundaries=new ingress.ClassicNativeFinalBoundaryStore();let clock=at+2000,reads=0,current=page({createdAt:at+1000});
+  const api=new ingress.ClassicNativeFinalApiIngress({boundaries,now:()=>clock,reuseMs:120_000,
+    inspectPages:async()=>{reads++;return[current];}});
+  const goal={conversationId:cid},proof=(await api.inspect(goal)).event,row={nativeCompletionProof:proof};
+  assert.equal(reads,1);
+  clock+=30_000;
+  assert.equal((await api.inspect(goal,row,{reuseRecent:true})).event.assistantMessageId,'fixture-api-assistant');
+  assert.equal(reads,1,'arm and advance do not compete with the sampler for the provider budget');
+  await api.inspect(goal,row);assert.equal(reads,2,'a dispatch preflight always samples again');
+  await api.inspect(goal);assert.equal(reads,3,'the sampler always samples again');
+  clock+=120_001;await api.inspect(goal,row,{reuseRecent:true});assert.equal(reads,4,'reuse is bounded');
+  boundaries.noteTurn({kind:'started',runtimeKey:'main-07',pageTargetId:'fixture-api-page',conversationId:cid,
+    requestId:'fixture-next-request',sourceUserMessageId:'fixture-next-user',observedAtMs:clock});
+  current=page({createdAt:at+1000,currentEndTurn:false});
+  assert.equal((await api.inspect(goal,row,{reuseRecent:true})).pages,null,'a native request on the page ends reuse');
+  assert.equal(reads,5);
+});
+test('a rate-limited read keeps the recent final; a resolved working branch discards it',async()=>{
+  const boundaries=new ingress.ClassicNativeFinalBoundaryStore();let clock=at+2000,reads=0,current=page({createdAt:at+1000});
+  const api=new ingress.ClassicNativeFinalApiIngress({boundaries,now:()=>clock,
+    inspectPages:async()=>{reads++;return[current];}});
+  const goal={conversationId:cid},row={nativeCompletionProof:(await api.inspect(goal)).event};
+  current={...page(),nativeContinuation:{resolved:false,state:'conversation-fetch-429'}};
+  assert.equal((await api.inspect(goal)).pages,null);
+  assert.ok((await api.inspect(goal,row,{reuseRecent:true})).event);assert.equal(reads,2);
+  current=page({createdAt:at+1000,currentEndTurn:false});
+  await api.inspect(goal);
+  assert.equal((await api.inspect(goal,row,{reuseRecent:true})).pages,null);assert.equal(reads,4);
+});

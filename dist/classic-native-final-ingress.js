@@ -235,23 +235,48 @@ export class ClassicNativeFinalBoundaryStore {
 // Read the exact native conversation branch, not rendered text, socket EOF or
 // an idle composer. Every dispatch read samples again; cache history is not a
 // current-turn claim. Page revisions fence late reads across request/navigation.
+// The provider rate-limits whole-conversation reads, so a proof-scoped
+// eligibility check may opt in to the sampler's own recent successful read of
+// the SAME final while that page's revision is unchanged. It never extends past
+// reuseMs, never survives a native request on the page, and never replaces a
+// sampler read or a dispatch preflight.
 export class ClassicNativeFinalApiIngress {
-  constructor({boundaries,inspectPages,now=()=>Date.now()}={}) {
+  constructor({boundaries,inspectPages,now=()=>Date.now(),reuseMs=120_000}={}) {
     if(!boundaries || typeof inspectPages!=='function')throw new Error('Native API ingress requires scoped branch inspection and live boundary storage.');
     this.boundaries=boundaries;this.inspectPages=inspectPages;this.now=now;
+    this.reuseMs=Math.max(0,Number(reuseMs)||0);this.recent=new Map();
   }
-  async inspect(goal,row=null) {
+  recentFinal(goal,proof) {
+    if(!this.reuseMs || !proof?.runtimeKey || !proof.pageTargetId || proof.conversationId!==goal?.conversationId)return null;
+    const key=this.boundaries.key(proof),hit=this.recent.get(key);
+    if(!hit)return null;
+    const age=this.now()-hit.event.observedAtMs;
+    if(!(age>=0 && age<=this.reuseMs) || !this.boundaries.matchesReadRevision(hit.event,hit.revisions)) {
+      this.recent.delete(key);return null;
+    }
+    return hit.event;
+  }
+  async inspect(goal,row=null,{reuseRecent=false}={}) {
     const revisions=this.boundaries.captureRevisions(),readStartedAtMs=this.now();
     const proof=row?.nativeCompletionProof||null;
     const scope=proof||row?.apiScope;
-    const pages=await this.inspectPages(goal,{runtimeKey:scope?.runtimeKey||null,pageTargetId:scope?.pageTargetId||null,
+    const reused=reuseRecent&&proof?this.recentFinal(goal,proof):null;
+    const pages=reused?null:await this.inspectPages(goal,{runtimeKey:scope?.runtimeKey||null,pageTargetId:scope?.pageTargetId||null,
       includeNativeBranch:true,nativeFinalApiOnly:true});
-    const event=nativeApiFinalFromPages(goal,pages,{readStartedAtMs,observedAtMs:this.now()});
+    const event=reused||nativeApiFinalFromPages(goal,pages,{readStartedAtMs,observedAtMs:this.now()});
+    if(!reused) {
+      // A resolved read that is no longer this final ends reuse; an unresolved
+      // one (rate limit, timeout, quiet period) says nothing about the branch.
+      const page=Array.isArray(pages)&&pages.length===1?pages[0]:null;
+      if(!event && page?.nativeContinuation?.resolved===true && page.runtimeKey && page.pageTargetId) {
+        this.recent.delete(this.boundaries.key({...page,conversationId:goal?.conversationId}));
+      }
+    }
     if(!event && !proof) {
       const started=nativeApiStartedFromPages(goal,pages,{readStartedAtMs,observedAtMs:this.now()});
       if(started && this.boundaries.matchesReadRevision(started,revisions))return{pages:null,started};
     }
-    if(!event || !this.boundaries.noteApiFinal(event,revisions))return{pages:null,inspectionReason:'native-api-final-unavailable-or-changed',
+    if(!event || !reused && !this.boundaries.noteApiFinal(event,revisions))return{pages:null,inspectionReason:'native-api-final-unavailable-or-changed',
       diagnostic:{pageCount:pages?.length??null,pages:Array.isArray(pages)?pages.map(p=>({runtimeKey:p.runtimeKey,
         runtimePort:p.candidate?.runtimePort,chatMode:p.chatMode,nativeSafetyBlocked:p.nativeSafetyBlocked,
         resolved:p.nativeContinuation?.resolved,state:p.nativeContinuation?.state,
@@ -260,6 +285,11 @@ export class ClassicNativeFinalApiIngress {
         nodeMatchesAssistant:p.nativeContinuation?.currentNodeId===p.nativeContinuation?.latestAssistantMessageId,
         messageMatchesAssistant:p.nativeContinuation?.currentMessageId===p.nativeContinuation?.latestAssistantMessageId,
         publicTextLength:p.nativeContinuation?.latestPublicAssistantText?.length??null})):[]}};
+    if(!reused && this.reuseMs) {
+      const key=this.boundaries.key(event);
+      this.recent.delete(key);this.recent.set(key,{event,revisions});
+      while(this.recent.size>this.boundaries.maxEntries)this.recent.delete(this.recent.keys().next().value);
+    }
     if(proof) {
       if(event.sourceUserMessageId!==proof.sourceUserMessageId)return{pages:null,newUser:true,newUserMessageId:event.sourceUserMessageId};
       if(['conversationId','runtimeKey','pageTargetId','assistantMessageId','assistantCreatedAt','assistantTextHash']

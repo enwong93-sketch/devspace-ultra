@@ -2348,12 +2348,15 @@ export function createServer(config = loadConfig(), options = {}) {
     const nativeFinalApi = new ClassicNativeFinalApiIngress({
         boundaries:nativeFinalBoundaries,
         inspectPages:async (goal,options={})=>inspectGoalContinuationPages(goal,{
-            ...classicCdpOptions,...options,skipNativeStatus:true,includeNativeBranch:true,nativeConversationTimeoutMs:5000,
+            ...classicCdpOptions,...options,skipNativeStatus:true,includeNativeBranch:true,nativeConversationTimeoutMs:6_500,
             nativeGoalStartReceipt:await goalRuntime.nativeStartReceipt(goal.id),
         }),
     });
     const inspectNativeFinal = (goal,row)=>row?.nativeCompletionProof?.ingress==='native-conversation-api'
         ? nativeFinalApi.inspect(goal,row) : nativeFinalBoundaries.inspect(goal,row);
+    // Eligibility checks share the sampler's recent read; dispatch preflight does not.
+    const inspectEligibleNativeFinal = (goal,row)=>row?.nativeCompletionProof?.ingress==='native-conversation-api'
+        ? nativeFinalApi.inspect(goal,row,{reuseRecent:true}) : nativeFinalBoundaries.inspect(goal,row);
     const goalHostBridge = new ClassicGoalHostBridge({
         ...classicCdpOptions,
         inspectNativeFinal,
@@ -2368,7 +2371,7 @@ export function createServer(config = loadConfig(), options = {}) {
         readPublicWorkingTurn: async (goal,row)=>(await nativeFinalApi.inspect(goal,{apiScope:{
             runtimeKey:row.dispatchRuntimeKey,pageTargetId:row.dispatchPageTargetId,
         }}))?.started||null,
-        inspectNativeFinal,
+        inspectNativeFinal: inspectEligibleNativeFinal,
         nativeFinalIngressOnly: true,
         relayDiagnostics: () => goalHostBridge.relayDiagnostics(),
         statePath: join(config.stateDir, 'goal-continuation-driver.json'),
